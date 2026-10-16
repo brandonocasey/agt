@@ -147,7 +147,8 @@ pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, dry_run: bool, not_own: bool)
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let target = load(ctx, &connection)?;
-    let writes = planner(ctx, &connection, &target, &attempt)?.records(&target)?;
+    let (writes, skips) = planner(ctx, &connection, &target, &attempt)?.records(&target)?;
+    skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let synced = sync::sync_with(ctx, &connection)?;
     Ok(json!({
@@ -200,14 +201,14 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target) -> Result<Value> 
     }
     let planner = planner(ctx, connection, &target, attempt)?;
     let (replies, more) = planner.replies(&target);
-    let records = planner.records(&target)?;
+    let (records, held) = planner.records(&target)?;
     let writes: Vec<Value> = threads
         .iter()
         .chain(&replies)
         .chain(&records)
         .map(Write::view)
         .collect();
-    let skipped: Vec<Value> = skipped.into_iter().chain(more).collect();
+    let skipped: Vec<Value> = skipped.into_iter().chain(more).chain(held).collect();
     Ok(json!({
         "target": connection.key,
         "dry_run": true,
@@ -394,6 +395,9 @@ impl Planner<'_> {
     /// Why a new thread is not posted: a finding of a pass still in progress, or another
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
+        if let Some(reason) = self.foreign() {
+            return Some(reason);
+        }
         if let Some(reason) = self.pre_pr(target, thread) {
             return Some(reason);
         }
@@ -567,12 +571,13 @@ impl Planner<'_> {
             if thread.deleted_remote {
                 continue;
             }
-            if let Some(reason) = self.pre_pr(target, thread) {
+            let foreign = self.foreign().filter(|_| !imported(thread));
+            if let Some(reason) = foreign.or_else(|| self.pre_pr(target, thread)) {
                 skipped.push(skip(&thread.id, reason));
                 continue;
             }
             for comment in thread.comments.iter().skip(1) {
-                if comment.remote.is_some() || comment.post == PostState::Posted {
+                if comment.local || comment.remote.is_some() || comment.post == PostState::Posted {
                     continue;
                 }
                 if !allowed(&comment.author, &self.connection.login) {
@@ -593,7 +598,10 @@ impl Planner<'_> {
             let (Some(remote), Some(resolved)) = (&thread.remote, thread.resolve_pending) else {
                 continue;
             };
-            if thread.deleted_remote || self.pre_pr(target, thread).is_some() {
+            if thread.deleted_remote
+                || self.pre_pr(target, thread).is_some()
+                || (self.foreign().is_some() && !imported(thread))
+            {
                 continue;
             }
             writes.push(self.resolve(&thread.id, remote, resolved));
@@ -693,8 +701,8 @@ impl Planner<'_> {
         }
     }
 
-    /// The final record of each ended run not posted yet.
-    fn records(&self, target: &Target) -> Result<Vec<Write>> {
+    /// The final record of each ended run not posted yet, and the records held back.
+    fn records(&self, target: &Target) -> Result<(Vec<Write>, Vec<Value>)> {
         let path = match self.connection.forge {
             Forge::Github => format!(
                 "{}/issues/{}/comments",
@@ -703,7 +711,7 @@ impl Planner<'_> {
             ),
             Forge::Gitlab => format!("{}/notes", self.base_path()),
         };
-        target
+        let due: Vec<&Run> = target
             .runs
             .iter()
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
@@ -713,6 +721,16 @@ impl Planner<'_> {
                     .as_ref()
                     .is_none_or(|record| record.post != PostState::Posted)
             })
+            .collect();
+        if let Some(reason) = self.foreign() {
+            let held = due
+                .iter()
+                .map(|run| skip(&format!("{}/record", run.id), reason.clone()))
+                .collect();
+            return Ok((Vec::new(), held));
+        }
+        let writes = due
+            .into_iter()
             .map(|run| {
                 let (head, text) = record_body(self.ctx, target, run, self.attempt)?;
                 Ok(Write {
@@ -724,8 +742,31 @@ impl Planner<'_> {
                     body: Some(json!({ "body": text })),
                 })
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        Ok((writes, Vec::new()))
     }
+
+    /// On someone else's PR/MR (`--not-own`), why only replies and resolves on their threads
+    /// are posted: our findings, threads and records there would speak for its author.
+    fn foreign(&self) -> Option<String> {
+        let author = self.review.author.as_deref();
+        (author != Some(self.connection.login.as_str())).then(|| {
+            format!(
+                "{} is authored by {}: --not-own posts only replies and resolves on others' threads",
+                self.review.url,
+                author.unwrap_or("an unknown user")
+            )
+        })
+    }
+}
+
+/// A thread imported from the host, started by someone else or outside this store.
+fn imported(thread: &Thread) -> bool {
+    thread.finding.is_none()
+        && thread
+            .comments
+            .first()
+            .is_some_and(|first| first.id.starts_with("remote-"))
 }
 
 fn location(anchor: &Anchor) -> String {

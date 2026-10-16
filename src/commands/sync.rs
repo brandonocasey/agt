@@ -103,7 +103,8 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     })
 }
 
-/// The forge of `host`, from the host name or the gh/glab configuration; never guessed.
+/// The forge of `host`, from the host name or the gh/glab configuration and logins; never
+/// guessed.
 fn detect(host: &str) -> Result<Forge> {
     if host == "github.com" {
         return Ok(Forge::Github);
@@ -117,15 +118,22 @@ fn detect(host: &str) -> Result<Forge> {
     {
         return Ok(Forge::Gitlab);
     }
-    if Client::gh(host)
-        .text(&["auth", "status", "--hostname", host])
-        .is_some()
-    {
+    let known = |client: Client| {
+        client
+            .text(&["auth", "status", "--hostname", host])
+            .is_some()
+    };
+    if known(Client::gh(host)) {
         return Ok(Forge::Github);
+    }
+    // `glab config get host` names only the global default, not every host glab is logged in to.
+    if known(Client::glab(host)) {
+        return Ok(Forge::Gitlab);
     }
     fail(format!(
         "unsupported forge {host}: sync and publish need github.com or a host `gh auth status` \
-         knows, or gitlab.com, GITLAB_HOST or glab's configured host"
+         knows, or gitlab.com, GITLAB_HOST, glab's configured host or a host `glab auth status` \
+         knows"
     ))
 }
 
@@ -648,6 +656,7 @@ fn imported_comment(comment: CommentData, login: &str) -> Comment {
         id: format!("remote-{}", comment.id),
         attempt: None,
         sent: None,
+        local: false,
         deleted_remote: false,
         deleted_seen_at: None,
         author: Author::Human {

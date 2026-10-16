@@ -618,3 +618,36 @@ fn default_branch_pass_with_base_reviews_the_branch() {
     assert_eq!(status["last_reviewed_head"], fix, "the repair counts");
     assert_eq!(status["review_from"], fix);
 }
+
+#[test]
+fn range_repair_clears_fix_commits_on_the_branch() {
+    let env = Env::with_branch();
+    let main = env.git(&["rev-parse", "main"]);
+    env.write("a.txt", &numbered(10, &[(2, "A")]));
+    let a = env.commit_all("A");
+    let range = format!("{main}..{a}");
+    let run = env.run(&["--range", &range, "run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&[
+        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
+    ]);
+    env.run(&[
+        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.write("a.txt", &numbered(10, &[(2, "A2")]));
+    let fix = env.commit_all("fix A");
+    env.run(&[
+        "--range", &range, "run", "end", "--run", &run, "--head", &fix,
+    ]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["unreviewed_commits"], json!([]), "{status}");
+    let fixed = status["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|commit| commit["sha"] == fix)
+        .unwrap();
+    assert_eq!(fixed["match"], "repair", "{status}");
+}

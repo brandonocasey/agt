@@ -297,6 +297,10 @@ pub struct Comment {
     /// The body last sent; GitLab shows no edits, so sync trusts only this text.
     #[serde(default)]
     pub sent: Option<String>,
+    /// Kept in the store only (`reply --local`), such as the user's answer to a held
+    /// question; `publish` never posts it.
+    #[serde(default)]
+    pub local: bool,
     pub deleted_remote: bool,
     pub deleted_seen_at: Option<String>,
 }

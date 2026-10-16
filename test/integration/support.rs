@@ -74,6 +74,12 @@ impl Env {
         fs::write(self.forge_file(args, "json"), body).unwrap();
     }
 
+    /// Like [`Env::respond`], for glab only (a call with `GITLAB_HOST` set), such as an
+    /// `auth status` that gh must not see.
+    pub fn respond_glab(&self, args: &[&str], body: &str) {
+        fs::write(self.forge_file(args, "glab.json"), body).unwrap();
+    }
+
     /// Like [`Env::respond`], for the `call`-th call with these arguments only (from 1, counted
     /// since the last [`Env::reset_calls`]).
     pub fn respond_nth(&self, args: &[&str], call: usize, body: &str) {

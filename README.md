@@ -132,6 +132,9 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still 
   stored reviewer. With no author flags the author is the forge login that
   `sync` last authenticated as for this repository, else git `user.name`,
   which the next `sync` (or `publish`) replaces with the forge login.
+- `reply --local` keeps the reply in the store only, such as the user's answer
+  to a held question: `list --format prompt` shows it and `publish` never posts
+  it.
 - `resolve`: `--resolution` is one of `fixed <sha>`, `not fixed: <reason>`,
   `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
   `stale` resolution; `fixed` needs `--resolution "fixed <sha>"`).
@@ -159,6 +162,8 @@ and killed findings. `--format prompt` prints the text only of comments written
 locally or by the authenticated forge user; every other comment shows as
 `(comment by another author, text hidden)`, so reviewers never read other
 people's comments. A posted thread also shows its forge URL on a `URL:` line.
+`--head <rev>` maps anchors to that commit instead of the target's head, such
+as a fix after a range target's end.
 
 `status` never writes: not to the store, not to the git index or object
 database. It reports whether the head is reviewed, `reviews_at_head`, the passes
@@ -251,16 +256,19 @@ agent-review prune --all
 - Each trusted `review-record v2` comment whose `head` is the evaluated head
   adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
   Records of this target's own runs are skipped; their passes already count.
-- A run's `repair` commits (after its last pass, up to `HEAD` at `run end`)
-  show as reviewed with `"match": "repair"` in `status` commits (`"pass"` for
+- A run's `repair` commits (after its last pass, up to `HEAD` at `run end`),
+  of this target or another target of this repository (such as a range
+  review's `run end --head <fix>`), show as reviewed with `"match": "repair"` in `status` commits (`"pass"` for
   a pass match), but never add to `reviews_at_head`.
 
 ## Sync
 
 - Forge: GitHub (`gh`, with `GH_HOST=<host>`) for `github.com` or a host
   `gh auth status --hostname <host>` knows; GitLab (`glab`, with
-  `GITLAB_HOST=<host>`) for `gitlab.com`, the host in `GITLAB_HOST`, or
-  glab's configured host (`glab config get host`). Any other host fails with
+  `GITLAB_HOST=<host>`) for `gitlab.com`, the host in `GITLAB_HOST`, glab's
+  configured host (`glab config get host`, the global default only), or a host
+  `glab auth status --hostname <host>` knows (a self-hosted GitLab glab is
+  logged in to). Any other host fails with
   `unsupported forge <host>`; the forge is never guessed. The host and
   repository come from `--pr <url>` (a GitHub `/pull/<n>` or GitLab
   `/-/merge_requests/<iid>` URL) or the `origin` remote.
@@ -331,7 +339,10 @@ agent-review prune --all
 
 ## Publish
 
-- Only on a PR/MR authored by the authenticated login, unless `--not-own`.
+- Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
+  someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
+  threads imported from the host (other people's threads); our findings, local
+  threads and final records are listed under `skipped`.
   `publish` syncs first, then posts in this order: new threads, sync, replies,
   resolves and reopens, final records, then a last sync to fill in ids.
 - Posted: new surviving findings of ended passes (a locked pass's findings wait

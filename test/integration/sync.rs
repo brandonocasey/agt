@@ -611,7 +611,9 @@ fn gitlab_host_comes_from_glab_or_gitlab_host() {
         "origin",
         "git@code.example.org:me/repo.git",
     ]);
-    env.respond(&["config", "get", "host"], "code.example.org\n");
+    // glab's global default host is not the self-hosted one it is also logged in to.
+    env.respond(&["config", "get", "host"], "gitlab.com\n");
+    env.respond_glab(&["auth", "status", "--hostname", "code.example.org"], "");
     env.fail(&["sync", "--pr", "5"], None);
     assert!(
         env.forge_calls()

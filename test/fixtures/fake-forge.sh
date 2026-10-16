@@ -6,7 +6,9 @@
 # call number <c> in calls.log is saved as input-<c>. <key>.fail makes the call fail after its
 # input is read, as when a write reaches the host but its response is lost. In a response,
 # {{LAST_NOTE}} and {{LAST_BODY}} stand for the JSON-escaped "note" or "body" of the latest
-# request that sent one, the text the host then shows. Any other call fails.
+# request that sent one, the text the host then shows. A glab call (one with GITLAB_HOST set)
+# first tries <key>.glab.json, so gh and glab can answer the same arguments differently. Any
+# other call fails.
 set -eu
 dir=$FAKE_FORGE_DIR
 body=
@@ -84,7 +86,9 @@ reply() {
     print line
   }' "$1"
 }
-for file in "$dir/$key.$count.json" "$dir/$key.json"; do
+glab=
+[ -n "${GITLAB_HOST:-}" ] && glab=$dir/$key.glab.json
+for file in $glab "$dir/$key.$count.json" "$dir/$key.json"; do
   if [ -f "$file" ]; then
     reply "$file"
     exit 0

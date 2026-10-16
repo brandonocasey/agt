@@ -632,8 +632,49 @@ fn publish_refuses_a_pr_by_someone_else() {
     let error = env.fail(&["publish", "--pr", "42"], None);
     assert!(error.contains("authored by alice, not me"), "{error}");
     assert!(env.forge_calls().iter().all(|call| !call.contains("POST")));
+}
+
+#[test]
+fn not_own_publish_posts_only_replies_and_resolves_on_others_threads() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let mut pr = GhPr::new();
+    pr.author = "alice";
+    pr.threads.push(gh_thread(
+        "PRRT_a",
+        false,
+        3,
+        vec![gh_comment(301, "alice", "Alice asks why.")],
+        &setup.head,
+    ));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["comment", "--body", "My own note.", "--author", "me"]);
+    env.run(&[
+        "reply",
+        "gh-t301",
+        "--body",
+        "Because of X.",
+        "--author",
+        "me",
+    ]);
+    env.run(&["resolve", "gh-t301", "--resolution", "answered"]);
+    env.run(&["run", "end", "--run", &setup.run]);
     let dry = env.run(&["publish", "--pr", "42", "--not-own", "--dry-run"]);
-    assert_eq!(kinds(&dry, "writes"), ["review", "thread", "record"]);
+    assert_eq!(kinds(&dry, "writes"), ["reply", "resolve"], "{dry}");
+    let skipped: Vec<&str> = dry["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skip| skip["item"].as_str().unwrap())
+        .collect();
+    for item in [
+        setup.finding(1),
+        "h1".to_owned(),
+        format!("{}/record", setup.run),
+    ] {
+        assert!(skipped.contains(&item.as_str()), "{item}: {dry}");
+    }
 }
 
 /// A write that reached GitHub but lost its response is matched by its marker on the next
@@ -1655,4 +1696,33 @@ fn runs_ended_before_the_pr_are_never_published() {
         skipped.contains(&f1.as_str()) && skipped.contains(&f2.as_str()),
         "{dry}"
     );
+}
+
+#[test]
+fn local_reply_is_never_published() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert!(writes_for(&dry, &format!("{f1}/c1")).len() == 1, "{dry}");
+    env.run(&[
+        "reply",
+        &f1,
+        "--local",
+        "--body",
+        "Answer to the held question.",
+        "--author",
+        "me",
+    ]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(
+        writes_for(&dry, &format!("{f1}/c2")),
+        Vec::<String>::new(),
+        "{dry}"
+    );
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &f1)["comments"][1]["local"], true);
+    let prompt = env.text(&["list", "--format", "prompt"]);
+    assert!(prompt.contains("Answer to the held question."), "{prompt}");
 }

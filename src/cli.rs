@@ -212,6 +212,9 @@ pub struct ReplyArgs {
     /// Reply text, or `-` for stdin.
     #[arg(long)]
     pub body: String,
+    /// Keep the reply in the store only; `publish` never posts it.
+    #[arg(long)]
+    pub local: bool,
     #[command(flatten)]
     pub author: AuthorArgs,
 }
@@ -242,6 +245,10 @@ pub struct ListArgs {
     /// Only findings of this cycle of `--run`.
     #[arg(long, requires = "run")]
     pub cycle: Option<u32>,
+    /// Map anchors to this commit, such as a fix after a range's end [default: the target's
+    /// head].
+    #[arg(long)]
+    pub head: Option<String>,
     #[arg(long, value_enum, default_value = "json")]
     pub format: Format,
 }

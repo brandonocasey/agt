@@ -732,6 +732,7 @@ fn local_comment(
         draft_id: None,
         attempt: None,
         sent: None,
+        local: false,
         deleted_remote: false,
         deleted_seen_at: None,
     }
@@ -1479,7 +1480,8 @@ fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, default)?;
         let thread = find_thread_mut(target, &args.id)?;
-        let comment = local_comment(&thread.id, &thread.comments, author, body, now);
+        let mut comment = local_comment(&thread.id, &thread.comments, author, body, now);
+        comment.local = args.local;
         thread.comments.push(comment);
         thread.updated_at = now.to_owned();
         Ok(thread.clone())
@@ -1641,7 +1643,10 @@ fn list(ctx: &Ctx, args: &ListArgs) -> Result<Output> {
         .collect();
     let mut locator = Locator {
         repo: &ctx.repo,
-        head: scope.head_known.then(|| scope.head.clone()),
+        head: match &args.head {
+            Some(rev) => Some(ctx.repo.commit(rev)?),
+            None => scope.head_known.then(|| scope.head.clone()),
+        },
         diffs: HashMap::new(),
     };
     if let Format::Prompt = args.format {
@@ -2047,11 +2052,14 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     }
     // Commits a review of another target of this repository recorded (a `--range` review of
     // the branch's end point, an earlier branch target) are reviewed here too.
-    for other in ctx.store.targets(&ctx.dir)? {
-        if Some(&other.key) == target.map(|target| &target.key) {
-            continue;
-        }
-        for pass in passes(&other).filter(|pass| pass.ended_at.is_some()) {
+    let others: Vec<Target> = ctx
+        .store
+        .targets(&ctx.dir)?
+        .into_iter()
+        .filter(|other| Some(&other.key) != target.map(|target| &target.key))
+        .collect();
+    for other in &others {
+        for pass in passes(other).filter(|pass| pass.ended_at.is_some()) {
             reviewed.patch_ids.extend(pass_patch_ids(pass).cloned());
             if !pass.dirty {
                 reviewed.shas.insert(pass.head.clone());
@@ -2062,11 +2070,12 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         }
     }
     // Repaired commits (fixes after a run's last pass) count as reviewed but never add to
-    // reviews_at_head.
+    // reviews_at_head, also when another target's run repaired them (a range review's fix).
     let mut repaired = Reviewed::default();
     for commit in target
         .iter()
         .flat_map(|target| &target.runs)
+        .chain(others.iter().flat_map(|other| &other.runs))
         .flat_map(|run| &run.repair)
     {
         repaired.shas.insert(commit.sha.clone());

@@ -1097,3 +1097,36 @@ fn range_fix_check_and_repair_use_a_descendant_head() {
     ]);
     assert_eq!(ended["repaired_head"], repair, "{ended}");
 }
+
+#[test]
+fn list_head_maps_anchors_to_a_later_head() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let end = env.commit_all("range end");
+    let range = format!("main..{end}");
+    env.run(&[
+        "--range",
+        &range,
+        "comment",
+        "--body",
+        "Why three?",
+        "--path",
+        "a.txt",
+        "--line",
+        "3",
+        "--commit",
+        &end,
+    ]);
+    env.write("a.txt", &numbered(10, &[(1, "one"), (3, "THREE")]));
+    let fix = env.commit_all("fix");
+    let at_end = env.run(&["--range", &range, "list"]);
+    assert_eq!(
+        at_end["threads"][0]["current"]["outdated"], false,
+        "{at_end}"
+    );
+    let at_fix = env.run(&["--range", &range, "list", "--head", &fix]);
+    assert_eq!(
+        at_fix["threads"][0]["current"]["outdated"], true,
+        "{at_fix}"
+    );
+}
