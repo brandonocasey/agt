@@ -245,9 +245,12 @@ agent-review prune --all
   checks that found no major finding (a `bug` of `high` or `medium` severity).
   Parallel reviewers in one pass count once. A pass of another target of this
   repository (such as a `--range` review of the branch's end point) also covers
-  the head when its range or head patch-id matches; a tree match alone does
-  not, since that pass may have another base. Each `covered_by` entry names
-  its `target` and `run`, so `--target <key> list --run <run>` finds it.
+  the head when its whole-range patch-id matches the head's, or a one-commit
+  head's patch-id; a tree match alone does not, since it says nothing about the
+  base. A run stored under two targets counts once. Each `covered_by` entry
+  names its `target` and `run`, so `--target <key> list --run <run>` finds it,
+  and the open threads and held questions of each covering target show in
+  `open_threads` and `held_questions`, with `target` on each open thread.
 - Anchors map through `git diff -U0 -M <anchor commit or tree> HEAD`. A
   new-side line inside a changed hunk, or a deleted file, is outdated; other
   lines shift and follow renames. An old-side anchor is outdated once its file
@@ -260,7 +263,8 @@ agent-review prune --all
   apply this to the current repository; `prune --all` to every repository.
 - Each trusted `review-record v2` comment whose `head` is the evaluated head
   adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
-  Records of this target's own runs are skipped; their passes already count.
+  Records of this target's own runs, or of a run whose pass covers the head,
+  are skipped; their passes already count.
 - A run's `repair` commits (after its last pass, up to `HEAD` at `run end`),
   of this target or another target of this repository (such as a range
   review's `run end --head <fix>`), show as reviewed with `"match": "repair"` in `status` commits (`"pass"` for

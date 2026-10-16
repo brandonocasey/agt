@@ -2061,16 +2061,18 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let others_ref: Vec<&Target> = others.iter().collect();
     // Another target's pass (a `--range` review of the branch's end point) covers the head
     // when it reviewed the same diff; a tree match alone may sit on another base.
+    // A run stored in two files (a rename to the PR/MR key cut short) counts once.
     let covered_at = |tree: &str, range: Option<&str>, head_id: Option<&str>| {
         let mut covered = coverage(target.as_slice(), tree, range, head_id);
-        covered.extend(
-            coverage(&others_ref, tree, range, head_id)
-                .into_iter()
-                .filter_map(|mut other| {
-                    other.matched.retain(|matched| *matched != "tree");
-                    (!other.matched.is_empty()).then_some(other)
-                }),
-        );
+        for mut other in coverage(&others_ref, tree, range, head_id) {
+            other.matched.retain(|matched| *matched != "tree");
+            let seen = covered
+                .iter()
+                .any(|known| known.run == other.run && known.pass.id == other.pass.id);
+            if !other.matched.is_empty() && !seen {
+                covered.push(other);
+            }
+        }
         covered
     };
     let covered = if merge_after {
@@ -2205,26 +2207,35 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         Value::Null
     };
 
-    let threads = thread_views(
-        target,
-        &mut Locator {
-            repo: &ctx.repo,
-            head: Some(head.clone()),
-            diffs: HashMap::new(),
-        },
-    );
+    let mut locator = Locator {
+        repo: &ctx.repo,
+        head: Some(head.clone()),
+        diffs: HashMap::new(),
+    };
+    let mut threads = thread_views(target, &mut locator);
+    // A covering pass of another target counts here, so its open threads show here too.
+    let mut shown = HashSet::new();
+    for other in others.iter().filter(|other| {
+        covered.iter().any(|covered| covered.target == other.key) && shown.insert(&other.key)
+    }) {
+        let views = thread_views(Some(other), &mut locator);
+        threads.open.extend(views.open.into_iter().map(|mut view| {
+            view["target"] = json!(other.key);
+            view
+        }));
+        threads.held.extend(views.held);
+    }
     let records: Vec<&ImportedRecord> = target
         .iter()
         .flat_map(|target| &target.records)
         .filter(|record| {
             record.head == head || (record.head.len() >= 7 && head.starts_with(&record.head))
         })
-        // Records of our own runs are already counted through their passes.
+        // Records of our own runs, or of runs covering the head, already count through their
+        // passes.
         .filter(|record| {
-            !target
-                .into_iter()
-                .chain(&others)
-                .any(|target| target.runs.iter().any(|run| run.id == record.run))
+            !target.is_some_and(|target| target.runs.iter().any(|run| run.id == record.run))
+                && !covered.iter().any(|covered| covered.run == record.run)
         })
         .collect();
     let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();

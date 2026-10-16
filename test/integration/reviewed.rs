@@ -553,9 +553,28 @@ fn range_review_of_the_branch_head_counts_and_names_its_run() {
         .unwrap()
         .to_owned();
     let key = env.run(&["--range", &range, "status"])["target"].clone();
-    env.run(&[
-        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
-    ]);
+    env.run_stdin(
+        &[
+            "--range",
+            &range,
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "full",
+            "--reviewers",
+            "-",
+        ],
+        r#"[{"model":"a","harness":"codex"}]"#,
+    );
+    let added = env.run_stdin(
+        &[
+            "--range", &range, "finding", "add", "--run", &run, "--pass", "c1p0", "--reviewer",
+            "r1",
+        ],
+        r#"{"type":"bug","severity":"high","path":"a.txt","line":2,"scenario":"broken"}"#,
+    );
     env.run(&[
         "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
     ]);
@@ -565,6 +584,43 @@ fn range_review_of_the_branch_head_counts_and_names_its_run() {
     assert_eq!(status["reviews_at_head"], 1, "{status}");
     assert_eq!(status["covered_by"][0]["target"], key, "{status}");
     assert_eq!(status["covered_by"][0]["run"], run, "{status}");
+    // The covering target's open finding shows too, so a count never hides it.
+    assert_eq!(status["open_threads"][0]["id"], added["added"][0], "{status}");
+    assert_eq!(status["open_threads"][0]["target"], key, "{status}");
+}
+
+#[test]
+fn run_left_in_two_target_files_counts_once() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(2, "A")]));
+    env.commit_all("A");
+    env.review("full");
+    let key = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    // A rename to the PR/MR key that crashed before removing the old file.
+    let old = walk(&env.state())
+        .into_iter()
+        .find(|path| path.file_name().unwrap() == format!("{key}.json").as_str())
+        .unwrap();
+    let mut target: Value = serde_json::from_slice(&std::fs::read(&old).unwrap()).unwrap();
+    target["key"] = json!("gh-5");
+    std::fs::write(
+        old.with_file_name("gh-5.json"),
+        serde_json::to_vec(&target).unwrap(),
+    )
+    .unwrap();
+    let status = env.run(&["status"]);
+    assert_eq!(status["reviews_at_head"], 1, "{status}");
+    assert_eq!(status["covered_by"].as_array().unwrap().len(), 1, "{status}");
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flat_map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() { walk(&path) } else { vec![path] }
+        })
+        .collect()
 }
 
 #[test]
