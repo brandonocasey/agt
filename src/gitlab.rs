@@ -139,6 +139,7 @@ pub fn fetch(glab: &Client, project: &str, iid: u64) -> Result<Fetched> {
             .ok_or_else(|| Error("GitLab MR has no head sha".into()))?,
         base_sha: forge::text(&mr, "/diff_refs/base_sha"),
         start_sha: forge::text(&mr, "/diff_refs/start_sha"),
+        author: forge::text(&mr, "/author/username"),
         url: url.clone(),
     };
     let discussions = glab.items(&[

@@ -234,7 +234,7 @@ pub fn fetch(gh: &Client, repo: &str, number: u64) -> Result<Fetched> {
     let threads_query = pull_query(
         "PullRequest",
         &format!(
-            "number url state closedAt headRefName headRefOid baseRefOid baseRepository{{nameWithOwner}} reviewThreads(first:50,after:$cursor){{pageInfo{{hasNextPage endCursor}} nodes{{id isResolved isOutdated path line originalLine startLine originalStartLine diffSide subjectType comments(first:50){{pageInfo{{hasNextPage endCursor}} nodes{{{COMMENT_FIELDS}}}}}}}}}"
+            "number url state closedAt author{{login}} headRefName headRefOid baseRefOid baseRepository{{nameWithOwner}} reviewThreads(first:50,after:$cursor){{pageInfo{{hasNextPage endCursor}} nodes{{id isResolved isOutdated path line originalLine startLine originalStartLine diffSide subjectType comments(first:50){{pageInfo{{hasNextPage endCursor}} nodes{{{COMMENT_FIELDS}}}}}}}}}"
         ),
     );
     let (first, thread_nodes) = pager.pages(&threads_query, "reviewThreads")?;
@@ -252,6 +252,7 @@ pub fn fetch(gh: &Client, repo: &str, number: u64) -> Result<Fetched> {
         head_sha: forge::required(pull, "/headRefOid", "GitHub PR")?,
         base_sha: forge::text(pull, "/baseRefOid"),
         start_sha: None,
+        author: forge::text(pull, "/author/login"),
     };
     let mut threads = thread_nodes
         .iter()

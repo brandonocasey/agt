@@ -71,11 +71,60 @@ impl Env {
     /// Registers a canned fake gh/glab response for exactly these arguments, with a GraphQL
     /// query given as `query=<operation name>`.
     pub fn respond(&self, args: &[&str], body: &str) {
+        fs::write(self.forge_file(args, "json"), body).unwrap();
+    }
+
+    /// Like [`Env::respond`], for the `call`-th call with these arguments only (from 1, counted
+    /// since the last [`Env::reset_calls`]).
+    pub fn respond_nth(&self, args: &[&str], call: usize, body: &str) {
+        fs::write(self.forge_file(args, &format!("{call}.json")), body).unwrap();
+    }
+
+    /// Makes calls with these arguments fail after their input is read, as when a write
+    /// reaches the host but its response is lost.
+    pub fn fail_call(&self, args: &[&str]) {
+        fs::write(self.forge_file(args, "fail"), "").unwrap();
+    }
+
+    /// Undoes [`Env::fail_call`].
+    pub fn pass_call(&self, args: &[&str]) {
+        fs::remove_file(self.forge_file(args, "fail")).unwrap();
+    }
+
+    /// Restarts the per-arguments call counts that [`Env::respond_nth`] uses.
+    pub fn reset_calls(&self) {
+        for entry in fs::read_dir(self.root.join("forge")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "count") {
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    fn forge_file(&self, args: &[&str], suffix: &str) -> PathBuf {
         let key = self.git_stdin(
             &["hash-object", "--stdin"],
             &format!("{}\n", args.join("\n")),
         );
-        fs::write(self.root.join("forge").join(format!("{key}.json")), body).unwrap();
+        self.root.join("forge").join(format!("{key}.{suffix}"))
+    }
+
+    /// Every fake gh/glab call that sent a body, as `(<arguments>, <body>)`.
+    pub fn forge_inputs(&self) -> Vec<(String, String)> {
+        self.forge_calls()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                let input = fs::read_to_string(
+                    self.root.join("forge").join(format!("input-{}", index + 1)),
+                )
+                .ok()?;
+                Some((
+                    call.split('\t').nth(1).unwrap_or_default().to_owned(),
+                    input,
+                ))
+            })
+            .collect()
     }
 
     /// Every fake gh/glab call as `<GITLAB_HOST>\t<arguments>`.

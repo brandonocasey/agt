@@ -367,6 +367,15 @@ impl Repo {
             .collect())
     }
 
+    /// `git diff -U3 -M`, the context forges show around review comments.
+    pub fn diff_context(&self, from: &str, to: &str) -> Result<String> {
+        let mut args = vec!["diff", "-U3", "-M"];
+        args.extend(DIFF_FLAGS);
+        args.extend(["--end-of-options", from, to, "--"]);
+        let diff = self.checked(&args, None, &[])?;
+        Ok(String::from_utf8_lossy(&diff).into_owned())
+    }
+
     pub fn diff_u0(&self, from: &str, to: &str) -> Result<String> {
         let mut args = vec!["diff", "-U0", "-M"];
         args.extend(DIFF_FLAGS);

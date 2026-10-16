@@ -147,6 +147,77 @@ pub fn locate(files: &[FileDiff], anchor: &Anchor) -> Location {
     }
 }
 
+/// A line of a unified diff: its old and new numbers (one is `None` for a removed or added
+/// line) and the file's old and new paths.
+pub struct DiffLine {
+    pub old_path: String,
+    pub new_path: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+/// Finds `line` on `side` of `path` inside a hunk of a `git diff -U3 -M` text, so a review
+/// comment can be placed on it.
+pub fn diff_line(diff: &str, path: &str, side: Side, line: u32) -> Option<DiffLine> {
+    let mut paths: Option<(String, String)> = None;
+    let mut numbers: Option<(u32, u32)> = None;
+    for text in diff.lines() {
+        if let Some(rest) = text.strip_prefix("diff --git ") {
+            let path = header_path(rest).unwrap_or_default();
+            paths = Some((path.clone(), path));
+            numbers = None;
+            continue;
+        }
+        let Some((old_path, new_path)) = &mut paths else {
+            continue;
+        };
+        if let Some(rest) = text.strip_prefix("@@ ") {
+            let mut parts = rest.split_whitespace();
+            let old = parts.next().and_then(|part| range(part.strip_prefix('-')?));
+            let new = parts.next().and_then(|part| range(part.strip_prefix('+')?));
+            numbers = old.zip(new).map(|((old, _), (new, _))| (old, new));
+            continue;
+        }
+        let Some((old, new)) = &mut numbers else {
+            if let Some(found) = text.strip_prefix("rename from ") {
+                *old_path = found.to_owned();
+            } else if let Some(found) = text.strip_prefix("rename to ") {
+                *new_path = found.to_owned();
+            } else if let Some(found) = text.strip_prefix("--- a/") {
+                *old_path = found.to_owned();
+            } else if let Some(found) = text.strip_prefix("+++ b/") {
+                *new_path = found.to_owned();
+            }
+            continue;
+        };
+        let (old_line, new_line) = match text.as_bytes().first() {
+            Some(b' ') => (Some(*old), Some(*new)),
+            Some(b'-') => (Some(*old), None),
+            Some(b'+') => (None, Some(*new)),
+            _ => continue,
+        };
+        let hit = match side {
+            Side::New => new_line == Some(line) && new_path == path,
+            Side::Old => old_line == Some(line) && old_path == path,
+        };
+        if hit {
+            return Some(DiffLine {
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                old_line,
+                new_line,
+            });
+        }
+        if old_line.is_some() {
+            *old += 1;
+        }
+        if new_line.is_some() {
+            *new += 1;
+        }
+    }
+    None
+}
+
 pub fn unchanged(anchor: &Anchor) -> Location {
     Location {
         path: anchor.path.clone(),
@@ -197,6 +268,20 @@ rename to b.txt\n\
         );
         let first = locate(&files, &anchor("a.txt", 2));
         assert_eq!((first.line, first.outdated), (Some(2), false));
+    }
+
+    #[test]
+    fn classifies_diff_lines() {
+        let diff =
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
+        let added = diff_line(diff, "x", Side::New, 2).unwrap();
+        assert_eq!((added.old_line, added.new_line), (None, Some(2)));
+        let context = diff_line(diff, "x", Side::New, 3).unwrap();
+        assert_eq!((context.old_line, context.new_line), (Some(3), Some(3)));
+        let removed = diff_line(diff, "x", Side::Old, 2).unwrap();
+        assert_eq!((removed.old_line, removed.new_line), (Some(2), None));
+        assert!(diff_line(diff, "x", Side::New, 9).is_none());
+        assert!(diff_line(diff, "y", Side::New, 2).is_none());
     }
 
     #[test]

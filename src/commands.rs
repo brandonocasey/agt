@@ -16,11 +16,12 @@ use crate::error::{Error, Result, ctx, fail};
 use crate::git::{CommitInfo, Repo};
 use crate::model::{
     Anchor, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
-    PassKind, PostState, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind, Thread,
-    ThreadType, Triage, VERSION,
+    PassKind, PostState, Reveal, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind,
+    Thread, ThreadType, Triage, VERSION,
 };
 use crate::store::Store;
 
+mod publish;
 mod sync;
 
 const PRUNE_AFTER_SECS: i64 = 90 * 24 * 60 * 60;
@@ -65,7 +66,10 @@ pub fn run(cli: Cli) -> Result<Output> {
     };
     let read_only = matches!(
         cli.command,
-        Command::Status { .. } | Command::List(_) | Command::Show { .. }
+        Command::Status { .. }
+            | Command::List(_)
+            | Command::Show { .. }
+            | Command::Publish { dry_run: true, .. }
     );
     if let Command::Prune { all: true, dry_run } = cli.command {
         return prune_all(&store, dry_run).map(Output::Json);
@@ -76,8 +80,18 @@ pub fn run(cli: Cli) -> Result<Output> {
             action: RunAction::Start,
         } => run_start(&ctx)?,
         Command::Run {
-            action: RunAction::End { run },
-        } => run_end(&ctx, &run)?,
+            action:
+                RunAction::End {
+                    run,
+                    reveal_agree,
+                    reveal_disagree,
+                },
+        } => {
+            let reveal = reveal_agree
+                .zip(reveal_disagree)
+                .map(|(agree, disagree)| Reveal { agree, disagree });
+            run_end(&ctx, &run, reveal)?
+        }
         Command::Pass {
             action:
                 PassAction::Start {
@@ -98,6 +112,9 @@ pub fn run(cli: Cli) -> Result<Output> {
                     reviewer,
                 },
         } => finding_add(&ctx, &run, &pass, &reviewer)?,
+        Command::Finding {
+            action: FindingAction::Kill { id, reason },
+        } => finding_kill(&ctx, &id, &reason)?,
         Command::Comment(args) => comment(&ctx, &args)?,
         Command::Reply(args) => reply(&ctx, &args)?,
         Command::Resolve(args) => resolve(&ctx, &args)?,
@@ -105,6 +122,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Show { id } => show(&ctx, &id)?,
         Command::Status { head } => status(&ctx, head.as_deref())?,
         Command::Sync { pr } => sync::sync(&ctx, pr.as_deref())?,
+        Command::Publish {
+            dry_run,
+            not_own,
+            pr,
+        } => publish::publish(&ctx, pr.as_deref(), dry_run, not_own)?,
         Command::Prune { dry_run, .. } => {
             let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, dry_run)?;
             json!({ "dry_run": dry_run, "pruned": pruned })
@@ -555,14 +577,57 @@ fn build_anchor(
     }))
 }
 
-fn local_comment(author: Author, body: String, now: &str) -> Comment {
+/// A comment written here, numbered after the thread's other local comments.
+fn local_comment(
+    thread: &str,
+    existing: &[Comment],
+    author: Author,
+    body: String,
+    now: &str,
+) -> Comment {
+    let prefix = format!("{thread}/c");
+    let number = next_number(existing.iter().map(|comment| comment.id.clone()), &prefix) + 1;
     Comment {
+        id: format!("{prefix}{number}"),
         author,
         body,
         created_at: now.to_owned(),
         post: PostState::Pending,
         remote: None,
         draft_id: None,
+        attempt: None,
+        deleted_remote: false,
+        deleted_seen_at: None,
+    }
+}
+
+struct NewThread {
+    id: String,
+    kind: ThreadType,
+    severity: Option<Severity>,
+    anchor: Option<Anchor>,
+    finding: Option<FindingInfo>,
+}
+
+fn local_thread(new: NewThread, author: Author, body: String, now: &str) -> Thread {
+    let first = local_comment(&new.id, &[], author, body, now);
+    Thread {
+        id: new.id,
+        kind: new.kind,
+        severity: new.severity,
+        anchor: new.anchor,
+        resolved: false,
+        resolution: None,
+        triage: None,
+        held: false,
+        finding: new.finding,
+        comments: vec![first],
+        remote: None,
+        resolve_pending: None,
+        deleted_remote: false,
+        deleted_seen_at: None,
+        created_at: now.to_owned(),
+        updated_at: now.to_owned(),
     }
 }
 
@@ -639,6 +704,10 @@ fn run_start(ctx: &Ctx) -> Result<Value> {
             started_at: now.to_owned(),
             ended_at: None,
             passes: Vec::new(),
+            repaired_head: None,
+            repair: Vec::new(),
+            reveal: None,
+            record: None,
         });
         Ok(id)
     })?;
@@ -730,12 +799,31 @@ impl Adoption {
     }
 }
 
-fn run_end(ctx: &Ctx, run_id: &str) -> Result<Value> {
+fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>) -> Result<Value> {
     let scope = ctx.scope()?;
-    if scope.existing.is_none() {
+    let Some(existing) = &scope.existing else {
         return fail(format!("run {run_id} not found in target {}", scope.key));
-    }
+    };
     let adoption = ctx.adoption(&scope)?;
+    // Commits after the run's last reviewed head (the fix commits) are recorded as repaired.
+    let last_head = existing
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .and_then(|run| run.passes.last())
+        .map(|pass| pass.head.clone());
+    let repair = match &last_head {
+        Some(last) if ctx.repo.is_ancestor(last, &scope.head)? => ctx
+            .repo
+            .commits(Some(last), &scope.head)?
+            .into_iter()
+            .map(|commit| CommitPatch {
+                sha: commit.sha,
+                patch_id: commit.patch_id,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let (ended_at, recorded) = ctx.update(&scope, |target, now| {
         let run = find_run_mut(target, run_id)?;
         if run.ended_at.is_some() {
@@ -748,6 +836,9 @@ fn run_end(ctx: &Ctx, run_id: &str) -> Result<Value> {
             ));
         }
         run.ended_at = Some(now.to_owned());
+        run.repaired_head = Some(scope.head.clone());
+        run.repair = repair;
+        run.reveal = reveal;
         Ok((now.to_owned(), adoption.apply(target)))
     })?;
     let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?;
@@ -756,8 +847,57 @@ fn run_end(ctx: &Ctx, run_id: &str) -> Result<Value> {
         "run": run_id,
         "ended_at": ended_at,
         "recorded": recorded,
+        "repaired_head": scope.head,
         "pruned": pruned,
     }))
+}
+
+/// Moves a surviving finding to its pass's killed list. A locked pass allows this: the lock
+/// freezes what reviewers reported, not the verdict.
+fn finding_kill(ctx: &Ctx, id: &str, reason: &str) -> Result<Value> {
+    let scope = ctx.scope()?;
+    if scope.existing.is_none() {
+        return fail(format!("finding {id} not found"));
+    }
+    let reason = limited(reason.to_owned(), "reason")?;
+    let killed = ctx.update(&scope, |target, now| {
+        let index = target
+            .threads
+            .iter()
+            .position(|thread| thread.id == id && thread.finding.is_some())
+            .ok_or_else(|| Error(format!("finding {id} not found")))?;
+        if target.threads[index].remote.is_some() {
+            return fail(format!(
+                "finding {id} is already posted; resolve it with --triage stale instead"
+            ));
+        }
+        let thread = target.threads.remove(index);
+        let finding = thread
+            .finding
+            .ok_or_else(|| Error(format!("finding {id} not found")))?;
+        let killed = KilledFinding {
+            id: thread.id,
+            kind: thread.kind,
+            severity: thread.severity,
+            anchor: thread.anchor,
+            scenario: thread
+                .comments
+                .first()
+                .map(|first| first.body.clone())
+                .unwrap_or_default(),
+            evidence: finding.evidence,
+            tests_run: finding.tests_run,
+            post_reveal: finding.post_reveal,
+            reason,
+            created_at: now.to_owned(),
+        };
+        let major = major_found(target, &finding.run, &finding.pass);
+        let pass = find_pass_mut(target, &finding.run, &finding.pass)?;
+        pass.killed.push(killed.clone());
+        pass.major_found = major;
+        Ok(killed)
+    })?;
+    Ok(json!({ "target": scope.key, "killed": killed }))
 }
 
 #[derive(Deserialize)]
@@ -1086,28 +1226,25 @@ fn finding_add(ctx: &Ctx, run_id: &str, pass_id: &str, reviewer_id: &str) -> Res
                 });
                 continue;
             }
-            threads.push(Thread {
-                id,
-                kind: finding.kind,
-                severity: finding.severity,
-                anchor,
-                resolved: false,
-                resolution: None,
-                triage: None,
-                held: false,
-                finding: Some(FindingInfo {
-                    run: run_id.to_owned(),
-                    pass: pass_id.to_owned(),
-                    reviewer: reviewer_id.to_owned(),
-                    evidence: finding.evidence,
-                    tests_run: finding.tests_run,
-                    post_reveal: finding.post_reveal,
-                }),
-                remote: None,
-                comments: vec![local_comment(agent.clone(), finding.scenario, now)],
-                created_at: now.to_owned(),
-                updated_at: now.to_owned(),
-            });
+            threads.push(local_thread(
+                NewThread {
+                    id,
+                    kind: finding.kind,
+                    severity: finding.severity,
+                    anchor,
+                    finding: Some(FindingInfo {
+                        run: run_id.to_owned(),
+                        pass: pass_id.to_owned(),
+                        reviewer: reviewer_id.to_owned(),
+                        evidence: finding.evidence,
+                        tests_run: finding.tests_run,
+                        post_reveal: finding.post_reveal,
+                    }),
+                },
+                agent.clone(),
+                finding.scenario,
+                now,
+            ));
         }
         let added: Vec<String> = threads.iter().map(|thread| thread.id.clone()).collect();
         let killed_ids: Vec<String> = killed.iter().map(|finding| finding.id.clone()).collect();
@@ -1160,21 +1297,18 @@ fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, login.as_deref())?;
         let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
-        let thread = Thread {
-            id: format!("h{number}"),
-            kind: args.kind,
-            severity: args.severity,
-            anchor,
-            resolved: false,
-            resolution: None,
-            triage: None,
-            held: false,
-            finding: None,
-            remote: None,
-            comments: vec![local_comment(author, body, now)],
-            created_at: now.to_owned(),
-            updated_at: now.to_owned(),
-        };
+        let thread = local_thread(
+            NewThread {
+                id: format!("h{number}"),
+                kind: args.kind,
+                severity: args.severity,
+                anchor,
+                finding: None,
+            },
+            author,
+            body,
+            now,
+        );
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
@@ -1191,7 +1325,8 @@ fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, login.as_deref())?;
         let thread = find_thread_mut(target, &args.id)?;
-        thread.comments.push(local_comment(author, body, now));
+        let comment = local_comment(&thread.id, &thread.comments, author, body, now);
+        thread.comments.push(comment);
         thread.updated_at = now.to_owned();
         Ok(thread.clone())
     })?;
@@ -1238,6 +1373,7 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
         if args.triage.is_some() {
             thread.triage = args.triage;
         }
+        let was = thread.resolved;
         if args.reopen {
             thread.resolved = false;
             thread.resolution = resolution;
@@ -1250,6 +1386,9 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
             if resolution.is_some() {
                 thread.resolution = resolution;
             }
+        }
+        if thread.resolved != was {
+            thread.resolve_pending = Some(thread.resolved);
         }
         thread.updated_at = now.to_owned();
         Ok(thread.clone())
@@ -1298,7 +1437,7 @@ impl Locator<'_> {
             Some(remote) if remote.path.is_some() => json!({
                 "path": remote.path,
                 "line": remote.line.or(remote.old_line).or(remote.original_line),
-                "outdated": remote.outdated.unwrap_or(false),
+                "outdated": remote.outdated,
             }),
             _ => Value::Null,
         }
@@ -1321,9 +1460,16 @@ fn list(ctx: &Ctx, args: &ListArgs) -> Result<Output> {
             (&target.threads, &target.runs)
         });
     let in_run = |id: &str| {
-        args.run
-            .as_ref()
-            .is_none_or(|run| id.starts_with(&format!("{run}.")))
+        let Some(run) = &args.run else {
+            return true;
+        };
+        let Some(rest) = id.strip_prefix(&format!("{run}.c")) else {
+            return false;
+        };
+        args.cycle.is_none_or(|cycle| {
+            rest.split_once('p')
+                .is_some_and(|(found, _)| found == cycle.to_string())
+        })
     };
     let selected: Vec<&Thread> = threads
         .iter()
@@ -1639,20 +1785,41 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             .shas
             .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
     }
+    // Repaired commits (fixes after a run's last pass) count as reviewed but never add to
+    // reviews_at_head.
+    let mut repaired = Reviewed::default();
+    for commit in target
+        .iter()
+        .flat_map(|target| &target.runs)
+        .flat_map(|run| &run.repair)
+    {
+        repaired.shas.insert(commit.sha.clone());
+        repaired.patch_ids.extend(commit.patch_id.clone());
+    }
     let commit_views: Vec<Value> = commits
         .iter()
         .map(|commit| {
-            let ok = reviewed.shas.contains(&commit.sha)
-                || reviewed.trees.contains(&commit.tree)
-                || commit
-                    .patch_id
-                    .as_ref()
-                    .is_some_and(|id| reviewed.patch_ids.contains(id));
+            let in_set = |set: &Reviewed| {
+                set.shas.contains(&commit.sha)
+                    || set.trees.contains(&commit.tree)
+                    || commit
+                        .patch_id
+                        .as_ref()
+                        .is_some_and(|id| set.patch_ids.contains(id))
+            };
+            let matched = if in_set(&reviewed) {
+                Some("pass")
+            } else if in_set(&repaired) {
+                Some("repair")
+            } else {
+                None
+            };
             json!({
                 "sha": commit.sha,
                 "subject": commit.subject,
                 "patch_id": commit.patch_id,
-                "reviewed": ok,
+                "reviewed": matched.is_some(),
+                "match": matched,
             })
         })
         .collect();
@@ -1707,6 +1874,9 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             "severity": thread.severity,
             "triage": thread.triage,
             "current": current,
+            "post": thread.comments.first().map(|first| first.post),
+            "remote_id": thread.remote.as_ref().map(|remote| &remote.id),
+            "url": thread.remote.as_ref().and_then(|remote| remote.url.as_ref()),
         }));
     }
     let runs: Vec<Value> = target
@@ -1718,6 +1888,8 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
                 "started_at": run.started_at,
                 "ended_at": run.ended_at,
                 "passes": run.passes.iter().map(|pass| &pass.id).collect::<Vec<_>>(),
+                "repaired_head": run.repaired_head,
+                "record": run.record,
             })
         })
         .collect();
@@ -1726,6 +1898,10 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         .flat_map(|target| &target.records)
         .filter(|record| {
             record.head == head || (record.head.len() >= 7 && head.starts_with(&record.head))
+        })
+        // Records of our own runs are already counted through their passes.
+        .filter(|record| {
+            !target.is_some_and(|target| target.runs.iter().any(|run| run.id == record.run))
         })
         .collect();
     let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();
@@ -1757,6 +1933,7 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
 /// no resolved state on the host.
 fn is_open(thread: &Thread) -> bool {
     !thread.resolved
+        && !thread.deleted_remote
         && (thread.finding.is_some()
             || thread
                 .remote

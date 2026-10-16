@@ -1,4 +1,5 @@
 mod commands;
+mod publish;
 mod reviewed;
 mod support;
 mod sync;

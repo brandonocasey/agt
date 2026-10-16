@@ -60,6 +60,18 @@ pub enum Command {
         #[arg(long)]
         pr: Option<String>,
     },
+    /// Post local findings, replies, resolves and final records to an own PR/MR.
+    Publish {
+        /// Print every payload without posting or writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow a PR/MR authored by someone else.
+        #[arg(long)]
+        not_own: bool,
+        /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
+        #[arg(long)]
+        pr: Option<String>,
+    },
     /// Drop targets 90 days after their PR/MR closed, else 90 days after their last change.
     Prune {
         /// Prune every repository in the store, not only the current one.
@@ -79,6 +91,12 @@ pub enum RunAction {
     End {
         #[arg(long)]
         run: String,
+        /// Reveal findings the blind reviewers agreed with, for the final record.
+        #[arg(long, requires = "reveal_disagree")]
+        reveal_agree: Option<u32>,
+        /// Reveal findings the blind reviewers disagreed with, for the final record.
+        #[arg(long, requires = "reveal_agree")]
+        reveal_disagree: Option<u32>,
     },
 }
 
@@ -119,6 +137,12 @@ pub enum FindingAction {
         pass: String,
         #[arg(long)]
         reviewer: String,
+    },
+    /// Move a surviving finding to its pass's killed list (allowed on a locked pass).
+    Kill {
+        id: String,
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -207,6 +231,9 @@ pub struct ListArgs {
     /// Only findings of this run.
     #[arg(long)]
     pub run: Option<String>,
+    /// Only findings of this cycle of `--run`.
+    #[arg(long, requires = "run")]
+    pub cycle: Option<u32>,
     #[arg(long, value_enum, default_value = "json")]
     pub format: Format,
 }

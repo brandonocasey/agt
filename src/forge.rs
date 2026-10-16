@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
@@ -32,11 +33,29 @@ impl Client {
     }
 
     fn output(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let output = Command::new(&self.program)
+        self.run(args, None)
+    }
+
+    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
+        let mut child = Command::new(&self.program)
             .args(args)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .stdin(Stdio::null())
-            .output()
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(ctx(format!("run {}", self.name)))?;
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            stdin
+                .write_all(input)
+                .map_err(ctx(format!("write to {}", self.name)))?;
+        }
+        let output = child
+            .wait_with_output()
             .map_err(ctx(format!("run {}", self.name)))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -53,6 +72,24 @@ impl Client {
     pub fn json(&self, args: &[&str]) -> Result<Value> {
         let value: Value = serde_json::from_slice(&self.output(args)?)
             .map_err(ctx(format!("parse {} output", self.name)))?;
+        if let Some(errors) = value.get("errors").filter(|errors| !errors.is_null()) {
+            return fail(format!("{} returned errors: {errors}", self.name));
+        }
+        Ok(value)
+    }
+
+    /// A write call, with the JSON body on stdin when given (`--input -`); an empty reply is
+    /// `null`.
+    pub fn send(&self, args: &[&str], body: Option<&Value>) -> Result<Value> {
+        let input = body
+            .map(|body| serde_json::to_vec(body).map_err(ctx("serialize request")))
+            .transpose()?;
+        let output = self.run(args, input.as_deref())?;
+        if output.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Value::Null);
+        }
+        let value: Value =
+            serde_json::from_slice(&output).map_err(ctx(format!("parse {} output", self.name)))?;
         if let Some(errors) = value.get("errors").filter(|errors| !errors.is_null()) {
             return fail(format!("{} returned errors: {errors}", self.name));
         }
@@ -126,6 +163,7 @@ pub struct PrInfo {
     pub head_sha: String,
     pub base_sha: Option<String>,
     pub start_sha: Option<String>,
+    pub author: Option<String>,
 }
 
 pub struct CommentData {

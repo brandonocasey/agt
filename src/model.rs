@@ -36,6 +36,7 @@ pub struct Review {
     pub head_sha: String,
     pub base_sha: Option<String>,
     pub start_sha: Option<String>,
+    pub author: Option<String>,
     pub login: String,
     pub synced_at: String,
 }
@@ -81,6 +82,27 @@ pub struct Run {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub passes: Vec<Pass>,
+    /// `HEAD` at `run end`; commits after the last pass up to it count as reviewed (`repair`).
+    pub repaired_head: Option<String>,
+    pub repair: Vec<CommitPatch>,
+    pub reveal: Option<Reveal>,
+    pub record: Option<RecordPost>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct Reveal {
+    pub agree: u32,
+    pub disagree: u32,
+}
+
+/// Publish state of a run's final record.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RecordPost {
+    pub post: PostState,
+    pub attempt: Option<String>,
+    pub head: String,
+    pub remote_id: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -142,6 +164,10 @@ pub struct Thread {
     pub finding: Option<FindingInfo>,
     pub comments: Vec<Comment>,
     pub remote: Option<RemoteThread>,
+    /// A local resolve or reopen that `publish` has not sent yet; `sync` keeps it.
+    pub resolve_pending: Option<bool>,
+    pub deleted_remote: bool,
+    pub deleted_seen_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -247,12 +273,18 @@ pub struct KilledFinding {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Comment {
+    /// `<thread id>/c<n>` for local comments, `remote-<id>` for imported ones; the
+    /// `agent-review id=` marker of a posted body.
+    pub id: String,
     pub author: Author,
     pub body: String,
     pub created_at: String,
     pub post: PostState,
     pub remote: Option<RemoteComment>,
     pub draft_id: Option<String>,
+    pub attempt: Option<String>,
+    pub deleted_remote: bool,
+    pub deleted_seen_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]

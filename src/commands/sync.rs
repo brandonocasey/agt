@@ -14,19 +14,34 @@ use crate::model::{
 };
 use crate::store::Account;
 
-const FINDING_MARKER: &str = "<!-- review-finding v1 id=";
-const RECORD_MARKER: &str = "<!-- review-record v2 ";
+pub(super) const FINDING_MARKER: &str = "<!-- review-finding v1 id=";
+pub(super) const RECORD_MARKER: &str = "<!-- review-record v2 ";
+pub(super) const AGENT_MARKER: &str = "<!-- agent-review id=";
+/// Agent id prefix of the body of a GitHub review that `publish` posts; sync skips those.
+pub(super) const REVIEW_ID: &str = "review/";
 
 #[derive(Default)]
 struct Summary {
     imported: usize,
     updated: usize,
+    deleted: usize,
     records: usize,
     answered: usize,
     drafts: usize,
 }
 
-pub(super) fn sync(ctx: &Ctx, pr: Option<&str>) -> Result<Value> {
+/// The forge, authenticated login and PR/MR a `sync` or `publish` works on.
+pub(super) struct Connection {
+    pub forge: Forge,
+    pub host: String,
+    pub client: Client,
+    pub login: String,
+    pub repo: String,
+    pub number: u64,
+    pub key: String,
+}
+
+pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     let pr_ref = pr.map(forge::parse_pr).transpose()?;
     let origin = ctx.repo.origin_url()?.and_then(|url| split_remote(&url));
     let location = pr_ref
@@ -49,16 +64,16 @@ pub(super) fn sync(ctx: &Ctx, pr: Option<&str>) -> Result<Value> {
         Forge::Github => github::login(&client)?,
         Forge::Gitlab => gitlab::login(&client)?,
     };
-    let branch = ctx.repo.current_branch()?;
     let (repo, number) = match &pr_ref {
         Some(pr) => (origin_repo, pr.number),
         None => {
-            let branch = branch
-                .as_deref()
+            let branch = ctx
+                .repo
+                .current_branch()?
                 .ok_or_else(|| Error("HEAD is detached; pass --pr <number|url>".into()))?;
             let found = match forge {
-                Forge::Github => github::find_pr(&client, &origin_repo, branch)?,
-                Forge::Gitlab => gitlab::find_mr(&client, &origin_repo, branch)?,
+                Forge::Github => github::find_pr(&client, &origin_repo, &branch)?,
+                Forge::Gitlab => gitlab::find_mr(&client, &origin_repo, &branch)?,
             };
             found.ok_or_else(|| {
                 Error(format!(
@@ -67,30 +82,50 @@ pub(super) fn sync(ctx: &Ctx, pr: Option<&str>) -> Result<Value> {
             })?
         }
     };
-    let mut fetched = match forge {
-        Forge::Github => github::fetch(&client, &repo, number)?,
-        Forge::Gitlab => gitlab::fetch(&client, &repo, number)?,
-    };
-    mark_outdated(&ctx.repo, &mut fetched);
-
     let key = match forge {
         Forge::Github => format!("gh-{number}"),
         Forge::Gitlab => format!("gl-{number}"),
     };
-    let (scope, local) = sync_scope(ctx, &key, &fetched, branch.as_deref())?;
+    Ok(Connection {
+        forge,
+        host,
+        client,
+        login,
+        repo,
+        number,
+        key,
+    })
+}
+
+/// Everything fetched and computed before the lock: the target to merge into and the merge
+/// inputs.
+pub(super) struct Plan {
+    pub scope: Scope,
+    fetched: Fetched,
+    adoption: Option<Adoption>,
+    pub review: Review,
+    now: String,
+}
+
+pub(super) fn plan(ctx: &Ctx, connection: &Connection) -> Result<Plan> {
+    let mut fetched = match connection.forge {
+        Forge::Github => github::fetch(&connection.client, &connection.repo, connection.number)?,
+        Forge::Gitlab => gitlab::fetch(&connection.client, &connection.repo, connection.number)?,
+    };
+    mark_outdated(&ctx.repo, &mut fetched);
+    let branch = ctx.repo.current_branch()?;
+    let (scope, local) = sync_scope(ctx, &connection.key, &fetched, branch.as_deref())?;
     let adoption = if local && scope.existing.is_some() {
         Some(ctx.adoption(&scope)?)
     } else {
         None
     };
-    let from = scope.key.clone();
-    let renamed = scope.existing.is_some() && from != key;
     let now = clock::now()?;
     let review = Review {
-        forge,
-        host: host.clone(),
+        forge: connection.forge,
+        host: connection.host.clone(),
         repo: fetched.pr.repo.clone(),
-        number,
+        number: connection.number,
         url: fetched.pr.url.clone(),
         state: fetched.pr.state,
         closed_at: fetched.pr.closed_at.clone(),
@@ -98,48 +133,112 @@ pub(super) fn sync(ctx: &Ctx, pr: Option<&str>) -> Result<Value> {
         head_sha: fetched.pr.head_sha.clone(),
         base_sha: fetched.pr.base_sha.clone(),
         start_sha: fetched.pr.start_sha.clone(),
-        login: login.clone(),
+        author: fetched.pr.author.clone(),
+        login: connection.login.clone(),
         synced_at: now.clone(),
+    };
+    Ok(Plan {
+        scope,
+        fetched,
+        adoption,
+        review,
+        now,
+    })
+}
+
+impl Plan {
+    /// Merges the fetched PR/MR into `target`; returns the merge summary and adopted passes.
+    fn apply(self, target: &mut Target, connection: &Connection) -> (Summary, Vec<String>) {
+        target.review = Some(self.review);
+        if target.branch.is_none() {
+            target.branch = Some(self.fetched.pr.head_branch.clone());
+        }
+        if target.branch_birth.is_none() {
+            target.branch_birth.clone_from(&self.scope.birth);
+        }
+        let summary = merge(
+            target,
+            self.fetched,
+            &connection.login,
+            connection.forge,
+            &self.now,
+        );
+        let recorded = self
+            .adoption
+            .as_ref()
+            .map(|adoption| adoption.apply(target))
+            .unwrap_or_default();
+        (summary, recorded)
+    }
+
+    /// The target as a sync would leave it, without writing anything.
+    pub(super) fn preview(self, ctx: &Ctx, connection: &Connection) -> Target {
+        let mut target = self
+            .scope
+            .existing
+            .clone()
+            .unwrap_or_else(|| ctx.new_target(&self.scope, &self.now));
+        target.key.clone_from(&connection.key);
+        self.apply(&mut target, connection);
+        target
+    }
+}
+
+pub(super) fn sync(ctx: &Ctx, pr: Option<&str>) -> Result<Value> {
+    let connection = connect(ctx, pr)?;
+    sync_with(ctx, &connection)
+}
+
+pub(super) fn sync_with(ctx: &Ctx, connection: &Connection) -> Result<Value> {
+    let plan = plan(ctx, connection)?;
+    sync_planned(ctx, connection, plan)
+}
+
+/// Writes a planned sync to the store under the PR/MR key.
+pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Result<Value> {
+    let from = plan.scope.key.clone();
+    let key = connection.key.clone();
+    let renamed = plan.scope.existing.is_some() && from != key;
+    let review = plan.review.clone();
+    let now = plan.now.clone();
+    let scope_for_init = Scope {
+        key: key.clone(),
+        kind: plan.scope.kind,
+        branch: plan.scope.branch.clone(),
+        birth: plan.scope.birth.clone(),
+        base: plan.scope.base.clone(),
+        head: plan.scope.head.clone(),
+        existing: None,
     };
     let (summary, recorded, total) = ctx.store.update_renamed(
         &ctx.dir,
         &from,
         &key,
         &now,
-        || ctx.new_target(&scope, &now),
+        || ctx.new_target(&scope_for_init, &now),
         |target| {
-            target.review = Some(review.clone());
-            if target.branch.is_none() {
-                target.branch = Some(fetched.pr.head_branch.clone());
-            }
-            if target.branch_birth.is_none() {
-                target.branch_birth.clone_from(&scope.birth);
-            }
-            let summary = merge(target, fetched, &login, forge, &now);
-            let recorded = adoption
-                .as_ref()
-                .map(|adoption: &Adoption| adoption.apply(target))
-                .unwrap_or_default();
+            let (summary, recorded) = plan.apply(target, connection);
             Ok((summary, recorded, target.threads.len()))
         },
     )?;
     ctx.store.save_account(
         &ctx.dir,
         &Account {
-            forge,
-            host,
-            login: login.clone(),
+            forge: connection.forge,
+            host: connection.host.clone(),
+            login: connection.login.clone(),
         },
     )?;
     let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?;
     Ok(json!({
         "target": key,
         "renamed_from": renamed.then_some(from),
-        "login": login,
+        "login": connection.login,
         "review": review,
         "threads": {
             "imported": summary.imported,
             "updated": summary.updated,
+            "deleted": summary.deleted,
             "total": total,
         },
         "records": summary.records,
@@ -178,7 +277,7 @@ fn sync_scope(
 }
 
 /// GitLab gives no outdated flag: a position is outdated when its head is not the latest diff
-/// head and the line does not map to it. A position git cannot diff counts as outdated.
+/// head and the line does not map to it. Without the commits locally the state is unknown.
 fn mark_outdated(repo: &Repo, fetched: &mut Fetched) {
     let latest = fetched.pr.head_sha.clone();
     for thread in &mut fetched.threads {
@@ -193,22 +292,23 @@ fn mark_outdated(repo: &Repo, fetched: &mut Fetched) {
         else {
             continue;
         };
-        let outdated = head != latest && {
-            let anchor = Anchor {
-                path,
-                line: thread.info.line,
-                old_line: thread.info.old_line,
-                side: thread.info.side.unwrap_or(Side::New),
-                start_line: thread.info.start_line,
-                commit: Some(head.clone()),
-                tree: String::new(),
-            };
-            match repo.diff_u0(&head, &latest) {
-                Ok(diff) => anchors::locate(&anchors::parse(&diff), &anchor).outdated,
-                Err(_) => true,
-            }
+        if head == latest {
+            thread.info.outdated = Some(false);
+            continue;
+        }
+        let anchor = Anchor {
+            path,
+            line: thread.info.line,
+            old_line: thread.info.old_line,
+            side: thread.info.side.unwrap_or(Side::New),
+            start_line: thread.info.start_line,
+            commit: Some(head.clone()),
+            tree: String::new(),
         };
-        thread.info.outdated = Some(outdated);
+        thread.info.outdated = repo
+            .diff_u0(&head, &latest)
+            .ok()
+            .map(|diff| anchors::locate(&anchors::parse(&diff), &anchor).outdated);
     }
 }
 
@@ -219,6 +319,20 @@ fn trusted(comment: &CommentData, login: &str) -> bool {
             .editor
             .as_deref()
             .is_none_or(|editor| editor == login)
+}
+
+/// The local id in an `<!-- agent-review id=<id> -->` marker, which `publish` adds to every body.
+pub(super) fn agent_id(body: &str) -> Option<String> {
+    let rest = body.split_once(AGENT_MARKER)?.1;
+    let id = rest.split_whitespace().next()?.trim_end_matches("-->");
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// The agent-review id of a trusted comment.
+fn own_id(comment: &CommentData, login: &str) -> Option<String> {
+    trusted(comment, login)
+        .then(|| agent_id(&comment.body))
+        .flatten()
 }
 
 fn marker_id(body: &str) -> Option<String> {
@@ -250,12 +364,13 @@ fn parse_record(comment: &CommentData) -> Option<ImportedRecord> {
     })
 }
 
-/// The finding id a `Fixed in ... Re: <id>` general comment answers.
-fn answered_id(body: &str) -> Option<String> {
+/// The thread id a general comment answers: a `Fixed in ... Re: <id>` comment, or any
+/// `... Re: <id>` reply that `publish` marked.
+fn answered_id(body: &str, marked: bool) -> Option<String> {
     let body = body.trim_end();
     let (before, last) = body.rsplit_once('\n').unwrap_or(("", body));
     let id = last.trim().strip_prefix("Re: ")?.trim();
-    (before.contains("Fixed in") && !id.is_empty()).then(|| id.to_owned())
+    ((marked || before.contains("Fixed in")) && !id.is_empty()).then(|| id.to_owned())
 }
 
 fn fixed_sha(body: &str) -> Option<String> {
@@ -324,6 +439,10 @@ fn remote_comment(comment: &CommentData, login: &str) -> RemoteComment {
 
 fn imported_comment(comment: CommentData, login: &str) -> Comment {
     Comment {
+        id: format!("remote-{}", comment.id),
+        attempt: None,
+        deleted_remote: false,
+        deleted_seen_at: None,
         author: Author::Human {
             login: comment.login.clone().unwrap_or_else(|| "ghost".to_owned()),
         },
@@ -351,12 +470,31 @@ fn imported_id(forge: Forge, data: &ThreadData) -> String {
 fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: &str) -> Summary {
     let mut summary = Summary::default();
     let mut answers = Vec::new();
+    let seen_threads: Vec<String> = fetched
+        .threads
+        .iter()
+        .map(|data| data.info.id.clone())
+        .collect();
+    let seen_comments: Vec<String> = fetched
+        .threads
+        .iter()
+        .flat_map(|data| data.comments.iter().map(|comment| comment.id.clone()))
+        .collect();
     for data in fetched.threads {
         if let [comment] = data.comments.as_slice()
             && data.info.kind == RemoteKind::General
             && trusted(comment, login)
         {
             if let Some(record) = parse_record(comment) {
+                if let Some(local) = own_id(comment, login)
+                    && let Some(run_id) = local.strip_suffix("/record")
+                    && let Some(run) = target.runs.iter_mut().find(|run| run.id == run_id)
+                    && let Some(post) = &mut run.record
+                {
+                    post.post = PostState::Posted;
+                    post.remote_id = Some(comment.id.clone());
+                    post.url.clone_from(&comment.url);
+                }
                 target
                     .records
                     .retain(|known| known.comment_id != record.comment_id);
@@ -364,8 +502,14 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
                 summary.records += 1;
                 continue;
             }
-            if let Some(id) = answered_id(&comment.body) {
+            let own = own_id(comment, login);
+            if let Some(id) = answered_id(&comment.body, own.is_some()) {
                 answers.push((id, data));
+                continue;
+            }
+            if data.info.kind == RemoteKind::Review
+                && own.is_some_and(|id| id.starts_with(REVIEW_ID))
+            {
                 continue;
             }
         }
@@ -380,24 +524,79 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
             None => import(target, data, login, forge, now, &mut summary),
         }
     }
-    for draft in fetched.drafts {
-        let Some(id) = marker_id(&draft.body) else {
-            continue;
-        };
-        let first = target
-            .threads
-            .iter_mut()
-            .find(|thread| thread.id == id)
-            .and_then(|thread| thread.comments.first_mut());
-        if let Some(first) = first
-            && first.remote.is_none()
+    // A draft that is gone was published or deleted; the comment is posted again unless a
+    // published note matched it above.
+    for comment in target
+        .threads
+        .iter_mut()
+        .flat_map(|thread| thread.comments.iter_mut())
+        .filter(|comment| comment.remote.is_none())
+    {
+        if comment
+            .draft_id
+            .as_ref()
+            .is_some_and(|id| !fetched.drafts.iter().any(|draft| &draft.id == id))
         {
-            first.post = PostState::Posting;
-            first.draft_id = Some(draft.id);
+            comment.draft_id = None;
+        }
+    }
+    for draft in fetched.drafts {
+        let comment = match (agent_id(&draft.body), marker_id(&draft.body)) {
+            (Some(local), _) => target
+                .threads
+                .iter_mut()
+                .flat_map(|thread| thread.comments.iter_mut())
+                .find(|comment| comment.id == local),
+            (None, Some(id)) => target
+                .threads
+                .iter_mut()
+                .find(|thread| thread.id == id)
+                .and_then(|thread| thread.comments.first_mut()),
+            (None, None) => None,
+        };
+        if let Some(comment) = comment
+            && comment.remote.is_none()
+        {
+            comment.post = PostState::Posting;
+            comment.draft_id = Some(draft.id);
             summary.drafts += 1;
         }
     }
+    summary.deleted = flag_deleted(target, &seen_threads, &seen_comments, now);
     summary
+}
+
+/// Marks threads and comments the host no longer returns. They are kept, never dropped.
+fn flag_deleted(target: &mut Target, threads: &[String], comments: &[String], now: &str) -> usize {
+    let mut flagged = 0;
+    for thread in &mut target.threads {
+        if let Some(remote) = &thread.remote {
+            let gone = !threads.contains(&remote.id);
+            if gone && !thread.deleted_remote {
+                thread.deleted_seen_at = Some(now.to_owned());
+                flagged += 1;
+            }
+            if !gone {
+                thread.deleted_seen_at = None;
+            }
+            thread.deleted_remote = gone;
+        }
+        for comment in &mut thread.comments {
+            let Some(remote) = &comment.remote else {
+                continue;
+            };
+            let gone = !comments.contains(&remote.id);
+            if gone && !comment.deleted_remote {
+                comment.deleted_seen_at = Some(now.to_owned());
+                flagged += 1;
+            }
+            if !gone {
+                comment.deleted_seen_at = None;
+            }
+            comment.deleted_remote = gone;
+        }
+    }
+    flagged
 }
 
 fn import(
@@ -419,6 +618,19 @@ fn import(
             .as_ref()
             .is_some_and(|remote| remote.id == data.info.id && remote.kind == data.info.kind)
     });
+    let by_agent = || {
+        let local = own_id(data.comments.first()?, login)?;
+        target.threads.iter().position(|thread| {
+            thread
+                .comments
+                .first()
+                .is_some_and(|first| first.id == local)
+                && thread
+                    .remote
+                    .as_ref()
+                    .is_none_or(|remote| remote.id == data.info.id)
+        })
+    };
     let by_marker = || {
         let marker = marker.as_deref()?;
         target.threads.iter().position(|thread| {
@@ -429,7 +641,7 @@ fn import(
                     .is_none_or(|remote| remote.id == data.info.id)
         })
     };
-    if let Some(index) = by_remote.or_else(by_marker) {
+    if let Some(index) = by_remote.or_else(by_agent).or_else(by_marker) {
         update(
             &mut target.threads[index],
             data,
@@ -471,6 +683,9 @@ fn import(
             .map(|comment| imported_comment(comment, login))
             .collect(),
         remote: Some(data.info),
+        resolve_pending: None,
+        deleted_remote: false,
+        deleted_seen_at: None,
         created_at,
         updated_at: now.to_owned(),
     });
@@ -480,9 +695,15 @@ fn import(
 /// Remote wins for posted text and resolved state; local fields and unposted comments stay.
 fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, login: &str, now: &str) {
     if data.info.resolvable {
-        thread.resolved = data.resolved;
-        if data.resolved {
-            thread.held = false;
+        match thread.resolve_pending {
+            Some(pending) if pending == data.resolved => thread.resolve_pending = None,
+            Some(_) => {}
+            None => {
+                thread.resolved = data.resolved;
+                if data.resolved {
+                    thread.held = false;
+                }
+            }
         }
     }
     thread.remote = Some(data.info);
@@ -497,6 +718,13 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, login: &str, n
                     .remote
                     .as_ref()
                     .is_some_and(|remote| remote.id == incoming.id)
+            })
+            .or_else(|| {
+                let local = own_id(&incoming, login)?;
+                thread
+                    .comments
+                    .iter()
+                    .position(|comment| comment.id == local && comment.remote.is_none())
             })
             .or_else(|| {
                 let first_unposted = thread
@@ -543,15 +771,29 @@ fn answer(thread: &mut Thread, data: ThreadData, login: &str, now: &str) {
         if known {
             continue;
         }
-        if !thread
+        let local = own_id(&comment, login);
+        if let Some(existing) = thread
+            .comments
+            .iter_mut()
+            .find(|existing| Some(&existing.id) == local.as_ref() && existing.remote.is_none())
+        {
+            existing.remote = Some(remote_comment(&comment, login));
+            existing.post = PostState::Posted;
+            existing.draft_id = None;
+            continue;
+        }
+        let resolvable = thread
             .remote
             .as_ref()
-            .is_some_and(|remote| remote.resolvable)
-        {
-            thread.resolved = true;
-            thread.held = false;
-            if thread.resolution.is_none() {
-                thread.resolution = fixed_sha(&comment.body).map(|sha| format!("fixed {sha}"));
+            .is_some_and(|remote| remote.resolvable);
+        if !resolvable && thread.resolve_pending.is_none() {
+            let fixed = fixed_sha(&comment.body);
+            thread.resolved = fixed.is_some();
+            if let Some(sha) = fixed {
+                thread.held = false;
+                if thread.resolution.is_none() {
+                    thread.resolution = Some(format!("fixed {sha}"));
+                }
             }
         }
         thread.comments.push(imported_comment(comment, login));
@@ -586,10 +828,14 @@ mod tests {
             ("rv-7k2m", 2, Some(1))
         );
         assert_eq!(
-            answered_id("Fixed in 9e8d7c6.\n\nsig\nRe: rv-7k2m.c1p0.r1.f2").as_deref(),
+            answered_id("Fixed in 9e8d7c6.\n\nsig\nRe: rv-7k2m.c1p0.r1.f2", false).as_deref(),
             Some("rv-7k2m.c1p0.r1.f2")
         );
-        assert_eq!(answered_id("Re: rv-7k2m.c1p0.r1.f2"), None);
+        assert_eq!(answered_id("Re: rv-7k2m.c1p0.r1.f2", false), None);
+        assert_eq!(
+            answered_id("Not fixed: x\n<!-- agent-review id=h1/c2 -->\nRe: h1", true).as_deref(),
+            Some("h1")
+        );
         assert_eq!(
             fixed_sha("Fixed in 9e8d7c6.\nRe: x").as_deref(),
             Some("9e8d7c6")

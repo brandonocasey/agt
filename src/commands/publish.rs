@@ -1,0 +1,1134 @@
+use std::fmt::Write as _;
+
+use serde_json::{Value, json};
+
+use super::sync::{
+    self, AGENT_MARKER, Connection, FINDING_MARKER, RECORD_MARKER, REVIEW_ID, agent_id,
+};
+use super::{Ctx, author_label, is_open, random_id};
+use crate::anchors;
+use crate::clock;
+use crate::error::{Error, Result, fail};
+use crate::forge;
+use crate::git::Repo;
+use crate::model::{
+    Anchor, Author, Comment, Forge, PassKind, PostState, RecordPost, RemoteComment, RemoteKind,
+    RemoteThread, Review, Run, Side, Target, Thread,
+};
+
+/// Stands for the id of the draft created by the write before; filled in when it returns.
+const NEW_DRAFT: &str = "<draft id>";
+const REPLY_MUTATION: &str = "mutation AddReply($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{databaseId url}}}";
+const RESOLVE_MUTATION: &str = "mutation ResolveThread($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
+const UNRESOLVE_MUTATION: &str = "mutation UnresolveThread($threadId:ID!){unresolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
+
+/// What one write call posts, which says how to mark and save it.
+enum Item {
+    /// A GitHub review holding the in-diff comments of one reviewed commit.
+    Review {
+        comments: Vec<String>,
+    },
+    /// A thread's first comment as a general comment (GitHub) or discussion (GitLab).
+    Thread {
+        comment: String,
+    },
+    /// A GitLab draft note, published right after it is created.
+    Draft {
+        comment: String,
+    },
+    PublishDraft {
+        comment: String,
+        draft: String,
+    },
+    Reply {
+        comment: String,
+    },
+    Resolve {
+        thread: String,
+        resolved: bool,
+    },
+    Record {
+        run: String,
+        head: String,
+    },
+}
+
+struct Write {
+    item: Item,
+    args: Vec<String>,
+    body: Option<Value>,
+}
+
+impl Write {
+    fn kind(&self) -> &'static str {
+        match &self.item {
+            Item::Review { .. } => "review",
+            Item::Thread { .. } => "thread",
+            Item::Draft { .. } => "draft",
+            Item::PublishDraft { .. } => "publish-draft",
+            Item::Reply { .. } => "reply",
+            Item::Resolve { resolved: true, .. } => "resolve",
+            Item::Resolve { .. } => "unresolve",
+            Item::Record { .. } => "record",
+        }
+    }
+
+    fn ids(&self) -> Vec<String> {
+        match &self.item {
+            Item::Review { comments } => comments.clone(),
+            Item::Thread { comment }
+            | Item::Draft { comment }
+            | Item::PublishDraft { comment, .. }
+            | Item::Reply { comment } => vec![comment.clone()],
+            Item::Resolve { thread, .. } => vec![thread.clone()],
+            Item::Record { run, .. } => vec![format!("{run}/record")],
+        }
+    }
+
+    fn view(&self) -> Value {
+        json!({
+            "kind": self.kind(),
+            "items": self.ids(),
+            "call": self.args,
+            "input": self.body,
+        })
+    }
+}
+
+/// Where a comment goes on the host.
+enum Spot {
+    Github {
+        commit: String,
+        path: String,
+        line: u32,
+        side: &'static str,
+    },
+    Gitlab(Value),
+    Outside,
+}
+
+/// The posting plan for one target state; built the same way for a dry run and a real one.
+struct Planner<'a> {
+    repo: &'a Repo,
+    connection: &'a Connection,
+    review: &'a Review,
+}
+
+pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, dry_run: bool, not_own: bool) -> Result<Value> {
+    let connection = sync::connect(ctx, pr)?;
+    let plan = sync::plan(ctx, &connection)?;
+    let author = plan.review.author.clone();
+    if !not_own && author.as_deref() != Some(connection.login.as_str()) {
+        return fail(format!(
+            "{} is authored by {}, not {}; pass --not-own to post anyway",
+            plan.review.url,
+            author.as_deref().unwrap_or("an unknown user"),
+            connection.login
+        ));
+    }
+    if dry_run {
+        let target = plan.preview(ctx, &connection);
+        return dry(ctx, &connection, target);
+    }
+    sync::sync_planned(ctx, &connection, plan)?;
+    let mut posted = Vec::new();
+    let mut skipped = Vec::new();
+    let target = load(ctx, &connection)?;
+    let (writes, skips, _) = planner(ctx, &connection, &target)?.threads(&target);
+    skipped.extend(skips);
+    run_writes(ctx, &connection, &target, writes, &mut posted)?;
+    sync::sync_with(ctx, &connection)?;
+    let target = load(ctx, &connection)?;
+    let (writes, skips) = planner(ctx, &connection, &target)?.replies(&target);
+    skipped.extend(skips);
+    run_writes(ctx, &connection, &target, writes, &mut posted)?;
+    let target = load(ctx, &connection)?;
+    let writes = planner(ctx, &connection, &target)?.records(&target);
+    run_writes(ctx, &connection, &target, writes, &mut posted)?;
+    let synced = sync::sync_with(ctx, &connection)?;
+    Ok(json!({
+        "target": connection.key,
+        "dry_run": false,
+        "posted": posted,
+        "skipped": skipped,
+        "sync": synced,
+    }))
+}
+
+fn load(ctx: &Ctx, connection: &Connection) -> Result<Target> {
+    ctx.store
+        .load(&ctx.dir, &connection.key)?
+        .ok_or_else(|| Error(format!("target {} vanished during publish", connection.key)))
+}
+
+fn planner<'a>(
+    ctx: &'a Ctx,
+    connection: &'a Connection,
+    target: &'a Target,
+) -> Result<Planner<'a>> {
+    let review = target
+        .review
+        .as_ref()
+        .ok_or_else(|| Error(format!("target {} has no synced PR/MR", target.key)))?;
+    Ok(Planner {
+        repo: &ctx.repo,
+        connection,
+        review,
+    })
+}
+
+/// Every payload a publish would send, from an in-memory sync; nothing is written.
+fn dry(ctx: &Ctx, connection: &Connection, mut target: Target) -> Result<Value> {
+    let (threads, skipped, expected) = planner(ctx, connection, &target)?.threads(&target);
+    // Treat the threads above as posted so their replies and resolves show too.
+    for (id, kind) in expected {
+        if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
+            thread.remote = Some(placeholder(&id, kind, connection.forge));
+            if let Some(first) = thread.comments.first_mut() {
+                first.post = PostState::Posted;
+            }
+        }
+    }
+    let planner = planner(ctx, connection, &target)?;
+    let (replies, more) = planner.replies(&target);
+    let records = planner.records(&target);
+    let writes: Vec<Value> = threads
+        .iter()
+        .chain(&replies)
+        .chain(&records)
+        .map(Write::view)
+        .collect();
+    let skipped: Vec<Value> = skipped.into_iter().chain(more).collect();
+    Ok(json!({
+        "target": connection.key,
+        "dry_run": true,
+        "writes": writes,
+        "skipped": skipped,
+    }))
+}
+
+fn placeholder(id: &str, kind: RemoteKind, forge: Forge) -> RemoteThread {
+    RemoteThread {
+        kind,
+        id: format!("<remote id of {id}>"),
+        url: None,
+        resolvable: kind != RemoteKind::General || forge == Forge::Gitlab,
+        outdated: None,
+        path: None,
+        old_path: None,
+        line: None,
+        old_line: None,
+        original_line: None,
+        start_line: None,
+        original_start_line: None,
+        side: None,
+        commit: None,
+        review_state: None,
+    }
+}
+
+/// Only agents and the authenticated user speak through `publish`.
+fn allowed(author: &Author, login: &str) -> bool {
+    match author {
+        Author::Agent { .. } => true,
+        Author::Human { login: name } => name == login,
+    }
+}
+
+fn skip(id: &str, reason: String) -> Value {
+    json!({ "item": id, "reason": reason })
+}
+
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
+impl Planner<'_> {
+    fn base_path(&self) -> String {
+        match self.connection.forge {
+            Forge::Github => format!("repos/{}", self.connection.repo),
+            Forge::Gitlab => format!(
+                "projects/{}/merge_requests/{}",
+                forge::encode(&self.connection.repo),
+                self.connection.number
+            ),
+        }
+    }
+
+    fn post(&self, path: &str) -> Vec<String> {
+        let mut args = match self.connection.forge {
+            Forge::Github => vec!["api", "--method", "POST"],
+            Forge::Gitlab => vec!["api", "-X", "POST"],
+        };
+        args.push(path);
+        if self.connection.forge == Forge::Gitlab {
+            args.extend(["-H", "Content-Type: application/json"]);
+        }
+        args.extend(["--input", "-"]);
+        args.into_iter().map(str::to_owned).collect()
+    }
+
+    fn general(&self) -> Vec<String> {
+        match self.connection.forge {
+            Forge::Github => self.post(&format!(
+                "{}/issues/{}/comments",
+                self.base_path(),
+                self.connection.number
+            )),
+            Forge::Gitlab => self.post(&format!("{}/discussions", self.base_path())),
+        }
+    }
+
+    /// New threads: one GitHub review per reviewed commit for in-diff comments, else general
+    /// comments; GitLab draft notes, published one by one, else discussions. Also returns the
+    /// remote kind each thread gets.
+    fn threads(&self, target: &Target) -> (Vec<Write>, Vec<Value>, Vec<(String, RemoteKind)>) {
+        let mut writes = Vec::new();
+        let mut skipped = Vec::new();
+        let mut expected = Vec::new();
+        let mut reviews: Vec<(String, Vec<String>, Vec<Value>)> = Vec::new();
+        for thread in &target.threads {
+            let Some(first) = thread.comments.first() else {
+                continue;
+            };
+            if thread.remote.is_some()
+                || thread.deleted_remote
+                || first.remote.is_some()
+                || first.post == PostState::Posted
+            {
+                continue;
+            }
+            if let Some(reason) = self.blocked(target, thread, first) {
+                skipped.push(skip(&thread.id, reason));
+                continue;
+            }
+            if let Some(draft) = &first.draft_id {
+                writes.push(self.publish_draft(&first.id, draft));
+                expected.push((thread.id.clone(), RemoteKind::Discussion));
+                continue;
+            }
+            let spot = thread
+                .anchor
+                .as_ref()
+                .map_or(Spot::Outside, |anchor| self.spot(anchor));
+            match spot {
+                Spot::Github {
+                    commit,
+                    path,
+                    line,
+                    side,
+                } => {
+                    let body = body(target, thread, first, None);
+                    let comment = json!({ "path": path, "line": line, "side": side, "body": body });
+                    match reviews.iter_mut().find(|(sha, ..)| *sha == commit) {
+                        Some((_, ids, comments)) => {
+                            ids.push(first.id.clone());
+                            comments.push(comment);
+                        }
+                        None => reviews.push((commit, vec![first.id.clone()], vec![comment])),
+                    }
+                    expected.push((thread.id.clone(), RemoteKind::ReviewThread));
+                }
+                Spot::Gitlab(position) => {
+                    let note = body(target, thread, first, None);
+                    writes.push(Write {
+                        item: Item::Draft {
+                            comment: first.id.clone(),
+                        },
+                        args: self.post(&format!("{}/draft_notes", self.base_path())),
+                        body: Some(json!({ "note": note, "position": position })),
+                    });
+                    writes.push(self.publish_draft(&first.id, NEW_DRAFT));
+                    expected.push((thread.id.clone(), RemoteKind::Discussion));
+                }
+                Spot::Outside => {
+                    let location = thread.anchor.as_ref().map(location);
+                    let text = body(target, thread, first, location.as_deref());
+                    writes.push(Write {
+                        item: Item::Thread {
+                            comment: first.id.clone(),
+                        },
+                        args: self.general(),
+                        body: Some(json!({ "body": text })),
+                    });
+                    let kind = match self.connection.forge {
+                        Forge::Github => RemoteKind::General,
+                        Forge::Gitlab => RemoteKind::Discussion,
+                    };
+                    expected.push((thread.id.clone(), kind));
+                }
+            }
+        }
+        let path = format!(
+            "{}/pulls/{}/reviews",
+            self.base_path(),
+            self.connection.number
+        );
+        let reviews = reviews.into_iter().map(|(commit, ids, comments)| Write {
+            item: Item::Review { comments: ids },
+            args: self.post(&path),
+            body: Some(json!({
+                "commit_id": commit,
+                "event": "COMMENT",
+                "body": format!("Review findings.\n{AGENT_MARKER}{REVIEW_ID}{commit} -->"),
+                "comments": comments,
+            })),
+        });
+        let writes = reviews.chain(writes).collect();
+        (writes, skipped, expected)
+    }
+
+    /// Why a new thread is not posted: a finding of a pass still in progress, or another
+    /// person's text.
+    fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
+        if let Some(finding) = &thread.finding {
+            let ended = target
+                .runs
+                .iter()
+                .filter(|run| run.id == finding.run)
+                .flat_map(|run| &run.passes)
+                .any(|pass| pass.id == finding.pass && pass.ended_at.is_some());
+            if !ended {
+                return Some(format!(
+                    "pass {}.{} has not ended",
+                    finding.run, finding.pass
+                ));
+            }
+        }
+        if !allowed(&first.author, &self.connection.login) {
+            return Some(format!(
+                "written by {}, not {}",
+                author_label(&first.author),
+                self.connection.login
+            ));
+        }
+        None
+    }
+
+    fn publish_draft(&self, comment: &str, draft: &str) -> Write {
+        let path = format!("{}/draft_notes/{draft}/publish", self.base_path());
+        Write {
+            item: Item::PublishDraft {
+                comment: comment.to_owned(),
+                draft: draft.to_owned(),
+            },
+            args: ["api", "-X", "PUT", &path].map(str::to_owned).to_vec(),
+            body: None,
+        }
+    }
+
+    /// The place of an anchored comment in the PR/MR diff; outside when the commits are not
+    /// here or the line is in no hunk.
+    fn spot(&self, anchor: &Anchor) -> Spot {
+        let Some(commit) = &anchor.commit else {
+            return Spot::Outside;
+        };
+        let wanted = match anchor.side {
+            Side::New => anchor.line,
+            Side::Old => anchor.old_line,
+        };
+        let Some(line) = wanted else {
+            return Spot::Outside;
+        };
+        let spot = match self.connection.forge {
+            Forge::Github => self.github_spot(anchor, commit, line),
+            Forge::Gitlab => self.gitlab_spot(anchor, commit, line),
+        };
+        spot.unwrap_or(Spot::Outside)
+    }
+
+    fn github_spot(&self, anchor: &Anchor, commit: &str, line: u32) -> Option<Spot> {
+        let base = self.review.base_sha.as_deref()?;
+        if !self.repo.is_ancestor(commit, &self.review.head_sha).ok()? {
+            return None;
+        }
+        let merge_base = self.repo.merge_base(base, commit).ok()??;
+        let diff = self.repo.diff_context(&merge_base, commit).ok()?;
+        let found = anchors::diff_line(&diff, &anchor.path, anchor.side, line)?;
+        let (line, side) = match found.new_line {
+            Some(new) => (new, "RIGHT"),
+            None => (found.old_line?, "LEFT"),
+        };
+        let path = if side == "LEFT" {
+            found.old_path
+        } else {
+            found.new_path
+        };
+        Some(Spot::Github {
+            commit: commit.to_owned(),
+            path,
+            line,
+            side,
+        })
+    }
+
+    /// GitLab positions are against the latest MR diff, so a line is first mapped to its head.
+    fn gitlab_spot(&self, anchor: &Anchor, commit: &str, line: u32) -> Option<Spot> {
+        let head = &self.review.head_sha;
+        let base = self.review.base_sha.as_deref()?;
+        let start = self.review.start_sha.as_deref().unwrap_or(base);
+        let (path, line) = if anchor.side == Side::Old || commit == head {
+            (anchor.path.clone(), line)
+        } else {
+            let diff = self.repo.diff_u0(commit, head).ok()?;
+            let location = anchors::locate(&anchors::parse(&diff), anchor);
+            if location.outdated {
+                return None;
+            }
+            (location.path, location.line?)
+        };
+        let diff = self.repo.diff_context(base, head).ok()?;
+        let found = anchors::diff_line(&diff, &path, anchor.side, line)?;
+        let mut position = json!({
+            "position_type": "text",
+            "base_sha": base,
+            "start_sha": start,
+            "head_sha": head,
+            "old_path": found.old_path,
+            "new_path": found.new_path,
+        });
+        if let Some(new) = found.new_line {
+            position["new_line"] = json!(new);
+        }
+        if let Some(old) = found.old_line {
+            position["old_line"] = json!(old);
+        }
+        Some(Spot::Gitlab(position))
+    }
+
+    /// Unposted comments on posted threads, then resolve and reopen changes.
+    fn replies(&self, target: &Target) -> (Vec<Write>, Vec<Value>) {
+        let mut writes = Vec::new();
+        let mut skipped = Vec::new();
+        for thread in &target.threads {
+            let Some(remote) = &thread.remote else {
+                continue;
+            };
+            if thread.deleted_remote {
+                continue;
+            }
+            for comment in thread.comments.iter().skip(1) {
+                if comment.remote.is_some() || comment.post == PostState::Posted {
+                    continue;
+                }
+                if !allowed(&comment.author, &self.connection.login) {
+                    skipped.push(skip(
+                        &comment.id,
+                        format!(
+                            "written by {}, not {}",
+                            author_label(&comment.author),
+                            self.connection.login
+                        ),
+                    ));
+                    continue;
+                }
+                writes.push(self.reply(target, thread, remote, comment));
+            }
+        }
+        for thread in &target.threads {
+            let (Some(remote), Some(resolved)) = (&thread.remote, thread.resolve_pending) else {
+                continue;
+            };
+            if thread.deleted_remote {
+                continue;
+            }
+            writes.push(self.resolve(&thread.id, remote, resolved));
+        }
+        (writes, skipped)
+    }
+
+    fn reply(
+        &self,
+        target: &Target,
+        thread: &Thread,
+        remote: &RemoteThread,
+        comment: &Comment,
+    ) -> Write {
+        let text = body(target, thread, comment, None);
+        let item = Item::Reply {
+            comment: comment.id.clone(),
+        };
+        match self.connection.forge {
+            Forge::Github if remote.kind == RemoteKind::ReviewThread => Write {
+                item,
+                args: [
+                    "api".to_owned(),
+                    "graphql".to_owned(),
+                    "-f".to_owned(),
+                    format!("threadId={}", remote.id),
+                    "-f".to_owned(),
+                    format!("body={text}"),
+                    "-f".to_owned(),
+                    format!("query={REPLY_MUTATION}"),
+                ]
+                .to_vec(),
+                body: None,
+            },
+            // A general comment has no replies: answer with a new one naming the thread.
+            Forge::Github => Write {
+                item,
+                args: self.general(),
+                body: Some(json!({ "body": format!("{text}\nRe: {}", thread.id) })),
+            },
+            Forge::Gitlab => Write {
+                item,
+                args: self.post(&format!(
+                    "{}/discussions/{}/notes",
+                    self.base_path(),
+                    remote.id
+                )),
+                body: Some(json!({ "body": text })),
+            },
+        }
+    }
+
+    /// GitHub general comments cannot be resolved; their resolve is only cleared locally.
+    fn resolve(&self, thread: &str, remote: &RemoteThread, resolved: bool) -> Write {
+        let item = Item::Resolve {
+            thread: thread.to_owned(),
+            resolved,
+        };
+        if !remote.resolvable {
+            return Write {
+                item,
+                args: Vec::new(),
+                body: None,
+            };
+        }
+        match self.connection.forge {
+            Forge::Github => {
+                let mutation = if resolved {
+                    RESOLVE_MUTATION
+                } else {
+                    UNRESOLVE_MUTATION
+                };
+                Write {
+                    item,
+                    args: [
+                        "api".to_owned(),
+                        "graphql".to_owned(),
+                        "-f".to_owned(),
+                        format!("threadId={}", remote.id),
+                        "-f".to_owned(),
+                        format!("query={mutation}"),
+                    ]
+                    .to_vec(),
+                    body: None,
+                }
+            }
+            Forge::Gitlab => {
+                let path = format!("{}/discussions/{}", self.base_path(), remote.id);
+                let mut args = self.post(&path);
+                args[2] = "PUT".to_owned();
+                Write {
+                    item,
+                    args,
+                    body: Some(json!({ "resolved": resolved })),
+                }
+            }
+        }
+    }
+
+    /// The final record of each ended run not posted yet.
+    fn records(&self, target: &Target) -> Vec<Write> {
+        let path = match self.connection.forge {
+            Forge::Github => format!(
+                "{}/issues/{}/comments",
+                self.base_path(),
+                self.connection.number
+            ),
+            Forge::Gitlab => format!("{}/notes", self.base_path()),
+        };
+        target
+            .runs
+            .iter()
+            .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
+            .filter(|run| {
+                run.record
+                    .as_ref()
+                    .is_none_or(|record| record.post != PostState::Posted)
+            })
+            .map(|run| {
+                let (head, text) = record_body(target, run);
+                Write {
+                    item: Item::Record {
+                        run: run.id.clone(),
+                        head,
+                    },
+                    args: self.post(&path),
+                    body: Some(json!({ "body": text })),
+                }
+            })
+            .collect()
+    }
+}
+
+fn location(anchor: &Anchor) -> String {
+    match (anchor.side, anchor.line, anchor.old_line) {
+        (Side::New, Some(line), _) => format!("{}:{line}", anchor.path),
+        (Side::Old, _, Some(line)) => format!("{} (old):{line}", anchor.path),
+        _ => anchor.path.clone(),
+    }
+}
+
+/// The posted text: a finding heading, the text, the signature and the markers.
+fn body(target: &Target, thread: &Thread, comment: &Comment, location: Option<&str>) -> String {
+    let first = thread
+        .comments
+        .first()
+        .is_some_and(|first| first.id == comment.id);
+    let finding = thread.finding.as_ref().filter(|_| first);
+    let mut text = String::new();
+    if let Some(location) = location {
+        let _ = write!(text, "`{location}`\n\n");
+    }
+    if finding.is_some() {
+        let kind = serde_json::to_value(thread.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        match thread
+            .severity
+            .and_then(|severity| serde_json::to_value(severity).ok())
+        {
+            Some(Value::String(severity)) => {
+                let _ = write!(text, "**{kind} ({severity}):** ");
+            }
+            _ => {
+                let _ = write!(text, "**{kind}:** ");
+            }
+        }
+    }
+    text.push_str(comment.body.trim_end());
+    text.push_str("\n\n");
+    text.push_str(&signature(&comment.author));
+    if let Some(finding) = finding {
+        if finding.post_reveal {
+            text.push_str(" post-reveal");
+        }
+        let sha = thread
+            .anchor
+            .as_ref()
+            .and_then(|anchor| anchor.commit.clone())
+            .or_else(|| {
+                target
+                    .runs
+                    .iter()
+                    .filter(|run| run.id == finding.run)
+                    .flat_map(|run| &run.passes)
+                    .find(|pass| pass.id == finding.pass)
+                    .map(|pass| pass.head.clone())
+            })
+            .unwrap_or_default();
+        let _ = write!(text, "\n{FINDING_MARKER}{} sha={sha} -->", thread.id);
+    }
+    let _ = write!(text, "\n{AGENT_MARKER}{} -->", comment.id);
+    text
+}
+
+fn signature(author: &Author) -> String {
+    match author {
+        Author::Agent { effort, .. } if effort.trim().is_empty() || effort == "unknown" => {
+            let mut author = author.clone();
+            if let Author::Agent { effort, .. } = &mut author {
+                "default".clone_into(effort);
+            }
+            author_label(&author)
+        }
+        _ => author_label(author),
+    }
+}
+
+fn harness_name(harness: &str) -> &str {
+    match harness {
+        "claude-code" => "Claude Code",
+        "codex" | "codex-cli" => "codex-cli",
+        other => other,
+    }
+}
+
+fn tool(model: &str, effort: &str, harness: &str, version: Option<&str>) -> String {
+    let mut text = format!("{model} {effort} · {}", harness_name(harness));
+    if let Some(version) = version {
+        let _ = write!(text, " {version}");
+    }
+    text
+}
+
+/// The run's final record per the review skill, and the head it records.
+fn record_body(target: &Target, run: &Run) -> (String, String) {
+    let last = run
+        .passes
+        .last()
+        .map(|pass| pass.head.clone())
+        .unwrap_or_default();
+    let head = run.repaired_head.clone().unwrap_or(last);
+    let findings: Vec<&Thread> = target
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread
+                .finding
+                .as_ref()
+                .is_some_and(|finding| finding.run == run.id)
+        })
+        .collect();
+    let fixed = findings
+        .iter()
+        .filter(|thread| {
+            thread
+                .resolution
+                .as_deref()
+                .is_some_and(|resolution| resolution.starts_with("fixed"))
+        })
+        .count();
+    let open = findings.iter().filter(|thread| is_open(thread)).count();
+    let mut cycles: Vec<u32> = run.passes.iter().map(|pass| pass.cycle).collect();
+    cycles.dedup();
+    let at_head = run
+        .passes
+        .iter()
+        .filter(|pass| pass.ended_at.is_some() && !pass.dirty && pass.head == head)
+        .filter(|pass| {
+            pass.kind == PassKind::Full || (pass.kind == PassKind::FixCheck && !pass.major_found)
+        })
+        .count();
+    let verdict = if run.repair.is_empty() {
+        "reviewed"
+    } else {
+        "review-fixed"
+    };
+    let mut text = format!(
+        "**Review {}:** {verdict} at {}. {} cycles, {} found, {fixed} fixed, {open} open.\n\n",
+        run.id,
+        short(&head),
+        cycles.len(),
+        findings.len(),
+    );
+    text.push_str("| Pass | Reviewed | Starting context | Reviewer |\n|---|---|---|---|\n");
+    let mut seen: Vec<&str> = Vec::new();
+    for pass in &run.passes {
+        let kind = match pass.kind {
+            PassKind::Full => "full",
+            PassKind::FixCheck => "fix check",
+            PassKind::Reveal => "reveal",
+        };
+        let reviewed = match (&pass.base, pass.kind) {
+            (Some(base), PassKind::FixCheck) => format!("{}..{}", short(base), short(&pass.head)),
+            _ => short(&pass.head).to_owned(),
+        };
+        for reviewer in &pass.reviewers {
+            let label = if seen.contains(&reviewer.id.as_str()) {
+                reviewer.id.clone()
+            } else {
+                seen.push(&reviewer.id);
+                format!(
+                    "{} {}",
+                    reviewer.id,
+                    tool(
+                        &reviewer.model,
+                        &reviewer.effort,
+                        &reviewer.harness,
+                        reviewer.harness_version.as_deref()
+                    )
+                )
+            };
+            let _ = writeln!(
+                text,
+                "| {} {kind} | {reviewed} | {} | {label} |",
+                pass.id, reviewer.starting_context
+            );
+        }
+    }
+    text.push('\n');
+    if let Some(reveal) = run.reveal {
+        let _ = writeln!(
+            text,
+            "Reveal: {} agree, {} disagree.",
+            reveal.agree, reveal.disagree
+        );
+    }
+    let mut fixers: Vec<String> = Vec::new();
+    for comment in findings.iter().flat_map(|thread| &thread.comments) {
+        if let Author::Agent {
+            model,
+            effort,
+            harness,
+            harness_version,
+            reviewer: Some(reviewer),
+            ..
+        } = &comment.author
+            && reviewer == "fix"
+        {
+            let fixer = tool(model, effort, harness, harness_version.as_deref());
+            if !fixers.contains(&fixer) {
+                fixers.push(fixer);
+            }
+        }
+    }
+    if !fixers.is_empty() {
+        let _ = writeln!(text, "Fixed by: {}", fixers.join("; "));
+    }
+    let _ = writeln!(
+        text,
+        "{RECORD_MARKER}id={} head={head} reviews-at-head={at_head} open={open} -->",
+        run.id
+    );
+    let _ = write!(text, "{AGENT_MARKER}{}/record -->", run.id);
+    (head, text)
+}
+
+/// Runs writes in order. Each item is marked `posting` and saved before its call and gets its
+/// remote id right after, so a rerun can match a write whose response was lost.
+fn run_writes(
+    ctx: &Ctx,
+    connection: &Connection,
+    target: &Target,
+    writes: Vec<Write>,
+    posted: &mut Vec<Value>,
+) -> Result<()> {
+    let mut created: Option<String> = None;
+    for mut write in writes {
+        if let (Item::PublishDraft { draft, .. }, Some(id)) = (&mut write.item, &created)
+            && draft == NEW_DRAFT
+        {
+            id.clone_into(draft);
+            for arg in &mut write.args {
+                *arg = arg.replace(NEW_DRAFT, id);
+            }
+        }
+        if write.args.is_empty() {
+            if let Item::Resolve { thread, .. } = &write.item {
+                change(ctx, target, |target| {
+                    clear_pending(target, thread);
+                    Ok(())
+                })?;
+            }
+            posted.push(json!({ "kind": write.kind(), "items": write.ids(), "local_only": true }));
+            continue;
+        }
+        let attempt = random_id().replacen("rv-", "at-", 1);
+        change(ctx, target, |target| {
+            mark(target, &write.item, &attempt);
+            Ok(())
+        })?;
+        let args: Vec<&str> = write.args.iter().map(String::as_str).collect();
+        let response = connection.client.send(&args, write.body.as_ref())?;
+        let remote = save(ctx, connection, target, &write.item, &response)?;
+        if matches!(write.item, Item::Draft { .. }) {
+            created.clone_from(&remote);
+        }
+        posted.push(json!({ "kind": write.kind(), "items": write.ids(), "remote_id": remote }));
+    }
+    Ok(())
+}
+
+fn change<R>(ctx: &Ctx, base: &Target, edit: impl FnOnce(&mut Target) -> Result<R>) -> Result<R> {
+    let now = clock::now()?;
+    ctx.store
+        .update(&ctx.dir, &base.key, &now, || base.clone(), edit)
+}
+
+fn comment_mut<'a>(target: &'a mut Target, id: &str) -> Option<&'a mut Comment> {
+    target
+        .threads
+        .iter_mut()
+        .flat_map(|thread| thread.comments.iter_mut())
+        .find(|comment| comment.id == id)
+}
+
+fn clear_pending(target: &mut Target, id: &str) {
+    if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
+        thread.resolve_pending = None;
+    }
+}
+
+fn mark(target: &mut Target, item: &Item, attempt: &str) {
+    let ids = match item {
+        Item::Review { comments } => comments.clone(),
+        Item::Thread { comment } | Item::Draft { comment } | Item::Reply { comment } => {
+            vec![comment.clone()]
+        }
+        Item::Record { run, head } => {
+            if let Some(run) = target
+                .runs
+                .iter_mut()
+                .find(|candidate| candidate.id == *run)
+            {
+                run.record = Some(RecordPost {
+                    post: PostState::Posting,
+                    attempt: Some(attempt.to_owned()),
+                    head: head.clone(),
+                    remote_id: None,
+                    url: None,
+                });
+            }
+            return;
+        }
+        Item::PublishDraft { .. } | Item::Resolve { .. } => return,
+    };
+    for id in ids {
+        if let Some(comment) = comment_mut(target, &id) {
+            comment.post = PostState::Posting;
+            comment.attempt = Some(attempt.to_owned());
+        }
+    }
+}
+
+fn own(id: String, url: Option<String>, login: &str, review_id: Option<String>) -> RemoteComment {
+    RemoteComment {
+        id,
+        url,
+        login: Some(login.to_owned()),
+        is_me: true,
+        editor: None,
+        review_id,
+    }
+}
+
+/// Saves what the host returned; returns the new remote id.
+fn save(
+    ctx: &Ctx,
+    connection: &Connection,
+    target: &Target,
+    item: &Item,
+    response: &Value,
+) -> Result<Option<String>> {
+    let login = connection.login.as_str();
+    let note_url = |id: &str| {
+        target
+            .review
+            .as_ref()
+            .map(|review| format!("{}#note_{id}", review.url))
+    };
+    match item {
+        Item::Review { comments } => {
+            let review = forge::id(response, "/id")
+                .ok_or_else(|| Error("GitHub returned no review id".into()))?;
+            let path = format!(
+                "repos/{}/pulls/{}/reviews/{review}/comments",
+                connection.repo, connection.number
+            );
+            let listed = connection.client.json(&["api", "--method", "GET", &path])?;
+            let found: Vec<(String, RemoteComment)> = listed
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| {
+                    let local = agent_id(item["body"].as_str()?)?;
+                    let id = forge::id(item, "/id")?;
+                    let url = forge::text(item, "/html_url");
+                    Some((local, own(id, url, login, Some(review.clone()))))
+                })
+                .filter(|(local, _)| comments.contains(local))
+                .collect();
+            change(ctx, target, |target| {
+                for (local, remote) in found {
+                    if let Some(comment) = comment_mut(target, &local) {
+                        comment.post = PostState::Posted;
+                        comment.remote = Some(remote);
+                    }
+                }
+                Ok(())
+            })?;
+            Ok(Some(review))
+        }
+        Item::Thread { comment } | Item::Reply { comment } => {
+            let (id, url) = match connection.forge {
+                Forge::Github => match forge::id(
+                    response,
+                    "/data/addPullRequestReviewThreadReply/comment/databaseId",
+                ) {
+                    Some(id) => (
+                        Some(id),
+                        forge::text(
+                            response,
+                            "/data/addPullRequestReviewThreadReply/comment/url",
+                        ),
+                    ),
+                    None => (
+                        forge::id(response, "/id"),
+                        forge::text(response, "/html_url"),
+                    ),
+                },
+                Forge::Gitlab => {
+                    let id =
+                        forge::id(response, "/notes/0/id").or_else(|| forge::id(response, "/id"));
+                    let url = id.as_deref().and_then(note_url);
+                    (id, url)
+                }
+            };
+            let id = id.ok_or_else(|| Error(format!("no comment id returned for {comment}")))?;
+            change(ctx, target, |target| {
+                if let Some(local) = comment_mut(target, comment) {
+                    local.post = PostState::Posted;
+                    local.remote = Some(own(id.clone(), url, login, None));
+                }
+                Ok(())
+            })?;
+            Ok(Some(id))
+        }
+        Item::Draft { comment } => {
+            let draft = forge::id(response, "/id")
+                .ok_or_else(|| Error(format!("GitLab returned no draft id for {comment}")))?;
+            change(ctx, target, |target| {
+                if let Some(local) = comment_mut(target, comment) {
+                    local.draft_id = Some(draft.clone());
+                }
+                Ok(())
+            })?;
+            Ok(Some(draft))
+        }
+        Item::PublishDraft { draft, .. } => Ok(Some(draft.clone())),
+        Item::Resolve { thread, .. } => {
+            change(ctx, target, |target| {
+                clear_pending(target, thread);
+                Ok(())
+            })?;
+            Ok(None)
+        }
+        Item::Record { run, .. } => {
+            let id = forge::id(response, "/id")
+                .ok_or_else(|| Error(format!("no comment id returned for the record of {run}")))?;
+            let url = match connection.forge {
+                Forge::Github => forge::text(response, "/html_url"),
+                Forge::Gitlab => note_url(&id),
+            };
+            change(ctx, target, |target| {
+                if let Some(record) = target
+                    .runs
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *run)
+                    .and_then(|run| run.record.as_mut())
+                {
+                    record.post = PostState::Posted;
+                    record.remote_id = Some(id.clone());
+                    record.url = url;
+                }
+                Ok(())
+            })?;
+            Ok(Some(id))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locations_name_the_side() {
+        let anchor = Anchor {
+            path: "a.txt".into(),
+            line: None,
+            old_line: Some(4),
+            side: Side::Old,
+            start_line: None,
+            commit: None,
+            tree: String::new(),
+        };
+        assert_eq!(location(&anchor), "a.txt (old):4");
+        assert_eq!(short("0123456789"), "0123456");
+        assert_eq!(harness_name("claude-code"), "Claude Code");
+    }
+}

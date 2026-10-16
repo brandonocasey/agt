@@ -6,6 +6,7 @@
         "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}",
         "state": "OPEN",
         "closedAt": null,
+        "author": { "login": "me" },
         "headRefName": "feat",
         "headRefOid": "{{HEAD}}",
         "baseRefOid": "{{BASE}}",

@@ -73,13 +73,19 @@ pass, the previous pass's head otherwise).
 ```sh
 agent-review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
 agent-review pass end --run rv-7k2m --pass c1p0 --lock
+agent-review finding kill rv-7k2m.c1p0.r1.f2 --reason "The caller checks it."
 agent-review run end --run rv-7k2m
+agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 ```
 
 `pass end --lock` freezes the pass for a blind review: `finding add` to it then
-fails. `run end` closes the run, records commit patch-ids for every pass whose
-reviewed tree now equals `HEAD`'s tree (see below), and prunes old targets of
-this repository.
+fails. `finding kill` moves a surviving finding to its pass's killed list, also
+on a locked pass; a finding already posted to the PR/MR is resolved as `stale`
+instead. `run end` closes the run, records commit patch-ids for every pass whose
+reviewed tree now equals `HEAD`'s tree (see below), records `HEAD` as the run's
+`repaired_head` (commits after the last pass up to it are the run's `repair`),
+stores the reveal counts for the final record, and prunes old targets of this
+repository.
 
 Threads for humans and agents:
 
@@ -115,6 +121,7 @@ Reading:
 ```sh
 agent-review list --open
 agent-review list --run rv-7k2m --format prompt   # fix-check and reveal input
+agent-review list --run rv-7k2m --cycle 2         # one cycle's findings
 agent-review show rv-7k2m.c1p0.r1.f1              # thread or killed finding
 agent-review show rv-7k2m                          # run
 agent-review show rv-7k2m.c1p0                     # pass
@@ -124,8 +131,9 @@ agent-review status --head 1a2b3c4
 
 `list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
 for imported threads the host's path, line and outdated state) and killed
-findings. `--run` keeps only that run's findings. `--format prompt` prints the
-text only of comments written locally or by the authenticated forge user;
+findings. `--run` keeps only that run's findings, and `--cycle <n>` (with
+`--run`) only that cycle's threads and killed findings. `--format prompt` prints
+the text only of comments written locally or by the authenticated forge user;
 every other comment shows as `(comment by another author, text hidden)`, so
 reviewers never read other people's comments.
 
@@ -148,6 +156,17 @@ agent-review sync --pr https://gitlab.example.com/group/proj/-/merge_requests/3
 
 `sync` is read-only on the forge: it sends only `GET` requests and GraphQL
 queries. See [Sync](#sync).
+
+Publish to an own PR or MR:
+
+```sh
+agent-review publish --dry-run        # print every payload; writes nothing
+agent-review publish
+agent-review publish --pr 1235 --not-own
+```
+
+`publish` posts what changed locally since the last publish. See
+[Publish](#publish).
 
 Cleanup:
 
@@ -188,6 +207,10 @@ agent-review prune --all
   apply this to the current repository; `prune --all` to every repository.
 - Each trusted `review-record v2` comment whose `head` is the evaluated head
   adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
+  Records of this target's own runs are skipped; their passes already count.
+- A run's `repair` commits (after its last pass, up to `HEAD` at `run end`)
+  show as reviewed with `"match": "repair"` in `status` commits (`"pass"` for
+  a pass match), but never add to `reviews_at_head`.
 
 ## Sync
 
@@ -206,27 +229,75 @@ agent-review prune --all
   issue comments, through GraphQL. GitLab: the MR, all discussions
   (`--paginate`) minus `system` notes, and your draft notes. An
   `individual_note` is a general comment; resolvability comes from the first
-  note. A GitLab position is outdated when its `head_sha` is not the MR's
-  latest head and the line no longer maps to it (`git diff -U0 -M`); a position
-  whose commits are not in the local repository counts as outdated.
-- Merge: remote wins for posted text and resolved state. Local fields (type,
-  severity, triage, held, killed findings, anchors of our findings) and
+  note. GitHub threads take `isOutdated`. A GitLab position is outdated when
+  its `head_sha` is not the MR's latest head and the line no longer maps to it
+  (`git diff -U0 -M`); when its commits are not in the local repository,
+  `outdated` is `null` (unknown). `sync` never fetches commits or writes to the
+  repository.
+- Merge: remote wins for posted text and resolved state, except a local resolve
+  or reopen that `publish` has not sent yet (`resolve_pending`). Local fields
+  (type, severity, triage, held, killed findings, anchors of our findings) and
   comments not yet posted stay. Remote threads match local ones by remote id,
-  then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the
-  first comment. Unmatched threads are imported as `gh-t<comment id>` (review
-  thread), `gh-r<review id>` (review body), `gh-c<comment id>` (general
-  comment) or `gl-n<note id>`.
+  then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first
+  comment, then by a trusted `<!-- agent-review id=<local id> -->` marker that
+  `publish` adds to every body. Unmatched threads are imported as
+  `gh-t<comment id>` (review thread), `gh-r<review id>` (review body),
+  `gh-c<comment id>` (general comment) or `gl-n<note id>`. `publish`'s own
+  review bodies are not imported.
 - Trust: a marker or record counts only when its comment's author is the
   authenticated user, `editor` is null or that user, and (for a marker) it is
   in the thread's first comment. Untrusted ones import as plain comments.
   Trusted records are stored under `records`; a trusted general comment ending
-  in `Re: <finding id>` after `Fixed in <sha>` answers that finding: it is
-  added as a reply and, when the finding's thread is not resolvable, resolves
-  it as `fixed <sha>`.
-- A draft note with a marker for a local finding marks that finding's first
-  comment `posting` with its `draft_id`, so a later publish can finish it.
+  in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`
+  marker) answers that thread: it is added as a reply and, when the thread is
+  not resolvable, resolves it as `fixed <sha>` (a `Fixed in` answer) or
+  reopens it (any other answer).
+- A draft note with a marker for a local comment marks it `posting` with its
+  `draft_id`, so a later publish publishes it; a `draft_id` whose draft is gone
+  is cleared.
+- Threads and comments the host no longer returns are kept and flagged
+  `deleted_remote: true` with `deleted_seen_at`; they are never dropped and
+  are not open. The flag clears if they come back.
 - The authenticated login is cached in `.account.json` in the repository's
   store directory.
+
+## Publish
+
+- Only on a PR/MR authored by the authenticated login, unless `--not-own`.
+  `publish` syncs first, then posts in this order: new threads, sync, replies,
+  resolves and reopens, final records, then a last sync to fill in ids.
+- Posted: new surviving findings of ended passes and local comment threads,
+  new replies, resolve and reopen changes, and the final record of each ended
+  run not posted yet. Never posted: killed findings, imported comments, and
+  local comments by another human author (listed under `skipped`).
+- Every body ends with a signature (agent: `<model> <effort> <harness>
+  <run>.<pass>.<reviewer>`, plus ` post-reveal`; human: the login) and
+  `<!-- agent-review id=<local id> -->`. Finding threads also carry
+  `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
+- GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
+  (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
+  review). Anything else is an issue comment, with an out-of-diff finding's
+  location on its first line. Replies and resolves use the GraphQL
+  `addPullRequestReviewThreadReply`, `resolveReviewThread` and
+  `unresolveReviewThread` mutations; a reply to a general comment is a new
+  issue comment ending in `Re: <thread id>`.
+- GitLab: in-diff comments are draft notes at the latest MR diff, each
+  published on its own (never `bulk_publish`). Anything else is a discussion;
+  replies are discussion notes; resolves are `PUT .../discussions/<id>`. The
+  final record is a plain note, so it never blocks merging.
+- In-diff means the line is in a hunk of `git diff -U3 -M` between the PR/MR
+  base and the reviewed commit (GitHub) or MR head (GitLab, after mapping the
+  line to it); when the commits are not local it is out of diff.
+- The final record follows the review skill: a header with cycles, found,
+  fixed and open counts, a `| Pass | Reviewed | Starting context | Reviewer |`
+  table, `Reveal:` and `Fixed by:` lines when known, and
+  `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`.
+- Crash safety: each item is saved as `posting` with an attempt id before its
+  write and gets its remote id right after. A rerun syncs first and matches
+  `posting` items by their `agent-review` marker before retrying, and
+  publishes a GitLab draft that was created but not published.
+- `--dry-run` syncs in memory and prints every payload, including the final
+  record; it writes nothing to the store, the repository or the forge.
 
 ## Store
 
@@ -259,7 +330,7 @@ Target file:
     "number": 42, "url": "https://github.com/owner/repo/pull/42",
     "state": "open", "closed_at": null, "head_branch": "feat/login",
     "head_sha": "5d6e7f...", "base_sha": "1a2b3c...", "start_sha": null,
-    "login": "brandonocasey", "synced_at": "2026-10-16T13:00:00Z"
+    "author": "brandonocasey", "login": "brandonocasey", "synced_at": "2026-10-16T13:00:00Z"
   },
   "records": [
     { "run": "rv-zz99", "head": "5d6e7f...", "reviews_at_head": 2, "open": 0,
@@ -295,7 +366,12 @@ Target file:
               "created_at": "2026-10-16T12:20:00Z" }
           ]
         }
-      ]
+      ],
+      "repaired_head": "9e8d7c...",
+      "repair": [{ "sha": "9e8d7c...", "patch_id": "bb22..." }],
+      "reveal": null,
+      "record": { "post": "posted", "attempt": "at-x1y2", "head": "9e8d7c...",
+                  "remote_id": "2002", "url": "https://github.com/...#issuecomment-2002" }
     }
   ],
   "threads": [
@@ -314,19 +390,23 @@ Target file:
                    "evidence": "...", "tests_run": ["cargo test net"],
                    "post_reveal": false },
       "comments": [
-        { "author": { "kind": "agent", "model": "claude-opus-5-5",
+        { "id": "rv-7k2m.c1p0.r1.f1/c1",
+          "author": { "kind": "agent", "model": "claude-opus-5-5",
                       "effort": "xhigh", "harness": "claude-code",
                       "harness_version": "2.1.296", "run": "rv-7k2m",
                       "pass": "c1p0", "reviewer": "r1" },
           "body": "Retry loop drops the last response when ...",
           "created_at": "2026-10-16T12:20:00Z",
-          "post": "posted", "draft_id": null,
+          "post": "posted", "draft_id": null, "attempt": "at-q3r4",
+          "deleted_remote": false, "deleted_seen_at": null,
           "remote": { "id": "1001", "url": "https://github.com/...#discussion_r1001",
                       "login": "brandonocasey", "is_me": true, "editor": null,
                       "review_id": "5001" } },
-        { "author": { "kind": "human", "login": "Brandon" },
+        { "id": "rv-7k2m.c1p0.r1.f1/c2",
+          "author": { "kind": "human", "login": "Brandon" },
           "body": "Fixed in 9e8d7c6.", "created_at": "2026-10-16T12:40:00Z",
-          "post": "pending", "remote": null, "draft_id": null }
+          "post": "pending", "remote": null, "draft_id": null, "attempt": null,
+          "deleted_remote": false, "deleted_seen_at": null }
       ],
       "remote": { "kind": "review-thread", "id": "PRRT_kwDO...", "url": "...",
                   "resolvable": true, "outdated": false, "path": "src/net.rs",
@@ -334,6 +414,9 @@ Target file:
                   "original_line": 42, "start_line": null,
                   "original_start_line": null, "side": "new",
                   "commit": "5d6e7f...", "review_state": null },
+      "resolve_pending": true,
+      "deleted_remote": false,
+      "deleted_seen_at": null,
       "created_at": "2026-10-16T12:20:00Z",
       "updated_at": "2026-10-16T12:40:00Z"
     }
@@ -344,9 +427,10 @@ Target file:
 Anchors carry `commit` when the line numbers refer to a commit; for uncommitted
 work `commit` is `null` and `tree` names the reviewed tree (`run end` fills in
 `commit` once `HEAD` has that tree). Human thread ids are `h<n>`; finding ids are
-`<run>.<pass>.<reviewer>.f<n>`. Comment `post` is `pending` for comments written
-locally, `posting` when a draft exists on the forge, and `posted` once the
-forge has it; `remote` and the target's `review` and `records` are filled by
+`<run>.<pass>.<reviewer>.f<n>`. Comment ids are `<thread id>/c<n>` for local
+comments and `remote-<id>` for imported ones. Comment `post` is `pending` for
+comments written locally, `posting` while `publish` writes it (`attempt` names
+the try; `draft_id` a GitLab draft), and `posted` once the forge has it; `remote` and the target's `review` and `records` are filled by
 `sync`. Imported threads have no `anchor`; their position is in `remote`.
 
 ## Finding input

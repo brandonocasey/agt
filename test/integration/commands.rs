@@ -697,3 +697,146 @@ fn prune_by_age() {
     assert_eq!(end["pruned"][0]["target"], old_key);
     assert_eq!(end["pruned"].as_array().unwrap().len(), 1);
 }
+
+fn add_findings(env: &Env, run: &str, pass: &str, findings: &str) {
+    let reviewer = if pass.starts_with("c1") { "r1" } else { "r2" };
+    env.run_stdin(
+        &[
+            "finding",
+            "add",
+            "--run",
+            run,
+            "--pass",
+            pass,
+            "--reviewer",
+            reviewer,
+        ],
+        findings,
+    );
+}
+
+fn start_pass(env: &Env, run: &str) -> String {
+    let pass = env.run_stdin(
+        &[
+            "pass",
+            "start",
+            "--run",
+            run,
+            "--kind",
+            "full",
+            "--reviewers",
+            "-",
+        ],
+        REVIEWER,
+    );
+    pass["pass"]["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn finding_kill_works_on_a_locked_pass() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    start_pass(&env, &run);
+    add_findings(
+        &env,
+        &run,
+        "c1p0",
+        r#"{"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"Breaks."}"#,
+    );
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0", "--lock"]);
+    let id = format!("{run}.c1p0.r1.f1");
+    let killed = env.run(&["finding", "kill", &id, "--reason", "duplicate of a test"]);
+    assert_eq!(killed["killed"]["reason"], "duplicate of a test");
+    let shown = env.run(&["show", &id]);
+    assert_eq!(shown["kind"], "killed");
+    let pass = env.run(&["show", &format!("{run}.c1p0")]);
+    assert_eq!(pass["pass"]["major_found"], false);
+    assert_eq!(pass["pass"]["locked"], true);
+    let listed = env.run(&["list", "--run", &run]);
+    assert_eq!(listed["threads"], serde_json::json!([]));
+    assert_eq!(listed["killed"][0]["id"], id);
+    let again = env.fail(&["finding", "kill", &id, "--reason", "x"], None);
+    assert!(again.contains("not found"), "{again}");
+}
+
+#[test]
+fn run_end_counts_fix_commits_as_repaired() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let reviewed = env.commit_all("change");
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.reviewed_pass(&run, "full");
+    assert_eq!(env.run(&["status"])["reviews_at_head"], 1);
+    env.write("a.txt", &numbered(10, &[(3, "three"), (4, "four")]));
+    let fix = env.commit_all("fix");
+    let ended = env.run(&["run", "end", "--run", &run]);
+    assert_eq!(ended["repaired_head"], fix);
+    let status = env.run(&["status"]);
+    let matched: Vec<(&str, &str)> = status["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|commit| {
+            (
+                commit["sha"].as_str().unwrap(),
+                commit["match"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        matched,
+        [(reviewed.as_str(), "pass"), (fix.as_str(), "repair")]
+    );
+    assert_eq!(status["unreviewed_commits"], serde_json::json!([]));
+    assert_eq!(status["reviews_at_head"], 0, "a repair never adds a review");
+    assert_eq!(status["runs"][0]["repaired_head"], fix);
+}
+
+#[test]
+fn list_cycle_selects_one_cycle() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let finding =
+        |text: &str| format!(r#"{{"type":"nit","path":"a.txt","line":3,"scenario":"{text}"}}"#);
+    start_pass(&env, &run);
+    add_findings(&env, &run, "c1p0", &finding("Cycle one."));
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    start_pass(&env, &run);
+    add_findings(&env, &run, "c2p0", &finding("Cycle two."));
+    add_findings(
+        &env,
+        &run,
+        "c2p0",
+        r#"{"type":"nit","scenario":"Killed in two.","killed":true,"reason":"wrong"}"#,
+    );
+    env.run(&["pass", "end", "--run", &run, "--pass", "c2p0"]);
+
+    let listed = env.run(&["list", "--run", &run, "--cycle", "2"]);
+    let ids: Vec<&str> = listed["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [format!("{run}.c2p0.r2.f1").as_str()]);
+    assert_eq!(listed["killed"][0]["id"], format!("{run}.c2p0.r2.f2"));
+    let prompt = env.text(&["list", "--run", &run, "--cycle", "2", "--format", "prompt"]);
+    assert!(prompt.contains("Cycle two."), "{prompt}");
+    assert!(prompt.contains("general: Killed in two."), "{prompt}");
+    assert!(!prompt.contains("Cycle one."), "{prompt}");
+    let none = env.run(&["list", "--run", &run, "--cycle", "3"]);
+    assert_eq!(none["threads"], serde_json::json!([]));
+}

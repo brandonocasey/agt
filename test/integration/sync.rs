@@ -512,7 +512,8 @@ fn gitlab_self_hosted_sync() {
     assert!(!ids(&list).iter().any(|id| id == "gl-n4000889251"));
 
     let mine = thread(&list, &f1);
-    assert_eq!(mine["resolved"], false, "remote unresolved state wins");
+    assert_eq!(mine["resolved"], true, "an unpublished local resolve stays");
+    assert_eq!(mine["resolve_pending"], true);
     assert_eq!(mine["resolution"], "answered");
     assert_eq!(mine["severity"], "high");
     assert_eq!(mine["comments"][0]["remote"]["id"], "4005300001");
@@ -528,7 +529,7 @@ fn gitlab_self_hosted_sync() {
         .iter()
         .map(|thread| thread["id"].as_str().unwrap())
         .collect();
-    assert!(open.contains(&f1.as_str()) && open.contains(&"gl-n4007000002"));
+    assert!(!open.contains(&f1.as_str()) && open.contains(&"gl-n4007000002"));
     assert!(!open.contains(&"gl-n4007000001"));
 }
 
