@@ -2393,6 +2393,7 @@ fn thread_views(target: Option<&Target>, locator: &mut Locator) -> ThreadViews {
             "type": thread.kind,
             "severity": thread.severity,
             "triage": thread.triage,
+            "held": thread.held,
             "current": current,
             "post": thread.comments.first().map(|first| first.post),
             "remote_id": thread.remote.as_ref().map(|remote| &remote.id),
