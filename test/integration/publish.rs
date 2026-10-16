@@ -558,7 +558,7 @@ fn assert_gh_posted(setup: &Setup) {
         !ids(&list).contains(&"gh-r700".to_owned()),
         "our review body is not a thread"
     );
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert_eq!(
         status["reviews_at_head"], 1,
         "the synced-back record is ours"
@@ -1041,7 +1041,7 @@ fn gitlab_publish_posts_every_payload_once() {
     assert_eq!(f1["remote"]["id"], "d-f1");
     assert_eq!(f1["comments"][0]["draft_id"], Value::Null);
     assert_eq!(f1["comments"][1]["remote"]["id"], "5011");
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert_eq!(status["reviews_at_head"], 1);
     assert_eq!(status["runs"][0]["record"]["remote_id"], "5020");
 }
@@ -1537,7 +1537,7 @@ fn closed_unrelated_pr_is_not_attached_or_pruned() {
     let synced = env.run(&["sync"]);
     assert_eq!(synced["target"], "gh-5");
     assert_eq!(synced["pruned"], json!([]), "synced just now");
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert_eq!(status["target"], branch_key, "the branch target stays");
     assert_eq!(status["runs"].as_array().unwrap().len(), 1);
     assert_eq!(status["review"], Value::Null);
@@ -1618,7 +1618,7 @@ fn gitlab_records_need_a_body_this_store_sent() {
         synced["records"], 0,
         "GitLab shows no edits, so only sent text is trusted"
     );
-    assert_eq!(env.run(&["status"])["imported_records"], json!([]));
+    assert_eq!(env.run(&["status", "--full"])["imported_records"], json!([]));
 }
 
 #[test]

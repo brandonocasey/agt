@@ -201,7 +201,7 @@ fn assert_imported_list(setup: &Setup) {
 fn github_sync_imports_threads_reviews_and_comments() {
     let setup = reviewed_branch("git@github.com:me/repo.git");
     let env = &setup.env;
-    let branch_key = env.run(&["status"])["target"].clone();
+    let branch_key = env.run(&["status", "--full"])["target"].clone();
     github_responses(&setup);
 
     let synced = env.run(&["sync"]);
@@ -216,7 +216,7 @@ fn github_sync_imports_threads_reviews_and_comments() {
     assert_eq!(synced["answered"], 1);
     assert_read_only(env);
 
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert_eq!(status["target"], "gh-42");
     assert_eq!(status["runs"][0]["id"], setup.run.as_str());
     assert_eq!(

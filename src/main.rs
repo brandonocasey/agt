@@ -10,7 +10,7 @@ mod gitlab;
 mod model;
 mod store;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -31,8 +31,14 @@ fn main() -> ExitCode {
 
 fn print(output: Output) -> Result<()> {
     let text = match output {
+        // Pretty for a person at a terminal; compact for agents and scripts, which pay per byte.
         Output::Json(value) => {
-            let mut text = serde_json::to_string_pretty(&value).map_err(ctx("serialize output"))?;
+            let mut text = if std::io::stdout().is_terminal() {
+                serde_json::to_string_pretty(&value)
+            } else {
+                serde_json::to_string(&value)
+            }
+            .map_err(ctx("serialize output"))?;
             text.push('\n');
             text
         }

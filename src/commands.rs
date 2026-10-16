@@ -32,6 +32,7 @@ pub enum Output {
     Text(String),
 }
 
+#[derive(Clone)]
 struct Selection {
     target: Option<String>,
     range: Option<String>,
@@ -80,11 +81,34 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
+    let status_selection = selection.clone();
     let ctx = Ctx::new(store, selection, read_only, scratch_git)?;
     let value = match cli.command {
         Command::Run {
-            action: RunAction::Start,
-        } => run_start(&ctx)?,
+            action:
+                RunAction::Start {
+                    kind,
+                    base,
+                    reviewers,
+                    head,
+                },
+        } => {
+            let started = run_start(&ctx)?;
+            match kind {
+                Some(kind) => {
+                    let run = started["run"].as_str().unwrap_or_default().to_owned();
+                    pass_start(
+                        &ctx,
+                        &run,
+                        kind,
+                        base.as_deref(),
+                        reviewers.as_deref(),
+                        head.as_deref(),
+                    )?
+                }
+                None => started,
+            }
+        }
         Command::Run {
             action:
                 RunAction::End {
@@ -97,7 +121,12 @@ pub fn run(cli: Cli) -> Result<Output> {
             let reveal = reveal_agree
                 .zip(reveal_disagree)
                 .map(|(agree, disagree)| Reveal { agree, disagree });
-            run_end(&ctx, &run, reveal, head.as_deref())?
+            let mut ended = run_end(&ctx, &run, reveal, head.as_deref())?;
+            // The status the caller would check next, from a read-only repository so
+            // merge checks write no objects.
+            let reader = Ctx::new(Store::open()?, status_selection, true, true)?;
+            ended["status"] = brief_status(status(&reader, head.as_deref())?);
+            ended
         }
         Command::Pass {
             action:
@@ -117,8 +146,22 @@ pub fn run(cli: Cli) -> Result<Output> {
             head.as_deref(),
         )?,
         Command::Pass {
-            action: PassAction::End { run, pass, lock },
-        } => pass_end(&ctx, &run, &pass, lock)?,
+            action:
+                PassAction::End {
+                    run,
+                    pass,
+                    lock,
+                    findings,
+                    reviewer,
+                },
+        } => pass_end(
+            &ctx,
+            &run,
+            &pass,
+            lock,
+            findings.as_deref(),
+            reviewer.as_deref(),
+        )?,
         Command::Finding {
             action:
                 FindingAction::Add {
@@ -135,7 +178,10 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Resolve(args) => resolve(&ctx, &args)?,
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,
-        Command::Status { head } => status(&ctx, head.as_deref())?,
+        Command::Status { head, full } => {
+            let status = status(&ctx, head.as_deref())?;
+            if full { status } else { brief_status(status) }
+        }
         Command::Sync { pr } => sync::sync(&ctx, pr.as_deref())?,
         Command::Publish {
             dry_run,
@@ -561,32 +607,56 @@ fn pass_patch_ids(pass: &Pass) -> impl Iterator<Item = &String> {
         .chain(pass.head_patch_id.as_ref())
 }
 
-fn find_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Run> {
-    target
+/// Names the open runs, so a wrong id costs no second lookup.
+fn run_missing(target: &Target, id: &str) -> Error {
+    let open: Vec<&str> = target
         .runs
-        .iter_mut()
-        .find(|run| run.id == id)
-        .ok_or_else(|| Error(format!("run {id} not found in target {}", target.key)))
+        .iter()
+        .filter(|run| run.ended_at.is_none())
+        .map(|run| run.id.as_str())
+        .collect();
+    Error(format!(
+        "run {id} not found in target {}; open runs: {}",
+        target.key,
+        if open.is_empty() { "none".to_owned() } else { open.join(", ") }
+    ))
+}
+
+/// Names the run's passes, so a wrong id costs no second lookup.
+fn pass_missing(run: &Run, pass: &str) -> Error {
+    let known: Vec<&str> = run.passes.iter().map(|pass| pass.id.as_str()).collect();
+    Error(format!(
+        "pass {}.{pass} not found; its passes: {}",
+        run.id,
+        if known.is_empty() { "none".to_owned() } else { known.join(", ") }
+    ))
+}
+
+fn find_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Run> {
+    match target.runs.iter().position(|run| run.id == id) {
+        Some(index) => Ok(&mut target.runs[index]),
+        None => Err(run_missing(target, id)),
+    }
 }
 
 fn find_pass<'a>(target: &'a Target, run: &str, pass: &str) -> Result<&'a Pass> {
-    target
+    let run = target
         .runs
         .iter()
         .find(|candidate| candidate.id == run)
-        .ok_or_else(|| Error(format!("run {run} not found in target {}", target.key)))?
-        .passes
+        .ok_or_else(|| run_missing(target, run))?;
+    run.passes
         .iter()
         .find(|candidate| candidate.id == pass)
-        .ok_or_else(|| Error(format!("pass {run}.{pass} not found")))
+        .ok_or_else(|| pass_missing(run, pass))
 }
 
 fn find_pass_mut<'a>(target: &'a mut Target, run: &str, pass: &str) -> Result<&'a mut Pass> {
-    find_run_mut(target, run)?
-        .passes
-        .iter_mut()
-        .find(|candidate| candidate.id == pass)
-        .ok_or_else(|| Error(format!("pass {run}.{pass} not found")))
+    let run = find_run_mut(target, run)?;
+    match run.passes.iter().position(|candidate| candidate.id == pass) {
+        Some(index) => Ok(&mut run.passes[index]),
+        None => Err(pass_missing(run, pass)),
+    }
 }
 
 fn find_thread_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Thread> {
@@ -1233,12 +1303,53 @@ fn pass_start(
         run.passes.push(pass.clone());
         Ok(pass)
     })?;
-    Ok(json!({ "target": scope.key, "run": run_id, "pass": pass }))
+    Ok(json!({ "target": scope.key, "run": run_id, "pass": pass_view(&pass) }))
 }
 
-fn pass_end(ctx: &Ctx, run_id: &str, pass_id: &str, lock: bool) -> Result<Value> {
+/// A pass without its per-commit patch-ids, which only coverage needs; `show` prints them.
+fn pass_view(pass: &Pass) -> Value {
+    let mut view = json!(pass);
+    if let Some(fields) = view.as_object_mut() {
+        fields.remove("commits");
+        fields.insert("commit_count".to_owned(), json!(pass.commits.len()));
+    }
+    view
+}
+
+fn pass_end(
+    ctx: &Ctx,
+    run_id: &str,
+    pass_id: &str,
+    lock: bool,
+    findings: Option<&Path>,
+    reviewer: Option<&str>,
+) -> Result<Value> {
     let scope = ctx.scope()?;
-    let pass = ctx.update(&scope, |target, now| {
+    let findings = match findings {
+        Some(source) => read_findings(source, true)?,
+        None => Vec::new(),
+    };
+    // Group by reviewer, keeping input order, so each reviewer's ids number in order.
+    let mut groups: Vec<(String, Vec<FindingInput>)> = Vec::new();
+    for (index, mut finding) in findings.into_iter().enumerate() {
+        let id = finding
+            .reviewer
+            .take()
+            .or_else(|| reviewer.map(str::to_owned))
+            .ok_or_else(|| Error(format!("finding {index}: no reviewer; add one or --reviewer")))?;
+        match groups.iter_mut().find(|(known, _)| *known == id) {
+            Some((_, group)) => group.push(finding),
+            None => groups.push((id, vec![finding])),
+        }
+    }
+    let (pass, added, killed) = ctx.update(&scope, |target, now| {
+        let mut added = Vec::new();
+        let mut killed = Vec::new();
+        for (reviewer, group) in groups {
+            let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
+            added.extend(new);
+            killed.extend(dead);
+        }
         let major = major_found(target, run_id, pass_id);
         let pass = find_pass_mut(target, run_id, pass_id)?;
         if pass.ended_at.is_some() {
@@ -1247,9 +1358,15 @@ fn pass_end(ctx: &Ctx, run_id: &str, pass_id: &str, lock: bool) -> Result<Value>
         pass.ended_at = Some(now.to_owned());
         pass.locked = lock;
         pass.major_found = major;
-        Ok(pass.clone())
+        Ok((pass.clone(), added, killed))
     })?;
-    Ok(json!({ "target": scope.key, "run": run_id, "pass": pass }))
+    Ok(json!({
+        "target": scope.key,
+        "run": run_id,
+        "pass": pass_view(&pass),
+        "added": added,
+        "killed": killed,
+    }))
 }
 
 /// One reviewer finding as `finding add` reads it; see README "Finding input".
@@ -1274,17 +1391,24 @@ struct FindingInput {
     #[serde(default)]
     killed: bool,
     reason: Option<String>,
+    /// Reviewer id, for `pass end --findings`; `finding add` takes `--reviewer`.
+    reviewer: Option<String>,
 }
 
-fn read_findings() -> Result<Vec<FindingInput>> {
-    let value: Value =
-        serde_json::from_str(&read_stdin("findings")?).map_err(ctx("parse findings JSON"))?;
+/// Findings from `source` (`-` for stdin); `allow_empty` accepts `[]` (a clean pass).
+fn read_findings(source: &Path, allow_empty: bool) -> Result<Vec<FindingInput>> {
+    let text = if source == Path::new("-") {
+        read_stdin("findings")?
+    } else {
+        std::fs::read_to_string(source).map_err(ctx(format!("read {}", source.display())))?
+    };
+    let value: Value = serde_json::from_str(&text).map_err(ctx("parse findings JSON"))?;
     let items = match value {
         Value::Array(items) => items,
         item @ Value::Object(_) => vec![item],
         _ => return fail("findings must be a JSON object or array"),
     };
-    if items.is_empty() {
+    if items.is_empty() && !allow_empty {
         return fail("no findings in input");
     }
     let mut findings = Vec::new();
@@ -1324,8 +1448,31 @@ fn next_number(ids: impl Iterator<Item = String>, prefix: &str) -> u32 {
 
 fn finding_add(ctx: &Ctx, run_id: &str, pass_id: &str, reviewer_id: &str) -> Result<Value> {
     let scope = ctx.scope()?;
-    let findings = read_findings()?;
+    let findings = read_findings(Path::new("-"), false)?;
+    if let Some(index) = findings
+        .iter()
+        .position(|finding| finding.reviewer.as_deref().is_some_and(|id| id != reviewer_id))
+    {
+        return fail(format!(
+            "finding {index}: its reviewer differs from --reviewer {reviewer_id}"
+        ));
+    }
     let (added, killed) = ctx.update(&scope, |target, now| {
+        add_findings(target, run_id, pass_id, reviewer_id, findings, now)
+    })?;
+    Ok(json!({ "target": scope.key, "added": added, "killed": killed }))
+}
+
+/// Stores one reviewer's findings on a pass; returns the new thread and killed ids.
+fn add_findings(
+    target: &mut Target,
+    run_id: &str,
+    pass_id: &str,
+    reviewer_id: &str,
+    findings: Vec<FindingInput>,
+    now: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    {
         let run_ended = target
             .runs
             .iter()
@@ -1341,7 +1488,13 @@ fn finding_add(ctx: &Ctx, run_id: &str, pass_id: &str, reviewer_id: &str) -> Res
             .reviewers
             .iter()
             .find(|reviewer| reviewer.id == reviewer_id)
-            .ok_or_else(|| Error(format!("reviewer {reviewer_id} is not in pass {pass_id}")))?;
+            .ok_or_else(|| {
+                let known: Vec<&str> = pass.reviewers.iter().map(|r| r.id.as_str()).collect();
+                Error(format!(
+                    "reviewer {reviewer_id} is not in pass {pass_id}; its reviewers: {}",
+                    known.join(", ")
+                ))
+            })?;
         let commit = (!pass.dirty).then(|| pass.head.clone());
         let tree = pass.tree.clone();
         let agent = Author::Agent {
@@ -1420,8 +1573,7 @@ fn finding_add(ctx: &Ctx, run_id: &str, pass_id: &str, reviewer_id: &str) -> Res
         pass.killed.extend(killed);
         pass.major_found = major;
         Ok((added, killed_ids))
-    })?;
-    Ok(json!({ "target": scope.key, "added": added, "killed": killed }))
+    }
 }
 
 fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
@@ -1517,50 +1669,103 @@ fn normalize_resolution(ctx: &Ctx, resolution: &str) -> Result<String> {
 fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
     let scope = ctx.scope()?;
     if scope.existing.is_none() {
-        return fail(format!("thread {} not found", args.id));
+        return fail(format!("thread {} not found", args.ids[0]));
     }
-    let resolution = args
-        .resolution
+    // `--fixed` and `--not-fixed` are shorthands for the triage, resolution and reply of a
+    // fix and of a failed fix check.
+    let (triage, resolution, reopen, default_reply) = match (&args.fixed, &args.not_fixed) {
+        (Some(sha), _) => {
+            let sha = ctx.repo.commit(sha)?;
+            let reply = format!("Fixed in {}.", &sha[..sha.len().min(12)]);
+            (Some(Triage::Fixed), Some(format!("fixed {sha}")), false, Some(reply))
+        }
+        (None, Some(reason)) => {
+            let reason = reason.trim().trim_end_matches('.');
+            (
+                None,
+                Some(format!("not fixed: {reason}")),
+                true,
+                Some(format!("Not fixed: {reason}.")),
+            )
+        }
+        (None, None) => (args.triage, args.resolution.clone(), args.reopen, None),
+    };
+    let resolution = resolution
         .as_deref()
         .map(|text| normalize_resolution(ctx, text))
         .transpose()?;
-    let records_only = matches!(args.triage, Some(Triage::Valid | Triage::Question));
-    if !args.reopen && records_only && resolution.is_some() {
+    let records_only = matches!(triage, Some(Triage::Valid | Triage::Question));
+    if !reopen && records_only && resolution.is_some() {
         return fail("--resolution needs a resolving triage (fixed or stale)");
     }
-    let resolution = match (args.triage, resolution) {
-        (Some(Triage::Stale), None) if !args.reopen => Some("stale".to_owned()),
-        (Some(Triage::Fixed), None) if !args.reopen => {
+    let resolution = match (triage, resolution) {
+        (Some(Triage::Stale), None) if !reopen => Some("stale".to_owned()),
+        (Some(Triage::Fixed), None) if !reopen => {
             return fail("--triage fixed needs --resolution 'fixed <sha>'");
         }
         (_, resolution) => resolution,
     };
-    let thread = ctx.update(&scope, |target, now| {
-        let thread = find_thread_mut(target, &args.id)?;
-        if args.triage.is_some() {
-            thread.triage = args.triage;
-        }
-        let was = thread.resolved;
-        if args.reopen {
-            thread.resolved = false;
-            thread.resolution = resolution;
-            thread.held = args.triage == Some(Triage::Question);
-        } else if records_only {
-            thread.held = args.triage == Some(Triage::Question);
-        } else {
-            thread.resolved = true;
-            thread.held = false;
-            if resolution.is_some() {
-                thread.resolution = resolution;
+    let reply = match (&args.reply, default_reply) {
+        (Some(body), _) => Some(read_body(body)?),
+        (None, reply) => reply,
+    };
+    let default = match reply {
+        Some(_) => ctx.default_author()?,
+        None => None,
+    };
+    let threads = ctx.update(&scope, |target, now| {
+        let author = match reply {
+            Some(_) => Some(author(&args.author, target, default)?),
+            None => None,
+        };
+        let mut changed = Vec::new();
+        for id in &args.ids {
+            let thread = find_thread_mut(target, id)?;
+            if let (Some(body), Some(author)) = (&reply, &author) {
+                let comment =
+                    local_comment(&thread.id, &thread.comments, author.clone(), body.clone(), now);
+                thread.comments.push(comment);
             }
+            if triage.is_some() {
+                thread.triage = triage;
+            }
+            let was = thread.resolved;
+            if reopen {
+                thread.resolved = false;
+                thread.resolution.clone_from(&resolution);
+                thread.held = triage == Some(Triage::Question);
+            } else if records_only {
+                thread.held = triage == Some(Triage::Question);
+            } else {
+                thread.resolved = true;
+                thread.held = false;
+                if resolution.is_some() {
+                    thread.resolution.clone_from(&resolution);
+                }
+            }
+            if thread.resolved != was {
+                thread.resolve_pending = Some(thread.resolved);
+            }
+            thread.updated_at = now.to_owned();
+            changed.push(thread.clone());
         }
-        if thread.resolved != was {
-            thread.resolve_pending = Some(thread.resolved);
-        }
-        thread.updated_at = now.to_owned();
-        Ok(thread.clone())
+        Ok(changed)
     })?;
-    Ok(json!({ "target": scope.key, "thread": thread }))
+    if let [thread] = threads.as_slice() {
+        return Ok(json!({ "target": scope.key, "thread": thread }));
+    }
+    let threads: Vec<Value> = threads
+        .iter()
+        .map(|thread| {
+            json!({
+                "id": thread.id,
+                "resolved": thread.resolved,
+                "resolution": thread.resolution,
+                "held": thread.held,
+            })
+        })
+        .collect();
+    Ok(json!({ "target": scope.key, "threads": threads }))
 }
 
 /// Maps anchors to the current head, caching one diff per anchor commit or tree.
@@ -2273,6 +2478,20 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         "held_questions": threads.held,
         "runs": run_views(target),
     }))
+}
+
+/// `status` without the per-commit list, runs, imported records and tree ids; `--full`
+/// prints them.
+fn brief_status(mut status: Value) -> Value {
+    if let Some(fields) = status.as_object_mut() {
+        for field in ["commits", "runs", "imported_records", "head_tree"] {
+            fields.remove(field);
+        }
+        if let Some(worktree) = fields.get_mut("worktree").and_then(Value::as_object_mut) {
+            worktree.remove("tree");
+        }
+    }
+    status
 }
 
 /// `status` for a branch target with no branch, PR/MR head or pass: nothing is reviewed and

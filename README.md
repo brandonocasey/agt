@@ -26,7 +26,8 @@ puts `agent-review` in `~/.cargo/bin`. A `v*` tag publishes a release
 ## Output and errors
 
 Every command prints JSON on stdout, except `list --format prompt`, which prints
-plain text. On failure a command prints `agent-review: <message>` on stderr and
+plain text. JSON is indented at a terminal and one compact line otherwise, since
+agents pay for every byte they read. On failure a command prints `agent-review: <message>` on stderr and
 exits with status 1. Timestamps are RFC 3339 in UTC, such as
 `2026-10-16T12:00:00Z`.
 
@@ -92,25 +93,42 @@ pass whose base is after the merge-base, and that does not continue a
 whole-branch pass from its head, is `partial`: it marks the commits it reviewed
 but never covers the whole head. On a range or commit target, `--head <rev>`
 reviews a later head, such as a fix for a fix check; it MUST descend from the
-target's end, else the pass is refused.
+target's end, else the pass is refused. Pass output leaves out the per-commit
+patch-ids (`commit_count` gives their number); `show <run>.<pass>` prints them.
+
+`run start --kind <kind>` also starts the run's first pass and takes the same
+`--base`, `--reviewers` and `--head`, saving a call:
+
+```sh
+agent-review run start --kind full --base 1a2b3c4 --reviewers - < reviewers.json
+# {"target": "...", "run": "rv-7k2m", "pass": {"id": "c1p0", ...}}
+```
 
 ```sh
 agent-review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
 agent-review pass end --run rv-7k2m --pass c1p0 --lock
+agent-review pass end --run rv-7k2m --pass c1p0 --findings - --reviewer r1 < all.json
 agent-review finding kill rv-7k2m.c1p0.r1.f2 --reason "The caller checks it."
 agent-review run end --run rv-7k2m
 agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 ```
 
-`pass end --lock` freezes the pass for a blind review: `finding add` to it then
-fails. `finding kill` moves a surviving finding to its pass's killed list, also
+`pass end --findings <file|->` adds findings and ends the pass in one write, as
+`finding add` would for each reviewer: each finding names its `"reviewer"`, or
+takes `--reviewer`; `[]` ends a clean pass. Output lists the new ids under
+`added` and `killed`. `pass end --lock` freezes the pass for a blind review:
+`finding add` to it then fails. `finding kill` moves a surviving finding to its pass's killed list, also
 on a locked pass; a finding that is posted or being posted to the PR/MR is
 resolved as `stale` instead. `run end` closes the run, records commit patch-ids
 for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
 `HEAD` (on a range or commit target, its end or `--head <rev>`, which MUST
 descend from the end) as the run's `repaired_head` (commits after the last pass
 up to it are the run's `repair`), stores the reveal counts for the final record, and prunes
-old targets of this repository.
+old targets of this repository. Its output ends with `status`: the brief
+`status` of that head, so no separate call is needed.
+
+A wrong run, pass or reviewer id fails with the valid ones named: the open
+runs, the run's passes, or the pass's reviewers.
 
 Threads for humans and agents:
 
@@ -124,6 +142,12 @@ agent-review resolve h1 --resolution answered
 agent-review resolve rv-7k2m.c1p0.r1.f1 --triage fixed --resolution "fixed 9e8d7c6"
 agent-review resolve rv-7k2m.c1p0.r1.f2 --triage question     # held, stays open
 agent-review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still loses data"
+# Fixed: triage, resolution and a "Fixed in <sha>." reply for each, in one write
+agent-review resolve rv-7k2m.c1p0.r1.f1 rv-7k2m.c1p0.r2.f1 --fixed 9e8d7c6 \
+  --run rv-7k2m --pass c1p1 --reviewer fix
+# A fix check disagrees: reopen with a "Not fixed: <reason>." reply
+agent-review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
+  --run rv-7k2m --pass c1p1 --reviewer r1
 ```
 
 - `comment` options: `--type bug|question|requirement|nit|comment` (default
@@ -143,7 +167,14 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still 
   `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
   `stale` resolution; `fixed` needs `--resolution "fixed <sha>"`).
   `--triage valid|question` only records the triage and leaves the thread open;
-  `question` marks it held. `--reopen` marks it unresolved.
+  `question` marks it held. `--reopen` marks it unresolved. `resolve` takes
+  several ids and changes them all in one write, or none when one is missing.
+  `--fixed <sha>` means `--triage fixed --resolution "fixed <sha>"` plus a reply
+  `Fixed in <sha>.`; `--not-fixed <reason>` means `--reopen --resolution
+  "not fixed: <reason>"` plus a reply `Not fixed: <reason>.`. `--reply <text>`
+  replaces that text, or adds a reply to any `resolve`; the author flags sign
+  it. With one id the output is the `thread`; with more, `threads` lists each
+  id with `resolved`, `resolution` and `held`.
 
 Reading:
 
@@ -156,6 +187,7 @@ agent-review show rv-7k2m                          # run
 agent-review show rv-7k2m.c1p0                     # pass
 agent-review status
 agent-review status --head 1a2b3c4
+agent-review status --full                         # plus commits, runs, records
 ```
 
 `list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
@@ -170,7 +202,8 @@ people's comments. A posted thread also shows its forge URL on a `URL:` line.
 as a fix after a range target's end.
 
 `status` never writes: not to the store, not to the git index or object
-database. It reports whether the head is reviewed, `reviews_at_head`, the passes
+database. By default it leaves out `commits`, `runs`, `imported_records` and
+tree ids; `--full` adds them. It reports whether the head is reviewed, `reviews_at_head`, the passes
 that cover it, each commit's reviewed state, `unreviewed_commits`,
 `last_reviewed_head` (the nearest ancestor of the head that a whole-branch pass
 reviewed or a run repaired, across this repository's branch and range targets,

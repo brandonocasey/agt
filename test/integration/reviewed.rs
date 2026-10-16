@@ -97,7 +97,7 @@ fn squash_then_status_still_reviewed() {
 
     env.git(&["reset", "-q", "--soft", "main"]);
     env.git(&["commit", "-q", "-m", "squashed"]);
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert!(status["target"].is_string());
     assert_eq!(status["reviewed"], true);
     assert_eq!(status["reviews_at_head"], 1);
@@ -166,7 +166,7 @@ fn conflict_resolved_commit_shows_unreviewed() {
     env.git(&["add", "a.txt"]);
     env.git(&["rebase", "--continue"]);
 
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert!(status["target"].is_string());
     assert_eq!(status["reviewed"], false);
     assert_eq!(status["reviews_at_head"], 0);
@@ -187,13 +187,13 @@ fn uncommitted_review_then_commit_stays_reviewed() {
     let shown = env.run(&["show", &format!("{run}.{pass}")]);
     assert_eq!(shown["pass"]["dirty"], true);
 
-    let before = env.run(&["status"]);
+    let before = env.run(&["status", "--full"]);
     assert_eq!(before["worktree"]["dirty"], true);
     assert_eq!(before["worktree"]["reviewed"], true);
     assert_eq!(before["reviewed"], false);
 
     env.commit_all("reviewed work");
-    let after = env.run(&["status"]);
+    let after = env.run(&["status", "--full"]);
     assert_eq!(after["reviewed"], true);
     assert_eq!(after["reviews_at_head"], 1);
     assert!(commit_reviewed(&after, "reviewed work"));
@@ -210,7 +210,7 @@ fn uncommitted_review_then_commit_stays_reviewed() {
     env.commit_all("main moves");
     env.git(&["switch", "-q", "feat"]);
     env.git(&["rebase", "-q", "main"]);
-    let rebased = env.run(&["status"]);
+    let rebased = env.run(&["status", "--full"]);
     assert_eq!(rebased["target"], after["target"]);
     assert_eq!(rebased["reviewed"], true);
     assert!(commit_reviewed(&rebased, "reviewed work"));
@@ -421,7 +421,7 @@ fn partial_pass_does_not_cover_earlier_commits() {
     env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
     env.commit_all("B reviewed");
     env.run(&["run", "end", "--run", &run]);
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert!(!commit_reviewed(&status, "A unreviewed"));
     assert!(commit_reviewed(&status, "B reviewed"));
     assert_eq!(status["reviewed"], false, "{status}");
@@ -663,7 +663,7 @@ fn rewritten_earlier_commit_is_not_covered_by_head_patch_id() {
     env.write("a.txt", &numbered(10, &[(2, "X changed")]));
     env.commit_all("X changed");
     env.git(&["cherry-pick", &y]);
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert_eq!(status["reviewed"], false, "{status}");
     assert!(!commit_reviewed(&status, "X changed"));
 }
@@ -731,7 +731,7 @@ fn range_repair_clears_fix_commits_on_the_branch() {
     env.run(&[
         "--range", &range, "run", "end", "--run", &run, "--head", &fix,
     ]);
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     assert_eq!(status["unreviewed_commits"], json!([]), "{status}");
     let fixed = status["commits"]
         .as_array()

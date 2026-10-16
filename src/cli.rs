@@ -53,6 +53,9 @@ pub enum Command {
         /// Commit to evaluate instead of the current head and work tree.
         #[arg(long)]
         head: Option<String>,
+        /// Also print every commit, run and imported record.
+        #[arg(long)]
+        full: bool,
     },
     /// Import the PR/MR of this branch (or `--pr`) from GitHub or GitLab. Read-only on the forge.
     Sync {
@@ -91,8 +94,21 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum RunAction {
-    /// Start a run and print its id.
-    Start,
+    /// Start a run and print its id; with `--kind`, also start its first pass.
+    Start {
+        /// Kind of the first pass to start with the run.
+        #[arg(long, value_enum)]
+        kind: Option<PassKind>,
+        /// Start of the first pass's reviewed delta (see `pass start --base`).
+        #[arg(long, requires = "kind")]
+        base: Option<String>,
+        /// JSON array of the first pass's reviewers, from a file or `-` for stdin.
+        #[arg(long, value_name = "FILE", requires = "kind")]
+        reviewers: Option<PathBuf>,
+        /// Reviewed head of a range or commit target (see `pass start --head`).
+        #[arg(long, requires = "kind")]
+        head: Option<String>,
+    },
     /// End a run, record patch-ids for committed work and prune old targets.
     End {
         #[arg(long)]
@@ -137,6 +153,13 @@ pub enum PassAction {
         /// Freeze the pass's findings (blind review lock).
         #[arg(long)]
         lock: bool,
+        /// Add these findings first: JSON from a file or `-` for stdin, as `finding add`
+        /// reads it; each finding names its `reviewer` or takes `--reviewer`.
+        #[arg(long, value_name = "FILE")]
+        findings: Option<PathBuf>,
+        /// Reviewer of findings that name none.
+        #[arg(long, requires = "findings")]
+        reviewer: Option<String>,
     },
 }
 
@@ -227,16 +250,31 @@ pub struct ReplyArgs {
 
 #[derive(Args)]
 pub struct ResolveArgs {
-    pub id: String,
+    /// Threads to change, all in one write.
+    #[arg(required = true)]
+    pub ids: Vec<String>,
     /// `fixed <sha>`, `not fixed: <reason>`, `stale` or `answered`.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["fixed", "not_fixed"])]
     pub resolution: Option<String>,
     /// `fixed` and `stale` resolve; `valid` and `question` only record the triage.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with_all = ["fixed", "not_fixed"])]
     pub triage: Option<Triage>,
     /// Mark the thread unresolved again.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["fixed", "not_fixed"])]
     pub reopen: bool,
+    /// Fixed in this commit: triage `fixed`, resolution `fixed <sha>`, and a reply
+    /// "Fixed in <sha>." unless `--reply` gives other text.
+    #[arg(long, value_name = "SHA", conflicts_with = "not_fixed")]
+    pub fixed: Option<String>,
+    /// A fix check found it not fixed: reopen with `not fixed: <reason>` and a reply
+    /// "Not fixed: <reason>." unless `--reply` gives other text.
+    #[arg(long, value_name = "REASON")]
+    pub not_fixed: Option<String>,
+    /// Also add this reply to each thread, or `-` for stdin.
+    #[arg(long)]
+    pub reply: Option<String>,
+    #[command(flatten)]
+    pub author: AuthorArgs,
 }
 
 #[derive(Args)]

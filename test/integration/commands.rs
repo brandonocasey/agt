@@ -38,7 +38,7 @@ fn run_and_pass_lifecycle() {
     assert_eq!(pass["dirty"], false);
     assert_eq!(pass["reviewers"][0]["id"], "r1");
     assert_eq!(pass["reviewers"][0]["harness_version"], "0.162.1");
-    assert_eq!(pass["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(pass["commit_count"], 1);
     assert!(pass["range_patch_id"].is_string());
 
     let open = env.fail(
@@ -484,7 +484,7 @@ fn range_and_commit_targets() {
         "--kind",
         "full",
     ]);
-    assert_eq!(pass["pass"]["commits"].as_array().unwrap().len(), 2);
+    assert_eq!(pass["pass"]["commit_count"], 2);
 
     let commit = env.run(&["--range", &first, "run", "start"]);
     assert_eq!(commit["target"], format!("commit-{first}"));
@@ -504,7 +504,7 @@ fn range_and_commit_targets() {
     let symmetric = env.fail(&["--range", "main...HEAD", "status"], None);
     assert!(symmetric.contains("symmetric"), "{symmetric}");
     env.git(&["switch", "-q", "--detach", "HEAD"]);
-    let detached = env.fail(&["status"], None);
+    let detached = env.fail(&["status", "--full"], None);
     assert!(detached.contains("HEAD is detached"), "{detached}");
 }
 
@@ -774,12 +774,12 @@ fn run_end_counts_fix_commits_as_repaired() {
         .unwrap()
         .to_owned();
     env.reviewed_pass(&run, "full");
-    assert_eq!(env.run(&["status"])["reviews_at_head"], 1);
+    assert_eq!(env.run(&["status", "--full"])["reviews_at_head"], 1);
     env.write("a.txt", &numbered(10, &[(3, "three"), (4, "four")]));
     let fix = env.commit_all("fix");
     let ended = env.run(&["run", "end", "--run", &run]);
     assert_eq!(ended["repaired_head"], fix);
-    let status = env.run(&["status"]);
+    let status = env.run(&["status", "--full"]);
     let matched: Vec<(&str, &str)> = status["commits"]
         .as_array()
         .unwrap()
@@ -1129,4 +1129,131 @@ fn list_head_maps_anchors_to_a_later_head() {
         at_fix["threads"][0]["current"]["outdated"], true,
         "{at_fix}"
     );
+}
+
+#[test]
+fn batched_review_records_in_few_calls() {
+    let env = Env::with_branch();
+    let main = env.git(&["rev-parse", "main"]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let reviewers = r#"[{"model":"a","harness":"codex"},{"model":"b","harness":"claude-code"}]"#;
+    let started = env.run_stdin(
+        &[
+            "run", "start", "--kind", "full", "--base", &main, "--reviewers", "-",
+        ],
+        reviewers,
+    );
+    let run = started["run"].as_str().unwrap().to_owned();
+    assert_eq!(started["pass"]["id"], "c1p0", "{started}");
+    assert_eq!(started["pass"]["commit_count"], 1);
+    assert!(started["pass"].get("commits").is_none(), "{started}");
+
+    let findings = r#"[
+        {"reviewer":"r2","type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"broken"},
+        {"type":"nit","path":"a.txt","line":3,"scenario":"style","killed":true,"reason":"taste"},
+        {"reviewer":"r2","type":"bug","severity":"low","path":"a.txt","line":3,"scenario":"also"}
+    ]"#;
+    let ended = env.run_stdin(
+        &[
+            "pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1",
+        ],
+        findings,
+    );
+    let f1 = format!("{run}.c1p0.r2.f1");
+    let f2 = format!("{run}.c1p0.r2.f2");
+    assert_eq!(ended["added"], serde_json::json!([f1, f2]), "{ended}");
+    assert_eq!(
+        ended["killed"],
+        serde_json::json!([format!("{run}.c1p0.r1.f1")])
+    );
+    assert_eq!(ended["pass"]["major_found"], true);
+    assert!(ended["pass"]["ended_at"].is_string());
+
+    // Fix both in one call, signed by the fixer.
+    env.write("a.txt", &numbered(10, &[(3, "fixed")]));
+    let fix = env.commit_all("fix");
+    env.run_stdin(
+        &[
+            "pass", "start", "--run", &run, "--kind", "fix-check", "--reviewers", "-",
+        ],
+        r#"[{"id":"r2"},{"id":"fix","model":"m","harness":"claude-code"}]"#,
+    );
+    let fixed = env.run(&[
+        "resolve", &f1, &f2, "--fixed", &fix, "--run", &run, "--pass", "c1p1", "--reviewer",
+        "fix",
+    ]);
+    assert_eq!(fixed["threads"][0]["resolved"], true, "{fixed}");
+    assert_eq!(fixed["threads"][1]["resolution"], format!("fixed {fix}"));
+    let shown = env.run(&["show", &f1]);
+    let reply = &shown["thread"]["comments"][1];
+    assert_eq!(reply["body"], format!("Fixed in {}.", &fix[..12]), "{shown}");
+    assert_eq!(reply["author"]["reviewer"], "fix");
+
+    // The fix check finds one still broken.
+    let reopened = env.run(&[
+        "resolve", &f2, "--not-fixed", "still off by one", "--run", &run, "--pass", "c1p1",
+        "--reviewer", "r2",
+    ]);
+    assert_eq!(reopened["thread"]["resolved"], false, "{reopened}");
+    assert_eq!(
+        reopened["thread"]["resolution"],
+        "not fixed: still off by one"
+    );
+    assert_eq!(
+        reopened["thread"]["comments"][2]["body"],
+        "Not fixed: still off by one."
+    );
+    env.run_stdin(
+        &["pass", "end", "--run", &run, "--pass", "c1p1", "--findings", "-"],
+        "[]",
+    );
+
+    let ended = env.run(&["run", "end", "--run", &run]);
+    assert_eq!(ended["status"]["reviewed"], true, "{ended}");
+    assert_eq!(ended["status"]["open_threads"][0]["id"], f2.as_str());
+    assert!(ended["status"].get("commits").is_none());
+}
+
+#[test]
+fn wrong_ids_name_the_valid_ones() {
+    let env = Env::with_branch();
+    let run = env.review("full");
+    let error = env.fail(
+        &["pass", "end", "--run", &run, "--pass", "1"],
+        None,
+    );
+    assert!(error.contains("its passes: c1p0"), "{error}");
+    let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
+    assert!(error.contains("open runs: none"), "{error}");
+    let run = env.run(&["run", "start"])["run"].as_str().unwrap().to_owned();
+    env.run_stdin(
+        &["pass", "start", "--run", &run, "--kind", "full", "--reviewers", "-"],
+        REVIEWER,
+    );
+    let error = env.fail(
+        &[
+            "finding", "add", "--run", &run, "--pass", "c1p0", "--reviewer", "reviewer-1",
+        ],
+        Some(FINDINGS),
+    );
+    assert!(error.contains("its reviewers: r1"), "{error}");
+}
+
+#[test]
+fn status_is_brief_and_compact_unless_asked() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    env.review("full");
+    let brief = env.run(&["status"]);
+    assert_eq!(brief["reviewed"], true);
+    for field in ["commits", "runs", "imported_records", "head_tree"] {
+        assert!(brief.get(field).is_none(), "{field} in {brief}");
+    }
+    let full = env.run(&["status", "--full"]);
+    assert_eq!(full["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(full["runs"].as_array().unwrap().len(), 1);
+    // Agents read a pipe, so the JSON is one line.
+    assert_eq!(env.text(&["status"]).lines().count(), 1);
 }
