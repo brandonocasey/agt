@@ -10,12 +10,16 @@ and comments.
 
 ## Install
 
+On macOS (arm64) and Linux (x64, arm64), from the private GitHub releases;
+mise reads the token of an authenticated `gh`:
+
 ```sh
-mise run install
+mise use -g github:brandonocasey/agent-review
 ```
 
-This runs `cargo install --locked --path .` and puts `agent-review` in
-`~/.cargo/bin`. Git 2.31 or newer must be on `PATH`; before git 2.38 (no
+From a checkout, `mise run install` runs `cargo install --locked --path .` and
+puts `agent-review` in `~/.cargo/bin`. A `v*` tag publishes a release
+(`.github/workflows/release.yml`); Windows is not supported. Git 2.31 or newer must be on `PATH`; before git 2.38 (no
 `merge-tree --write-tree`) every merge commit in a range counts as unreviewed.
 `sync` also needs an authenticated `gh` (GitHub) or `glab` (GitLab).
 
