@@ -27,7 +27,8 @@ puts `agent-review` in `~/.cargo/bin`. A `v*` tag publishes a release
 
 Every command prints JSON on stdout, except `list --format prompt`, which prints
 plain text. JSON is indented at a terminal and one compact line otherwise, since
-agents pay for every byte they read. On failure a command prints `agent-review: <message>` on stderr and
+agents pay for every byte they read. On failure a command prints `agent-review: error: <message>` on stderr (the word `error:` matches
+clap's usage errors, so one pattern finds both) and
 exits with status 1. Timestamps are RFC 3339 in UTC, such as
 `2026-10-16T12:00:00Z`.
 
@@ -128,7 +129,11 @@ old targets of this repository. Its output ends with `status`: the brief
 `status` of that head, so no separate call is needed.
 
 A wrong run, pass or reviewer id fails with the valid ones named: the open
-runs, the run's passes, or the pass's reviewers.
+runs, the run's passes, or the pass's reviewers. Run ids are unique in the repository. With no `--target` or `--range`, a
+command that names a run (`--run`, or a thread, killed finding or pass id that
+starts with one) works on the target holding that run, unless the current
+branch's own target holds it; so a `--range` review needs `--range` only on
+`run start`.
 
 Threads for humans and agents:
 

@@ -519,7 +519,7 @@ fn errors_outside_a_repository() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "agent-review: not inside a git work tree\n"
+        "agent-review: error: not inside a git work tree\n"
     );
 }
 
@@ -1256,4 +1256,35 @@ fn status_is_brief_and_compact_unless_asked() {
     assert_eq!(full["runs"].as_array().unwrap().len(), 1);
     // Agents read a pipe, so the JSON is one line.
     assert_eq!(env.text(&["status"]).lines().count(), 1);
+}
+
+#[test]
+fn run_id_finds_its_range_target() {
+    let env = Env::with_branch();
+    let main = env.git(&["rev-parse", "main"]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let a = env.commit_all("A");
+    let range = format!("{main}..{a}");
+    let started = env.run_stdin(
+        &[
+            "--range", &range, "run", "start", "--kind", "full", "--reviewers", "-",
+        ],
+        REVIEWER,
+    );
+    let run = started["run"].as_str().unwrap().to_owned();
+    let key = started["target"].clone();
+    // No --range from here on: the run id names the target.
+    let ended = env.run_stdin(
+        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"[{"type":"bug","severity":"low","path":"a.txt","line":3,"scenario":"x"}]"#,
+    );
+    assert_eq!(ended["target"], key, "{ended}");
+    let id = ended["added"][0].as_str().unwrap().to_owned();
+    assert_eq!(env.run(&["show", &id])["target"], key);
+    let resolved = env.run(&["resolve", &id, "--triage", "stale"]);
+    assert_eq!(resolved["target"], key);
+    let ended = env.run(&["run", "end", "--run", &run]);
+    assert_eq!(ended["target"], key, "{ended}");
+    let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
+    assert!(error.starts_with("agent-review: error: "), "{error}");
 }

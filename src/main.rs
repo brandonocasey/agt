@@ -23,7 +23,7 @@ fn main() -> ExitCode {
     match commands::run(cli).and_then(print) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("agent-review: {error}");
+            eprintln!("agent-review: error: {error}");
             ExitCode::FAILURE
         }
     }

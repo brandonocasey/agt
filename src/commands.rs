@@ -81,8 +81,11 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
-    let status_selection = selection.clone();
-    let ctx = Ctx::new(store, selection, read_only, scratch_git)?;
+    let mut ctx = Ctx::new(store, selection, read_only, scratch_git)?;
+    if let Some(run) = run_hint(&cli.command) {
+        ctx.select_run_target(&run)?;
+    }
+    let status_selection = ctx.selection.clone();
     let value = match cli.command {
         Command::Run {
             action:
@@ -207,7 +210,63 @@ pub fn run(cli: Cli) -> Result<Output> {
     Ok(Output::Json(value))
 }
 
+/// The run a command names, through `--run` or an id that starts with one (`rv-xxxx...`).
+fn run_hint(command: &Command) -> Option<String> {
+    let from_id = |id: &str| {
+        let run = id.split('.').next()?;
+        (run.len() == 7 && run.starts_with("rv-")).then(|| run.to_owned())
+    };
+    match command {
+        Command::Run {
+            action: RunAction::End { run, .. },
+        }
+        | Command::Pass {
+            action: PassAction::Start { run, .. } | PassAction::End { run, .. },
+        }
+        | Command::Finding {
+            action: FindingAction::Add { run, .. },
+        } => Some(run.clone()),
+        Command::Finding {
+            action: FindingAction::Kill { id, .. },
+        }
+        | Command::Show { id } => from_id(id),
+        Command::Reply(args) => args.author.run.clone().or_else(|| from_id(&args.id)),
+        Command::Resolve(args) => args
+            .author
+            .run
+            .clone()
+            .or_else(|| args.ids.first().and_then(|id| from_id(id))),
+        Command::List(args) => args.run.clone(),
+        _ => None,
+    }
+}
+
 impl Ctx {
+    /// With no `--target` or `--range`, a command naming a run works on the target that holds
+    /// it, so callers need not repeat a range or key. The current branch's own target wins.
+    fn select_run_target(&mut self, run: &str) -> Result<()> {
+        if self.selection.target.is_some() || self.selection.range.is_some() {
+            return Ok(());
+        }
+        let has_run = |target: &Target| target.runs.iter().any(|known| known.id == run);
+        if let Ok(scope) = self.scope()
+            && scope.existing.as_ref().is_some_and(has_run)
+        {
+            return Ok(());
+        }
+        let holders: Vec<String> = self
+            .store
+            .targets(&self.dir)?
+            .into_iter()
+            .filter(|target| has_run(target))
+            .map(|target| target.key)
+            .collect();
+        if let [key] = holders.as_slice() {
+            self.selection.target = Some(key.clone());
+        }
+        Ok(())
+    }
+
     fn new(store: Store, selection: Selection, read_only: bool, scratch_git: bool) -> Result<Self> {
         let mut repo = Repo::discover()?;
         if scratch_git {
@@ -908,10 +967,17 @@ fn author(args: &AuthorArgs, target: &Target, default: Option<Author>) -> Result
 
 fn run_start(ctx: &Ctx) -> Result<Value> {
     let scope = ctx.scope()?;
+    // Run ids are unique in the repository, so `--run` alone finds the target.
+    let taken: HashSet<String> = ctx
+        .store
+        .targets(&ctx.dir)?
+        .into_iter()
+        .flat_map(|target| target.runs.into_iter().map(|run| run.id))
+        .collect();
     let run = ctx.update(&scope, |target, now| {
         let id = loop {
             let id = random_id();
-            if !target.runs.iter().any(|run| run.id == id) {
+            if !taken.contains(&id) && !target.runs.iter().any(|run| run.id == id) {
                 break id;
             }
         };
