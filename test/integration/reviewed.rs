@@ -542,6 +542,32 @@ fn range_review_clears_branch_commits() {
 }
 
 #[test]
+fn range_review_of_the_branch_head_counts_and_names_its_run() {
+    let env = Env::with_branch();
+    let main = env.git(&["rev-parse", "main"]);
+    env.write("a.txt", &numbered(10, &[(2, "A")]));
+    let a = env.commit_all("A");
+    let range = format!("{main}..{a}");
+    let run = env.run(&["--range", &range, "run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = env.run(&["--range", &range, "status"])["target"].clone();
+    env.run(&[
+        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
+    ]);
+    env.run(&[
+        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.run(&["--range", &range, "run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["reviewed"], true, "{status}");
+    assert_eq!(status["reviews_at_head"], 1, "{status}");
+    assert_eq!(status["covered_by"][0]["target"], key, "{status}");
+    assert_eq!(status["covered_by"][0]["run"], run, "{status}");
+}
+
+#[test]
 fn reviewed_merge_counts_after_a_new_pass() {
     let env = Env::with_branch();
     env.write("a.txt", &numbered(10, &[(3, "three")]));

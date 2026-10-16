@@ -243,7 +243,11 @@ agent-review prune --all
   later rebased.
 - `reviews_at_head` counts covering passes that are full reviews, plus fix
   checks that found no major finding (a `bug` of `high` or `medium` severity).
-  Parallel reviewers in one pass count once.
+  Parallel reviewers in one pass count once. A pass of another target of this
+  repository (such as a `--range` review of the branch's end point) also covers
+  the head when its range or head patch-id matches; a tree match alone does
+  not, since that pass may have another base. Each `covered_by` entry names
+  its `target` and `run`, so `--target <key> list --run <run>` finds it.
 - Anchors map through `git diff -U0 -M <anchor commit or tree> HEAD`. A
   new-side line inside a changed hunk, or a deleted file, is outdated; other
   lines shift and follow renames. An old-side anchor is outdated once its file

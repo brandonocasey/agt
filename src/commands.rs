@@ -1878,39 +1878,56 @@ struct Reviewed {
     shas: HashSet<String>,
 }
 
-/// Ended passes whose reviewed state matches `tree`, the whole-range patch-id or the head
-/// commit's patch-id.
+/// A pass covering a head, with its target and run.
+#[derive(Clone)]
+struct Covered<'a> {
+    target: &'a str,
+    run: &'a str,
+    pass: &'a Pass,
+    matched: Vec<&'static str>,
+}
+
+/// Ended passes of `targets` whose reviewed state matches `tree`, the whole-range patch-id or
+/// the head commit's patch-id.
 fn coverage<'a>(
-    target: Option<&'a Target>,
+    targets: &[&'a Target],
     tree: &str,
     range_patch_id: Option<&str>,
     head_patch_id: Option<&str>,
-) -> Vec<(String, &'a Pass, Vec<&'static str>)> {
+) -> Vec<Covered<'a>> {
     let mut covered = Vec::new();
-    for run in target.iter().flat_map(|target| &target.runs) {
-        // A partial pass reviewed only its delta, so it covers commits, never the whole head.
-        for pass in run
-            .passes
-            .iter()
-            .filter(|pass| pass.ended_at.is_some() && !pass.partial)
-        {
-            let mut matched = Vec::new();
-            if pass.tree == tree {
-                matched.push("tree");
-            }
-            if range_patch_id.is_some() && pass.range_patch_id.as_deref() == range_patch_id {
-                matched.push("range-patch-id");
-            }
-            // Only a one-commit head (the caller passes no id otherwise) may match by its own
-            // patch-id, and only the pass's whole range: a matching last commit says nothing
-            // about rewritten earlier ones.
-            if let Some(id) = head_patch_id
-                && pass.range_patch_id.as_deref() == Some(id)
+    for target in targets {
+        for run in &target.runs {
+            // A partial pass reviewed only its delta, so it covers commits, never the whole
+            // head.
+            for pass in run
+                .passes
+                .iter()
+                .filter(|pass| pass.ended_at.is_some() && !pass.partial)
             {
-                matched.push("head-patch-id");
-            }
-            if !matched.is_empty() {
-                covered.push((run.id.clone(), pass, matched));
+                let mut matched = Vec::new();
+                if pass.tree == tree {
+                    matched.push("tree");
+                }
+                if range_patch_id.is_some() && pass.range_patch_id.as_deref() == range_patch_id {
+                    matched.push("range-patch-id");
+                }
+                // Only a one-commit head (the caller passes no id otherwise) may match by its
+                // own patch-id, and only the pass's whole range: a matching last commit says
+                // nothing about rewritten earlier ones.
+                if let Some(id) = head_patch_id
+                    && pass.range_patch_id.as_deref() == Some(id)
+                {
+                    matched.push("head-patch-id");
+                }
+                if !matched.is_empty() {
+                    covered.push(Covered {
+                        target: &target.key,
+                        run: &run.id,
+                        pass,
+                        matched,
+                    });
+                }
             }
         }
     }
@@ -1920,19 +1937,19 @@ fn coverage<'a>(
 /// Passes covering `head` itself; a changed merge the caller found unreviewed voids them all.
 fn head_coverage<'a>(
     repo: &Repo,
-    target: Option<&'a Target>,
+    targets: &[&'a Target],
     base: Option<&str>,
     head: &str,
     head_tree: &str,
     commits: &[CommitInfo],
-) -> Result<Vec<(String, &'a Pass, Vec<&'static str>)>> {
+) -> Result<Vec<Covered<'a>>> {
     let head_patch_id = match commits {
         [only] if only.sha == head => only.patch_id.clone(),
         _ => None,
     };
     let range_patch_id = repo.range_patch_id(base, head)?;
     Ok(coverage(
-        target,
+        targets,
         head_tree,
         range_patch_id.as_deref(),
         head_patch_id.as_deref(),
@@ -1978,38 +1995,40 @@ fn run_reviews_at(ctx: &Ctx, target: &Target, run: &str, head: &str) -> Result<u
     let tree = ctx.repo.tree_of(head)?;
     let covered: Vec<_> = head_coverage(
         &ctx.repo,
-        Some(target),
+        &[target],
         base.as_deref(),
         head,
         &tree,
         &commits,
     )?
     .into_iter()
-    .filter(|(id, _, _)| id == run)
+    .filter(|covered| covered.run == run)
     .collect();
     Ok(count(&covered))
 }
 
-fn coverage_json(covered: &[(String, &Pass, Vec<&str>)]) -> Value {
+fn coverage_json(covered: &[Covered]) -> Value {
     covered
         .iter()
-        .map(|(run, pass, matched)| {
+        .map(|covered| {
             json!({
-                "run": run,
-                "pass": pass.id,
-                "kind": pass.kind,
-                "major_found": pass.major_found,
-                "match": matched,
+                "target": covered.target,
+                "run": covered.run,
+                "pass": covered.pass.id,
+                "kind": covered.pass.kind,
+                "major_found": covered.pass.major_found,
+                "match": covered.matched,
             })
         })
         .collect()
 }
 
 /// Full reviews plus clean fix checks; parallel reviewers in one pass count once.
-fn count(covered: &[(String, &Pass, Vec<&str>)]) -> usize {
+fn count(covered: &[Covered]) -> usize {
     covered
         .iter()
-        .filter(|(_, pass, _)| {
+        .filter(|covered| {
+            let pass = covered.pass;
             pass.kind == PassKind::Full || (pass.kind == PassKind::FixCheck && !pass.major_found)
         })
         .count()
@@ -2033,17 +2052,36 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let last_reviewed = last_reviewed_head(ctx, &head)?;
     let unreviewed_merges = unreviewed_merges(&ctx.repo, &merges, last_reviewed.as_deref())?;
     let merge_after = !unreviewed_merges.is_empty();
+    let others: Vec<Target> = ctx
+        .store
+        .targets(&ctx.dir)?
+        .into_iter()
+        .filter(|other| Some(&other.key) != target.map(|target| &target.key))
+        .collect();
+    let others_ref: Vec<&Target> = others.iter().collect();
+    // Another target's pass (a `--range` review of the branch's end point) covers the head
+    // when it reviewed the same diff; a tree match alone may sit on another base.
+    let covered_at = |tree: &str, range: Option<&str>, head_id: Option<&str>| {
+        let mut covered = coverage(target.as_slice(), tree, range, head_id);
+        covered.extend(
+            coverage(&others_ref, tree, range, head_id)
+                .into_iter()
+                .filter_map(|mut other| {
+                    other.matched.retain(|matched| *matched != "tree");
+                    (!other.matched.is_empty()).then_some(other)
+                }),
+        );
+        covered
+    };
     let covered = if merge_after {
         Vec::new()
     } else {
-        head_coverage(
-            &ctx.repo,
-            target,
-            scope.base.as_deref(),
-            &head,
-            &head_tree,
-            &commits,
-        )?
+        let head_patch_id = match commits.as_slice() {
+            [only] if only.sha == head => only.patch_id.clone(),
+            _ => None,
+        };
+        let range = ctx.repo.range_patch_id(scope.base.as_deref(), &head)?;
+        covered_at(&head_tree, range.as_deref(), head_patch_id.as_deref())
     };
 
     let mut reviewed = Reviewed::default();
@@ -2063,12 +2101,6 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     }
     // Commits a review of another target of this repository recorded (a `--range` review of
     // the branch's end point, an earlier branch target) are reviewed here too.
-    let others: Vec<Target> = ctx
-        .store
-        .targets(&ctx.dir)?
-        .into_iter()
-        .filter(|other| Some(&other.key) != target.map(|target| &target.key))
-        .collect();
     for other in &others {
         for pass in passes(other).filter(|pass| pass.ended_at.is_some()) {
             reviewed.patch_ids.extend(pass_patch_ids(pass).cloned());
@@ -2158,7 +2190,7 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         let dirty = tree != head_tree;
         let covered = if dirty && !merge_after {
             let range = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
-            coverage(target, &tree, range.as_deref(), None)
+            covered_at(&tree, range.as_deref(), None)
         } else {
             covered.clone()
         };
@@ -2189,7 +2221,10 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         })
         // Records of our own runs are already counted through their passes.
         .filter(|record| {
-            !target.is_some_and(|target| target.runs.iter().any(|run| run.id == record.run))
+            !target
+                .into_iter()
+                .chain(&others)
+                .any(|target| target.runs.iter().any(|run| run.id == record.run))
         })
         .collect();
     let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();
