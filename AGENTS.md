@@ -16,6 +16,14 @@ mise run test
 
 `mise run install` installs the binary into `~/.cargo/bin`.
 
+## Release
+
+Bump `version` in `Cargo.toml`, land it on `main`, then push a `v<version>` tag;
+the release workflow builds the binaries. Hosts install the version pinned in
+the dotfiles mise config (`home/dot_config/mise/config.toml` in the chezmoi
+source), so bump that pin, and the minimum version in the review skill's
+`references/store.md` when its rules need the release, in one dotfiles commit.
+
 ## Conventions
 
 - Integration tests live in `test/integration/` (one test binary) and fixtures
