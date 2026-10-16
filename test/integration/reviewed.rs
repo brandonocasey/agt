@@ -560,3 +560,61 @@ fn reviewed_merge_counts_after_a_new_pass() {
     assert_eq!(status["reviewed"], true, "{status}");
     assert_eq!(status["unreviewed_commits"], json!([]));
 }
+
+#[test]
+fn rewritten_earlier_commit_is_not_covered_by_head_patch_id() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(2, "X")]));
+    env.commit_all("X");
+    env.write("a.txt", &numbered(10, &[(2, "X"), (8, "Y")]));
+    let y = env.commit_all("Y");
+    env.review("full");
+    env.git(&["reset", "-q", "--hard", "main"]);
+    env.write("a.txt", &numbered(10, &[(2, "X changed")]));
+    env.commit_all("X changed");
+    env.git(&["cherry-pick", &y]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["reviewed"], false, "{status}");
+    assert!(!commit_reviewed(&status, "X changed"));
+}
+
+#[test]
+fn default_branch_pass_with_base_reviews_the_branch() {
+    let env = Env::with_branch();
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", &numbered(10, &[(2, "A")]));
+    let a = env.commit_all("A");
+    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B")]));
+    let b = env.commit_all("B");
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let started = env.run(&[
+        "pass", "start", "--run", &run, "--kind", "full", "--base", &a,
+    ]);
+    assert_eq!(started["pass"]["partial"], false, "{started}");
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["reviewed"], true, "{status}");
+    assert_eq!(status["last_reviewed_head"], b);
+    assert_eq!(status["review_from"], b);
+
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B"), (8, "C")]));
+    env.commit_all("C");
+    env.run(&[
+        "pass", "start", "--run", &run, "--kind", "full", "--base", &b,
+    ]);
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B"), (8, "C2")]));
+    let fix = env.commit_all("fix C");
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["last_reviewed_head"], fix, "the repair counts");
+    assert_eq!(status["review_from"], fix);
+}

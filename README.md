@@ -55,8 +55,11 @@ A target is one thing under review. Commands pick it like this:
   or `gl-<iid>` target, `sync` and `publish` use that PR/MR without `--pr`, also
   on a detached `HEAD`.
 
-On the default branch itself, the root commit names the target and passes cover
-only uncommitted work; use `--range` to review commits there.
+On the default branch itself, the root commit names the target. A pass there
+covers uncommitted work by default; `pass start --base <rev>` reviews
+`<rev>..HEAD` and still counts as a whole-branch pass (never `partial`): it
+covers its commits, advances `last_reviewed_head` and `review_from`, and
+`run end` records its repair. `--range` reviews commits too.
 
 ## Commands
 
@@ -83,7 +86,9 @@ from its earlier pass. `--base <rev>` sets the start of the reviewed delta
 (default: the merge-base for a full pass, the previous pass's head otherwise). A
 pass whose base is after the merge-base, and that does not continue a
 whole-branch pass from its head, is `partial`: it marks the commits it reviewed
-but never covers the whole head.
+but never covers the whole head. On a range or commit target, `--head <rev>`
+reviews a later head, such as a fix for a fix check; it MUST descend from the
+target's end, else the pass is refused.
 
 ```sh
 agent-review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
@@ -98,8 +103,9 @@ fails. `finding kill` moves a surviving finding to its pass's killed list, also
 on a locked pass; a finding that is posted or being posted to the PR/MR is
 resolved as `stale` instead. `run end` closes the run, records commit patch-ids
 for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
-`HEAD` as the run's `repaired_head` (commits after the last pass up to it are
-the run's `repair`), stores the reveal counts for the final record, and prunes
+`HEAD` (on a range or commit target, its end or `--head <rev>`, which MUST
+descend from the end) as the run's `repaired_head` (commits after the last pass
+up to it are the run's `repair`), stores the reveal counts for the final record, and prunes
 old targets of this repository.
 
 Threads for humans and agents:
@@ -152,7 +158,7 @@ that run's findings, and `--cycle <n>` (with `--run`) only that cycle's threads
 and killed findings. `--format prompt` prints the text only of comments written
 locally or by the authenticated forge user; every other comment shows as
 `(comment by another author, text hidden)`, so reviewers never read other
-people's comments.
+people's comments. A posted thread also shows its forge URL on a `URL:` line.
 
 `status` never writes: not to the store, not to the git index or object
 database. It reports whether the head is reviewed, `reviews_at_head`, the passes
@@ -205,10 +211,14 @@ agent-review prune --all
   the head commit's patch-id. For uncommitted work, the tree id comes from a
   copy of the real index in a temporary `GIT_INDEX_FILE` after `git add -A`
   and `git write-tree`, so tracked files that match `.gitignore` stay in the
-  tree and the real index is untouched.
+  tree and the real index is untouched. The work tree counts only when `HEAD`
+  is the target's head; otherwise (such as `--target` from another checkout)
+  the pass reviews the head commit's tree and is not dirty.
 - An ended pass that is not partial covers a head when the head's tree equals
-  the pass tree, the range's patch-id equals the pass's whole-range patch-id, or
-  the head commit's patch-id equals the pass's head or whole-range patch-id. A
+  the pass tree, the range's patch-id equals the pass's whole-range patch-id,
+  or the head is the only commit since the merge-base and its patch-id equals
+  the pass's whole-range patch-id (a squash). A matching last commit alone
+  never covers a longer head: its earlier commits may have changed. A
   partial pass's range patch-id runs from its own base. A commit is reviewed
   when its patch-id, tree or sha matches any ended pass of the target, or its
   sha or patch-id matches an ended pass of another target of this repository
@@ -235,8 +245,8 @@ agent-review prune --all
   `agent-review` never writes refs to pin it, so once `git gc` prunes it (by
   default about two weeks later, unless `run end` has since moved the anchor
   to a commit) the anchor counts as outdated.
-- A target is deleted 90 days after its PR/MR closed or merged, or, with no
-  closed PR/MR, 90 days after its last change. `sync`, `run end` and `prune`
+- A target is deleted 90 days after the later of its PR/MR's close or merge
+  and its last change, or, with no closed PR/MR, 90 days after its last change. `sync`, `run end` and `prune`
   apply this to the current repository; `prune --all` to every repository.
 - Each trusted `review-record v2` comment whose `head` is the evaluated head
   adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
@@ -247,20 +257,30 @@ agent-review prune --all
 
 ## Sync
 
-- Forge: `github.com` uses `gh`; any other host uses `glab` with
-  `GITLAB_HOST=<host>`, so self-hosted GitLab works. The host and repository
-  come from `--pr <url>` or the `origin` remote.
+- Forge: GitHub (`gh`, with `GH_HOST=<host>`) for `github.com` or a host
+  `gh auth status --hostname <host>` knows; GitLab (`glab`, with
+  `GITLAB_HOST=<host>`) for `gitlab.com`, the host in `GITLAB_HOST`, or
+  glab's configured host (`glab config get host`). Any other host fails with
+  `unsupported forge <host>`; the forge is never guessed. The host and
+  repository come from `--pr <url>` (a GitHub `/pull/<n>` or GitLab
+  `/-/merge_requests/<iid>` URL) or the `origin` remote.
 - PR/MR lookup: the PR whose head is `<origin owner>:<branch>` (GitHub) or the
   MR whose source branch is the current branch (GitLab), first in `origin`,
   then in the repository `origin` was forked from. Open ones win, then the
   newest. On GitLab, only MRs whose source project is `origin` count, so a
-  fork's MR with the same branch name is skipped.
+  fork's MR with the same branch name is skipped. A closed PR/MR joins the
+  branch's target only when its head is the branch head or an ancestor of it;
+  an older, unrelated PR/MR of a reused branch name syncs into its own target.
 - The target is renamed to `gh-<number>` or `gl-<iid>` under both locks, keeping
   its runs and threads. Away from the branch (such as on a detached `HEAD`),
   `sync` joins the local branch target of the PR/MR's head branch the same way,
   unless that target's passes do not lead to the PR/MR head; later commands on
-  the branch find it by reflog birth or shared patch-ids. `sync` also adopts
-  patch-ids like `run end` and prunes.
+  the branch find it by reflog birth or shared patch-ids. When the PR/MR target
+  already exists, the two merge without dropping a thread: a local thread
+  whose id is taken gets the next free `h<n>`, and the same remote thread
+  merges its comments, keeping unposted local replies. The first sync that
+  links a target to a PR/MR stores `attached_at`. `sync` also adopts patch-ids
+  like `run end` and prunes.
 - GitHub: review threads with all their comments (`reviewThreads` and inner
   comments are paginated), review bodies (empty and pending ones skipped) and
   issue comments, through GraphQL. GitLab: the MR, all discussions
@@ -276,8 +296,10 @@ agent-review prune --all
   (type, severity, triage, held, killed findings, anchors of our findings) and
   comments not yet posted stay. Remote threads match local ones by remote id,
   then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first
-  comment, then by a trusted `<!-- agent-review id=<local id> -->` marker that
-  `publish` adds to every body. Unmatched threads are imported as
+  comment, then by a trusted `<!-- agent-review id=<local id> attempt=<attempt> -->`
+  marker that `publish` adds to every body. That marker claims only a local
+  comment in `posting` state with the same attempt id, never a `pending` one:
+  another store's comment can carry the same local id (`h1/c1`). Unmatched threads are imported as
   `gh-t<comment id>` (review thread), `gh-r<review id>` (review body),
   `gh-c<comment id>` (general comment) or `gl-n<note id>`, with `-2`, `-3`
   added when that id is taken; an id is never reused, including a killed
@@ -287,13 +309,19 @@ agent-review prune --all
 - Trust: a marker or record counts only when its comment's author is the
   authenticated user, `editor` is null or that user, and (for a marker) it is
   in the thread's first comment. Untrusted ones import as plain comments.
+  GitLab notes report no editor (the API has no `last_edited_by`, and
+  `updated_at` also changes on resolve), so a maintainer could edit a note of
+  mine unseen. On GitLab, records, `Re:` answers and `agent-review` marker
+  claims therefore count only when the note's body equals a body this store
+  sent (`sent` on the comment or record); anything else imports as a plain
+  comment. A record posted from another clone thus never counts on GitLab.
   Trusted records are stored under `records`; a trusted general comment ending
   in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`
   marker) answers that thread: it is added as a reply and, when the thread is
   not resolvable, resolves it as `fixed <sha>` (a `Fixed in` answer) or
   reopens it (any other answer).
-- A draft note with a marker for a local comment marks it `posting` with its
-  `draft_id`, so a later publish publishes it; a `draft_id` whose draft is gone
+- A draft note with a marker for a local comment and its attempt id marks it
+  `posting` with its `draft_id`, so a later publish publishes it; a `draft_id` whose draft is gone
   is cleared.
 - Threads and comments the host no longer returns are kept and flagged
   `deleted_remote: true` with `deleted_seen_at`; they are never dropped and
@@ -310,11 +338,14 @@ agent-review prune --all
   until a later `reveal` pass of the same cycle, or the run, has ended) and
   local comment threads, new replies, resolve and reopen changes, and the final
   record of each ended run not posted yet. Never posted: killed findings,
-  findings resolved `stale` before they were posted, imported comments, and
-  local comments by another human author (listed under `skipped`).
+  findings resolved `stale` before they were posted, imported comments, local
+  comments by another human author, and runs that ended before the target's
+  `attached_at` (history from before the PR/MR) with their findings, replies,
+  resolves and records (listed under `skipped`).
 - Every body ends with a signature (agent: `<model> <effort> <harness>
   <run>.<pass>.<reviewer>`, plus ` post-reveal`; human: the login) and
-  `<!-- agent-review id=<local id> -->`. Finding threads also carry
+  `<!-- agent-review id=<local id> attempt=<attempt> -->`, with one attempt id
+  per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
 - GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
   (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
@@ -334,8 +365,13 @@ agent-review prune --all
   fixed and open counts, a `| Pass | Reviewed | Starting context | Reviewer |`
   table, `Reveal:` and `Fixed by:` lines when known, and
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`.
-- Crash safety: each item is saved as `posting` with an attempt id before its
-  write and gets its remote id right after. A rerun syncs first and matches
+  `N` counts the run's passes covering the repaired head by the same rules as
+  `status`. The verdict is `review-fixed` when the run has repair commits that
+  no pass of it covers, else `reviewed` (committing a reviewed dirty tree is
+  `reviewed`).
+- Crash safety: each item is saved as `posting` with the attempt id and the
+  exact body it sends (`sent`) before its write and gets its remote id right
+  after. A rerun syncs first and matches
   `posting` items by their `agent-review` marker before retrying, and publishes
   a GitLab draft that was created but not published. A `posting` item that a
   sync finds neither as a note nor as a draft goes back to `pending` (keeping
@@ -375,7 +411,7 @@ Target file:
     "state": "open", "closed_at": null, "head_branch": "feat/login",
     "head_sha": "5d6e7f...", "base_sha": "1a2b3c...", "start_sha": null,
     "author": "brandonocasey", "login": "brandonocasey",
-    "synced_at": "2026-10-16T13:00:00Z"
+    "synced_at": "2026-10-16T13:00:00Z", "attached_at": "2026-10-16T12:50:00Z"
   },
   "records": [
     { "run": "rv-zz99", "head": "5d6e7f...", "reviews_at_head": 2, "open": 0,
@@ -416,8 +452,8 @@ Target file:
       "repaired_head": "9e8d7c...",
       "repair": [{ "sha": "9e8d7c...", "patch_id": "bb22..." }],
       "reveal": null,
-      "record": { "post": "posted", "attempt": "at-x1y2", "head": "9e8d7c...",
-                  "remote_id": "2002",
+      "record": { "post": "posted", "attempt": "at-x1y2", "sent": "**Review ...",
+                  "head": "9e8d7c...", "remote_id": "2002",
                   "url": "https://github.com/...#issuecomment-2002" }
     }
   ],
@@ -445,6 +481,7 @@ Target file:
           "body": "Retry loop drops the last response when ...",
           "created_at": "2026-10-16T12:20:00Z",
           "post": "posted", "draft_id": null, "attempt": "at-q3r4",
+          "sent": "**bug (high):** Retry loop ...",
           "deleted_remote": false, "deleted_seen_at": null,
           "remote": { "id": "1001", "url": "https://github.com/...#discussion_r1001",
                       "login": "brandonocasey", "is_me": true, "editor": null,
@@ -453,7 +490,7 @@ Target file:
           "author": { "kind": "human", "login": "Brandon", "git_name": false },
           "body": "Fixed in 9e8d7c6.", "created_at": "2026-10-16T12:40:00Z",
           "post": "pending", "remote": null, "draft_id": null, "attempt": null,
-          "deleted_remote": false, "deleted_seen_at": null }
+          "sent": null, "deleted_remote": false, "deleted_seen_at": null }
       ],
       "remote": { "kind": "review-thread", "id": "PRRT_kwDO...", "url": "...",
                   "resolvable": true, "outdated": false, "path": "src/net.rs",
@@ -477,7 +514,8 @@ work `commit` is `null` and `tree` names the reviewed tree (`run end` fills in
 `<run>.<pass>.<reviewer>.f<n>`. Comment ids are `<thread id>/c<n>` for local
 comments and `remote-<id>` for imported ones. Comment `post` is `pending` for
 comments written locally, `posting` while `publish` writes it (`attempt` names
-the try; `draft_id` a GitLab draft), and `posted` once the forge has it; `remote` and the target's `review` and `records` are filled by
+the try, `sent` the exact body; `draft_id` a GitLab draft), and `posted` once
+the forge has it; `remote` and the target's `review` and `records` are filled by
 `sync`. Imported threads have no `anchor`; their position is in `remote`.
 
 ## Finding input

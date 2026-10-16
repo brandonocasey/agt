@@ -4,7 +4,9 @@
 # `query=query Name(...)` or `query=mutation Name(...)` argument is keyed as `query=Name` and a
 # `body=<text>` argument as `body=`. The request body (`--input -` stdin or the `body=` text) of
 # call number <c> in calls.log is saved as input-<c>. <key>.fail makes the call fail after its
-# input is read, as when a write reaches the host but its response is lost. Any other call fails.
+# input is read, as when a write reaches the host but its response is lost. In a response,
+# {{LAST_NOTE}} and {{LAST_BODY}} stand for the JSON-escaped "note" or "body" of the latest
+# request that sent one, the text the host then shows. Any other call fails.
 set -eu
 dir=$FAKE_FORGE_DIR
 body=
@@ -45,9 +47,46 @@ if [ -f "$dir/$key.fail" ]; then
   echo "fake-forge: simulated failure: $*" >&2
   exit 1
 fi
+# The JSON-escaped string field $1 of the latest request that sent one.
+last() {
+  latest=
+  for name in $(ls "$dir" | grep '^input-' | sort -t- -k2 -n); do
+    if grep -q "\"$1\":\"" "$dir/$name"; then
+      latest=$dir/$name
+    fi
+  done
+  [ -n "$latest" ] || return 0
+  FIELD="\"$1\":\"" awk '{
+    rest = substr($0, index($0, ENVIRON["FIELD"]) + length(ENVIRON["FIELD"]))
+    out = ""
+    for (i = 1; i <= length(rest); i++) {
+      c = substr(rest, i, 1)
+      if (c == "\\") { out = out c substr(rest, i + 1, 1); i++; continue }
+      if (c == "\"") break
+      out = out c
+    }
+    printf "%s", out
+  }' "$latest"
+}
+reply() {
+  if ! grep -q '{{LAST_' "$1"; then
+    cat "$1"
+    return
+  fi
+  NOTE=$(last note) BODY=$(last body) awk '{
+    line = $0
+    while ((at = index(line, "{{LAST_NOTE}}")) > 0) {
+      line = substr(line, 1, at - 1) ENVIRON["NOTE"] substr(line, at + 13)
+    }
+    while ((at = index(line, "{{LAST_BODY}}")) > 0) {
+      line = substr(line, 1, at - 1) ENVIRON["BODY"] substr(line, at + 13)
+    }
+    print line
+  }' "$1"
+}
 for file in "$dir/$key.$count.json" "$dir/$key.json"; do
   if [ -f "$file" ]; then
-    cat "$file"
+    reply "$file"
     exit 0
   fi
 done

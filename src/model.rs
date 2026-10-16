@@ -39,6 +39,10 @@ pub struct Review {
     pub author: Option<String>,
     pub login: String,
     pub synced_at: String,
+    /// When a sync first linked the target to this PR/MR; `publish` never posts runs that
+    /// ended earlier. Absent in stores written before it existed.
+    #[serde(default)]
+    pub attached_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,9 @@ pub struct Reveal {
 pub struct RecordPost {
     pub post: PostState,
     pub attempt: Option<String>,
+    /// The body last sent; GitLab shows no edits, so sync trusts only this text.
+    #[serde(default)]
+    pub sent: Option<String>,
     pub head: String,
     pub remote_id: Option<String>,
     pub url: Option<String>,
@@ -287,6 +294,9 @@ pub struct Comment {
     pub remote: Option<RemoteComment>,
     pub draft_id: Option<String>,
     pub attempt: Option<String>,
+    /// The body last sent; GitLab shows no edits, so sync trusts only this text.
+    #[serde(default)]
+    pub sent: Option<String>,
     pub deleted_remote: bool,
     pub deleted_seen_at: Option<String>,
 }

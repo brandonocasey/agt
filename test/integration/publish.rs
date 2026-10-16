@@ -86,8 +86,26 @@ fn reviewed_with(origin: &str, lock: bool) -> Setup {
     }
 }
 
+/// Links the reviewed branch to PR 42, then ends its run: `publish` posts only runs that end
+/// after the target is linked.
+fn link(setup: &Setup) {
+    let env = &setup.env;
+    gh_sync(env, None, &GhPr::new().render(setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+}
+
 fn marked(text: &str, local: &str) -> String {
     format!("{text}\n<!-- agent-review id={local} -->")
+}
+
+/// The text a failed write sent for the first comment of `thread`, as the host shows it.
+fn sent(env: &Env, thread_id: &str) -> String {
+    let list = env.run(&["list"]);
+    thread(&list, thread_id)["comments"][0]["sent"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -453,7 +471,12 @@ fn assert_record(setup: &Setup, record: &str) {
         "<!-- review-record v2 id={} head={} reviews-at-head=1 open=1 -->",
         setup.run, setup.head
     )));
-    assert!(record.ends_with(&format!("<!-- agent-review id={}/record -->", setup.run)));
+    let marker = format!("<!-- agent-review id={}/record attempt=", setup.run);
+    assert!(
+        record.rsplit_once('\n').unwrap().1.starts_with(&marker),
+        "{record}"
+    );
+    assert!(record.ends_with(" -->"), "{record}");
 }
 
 fn assert_gh_dry_run(setup: &Setup, dry: &Value) {
@@ -486,16 +509,15 @@ fn assert_gh_dry_run(setup: &Setup, dry: &Value) {
         "{}.c1p0.r1\n<!-- review-finding v1 id={f1} sha={} -->",
         setup.run, setup.head
     )));
-    assert!(body.ends_with(&format!("<!-- agent-review id={f1}/c1 -->")));
+    assert!(body.ends_with(&format!(
+        "<!-- agent-review id={f1}/c1 attempt=<attempt> -->"
+    )));
     let outside = writes[1]["input"]["body"].as_str().unwrap();
     assert!(outside.starts_with("`a.txt:9`\n\n**nit:** Out-of-diff text of f2."));
     assert_eq!(writes[1]["call"], json!(post(GH_COMMENTS)));
-    assert!(
-        writes[2]["input"]["body"]
-            .as_str()
-            .unwrap()
-            .starts_with("General note from me.\n\nme\n<!-- agent-review id=h1/c1 -->")
-    );
+    assert!(writes[2]["input"]["body"].as_str().unwrap().starts_with(
+        "General note from me.\n\nme\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
+    ));
     assert_eq!(dry["skipped"][0]["item"], "h2");
     assert_record(setup, writes[7]["input"]["body"].as_str().unwrap());
 }
@@ -517,12 +539,12 @@ fn assert_gh_posted(setup: &Setup) {
         .find(|(_, input)| input.contains("Thanks, done."))
         .unwrap();
     let answer: Value = serde_json::from_str(&answer.1).unwrap();
+    let answer = answer["body"].as_str().unwrap();
     assert!(
-        answer["body"]
-            .as_str()
-            .unwrap()
-            .ends_with("<!-- agent-review id=gh-c900/c1 -->\nRe: gh-c900")
+        answer.contains("<!-- agent-review id=gh-c900/c1 attempt=at-"),
+        "{answer}"
     );
+    assert!(answer.ends_with(" -->\nRe: gh-c900"), "{answer}");
     assert_never_posted(env);
     let list = env.run(&["list"]);
     let f1 = thread(&list, &setup.finding(1));
@@ -602,10 +624,11 @@ fn github_publish_posts_every_payload_once() {
 fn publish_refuses_a_pr_by_someone_else() {
     let setup = reviewed("git@github.com:me/repo.git");
     let env = &setup.env;
-    env.run(&["run", "end", "--run", &setup.run]);
     let mut pr = GhPr::new();
     pr.author = "alice";
     gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
     let error = env.fail(&["publish", "--pr", "42"], None);
     assert!(error.contains("authored by alice, not me"), "{error}");
     assert!(env.forge_calls().iter().all(|call| !call.contains("POST")));
@@ -620,8 +643,7 @@ fn github_crash_after_write_does_not_duplicate() {
     let setup = reviewed("git@github.com:me/repo.git");
     let env = &setup.env;
     let (f1, f2) = (setup.finding(1), setup.finding(2));
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     env.fail_call(&strs(&post(GH_REVIEWS)));
     env.fail(&["publish", "--pr", "42"], None);
     let list = env.run(&["list"]);
@@ -633,7 +655,7 @@ fn github_crash_after_write_does_not_duplicate() {
         "PRRT_f1",
         false,
         3,
-        vec![gh_comment(501, "me", &marked("f1", &format!("{f1}/c1")))],
+        vec![gh_comment(501, "me", &sent(env, &f1))],
         &setup.head,
     ));
     pr.review(&setup.head);
@@ -644,8 +666,7 @@ fn github_crash_after_write_does_not_duplicate() {
     assert_eq!(thread(&list, &f1)["comments"][0]["remote"]["id"], "501");
     assert_eq!(thread(&list, &f2)["comments"][0]["post"], "posting");
 
-    pr.comments
-        .push(gh_comment(601, "me", &marked("f2", &format!("{f2}/c1"))));
+    pr.comments.push(gh_comment(601, "me", &sent(env, &f2)));
     gh_sync(env, None, &pr.render(&setup));
     env.pass_call(&strs(&post(GH_COMMENTS)));
     env.respond(&strs(&post(GH_COMMENTS)), r#"{"id":604}"#);
@@ -747,13 +768,14 @@ fn gl_before(setup: &Setup) -> Vec<Value> {
 }
 
 fn gl_posted(setup: &Setup) -> Vec<Value> {
-    let (f1, f2) = (setup.finding(1), setup.finding(2));
+    let f2 = setup.finding(2);
     let mut list = gl_before(setup);
     list.push(gl_discussion(
         "d-f1",
         false,
         Some(3),
-        vec![gl_note(5001, "me", &marked("f1", &format!("{f1}/c1")))],
+        // A published draft returns no id; sync knows it by the text this store sent.
+        vec![gl_note(5001, "me", "{{LAST_NOTE}}")],
         setup,
     ));
     list.push(gl_discussion(
@@ -795,17 +817,13 @@ fn gl_done(setup: &Setup) -> Vec<Value> {
         true,
         Some(3),
         vec![
-            gl_note(5001, "me", &marked("f1", &format!("{f1}/c1"))),
+            gl_note(5001, "me", "{{LAST_NOTE}}"),
             gl_note(5011, "me", &marked("Fixed.", &format!("{f1}/c2"))),
         ],
         setup,
     );
-    let record = format!(
-        "<!-- review-record v2 id={run} head={head} reviews-at-head=1 open=1 -->\n<!-- agent-review id={run}/record -->",
-        run = setup.run,
-        head = setup.head
-    );
-    list.push(gl_general("d-rec", gl_note(5020, "me", &record)));
+    // GitLab shows no edits, so the record must read as this store sent it.
+    list.push(gl_general("d-rec", gl_note(5020, "me", "{{LAST_BODY}}")));
     list
 }
 
@@ -994,7 +1012,6 @@ fn gitlab_crash_after_write_does_not_duplicate() {
     let setup = reviewed("git@gitlab.com:me/proj.git");
     let env = &setup.env;
     let (f1, f2) = (setup.finding(1), setup.finding(2));
-    env.run(&["run", "end", "--run", &setup.run]);
     let drafts = gl_write("POST", &format!("{GL_MR}/draft_notes"));
     let discussions = gl_write("POST", &format!("{GL_MR}/discussions"));
     let publish = args(&[
@@ -1004,10 +1021,12 @@ fn gitlab_crash_after_write_does_not_duplicate() {
         &format!("{GL_MR}/draft_notes/77/publish"),
     ]);
     gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
     env.fail_call(&strs(&drafts));
     env.fail(&["publish", "--pr", "3"], None);
 
-    let draft = json!({ "id": 77, "note": marked("f1", &format!("{f1}/c1")) });
+    let draft = json!({ "id": 77, "note": sent(env, &f1) });
     gl_sync(env, &setup, &[], &[draft]);
     env.respond(&strs(&publish), "");
     env.fail_call(&strs(&discussions));
@@ -1019,6 +1038,7 @@ fn gitlab_crash_after_write_does_not_duplicate() {
 
     let mut posted = gl_posted(&setup);
     posted.drain(..2);
+    posted[1]["notes"][0]["body"] = json!(sent(env, &f2));
     gl_sync(env, &setup, &posted, &[]);
     env.respond(
         &strs(&gl_write("POST", &format!("{GL_MR}/notes"))),
@@ -1144,8 +1164,7 @@ fn own_review_body_is_not_imported() {
 fn finding_kill_refuses_a_posting_finding() {
     let setup = reviewed(GH);
     let env = &setup.env;
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     env.fail_call(&strs(&post(GH_REVIEWS)));
     env.fail(&["publish", "--pr", "42"], None);
     let error = env.fail(
@@ -1179,8 +1198,7 @@ fn comments_before_first_sync_are_mine() {
     let setup = reviewed(GH);
     let env = &setup.env;
     env.run(&["comment", "--body", "Written before sync."]);
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert_eq!(dry["skipped"], json!([]), "{dry}");
     assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
@@ -1205,8 +1223,7 @@ fn target_without_local_branch_uses_pr_head() {
 fn publish_target_on_detached_head() {
     let setup = reviewed(GH);
     let env = &setup.env;
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     env.run(&["sync", "--pr", "42"]);
     env.git(&["switch", "-q", "--detach"]);
     let dry = env.run(&["--target", "gh-42", "publish", "--dry-run"]);
@@ -1218,18 +1235,24 @@ fn github_reply_on_general_finding_posts_re_answer() {
     let setup = reviewed(GH);
     let env = &setup.env;
     let (f1, f2) = (setup.finding(1), setup.finding(2));
-    env.run(&["run", "end", "--run", &setup.run]);
+    link(&setup);
+    // Both findings land with lost responses, so sync knows them by their markers.
+    env.fail_call(&strs(&post(GH_REVIEWS)));
+    env.fail(&["publish", "--pr", "42"], None);
     let mut pr = GhPr::new();
     pr.threads.push(gh_thread(
         "PRRT_f1",
         false,
         3,
-        vec![gh_comment(501, "me", &marked("f1", &format!("{f1}/c1")))],
+        vec![gh_comment(501, "me", &sent(env, &f1))],
         &setup.head,
     ));
     pr.review(&setup.head);
-    pr.comments
-        .push(gh_comment(601, "me", &marked("f2", &format!("{f2}/c1"))));
+    gh_sync(env, None, &pr.render(&setup));
+    env.fail_call(&strs(&post(GH_COMMENTS)));
+    env.fail(&["publish", "--pr", "42"], None);
+    env.pass_call(&strs(&post(GH_COMMENTS)));
+    pr.comments.push(gh_comment(601, "me", &sent(env, &f2)));
     gh_sync(env, None, &pr.render(&setup));
     env.run(&["sync", "--pr", "42"]);
     env.run(&[
@@ -1257,8 +1280,20 @@ fn github_reply_on_general_finding_posts_re_answer() {
     env.respond_nth(&strs(&post(GH_COMMENTS)), 2, r#"{"id":604}"#);
     let published = env.run(&["publish", "--pr", "42"]);
     assert_eq!(kinds(&published, "posted"), ["reply", "record"]);
-    let sent: Value = serde_json::from_str(&env.forge_inputs()[0].1).unwrap();
-    assert_eq!(sent["body"], answer);
+    let inputs = env.forge_inputs();
+    let (_, posted) = inputs
+        .iter()
+        .find(|(_, input)| input.contains("Not fixed"))
+        .unwrap();
+    let posted: Value = serde_json::from_str(posted).unwrap();
+    let posted = posted["body"].as_str().unwrap();
+    assert!(
+        posted.starts_with(&format!(
+            "Not fixed: needs a design change.\n\nme\n<!-- agent-review id={f2}/c2 attempt=at-"
+        )),
+        "{posted}"
+    );
+    assert!(posted.ends_with(&format!(" -->\nRe: {f2}")), "{posted}");
     let list = env.run(&["list"]);
     let general = thread(&list, &f2);
     assert_eq!(general["comments"].as_array().unwrap().len(), 2);
@@ -1307,8 +1342,7 @@ fn rejected_finding_returns_to_pending_and_can_be_killed() {
     let setup = reviewed(GH);
     let env = &setup.env;
     let f1 = setup.finding(1);
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     env.fail_call(&strs(&post(GH_REVIEWS)));
     env.fail(&["publish", "--pr", "42"], None);
     env.fail(&["publish", "--pr", "42"], None);
@@ -1326,8 +1360,7 @@ fn stale_unposted_findings_are_not_posted() {
     let env = &setup.env;
     let f2 = setup.finding(2);
     env.run(&["resolve", &f2, "--triage", "stale"]);
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert_eq!(writes_for(&dry, &format!("{f2}/c1")), Vec::<String>::new());
     assert_eq!(kinds(&dry, "writes"), ["review", "record"]);
@@ -1337,8 +1370,7 @@ fn stale_unposted_findings_are_not_posted() {
 fn run_end_releases_locked_findings() {
     let setup = reviewed_with(GH, true);
     let env = &setup.env;
-    env.run(&["run", "end", "--run", &setup.run]);
-    gh_sync(env, None, &GhPr::new().render(&setup));
+    link(&setup);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert_eq!(kinds(&dry, "writes"), ["review", "thread", "record"]);
 }
@@ -1397,4 +1429,230 @@ fn sync_from_detached_head_adopts_the_branch_target() {
     assert_eq!(synced["renamed_from"], branch_key);
     let list = env.run(&["--target", "gh-42", "list"]);
     assert!(ids(&list).contains(&setup.finding(1)), "{list}");
+}
+
+#[test]
+fn foreign_marker_never_claims_a_pending_comment() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["comment", "--body", "Local pending note.", "--author", "me"]);
+    let mut pr = GhPr::new();
+    pr.comments
+        .push(gh_comment(950, "me", &marked("Other store text.", "h1/c1")));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let local = &thread(&list, "h1")["comments"][0];
+    assert_eq!(local["body"], "Local pending note.");
+    assert_eq!(local["post"], "pending");
+    assert_eq!(local["remote"], Value::Null);
+    assert!(ids(&list).contains(&"gh-c950".to_owned()), "{list}");
+}
+
+#[test]
+fn closed_unrelated_pr_is_not_attached_or_pruned() {
+    let env = Env::with_branch();
+    env.git(&["remote", "add", "origin", GH]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let base = env.git(&["rev-parse", "main"]);
+    let branch_key = env.run(&["run", "start"])["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "GET",
+            "repos/me/repo/pulls?head=me%3Afeat&state=all&per_page=20",
+        ],
+        r#"[{"number":5,"state":"closed"}]"#,
+    );
+    let vars = [
+        ("HEAD", "1111111111111111111111111111111111111111"),
+        ("BASE", base.as_str()),
+        ("REPO", "me/repo"),
+        ("NUMBER", "5"),
+        ("STATE", "CLOSED"),
+        ("CLOSED", "\"2020-01-01T00:00:00Z\""),
+    ];
+    for query in ["PullRequest", "PullReviews", "PullComments"] {
+        let args = [
+            "api",
+            "graphql",
+            "-f",
+            "owner=me",
+            "-f",
+            "name=repo",
+            "-F",
+            "number=5",
+            "-f",
+            &format!("query={query}"),
+        ];
+        env.respond(&args, &fixture("gh-empty-pr.json", &vars));
+    }
+    let synced = env.run(&["sync"]);
+    assert_eq!(synced["target"], "gh-5");
+    assert_eq!(synced["pruned"], json!([]), "synced just now");
+    let status = env.run(&["status"]);
+    assert_eq!(status["target"], branch_key, "the branch target stays");
+    assert_eq!(status["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(status["review"], Value::Null);
+}
+
+#[test]
+fn record_counts_reviews_like_status() {
+    let env = Env::with_branch();
+    env.git(&["remote", "add", "origin", GH]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("C0");
+    let base = env.git(&["rev-parse", "main"]);
+    env.write("a.txt", &numbered(10, &[(3, "three"), (6, "six")]));
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pass = [
+        "pass",
+        "start",
+        "--run",
+        &run,
+        "--kind",
+        "full",
+        "--reviewers",
+        "-",
+    ];
+    env.run_stdin(&pass, REVIEWER);
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    let head = env.commit_all("commit exactly the reviewed tree");
+    let setup = Setup {
+        env,
+        run,
+        head,
+        base,
+    };
+    link(&setup);
+    assert_eq!(setup.env.run(&["status"])["reviews_at_head"], 1);
+    let dry = setup.env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let record = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|write| write["kind"] == "record")
+        .unwrap()["input"]["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        record.starts_with(&format!(
+            "**Review {}:** reviewed at {}.",
+            setup.run,
+            &setup.head[..7]
+        )),
+        "{record}"
+    );
+    assert!(record.contains("reviews-at-head=1 "), "{record}");
+}
+
+#[test]
+fn gitlab_records_need_a_body_this_store_sent() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    let record = format!(
+        "<!-- review-record v2 id=rv-zzzz head={} reviews-at-head=2 open=0 -->\n<!-- agent-review id=rv-zzzz/record -->",
+        setup.head
+    );
+    let mut note = gl_note(6001, "me", &record);
+    note["resolvable"] = json!(false);
+    gl_sync(
+        env,
+        &setup,
+        &[json!({ "id": "d-r", "individual_note": true, "notes": [note] })],
+        &[],
+    );
+    let synced = env.run(&["sync", "--pr", "3"]);
+    assert_eq!(
+        synced["records"], 0,
+        "GitLab shows no edits, so only sent text is trusted"
+    );
+    assert_eq!(env.run(&["status"])["imported_records"], json!([]));
+}
+
+#[test]
+fn rename_merge_keeps_colliding_human_threads() {
+    let env = Env::with_branch();
+    env.git(&["remote", "add", "origin", GH]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let head = env.commit_all("change");
+    let base = env.git(&["rev-parse", "main"]);
+    let setup = Setup {
+        env,
+        run: String::new(),
+        head,
+        base,
+    };
+    let env = &setup.env;
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.git(&["switch", "-q", "--detach"]);
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&[
+        "--target",
+        "gh-42",
+        "comment",
+        "--body",
+        "Detached note.",
+        "--author",
+        "me",
+    ]);
+    env.git(&["switch", "-q", "feat"]);
+    env.run(&["comment", "--body", "Branch note.", "--author", "me"]);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["--target", "gh-42", "list"]);
+    let mut texts: Vec<&str> = list["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["comments"][0]["body"].as_str().unwrap())
+        .collect();
+    texts.sort_unstable();
+    assert_eq!(texts, ["Branch note.", "Detached note."], "{list}");
+}
+
+#[test]
+fn runs_ended_before_the_pr_are_never_published() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let (f1, f2) = (setup.finding(1), setup.finding(2));
+    env.run(&[
+        "resolve",
+        &f1,
+        "--resolution",
+        &format!("fixed {}", setup.head),
+    ]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let later = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.run_with(
+        &["sync", "--pr", "42"],
+        None,
+        &[("AGENT_REVIEW_NOW", &later.to_string())],
+    );
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(dry["writes"], json!([]), "{dry}");
+    let skipped: Vec<&str> = dry["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skip| skip["item"].as_str().unwrap())
+        .collect();
+    assert!(
+        skipped.contains(&f1.as_str()) && skipped.contains(&f2.as_str()),
+        "{dry}"
+    );
 }

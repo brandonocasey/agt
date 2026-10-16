@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::sync::{
     self, AGENT_MARKER, Connection, FINDING_MARKER, RECORD_MARKER, REVIEW_ID, agent_id,
 };
-use super::{Ctx, author_label, is_open, random_id};
+use super::{Ctx, author_label, is_open, random_id, run_reviews_at};
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
@@ -109,6 +109,8 @@ enum Spot {
 
 /// The posting plan for one target state; built the same way for a dry run and a real one.
 struct Planner<'a> {
+    ctx: &'a Ctx,
+    attempt: &'a str,
     repo: &'a Repo,
     connection: &'a Connection,
     review: &'a Review,
@@ -131,20 +133,22 @@ pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, dry_run: bool, not_own: bool)
         return dry(ctx, &connection, target);
     }
     sync::sync_planned(ctx, &connection, plan)?;
+    // One attempt id per publish: sync claims a marked note only for a write of that attempt.
+    let attempt = random_id().replacen("rv-", "at-", 1);
     let mut posted = Vec::new();
     let mut skipped = Vec::new();
     let target = load(ctx, &connection)?;
-    let (writes, skips, _) = planner(ctx, &connection, &target)?.threads(&target);
+    let (writes, skips, _) = planner(ctx, &connection, &target, &attempt)?.threads(&target);
     skipped.extend(skips);
-    run_writes(ctx, &connection, &target, writes, &mut posted)?;
+    run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     sync::sync_with(ctx, &connection)?;
     let target = load(ctx, &connection)?;
-    let (writes, skips) = planner(ctx, &connection, &target)?.replies(&target);
+    let (writes, skips) = planner(ctx, &connection, &target, &attempt)?.replies(&target);
     skipped.extend(skips);
-    run_writes(ctx, &connection, &target, writes, &mut posted)?;
+    run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let target = load(ctx, &connection)?;
-    let writes = planner(ctx, &connection, &target)?.records(&target);
-    run_writes(ctx, &connection, &target, writes, &mut posted)?;
+    let writes = planner(ctx, &connection, &target, &attempt)?.records(&target)?;
+    run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let synced = sync::sync_with(ctx, &connection)?;
     Ok(json!({
         "target": connection.key,
@@ -165,12 +169,15 @@ fn planner<'a>(
     ctx: &'a Ctx,
     connection: &'a Connection,
     target: &'a Target,
+    attempt: &'a str,
 ) -> Result<Planner<'a>> {
     let review = target
         .review
         .as_ref()
         .ok_or_else(|| Error(format!("target {} has no synced PR/MR", target.key)))?;
     Ok(Planner {
+        ctx,
+        attempt,
         repo: &ctx.repo,
         connection,
         review,
@@ -179,7 +186,9 @@ fn planner<'a>(
 
 /// Every payload a publish would send, from an in-memory sync; nothing is written.
 fn dry(ctx: &Ctx, connection: &Connection, mut target: Target) -> Result<Value> {
-    let (threads, skipped, expected) = planner(ctx, connection, &target)?.threads(&target);
+    // A dry run sends nothing, so its markers name no real attempt.
+    let attempt = "<attempt>";
+    let (threads, skipped, expected) = planner(ctx, connection, &target, attempt)?.threads(&target);
     // Treat the threads above as posted so their replies and resolves show too.
     for (id, kind) in expected {
         if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
@@ -189,9 +198,9 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target) -> Result<Value> 
             }
         }
     }
-    let planner = planner(ctx, connection, &target)?;
+    let planner = planner(ctx, connection, &target, attempt)?;
     let (replies, more) = planner.replies(&target);
-    let records = planner.records(&target);
+    let records = planner.records(&target)?;
     let writes: Vec<Value> = threads
         .iter()
         .chain(&replies)
@@ -322,7 +331,7 @@ impl Planner<'_> {
                     line,
                     side,
                 } => {
-                    let body = body(target, thread, first, None);
+                    let body = body(target, thread, first, None, self.attempt);
                     let comment = json!({ "path": path, "line": line, "side": side, "body": body });
                     match reviews.iter_mut().find(|(sha, ..)| *sha == commit) {
                         Some((_, ids, comments)) => {
@@ -334,7 +343,7 @@ impl Planner<'_> {
                     expected.push((thread.id.clone(), RemoteKind::ReviewThread));
                 }
                 Spot::Gitlab(position) => {
-                    let note = body(target, thread, first, None);
+                    let note = body(target, thread, first, None, self.attempt);
                     writes.push(Write {
                         item: Item::Draft {
                             comment: first.id.clone(),
@@ -347,7 +356,7 @@ impl Planner<'_> {
                 }
                 Spot::Outside => {
                     let location = thread.anchor.as_ref().map(location);
-                    let text = body(target, thread, first, location.as_deref());
+                    let text = body(target, thread, first, location.as_deref(), self.attempt);
                     writes.push(Write {
                         item: Item::Thread {
                             comment: first.id.clone(),
@@ -385,6 +394,9 @@ impl Planner<'_> {
     /// Why a new thread is not posted: a finding of a pass still in progress, or another
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
+        if let Some(reason) = self.pre_pr(target, thread) {
+            return Some(reason);
+        }
         if let Some(finding) = &thread.finding {
             let passes: Vec<&Pass> = target
                 .runs
@@ -427,6 +439,30 @@ impl Planner<'_> {
             ));
         }
         None
+    }
+
+    /// Why a finding is not the PR/MR's business: its run ended before the target was linked
+    /// to it, so it reviewed history from before the PR/MR.
+    fn pre_pr(&self, target: &Target, thread: &Thread) -> Option<String> {
+        let run = &thread.finding.as_ref()?.run;
+        self.run_before_pr(target, run)
+    }
+
+    fn run_before_pr(&self, target: &Target, run_id: &str) -> Option<String> {
+        let attached = self.review.attached_at.as_deref()?;
+        let ended = target
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)?
+            .ended_at
+            .as_deref()?;
+        // Timestamps share one fixed-width UTC format, so they order as text.
+        (ended < attached).then(|| {
+            format!(
+                "run {run_id} ended before the target was linked to {}",
+                self.review.url
+            )
+        })
     }
 
     fn publish_draft(&self, comment: &str, draft: &str) -> Write {
@@ -531,6 +567,10 @@ impl Planner<'_> {
             if thread.deleted_remote {
                 continue;
             }
+            if let Some(reason) = self.pre_pr(target, thread) {
+                skipped.push(skip(&thread.id, reason));
+                continue;
+            }
             for comment in thread.comments.iter().skip(1) {
                 if comment.remote.is_some() || comment.post == PostState::Posted {
                     continue;
@@ -553,7 +593,7 @@ impl Planner<'_> {
             let (Some(remote), Some(resolved)) = (&thread.remote, thread.resolve_pending) else {
                 continue;
             };
-            if thread.deleted_remote {
+            if thread.deleted_remote || self.pre_pr(target, thread).is_some() {
                 continue;
             }
             writes.push(self.resolve(&thread.id, remote, resolved));
@@ -568,7 +608,7 @@ impl Planner<'_> {
         remote: &RemoteThread,
         comment: &Comment,
     ) -> Write {
-        let text = body(target, thread, comment, None);
+        let text = body(target, thread, comment, None, self.attempt);
         let item = Item::Reply {
             comment: comment.id.clone(),
         };
@@ -654,7 +694,7 @@ impl Planner<'_> {
     }
 
     /// The final record of each ended run not posted yet.
-    fn records(&self, target: &Target) -> Vec<Write> {
+    fn records(&self, target: &Target) -> Result<Vec<Write>> {
         let path = match self.connection.forge {
             Forge::Github => format!(
                 "{}/issues/{}/comments",
@@ -667,21 +707,22 @@ impl Planner<'_> {
             .runs
             .iter()
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
+            .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .filter(|run| {
                 run.record
                     .as_ref()
                     .is_none_or(|record| record.post != PostState::Posted)
             })
             .map(|run| {
-                let (head, text) = record_body(target, run);
-                Write {
+                let (head, text) = record_body(self.ctx, target, run, self.attempt)?;
+                Ok(Write {
                     item: Item::Record {
                         run: run.id.clone(),
                         head,
                     },
                     args: self.post(&path),
                     body: Some(json!({ "body": text })),
-                }
+                })
             })
             .collect()
     }
@@ -696,7 +737,13 @@ fn location(anchor: &Anchor) -> String {
 }
 
 /// The posted text: a finding heading, the text, the signature and the markers.
-fn body(target: &Target, thread: &Thread, comment: &Comment, location: Option<&str>) -> String {
+fn body(
+    target: &Target,
+    thread: &Thread,
+    comment: &Comment,
+    location: Option<&str>,
+    attempt: &str,
+) -> String {
     let first = thread
         .comments
         .first()
@@ -746,7 +793,7 @@ fn body(target: &Target, thread: &Thread, comment: &Comment, location: Option<&s
             .unwrap_or_default();
         let _ = write!(text, "\n{FINDING_MARKER}{} sha={sha} -->", thread.id);
     }
-    let _ = write!(text, "\n{AGENT_MARKER}{} -->", comment.id);
+    let _ = write!(text, "\n{AGENT_MARKER}{} attempt={attempt} -->", comment.id);
     text
 }
 
@@ -780,7 +827,7 @@ fn tool(model: &str, effort: &str, harness: &str, version: Option<&str>) -> Stri
 }
 
 /// The run's final record per the review skill, and the head it records.
-fn record_body(target: &Target, run: &Run) -> (String, String) {
+fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(String, String)> {
     let last = run
         .passes
         .last()
@@ -809,15 +856,10 @@ fn record_body(target: &Target, run: &Run) -> (String, String) {
     let open = findings.iter().filter(|thread| is_open(thread)).count();
     let mut cycles: Vec<u32> = run.passes.iter().map(|pass| pass.cycle).collect();
     cycles.dedup();
-    let at_head = run
-        .passes
-        .iter()
-        .filter(|pass| pass.ended_at.is_some() && !pass.dirty && pass.head == head)
-        .filter(|pass| {
-            pass.kind == PassKind::Full || (pass.kind == PassKind::FixCheck && !pass.major_found)
-        })
-        .count();
-    let verdict = if run.repair.is_empty() {
+    let at_head = run_reviews_at(ctx, target, &run.id, &head)?;
+    // Fixes after the last pass make the head "review-fixed"; a repair a pass still covers,
+    // such as committing the reviewed dirty tree, leaves it "reviewed".
+    let verdict = if run.repair.is_empty() || at_head > 0 {
         "reviewed"
     } else {
         "review-fixed"
@@ -903,8 +945,12 @@ fn record_body(target: &Target, run: &Run) -> (String, String) {
         "{RECORD_MARKER}id={} head={head} reviews-at-head={at_head} open={open} -->",
         run.id
     );
-    let _ = write!(text, "{AGENT_MARKER}{}/record -->", run.id);
-    (head, text)
+    let _ = write!(
+        text,
+        "{AGENT_MARKER}{}/record attempt={attempt} -->",
+        run.id
+    );
+    Ok((head, text))
 }
 
 /// Runs writes in order. Each item is marked `posting` and saved before its call and gets its
@@ -914,6 +960,7 @@ fn run_writes(
     connection: &Connection,
     target: &Target,
     writes: Vec<Write>,
+    attempt: &str,
     posted: &mut Vec<Value>,
 ) -> Result<()> {
     let mut created: Option<String> = None;
@@ -936,9 +983,8 @@ fn run_writes(
             posted.push(json!({ "kind": write.kind(), "items": write.ids(), "local_only": true }));
             continue;
         }
-        let attempt = random_id().replacen("rv-", "at-", 1);
         change(ctx, target, |target| {
-            mark(target, &write.item, &attempt);
+            mark(target, &write, attempt);
             Ok(())
         })?;
         let args: Vec<&str> = write.args.iter().map(String::as_str).collect();
@@ -972,8 +1018,35 @@ fn clear_pending(target: &mut Target, id: &str) {
     }
 }
 
-fn mark(target: &mut Target, item: &Item, attempt: &str) {
-    let ids = match item {
+/// The text each item of a write sends, in the order of its ids.
+fn sent(write: &Write) -> Vec<Option<String>> {
+    let text = |value: &Value| value.as_str().map(str::to_owned);
+    match (&write.item, &write.body) {
+        (Item::Review { .. }, Some(body)) => body["comments"]
+            .as_array()
+            .map(|comments| {
+                comments
+                    .iter()
+                    .map(|comment| text(&comment["body"]))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        (Item::Draft { .. }, Some(body)) => vec![text(&body["note"])],
+        (_, Some(body)) => vec![text(&body["body"])],
+        // A GraphQL reply carries its text as a `body=` argument.
+        (_, None) => vec![
+            write
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("body="))
+                .map(str::to_owned),
+        ],
+    }
+}
+
+fn mark(target: &mut Target, write: &Write, attempt: &str) {
+    let mut texts = sent(write).into_iter();
+    let ids = match &write.item {
         Item::Review { comments } => comments.clone(),
         Item::Thread { comment } | Item::Draft { comment } | Item::Reply { comment } => {
             vec![comment.clone()]
@@ -987,6 +1060,7 @@ fn mark(target: &mut Target, item: &Item, attempt: &str) {
                 run.record = Some(RecordPost {
                     post: PostState::Posting,
                     attempt: Some(attempt.to_owned()),
+                    sent: texts.next().flatten(),
                     head: head.clone(),
                     remote_id: None,
                     url: None,
@@ -997,9 +1071,11 @@ fn mark(target: &mut Target, item: &Item, attempt: &str) {
         Item::PublishDraft { .. } | Item::Resolve { .. } => return,
     };
     for id in ids {
+        let text = texts.next().flatten();
         if let Some(comment) = comment_mut(target, &id) {
             comment.post = PostState::Posting;
             comment.attempt = Some(attempt.to_owned());
+            comment.sent = text;
         }
     }
 }

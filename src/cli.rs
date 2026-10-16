@@ -97,6 +97,9 @@ pub enum RunAction {
         /// Reveal findings the blind reviewers disagreed with, for the final record.
         #[arg(long, requires = "reveal_agree")]
         reveal_disagree: Option<u32>,
+        /// Repaired head of a range or commit target: a descendant of its end [default: the end].
+        #[arg(long)]
+        head: Option<String>,
     },
 }
 
@@ -114,6 +117,10 @@ pub enum PassAction {
         /// JSON array of reviewers, from a file or `-` for stdin.
         #[arg(long, value_name = "FILE")]
         reviewers: Option<PathBuf>,
+        /// Reviewed head of a range or commit target, such as a fix: a descendant of its end
+        /// [default: the end].
+        #[arg(long)]
+        head: Option<String>,
     },
     /// End a pass.
     End {

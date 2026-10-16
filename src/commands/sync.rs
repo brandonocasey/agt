@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use super::{Adoption, Ctx, Scope, prune_dir};
@@ -10,7 +12,7 @@ use crate::github;
 use crate::gitlab;
 use crate::model::{
     Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RemoteComment,
-    RemoteKind, Review, Severity, Side, Target, TargetKind, Thread, ThreadType,
+    RemoteKind, Review, ReviewState, Severity, Side, Target, TargetKind, Thread, ThreadType,
 };
 use crate::store::Account;
 
@@ -70,11 +72,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     let Some((host, origin_repo)) = location else {
         return fail("sync needs a GitHub or GitLab origin remote, or --pr <url>");
     };
-    let forge = if host == "github.com" {
-        Forge::Github
-    } else {
-        Forge::Gitlab
-    };
+    let forge = detect(&host)?;
     let (client, login) = authenticate(forge, &host)?;
     let (repo, number) = match &pr_ref {
         Some(pr) => (origin_repo, pr.number),
@@ -105,9 +103,45 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     })
 }
 
+/// The forge of `host`, from the host name or the gh/glab configuration; never guessed.
+fn detect(host: &str) -> Result<Forge> {
+    if host == "github.com" {
+        return Ok(Forge::Github);
+    }
+    let named = |value: &str| bare_host(value) == host;
+    if host == "gitlab.com"
+        || std::env::var("GITLAB_HOST").is_ok_and(|value| named(&value))
+        || Client::glab_configured()
+            .text(&["config", "get", "host"])
+            .is_some_and(|value| named(&value))
+    {
+        return Ok(Forge::Gitlab);
+    }
+    if Client::gh(host)
+        .text(&["auth", "status", "--hostname", host])
+        .is_some()
+    {
+        return Ok(Forge::Github);
+    }
+    fail(format!(
+        "unsupported forge {host}: sync and publish need github.com or a host `gh auth status` \
+         knows, or gitlab.com, GITLAB_HOST or glab's configured host"
+    ))
+}
+
+/// The lowercase host of a `GITLAB_HOST`-style value, which may be a URL.
+fn bare_host(value: &str) -> String {
+    let value = value.split_once("://").map_or(value, |(_, rest)| rest);
+    value
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 fn authenticate(forge: Forge, host: &str) -> Result<(Client, String)> {
     let client = match forge {
-        Forge::Github => Client::gh(),
+        Forge::Github => Client::gh(host),
         Forge::Gitlab => Client::glab(host),
     };
     let login = match forge {
@@ -163,6 +197,7 @@ pub(super) fn plan(ctx: &Ctx, connection: &Connection) -> Result<Plan> {
         author: fetched.pr.author.clone(),
         login: connection.login.clone(),
         synced_at: now.clone(),
+        attached_at: Some(now.clone()),
     };
     Ok(Plan {
         scope,
@@ -175,7 +210,13 @@ pub(super) fn plan(ctx: &Ctx, connection: &Connection) -> Result<Plan> {
 
 impl Plan {
     /// Merges the fetched PR/MR into `target`; returns the merge summary and adopted passes.
-    fn apply(self, target: &mut Target, connection: &Connection) -> (Summary, Vec<String>) {
+    fn apply(mut self, target: &mut Target, connection: &Connection) -> (Summary, Vec<String>) {
+        if let Some(old) = &target.review
+            && old.forge == self.review.forge
+            && old.number == self.review.number
+        {
+            self.review.attached_at.clone_from(&old.attached_at);
+        }
         target.review = Some(self.review);
         if target.branch.is_none() {
             target.branch = Some(self.fetched.pr.head_branch.clone());
@@ -227,7 +268,6 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
     let from = plan.scope.key.clone();
     let key = connection.key.clone();
     let renamed = plan.scope.existing.is_some() && from != key;
-    let review = plan.review.clone();
     let now = plan.now.clone();
     let scope_for_init = Scope {
         key: key.clone(),
@@ -239,7 +279,7 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
         head_known: true,
         existing: None,
     };
-    let (summary, recorded, total) = ctx.store.update_renamed(
+    let (summary, recorded, total, review) = ctx.store.update_renamed(
         &ctx.dir,
         &from,
         &key,
@@ -247,7 +287,12 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
         || ctx.new_target(&scope_for_init, &now),
         |target| {
             let (summary, recorded) = plan.apply(target, connection);
-            Ok((summary, recorded, target.threads.len()))
+            Ok((
+                summary,
+                recorded,
+                target.threads.len(),
+                target.review.clone(),
+            ))
         },
     )?;
     ctx.store.save_account(
@@ -287,13 +332,24 @@ fn sync_scope(
     fetched: &Fetched,
     branch: Option<&str>,
 ) -> Result<(Scope, bool)> {
-    let own_branch = branch == Some(fetched.pr.head_branch.as_str());
-    if ctx.selection.target.is_some() || (own_branch && ctx.selection.range.is_none()) {
+    if ctx.selection.target.is_some() {
         return Ok((ctx.scope()?, true));
     }
-    let branch_target = match ctx.selection.range {
-        Some(_) => None,
-        None => branch_target(ctx, key, fetched)?,
+    let own_branch = branch == Some(fetched.pr.head_branch.as_str());
+    if own_branch && ctx.selection.range.is_none() {
+        let scope = ctx.scope()?;
+        if belongs(ctx, fetched, &scope.head)? {
+            return Ok((scope, true));
+        }
+    }
+    let local_head = ctx
+        .repo
+        .commit(&format!("refs/heads/{}", fetched.pr.head_branch))
+        .ok();
+    let branch_target = match (&ctx.selection.range, local_head) {
+        (None, Some(head)) if belongs(ctx, fetched, &head)? => branch_target(ctx, key, fetched)?,
+        (None, None) if fetched.pr.state == ReviewState::Open => branch_target(ctx, key, fetched)?,
+        _ => None,
     };
     let (from, existing) = match branch_target {
         Some(target) => (target.key.clone(), Some(target)),
@@ -314,6 +370,17 @@ fn sync_scope(
         },
         false,
     ))
+}
+
+/// An open PR/MR belongs to its branch. A closed one only when its head is the branch head or an
+/// ancestor of it, since a branch name is often reused after its PR/MR closed.
+fn belongs(ctx: &Ctx, fetched: &Fetched, branch_head: &str) -> Result<bool> {
+    let head = &fetched.pr.head_sha;
+    if fetched.pr.state == ReviewState::Open || head == branch_head {
+        return Ok(true);
+    }
+    Ok(ctx.repo.object_exists(&format!("{head}^{{commit}}"))?
+        && ctx.repo.is_ancestor(head, branch_head)?)
 }
 
 /// The local branch target of the PR/MR's head branch, so a sync away from that branch (such
@@ -405,11 +472,73 @@ pub(super) fn agent_id(body: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
-/// The agent-review id of a trusted comment.
-fn own_id(comment: &CommentData, login: &str) -> Option<String> {
-    trusted(comment, login)
-        .then(|| agent_id(&comment.body))
-        .flatten()
+/// The attempt id in an `<!-- agent-review id=<id> attempt=<attempt> -->` marker.
+fn agent_attempt(body: &str) -> Option<&str> {
+    let inner = body.split_once(AGENT_MARKER)?.1.split_once("-->")?.0;
+    inner
+        .split_whitespace()
+        .find_map(|pair| pair.strip_prefix("attempt="))
+}
+
+/// What sync may believe of fetched comments. GitLab notes show no editor, so there only
+/// text this store sent is trusted.
+struct Trust<'a> {
+    login: &'a str,
+    forge: Forge,
+    sent: HashSet<String>,
+}
+
+impl<'a> Trust<'a> {
+    fn new(target: &Target, login: &'a str, forge: Forge) -> Self {
+        let comments = target
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.comments)
+            .filter_map(|comment| comment.sent.as_deref());
+        let records = target
+            .runs
+            .iter()
+            .filter_map(|run| run.record.as_ref()?.sent.as_deref());
+        Self {
+            login,
+            forge,
+            sent: comments
+                .chain(records)
+                .map(|text| text.trim().to_owned())
+                .collect(),
+        }
+    }
+
+    fn sent_text(&self, local: Option<&str>, comment: &CommentData) -> bool {
+        self.forge == Forge::Github
+            || local.is_some_and(|local| local.trim() == comment.body.trim())
+    }
+
+    /// A trusted comment, on GitLab only with a body this store sent.
+    fn verified(&self, comment: &CommentData) -> bool {
+        trusted(comment, self.login)
+            && (self.forge == Forge::Github || self.sent.contains(comment.body.trim()))
+    }
+
+    /// The agent-review id of a verified comment.
+    fn own_id(&self, comment: &CommentData) -> Option<String> {
+        self.verified(comment)
+            .then(|| agent_id(&comment.body))
+            .flatten()
+    }
+
+    /// Whether `incoming` is the landed write of local `comment`: one this store is posting,
+    /// marked with its id and the same attempt. Another store's ids repeat, so a pending
+    /// comment is never claimed.
+    fn claims(&self, comment: &Comment, incoming: &CommentData) -> bool {
+        comment.remote.is_none()
+            && comment.post == PostState::Posting
+            && trusted(incoming, self.login)
+            && agent_id(&incoming.body).as_deref() == Some(comment.id.as_str())
+            && comment.attempt.is_some()
+            && agent_attempt(&incoming.body) == comment.attempt.as_deref()
+            && self.sent_text(comment.sent.as_deref(), incoming)
+    }
 }
 
 fn marker_id(body: &str) -> Option<String> {
@@ -518,6 +647,7 @@ fn imported_comment(comment: CommentData, login: &str) -> Comment {
     Comment {
         id: format!("remote-{}", comment.id),
         attempt: None,
+        sent: None,
         deleted_remote: false,
         deleted_seen_at: None,
         author: Author::Human {
@@ -546,6 +676,7 @@ fn imported_id(forge: Forge, data: &ThreadData) -> String {
 }
 
 fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: &str) -> Summary {
+    let trust = Trust::new(target, login, forge);
     let mut summary = Summary::default();
     let mut answers = Vec::new();
     let seen_threads: Vec<String> = fetched
@@ -558,18 +689,22 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
         .iter()
         .flat_map(|data| data.comments.iter().map(|comment| comment.id.clone()))
         .collect();
+    // Records are read again from the comments the host still returns.
+    target
+        .records
+        .retain(|record| !seen_comments.contains(&record.comment_id));
     for data in fetched.threads {
         if let [comment] = data.comments.as_slice()
-            && trusted(comment, login)
+            && trust.verified(comment)
         {
-            let own = own_id(comment, login);
+            let own = trust.own_id(comment);
             if data.info.kind == RemoteKind::Review
                 && own.as_ref().is_some_and(|id| id.starts_with(REVIEW_ID))
             {
                 continue;
             }
             if data.info.kind == RemoteKind::General {
-                if take_record(target, comment, own.as_deref()) {
+                if take_record(target, comment, &trust) {
                     summary.records += 1;
                     continue;
                 }
@@ -579,15 +714,15 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
                 }
             }
         }
-        import(target, data, login, forge, now, &mut summary);
+        import(target, data, &trust, now, &mut summary);
     }
     for (id, data) in answers {
         match target.threads.iter_mut().find(|thread| thread.id == id) {
             Some(thread) => {
-                answer(thread, data, login, now);
+                answer(thread, data, &trust, now);
                 summary.answered += 1;
             }
-            None => import(target, data, login, forge, now, &mut summary),
+            None => import(target, data, &trust, now, &mut summary),
         }
     }
     // A draft that is gone was published or deleted, and a write that left no marker on the
@@ -611,12 +746,17 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
         }
     }
     for draft in fetched.drafts {
+        let attempt = agent_attempt(&draft.body);
         let comment = match (agent_id(&draft.body), marker_id(&draft.body)) {
             (Some(local), _) => target
                 .threads
                 .iter_mut()
                 .flat_map(|thread| thread.comments.iter_mut())
-                .find(|comment| comment.id == local),
+                .find(|comment| {
+                    comment.id == local
+                        && comment.attempt.is_some()
+                        && comment.attempt.as_deref() == attempt
+                }),
             (None, Some(id)) => target
                 .threads
                 .iter_mut()
@@ -656,15 +796,23 @@ fn claim_git_names(target: &mut Target, login: &str) {
     }
 }
 
-/// Stores a trusted record comment and marks our run's record posted; false when the comment
-/// is no record.
-fn take_record(target: &mut Target, comment: &CommentData, own: Option<&str>) -> bool {
+/// Stores a verified record comment and marks our run's record posted when it is that run's
+/// write; false when the comment is no record.
+fn take_record(target: &mut Target, comment: &CommentData, trust: &Trust) -> bool {
     let Some(record) = parse_record(comment) else {
         return false;
     };
-    if let Some(run_id) = own.and_then(|local| local.strip_suffix("/record"))
+    let own = trust.own_id(comment);
+    if let Some(run_id) = own
+        .as_deref()
+        .and_then(|local| local.strip_suffix("/record"))
         && let Some(run) = target.runs.iter_mut().find(|run| run.id == run_id)
         && let Some(post) = &mut run.record
+        && (post.remote_id.as_deref() == Some(comment.id.as_str())
+            || (post.remote_id.is_none()
+                && post.post == PostState::Posting
+                && post.attempt.is_some()
+                && agent_attempt(&comment.body) == post.attempt.as_deref()))
     {
         post.post = PostState::Posted;
         post.remote_id = Some(comment.id.clone());
@@ -710,18 +858,12 @@ fn flag_deleted(target: &mut Target, threads: &[String], comments: &[String], no
     flagged
 }
 
-fn import(
-    target: &mut Target,
-    data: ThreadData,
-    login: &str,
-    forge: Forge,
-    now: &str,
-    summary: &mut Summary,
-) {
+fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summary: &mut Summary) {
+    let (login, forge) = (trust.login, trust.forge);
     let marker = data
         .comments
         .first()
-        .filter(|first| trusted(first, login))
+        .filter(|first| trusted(first, trust.login))
         .and_then(|first| marker_id(&first.body));
     let by_remote = target.threads.iter().position(|thread| {
         thread.remote.as_ref().is_some_and(|remote| {
@@ -731,16 +873,20 @@ fn import(
         })
     });
     let by_agent = || {
-        let local = own_id(data.comments.first()?, login)?;
+        let incoming = data.comments.first()?;
         target.threads.iter().position(|thread| {
-            thread
-                .comments
-                .first()
-                .is_some_and(|first| first.id == local)
-                && thread
+            thread.comments.first().is_some_and(|first| {
+                // `publish` saves the remote ids of a review's comments before their
+                // threads are known.
+                first
                     .remote
                     .as_ref()
-                    .is_none_or(|remote| remote.id == data.info.id)
+                    .is_some_and(|remote| remote.id == incoming.id)
+                    || trust.claims(first, incoming)
+            }) && thread
+                .remote
+                .as_ref()
+                .is_none_or(|remote| remote.id == data.info.id)
         })
     };
     let by_marker = || {
@@ -758,7 +904,7 @@ fn import(
             &mut target.threads[index],
             data,
             marker.is_some(),
-            login,
+            trust,
             now,
         );
         summary.updated += 1;
@@ -822,7 +968,8 @@ fn import(
 }
 
 /// Remote wins for posted text and resolved state; local fields and unposted comments stay.
-fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, login: &str, now: &str) {
+fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust, now: &str) {
+    let login = trust.login;
     if data.info.resolvable {
         match thread.resolve_pending {
             Some(pending) if pending == data.resolved => thread.resolve_pending = None,
@@ -849,11 +996,10 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, login: &str, n
                     .is_some_and(|remote| remote.id == incoming.id)
             })
             .or_else(|| {
-                let local = own_id(&incoming, login)?;
                 thread
                     .comments
                     .iter()
-                    .position(|comment| comment.id == local && comment.remote.is_none())
+                    .position(|comment| trust.claims(comment, &incoming))
             })
             .or_else(|| {
                 let first_unposted = thread
@@ -889,7 +1035,8 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, login: &str, n
 }
 
 /// A general finding is answered by a later `Fixed in <sha>. ... Re: <id>` comment by me.
-fn answer(thread: &mut Thread, data: ThreadData, login: &str, now: &str) {
+fn answer(thread: &mut Thread, data: ThreadData, trust: &Trust, now: &str) {
+    let login = trust.login;
     for comment in data.comments {
         let known = thread.comments.iter().any(|existing| {
             existing
@@ -900,11 +1047,10 @@ fn answer(thread: &mut Thread, data: ThreadData, login: &str, now: &str) {
         if known {
             continue;
         }
-        let local = own_id(&comment, login);
         if let Some(existing) = thread
             .comments
             .iter_mut()
-            .find(|existing| Some(&existing.id) == local.as_ref() && existing.remote.is_none())
+            .find(|existing| trust.claims(existing, &comment))
         {
             existing.remote = Some(remote_comment(&comment, login));
             existing.post = PostState::Posted;

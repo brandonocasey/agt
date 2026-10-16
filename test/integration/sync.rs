@@ -339,7 +339,9 @@ fn prompt_hides_other_authors_and_author_defaults_to_login() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("- gh-t1301 [comment] a.txt:5 (outdated) (open)"),
+        prompt.contains(
+            "- gh-t1301 [comment] a.txt:5 (outdated) (open)\n  URL: https://github.com/me/repo/pull/42#discussion_r1301\n"
+        ),
         "{prompt}"
     );
 
@@ -417,12 +419,13 @@ fn prune_ninety_days_after_close() {
     assert_eq!(synced["review"]["state"], "merged");
     assert_eq!(synced["review"]["closed_at"], "2026-01-01T00:00:00Z");
 
-    let kept = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &at(89))]);
+    // The sync on day 59 is the later change, so the 90 days count from it.
+    let kept = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &at(59 + 89))]);
     assert_eq!(kept["pruned"], json!([]));
-    let pruned = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &at(91))]);
+    let pruned = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &at(59 + 91))]);
     assert_eq!(
         pruned["pruned"][0]["target"], "gh-5",
-        "32 days after the last change"
+        "91 days after the last change"
     );
 }
 
@@ -481,7 +484,7 @@ fn gitlab_self_hosted_sync() {
     env.run(&["resolve", &f1, "--resolution", "answered"]);
     gitlab_responses(&setup, &old);
 
-    let synced = env.run(&["sync"]);
+    let synced = env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
     assert_eq!(synced["target"], "gl-3");
     assert_eq!(synced["drafts"], 1);
     assert_eq!(synced["threads"]["imported"], 3);
@@ -561,4 +564,76 @@ fn sync_errors_without_forge_or_pr() {
     );
     let unexpected = env.fail(&["sync", "--pr", "99"], None);
     assert!(unexpected.contains("unexpected call"), "{unexpected}");
+}
+
+#[test]
+fn forge_comes_from_the_host_never_a_guess() {
+    let env = Env::with_branch();
+    env.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@code.example.org:me/repo.git",
+    ]);
+    let error = env.fail(&["sync", "--pr", "5"], None);
+    assert!(
+        error.contains("unsupported forge code.example.org"),
+        "{error}"
+    );
+    assert!(
+        !env.forge_calls().iter().any(|call| call.contains("user")),
+        "nothing is asked of an unknown host"
+    );
+    let forgejo = env.fail(
+        &["sync", "--pr", "https://codeberg.org/me/repo/pulls/5"],
+        None,
+    );
+    assert!(forgejo.contains("--pr must be a number or a"), "{forgejo}");
+
+    // A host `gh auth status` knows is GitHub (Enterprise).
+    env.respond(&["auth", "status", "--hostname", "code.example.org"], "");
+    env.fail(&["sync", "--pr", "5"], None);
+    assert!(
+        env.forge_calls()
+            .iter()
+            .any(|call| call.ends_with("\tapi --method GET user")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn gitlab_host_comes_from_glab_or_gitlab_host() {
+    let env = Env::with_branch();
+    env.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@code.example.org:me/repo.git",
+    ]);
+    env.respond(&["config", "get", "host"], "code.example.org\n");
+    env.fail(&["sync", "--pr", "5"], None);
+    assert!(
+        env.forge_calls()
+            .iter()
+            .any(|call| call == "code.example.org\tapi -X GET user"),
+        "{:?}",
+        env.forge_calls()
+    );
+
+    let other = Env::with_branch();
+    other.git(&["remote", "add", "origin", "git@git.example.net:me/repo.git"]);
+    other.exec(
+        &["sync", "--pr", "5"],
+        None,
+        &[("GITLAB_HOST", "https://git.example.net")],
+    );
+    assert!(
+        other
+            .forge_calls()
+            .iter()
+            .any(|call| call == "git.example.net\tapi -X GET user"),
+        "{:?}",
+        other.forge_calls()
+    );
 }

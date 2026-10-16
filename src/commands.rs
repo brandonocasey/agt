@@ -78,7 +78,9 @@ pub fn run(cli: Cli) -> Result<Output> {
     if let Command::Prune { all: true, dry_run } = cli.command {
         return prune_all(&store, dry_run).map(Output::Json);
     }
-    let ctx = Ctx::new(store, selection, read_only)?;
+    // Publish writes no git objects and needs `merge-tree` for its records' coverage.
+    let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
+    let ctx = Ctx::new(store, selection, read_only, scratch_git)?;
     let value = match cli.command {
         Command::Run {
             action: RunAction::Start,
@@ -89,12 +91,13 @@ pub fn run(cli: Cli) -> Result<Output> {
                     run,
                     reveal_agree,
                     reveal_disagree,
+                    head,
                 },
         } => {
             let reveal = reveal_agree
                 .zip(reveal_disagree)
                 .map(|(agree, disagree)| Reveal { agree, disagree });
-            run_end(&ctx, &run, reveal)?
+            run_end(&ctx, &run, reveal, head.as_deref())?
         }
         Command::Pass {
             action:
@@ -103,8 +106,16 @@ pub fn run(cli: Cli) -> Result<Output> {
                     kind,
                     base,
                     reviewers,
+                    head,
                 },
-        } => pass_start(&ctx, &run, kind, base.as_deref(), reviewers.as_deref())?,
+        } => pass_start(
+            &ctx,
+            &run,
+            kind,
+            base.as_deref(),
+            reviewers.as_deref(),
+            head.as_deref(),
+        )?,
         Command::Pass {
             action: PassAction::End { run, pass, lock },
         } => pass_end(&ctx, &run, &pass, lock)?,
@@ -140,9 +151,9 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 impl Ctx {
-    fn new(store: Store, selection: Selection, read_only: bool) -> Result<Self> {
+    fn new(store: Store, selection: Selection, read_only: bool, scratch_git: bool) -> Result<Self> {
         let mut repo = Repo::discover()?;
-        if read_only {
+        if scratch_git {
             repo = repo.read_only()?;
         }
         let repo_key = repo.repo_key()?;
@@ -377,6 +388,41 @@ impl Ctx {
 
     /// Returns the review base and the commit that names the target. On the default branch
     /// itself the merge-base is the head, so the root commit names the target instead.
+    /// The scope at `--head`: a range or commit target's later head, such as its fix, which
+    /// MUST descend from the target's end.
+    fn scope_at(&self, rev: Option<&str>) -> Result<Scope> {
+        let mut scope = self.scope()?;
+        let Some(rev) = rev else {
+            return Ok(scope);
+        };
+        if scope.kind == TargetKind::Branch {
+            return fail("--head is for range and commit targets; a branch target uses its head");
+        }
+        let head = self.repo.commit(rev)?;
+        if !self.repo.is_ancestor(&scope.head, &head)? {
+            return fail(format!(
+                "--head {rev} does not descend from the end {} of target {}",
+                scope.head, scope.key
+            ));
+        }
+        scope.head = head;
+        Ok(scope)
+    }
+
+    fn is_default_branch(&self, scope: &Scope) -> Result<bool> {
+        let Some(branch) = scope
+            .branch
+            .as_deref()
+            .filter(|_| scope.kind == TargetKind::Branch)
+        else {
+            return Ok(false);
+        };
+        let default = self
+            .repo
+            .default_branch(self.selection.default_branch.as_deref())?;
+        Ok(default == format!("refs/heads/{branch}"))
+    }
+
     fn branch_base(&self, branch: &str, head: &str) -> Result<(String, String)> {
         let default = self
             .repo
@@ -464,10 +510,11 @@ impl Ctx {
         )
     }
 
-    /// The reviewed state: the work tree for a branch (possibly uncommitted), else the head.
+    /// The reviewed state: the work tree for a branch whose head is checked out (possibly
+    /// uncommitted), else the head commit, such as for `--target` while elsewhere.
     fn reviewed_state(&self, scope: &Scope) -> Result<(Option<String>, String)> {
         let head_tree = self.repo.tree_of(&scope.head)?;
-        if scope.kind != TargetKind::Branch {
+        if scope.kind != TargetKind::Branch || self.repo.head()? != scope.head {
             return Ok((Some(scope.head.clone()), head_tree));
         }
         let tree = self.repo.worktree_tree()?;
@@ -684,6 +731,7 @@ fn local_comment(
         remote: None,
         draft_id: None,
         attempt: None,
+        sent: None,
         deleted_remote: false,
         deleted_seen_at: None,
     }
@@ -886,8 +934,8 @@ impl Adoption {
     }
 }
 
-fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>) -> Result<Value> {
-    let scope = ctx.scope()?;
+fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>, head: Option<&str>) -> Result<Value> {
+    let scope = ctx.scope_at(head)?;
     let Some(existing) = &scope.existing else {
         return fail(format!("run {run_id} not found in target {}", scope.key));
     };
@@ -1086,8 +1134,9 @@ fn pass_start(
     kind: PassKind,
     base: Option<&str>,
     reviewers: Option<&Path>,
+    head: Option<&str>,
 ) -> Result<Value> {
-    let scope = ctx.scope()?;
+    let scope = ctx.scope_at(head)?;
     let inputs = read_reviewers(reviewers)?;
     let (commit, tree) = ctx.reviewed_state(&scope)?;
     let previous = scope.existing.as_ref().and_then(|target| {
@@ -1106,9 +1155,10 @@ fn pass_start(
         }
     };
     // A pass that starts after the merge-base reviews only its own delta, unless it continues a
-    // whole-branch pass from that pass's head.
+    // whole-branch pass from that pass's head. The default branch has no merge-base: its
+    // reviews always start at an explicit or earlier head and cover the branch.
     let continues = previous.is_some_and(|pass| !pass.partial) && base == previous_head;
-    let partial = base != scope.base && !continues;
+    let partial = base != scope.base && !continues && !ctx.is_default_branch(&scope)?;
     let range_base = if partial { &base } else { &scope.base };
     let commits = ctx.repo.commits(base.as_deref(), &scope.head)?;
     let range_patch_id = ctx.repo.range_patch_id(range_base.as_deref(), &tree)?;
@@ -1694,6 +1744,19 @@ fn prompt(
             kind_label(thread.kind, thread.severity),
             place(&current)
         );
+        let url = thread
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.url.as_deref())
+            .or_else(|| {
+                thread
+                    .comments
+                    .first()
+                    .and_then(|first| first.remote.as_ref()?.url.as_deref())
+            });
+        if let Some(url) = url {
+            let _ = writeln!(out, "  URL: {url}");
+        }
         let mut comments = thread.comments.iter();
         if let Some(first) = comments.next() {
             if mine(first) {
@@ -1822,9 +1885,11 @@ fn coverage<'a>(
             if range_patch_id.is_some() && pass.range_patch_id.as_deref() == range_patch_id {
                 matched.push("range-patch-id");
             }
+            // Only a one-commit head (the caller passes no id otherwise) may match by its own
+            // patch-id, and only the pass's whole range: a matching last commit says nothing
+            // about rewritten earlier ones.
             if let Some(id) = head_patch_id
-                && (pass.head_patch_id.as_deref() == Some(id)
-                    || pass.range_patch_id.as_deref() == Some(id))
+                && pass.range_patch_id.as_deref() == Some(id)
             {
                 matched.push("head-patch-id");
             }
@@ -1834,6 +1899,79 @@ fn coverage<'a>(
         }
     }
     covered
+}
+
+/// Passes covering `head` itself; a changed merge the caller found unreviewed voids them all.
+fn head_coverage<'a>(
+    repo: &Repo,
+    target: Option<&'a Target>,
+    base: Option<&str>,
+    head: &str,
+    head_tree: &str,
+    commits: &[CommitInfo],
+) -> Result<Vec<(String, &'a Pass, Vec<&'static str>)>> {
+    let head_patch_id = match commits {
+        [only] if only.sha == head => only.patch_id.clone(),
+        _ => None,
+    };
+    let range_patch_id = repo.range_patch_id(base, head)?;
+    Ok(coverage(
+        target,
+        head_tree,
+        range_patch_id.as_deref(),
+        head_patch_id.as_deref(),
+    ))
+}
+
+/// Changed merges after the last reviewed head: they bring in code no pass reviewed.
+fn unreviewed_merges<'h>(
+    repo: &Repo,
+    merges: &[&'h LogEntry],
+    last_reviewed: Option<&str>,
+) -> Result<HashSet<&'h str>> {
+    let mut unreviewed = HashSet::new();
+    for merge in merges {
+        let after = match last_reviewed {
+            Some(last) => !repo.is_ancestor(&merge.sha, last)?,
+            None => true,
+        };
+        if after {
+            unreviewed.insert(merge.sha.as_str());
+        }
+    }
+    Ok(unreviewed)
+}
+
+/// The reviews of run `run` covering `head`, counted the way `status` counts
+/// `reviews_at_head`.
+fn run_reviews_at(ctx: &Ctx, target: &Target, run: &str, head: &str) -> Result<usize> {
+    if !ctx.repo.object_exists(&format!("{head}^{{commit}}"))? {
+        return Ok(0);
+    }
+    let base = match (target.kind, &target.branch) {
+        (TargetKind::Branch, Some(branch)) => Some(ctx.branch_base(branch, head)?.0),
+        _ => target.base.clone(),
+    };
+    let history = ctx.repo.log(base.as_deref(), head)?;
+    let merges = changed_merges(&ctx.repo, &history)?;
+    let last_reviewed = last_reviewed_head(ctx, head)?;
+    if !unreviewed_merges(&ctx.repo, &merges, last_reviewed.as_deref())?.is_empty() {
+        return Ok(0);
+    }
+    let commits = ctx.repo.commits(base.as_deref(), head)?;
+    let tree = ctx.repo.tree_of(head)?;
+    let covered: Vec<_> = head_coverage(
+        &ctx.repo,
+        Some(target),
+        base.as_deref(),
+        head,
+        &tree,
+        &commits,
+    )?
+    .into_iter()
+    .filter(|(id, _, _)| id == run)
+    .collect();
+    Ok(count(&covered))
 }
 
 fn coverage_json(covered: &[(String, &Pass, Vec<&str>)]) -> Value {
@@ -1877,33 +2015,19 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let history = ctx.repo.log(scope.base.as_deref(), &head)?;
     let merges = changed_merges(&ctx.repo, &history)?;
     let last_reviewed = last_reviewed_head(ctx, &head)?;
-    // A changed merge after the last reviewed head brings in unreviewed code, so no pass may
-    // cover the head through its tree or patch-ids.
-    let mut unreviewed_merges = HashSet::new();
-    for merge in &merges {
-        let after = match &last_reviewed {
-            Some(last) => !ctx.repo.is_ancestor(&merge.sha, last)?,
-            None => true,
-        };
-        if after {
-            unreviewed_merges.insert(merge.sha.as_str());
-        }
-    }
+    let unreviewed_merges = unreviewed_merges(&ctx.repo, &merges, last_reviewed.as_deref())?;
     let merge_after = !unreviewed_merges.is_empty();
-    let head_patch_id = match commits.iter().find(|commit| commit.sha == head) {
-        Some(commit) => commit.patch_id.clone(),
-        None => None,
-    };
-    let range_patch_id = ctx.repo.range_patch_id(scope.base.as_deref(), &head)?;
     let covered = if merge_after {
         Vec::new()
     } else {
-        coverage(
+        head_coverage(
+            &ctx.repo,
             target,
+            scope.base.as_deref(),
+            &head,
             &head_tree,
-            range_patch_id.as_deref(),
-            head_patch_id.as_deref(),
-        )
+            &commits,
+        )?
     };
 
     let mut reviewed = Reviewed::default();
@@ -2249,7 +2373,12 @@ fn last_change(target: &Target) -> Result<i64> {
         .as_ref()
         .filter(|review| review.state != ReviewState::Open)
         .and_then(|review| review.closed_at.as_deref());
-    clock::parse(closed.unwrap_or(&target.updated_at))
+    // A target touched after its PR/MR closed (a new run on a reused branch) ages from then.
+    let updated = clock::parse(&target.updated_at)?;
+    Ok(match closed {
+        Some(closed) => updated.max(clock::parse(closed)?),
+        None => updated,
+    })
 }
 
 fn prune_dir(store: &Store, dir: &Path, now: i64, dry_run: bool) -> Result<Vec<Value>> {

@@ -16,20 +16,35 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn gh() -> Self {
+    pub fn gh(host: &str) -> Self {
         Self {
             program: std::env::var_os("AGENT_REVIEW_GH_BIN").unwrap_or_else(|| "gh".into()),
             name: "gh",
-            env: Vec::new(),
+            env: vec![("GH_HOST", host.to_owned())],
         }
     }
 
     pub fn glab(host: &str) -> Self {
         Self {
+            env: vec![("GITLAB_HOST", host.to_owned())],
+            ..Self::glab_configured()
+        }
+    }
+
+    /// glab on the host its own configuration names.
+    pub fn glab_configured() -> Self {
+        Self {
             program: std::env::var_os("AGENT_REVIEW_GLAB_BIN").unwrap_or_else(|| "glab".into()),
             name: "glab",
-            env: vec![("GITLAB_HOST", host.to_owned())],
+            env: Vec::new(),
         }
+    }
+
+    /// The trimmed output of a read-only command, such as `glab config get host`; `None` when
+    /// it fails or the tool is missing, which callers read as "not configured".
+    pub fn text(&self, args: &[&str]) -> Option<String> {
+        let output = self.output(args).ok()?;
+        Some(String::from_utf8_lossy(&output).trim().to_owned())
     }
 
     fn output(&self, args: &[&str]) -> Result<Vec<u8>> {

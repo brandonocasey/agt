@@ -7,7 +7,7 @@ use crate::error::{Error, Result, ctx, fail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Forge, Target, VERSION};
+use crate::model::{Comment, Forge, Target, Thread, VERSION};
 
 const MAX_KEY: usize = 200;
 const ACCOUNT_FILE: &str = ".account.json";
@@ -374,6 +374,66 @@ fn create_dir(dir: &Path) -> Result<()> {
 }
 
 /// Moves runs, threads and records that `into` lacks over from `from`.
+/// Adds `thread` without losing anything: the same remote thread (or the same finding) gains
+/// the comments it lacks; a different thread under a taken id (human `h<n>` ids restart per
+/// target) gets the next free id.
+fn merge_thread(into: &mut Target, mut thread: Thread) {
+    let Some(index) = into.threads.iter().position(|known| known.id == thread.id) else {
+        into.threads.push(thread);
+        return;
+    };
+    let known = &mut into.threads[index];
+    let same_remote = match (&known.remote, &thread.remote) {
+        (Some(a), Some(b)) => a.id == b.id,
+        (None, None) => thread.finding.is_some(),
+        _ => false,
+    };
+    if same_remote {
+        for comment in thread.comments {
+            merge_comment(known, comment);
+        }
+        return;
+    }
+    let ids = into.threads.iter().map(|thread| thread.id.as_str());
+    let next = ids
+        .filter_map(|id| id.strip_prefix('h')?.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let (old, new) = (format!("{}/", thread.id), format!("h{next}/"));
+    for comment in &mut thread.comments {
+        if let Some(rest) = comment.id.strip_prefix(&old) {
+            comment.id = format!("{new}{rest}");
+        }
+    }
+    thread.id = format!("h{next}");
+    into.threads.push(thread);
+}
+
+/// Keeps a comment the thread lacks; a local comment id taken by different text is renumbered.
+fn merge_comment(thread: &mut Thread, mut comment: Comment) {
+    let same = |known: &Comment| match (&known.remote, &comment.remote) {
+        (Some(a), Some(b)) => a.id == b.id,
+        (None, None) => known.id == comment.id && known.body == comment.body,
+        _ => false,
+    };
+    if thread.comments.iter().any(same) {
+        return;
+    }
+    if thread.comments.iter().any(|known| known.id == comment.id) {
+        let prefix = format!("{}/c", thread.id);
+        let next = thread
+            .comments
+            .iter()
+            .filter_map(|known| known.id.strip_prefix(&prefix)?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        comment.id = format!("{prefix}{next}");
+    }
+    thread.comments.push(comment);
+}
+
 fn merge_targets(into: &mut Target, from: Target) {
     for run in from.runs {
         if !into.runs.iter().any(|known| known.id == run.id) {
@@ -381,9 +441,7 @@ fn merge_targets(into: &mut Target, from: Target) {
         }
     }
     for thread in from.threads {
-        if !into.threads.iter().any(|known| known.id == thread.id) {
-            into.threads.push(thread);
-        }
+        merge_thread(into, thread);
     }
     for record in from.records {
         if !into
@@ -393,5 +451,118 @@ fn merge_targets(into: &mut Target, from: Target) {
         {
             into.records.push(record);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn comment(id: &str, body: &str, remote: Option<&str>) -> Value {
+        json!({
+            "id": id, "author": { "kind": "human", "login": "me" }, "body": body,
+            "created_at": "2026-10-16T12:00:00Z",
+            "post": if remote.is_some() { "posted" } else { "pending" },
+            "remote": remote.map(|id| json!({
+                "id": id, "url": null, "login": "alice", "is_me": false, "editor": null,
+                "review_id": null,
+            })),
+            "draft_id": null, "attempt": null, "deleted_remote": false, "deleted_seen_at": null,
+        })
+    }
+
+    fn thread(id: &str, remote: Option<&str>, comments: Vec<Value>) -> Value {
+        json!({
+            "id": id, "type": "comment", "severity": null, "anchor": null, "resolved": false,
+            "resolution": null, "triage": null, "held": false, "finding": null,
+            "comments": comments,
+            "remote": remote.map(|id| json!({
+                "kind": "general", "id": id, "url": null, "resolvable": false, "outdated": null,
+                "path": null, "old_path": null, "line": null, "old_line": null,
+                "original_line": null, "start_line": null, "original_start_line": null,
+                "side": null, "commit": null, "review_state": null,
+            })),
+            "resolve_pending": null, "deleted_remote": false, "deleted_seen_at": null,
+            "created_at": "2026-10-16T12:00:00Z", "updated_at": "2026-10-16T12:00:00Z",
+        })
+    }
+
+    fn target(threads: Vec<Value>) -> Target {
+        serde_json::from_value(json!({
+            "version": VERSION, "revision": 1, "key": "k", "repo": "r", "kind": "branch",
+            "branch": "feat", "branch_birth": null, "base": null, "head": null,
+            "created_at": "2026-10-16T12:00:00Z", "updated_at": "2026-10-16T12:00:00Z",
+            "review": null, "runs": [], "records": [], "threads": threads,
+        }))
+        .unwrap()
+    }
+
+    fn bodies(target: &Target) -> Vec<(String, Vec<String>)> {
+        target
+            .threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.id.clone(),
+                    thread
+                        .comments
+                        .iter()
+                        .map(|comment| comment.body.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merge_renumbers_colliding_human_threads() {
+        let mut into = target(vec![thread(
+            "h1",
+            None,
+            vec![comment("h1/c1", "Into note", None)],
+        )]);
+        let from = target(vec![thread(
+            "h1",
+            None,
+            vec![comment("h1/c1", "From note", None)],
+        )]);
+        merge_targets(&mut into, from);
+        assert_eq!(
+            bodies(&into),
+            [
+                ("h1".to_owned(), vec!["Into note".to_owned()]),
+                ("h2".to_owned(), vec!["From note".to_owned()]),
+            ]
+        );
+        assert_eq!(into.threads[1].comments[0].id, "h2/c1");
+    }
+
+    #[test]
+    fn merge_keeps_pending_replies_on_the_same_remote_thread() {
+        let imported = || comment("remote-900", "Alice text", Some("900"));
+        let mut into = target(vec![thread(
+            "gh-c900",
+            Some("900"),
+            vec![imported(), comment("gh-c900/c1", "Into reply", None)],
+        )]);
+        let from = target(vec![thread(
+            "gh-c900",
+            Some("900"),
+            vec![imported(), comment("gh-c900/c1", "From reply", None)],
+        )]);
+        merge_targets(&mut into, from);
+        assert_eq!(
+            bodies(&into),
+            [(
+                "gh-c900".to_owned(),
+                vec![
+                    "Alice text".to_owned(),
+                    "Into reply".to_owned(),
+                    "From reply".to_owned()
+                ]
+            )]
+        );
+        assert_eq!(into.threads[0].comments[2].id, "gh-c900/c2");
     }
 }

@@ -1011,3 +1011,89 @@ fn target_on_detached_review_worktree_uses_head() {
         "an unrelated detached HEAD is not the target's"
     );
 }
+
+#[test]
+fn target_elsewhere_uses_the_head_tree() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let head = env.commit_all("change");
+    let started = env.run(&["run", "start"]);
+    let key = started["target"].as_str().unwrap().to_owned();
+    let run = started["run"].as_str().unwrap().to_owned();
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", "uncommitted on main\n");
+    let pass = env.run(&[
+        "--target", &key, "pass", "start", "--run", &run, "--kind", "full",
+    ]);
+    assert_eq!(pass["pass"]["dirty"], false);
+    assert_eq!(pass["pass"]["head"], head);
+    assert_eq!(
+        pass["pass"]["tree"],
+        env.git(&["rev-parse", &format!("{head}^{{tree}}")])
+    );
+    let comment = env.run(&[
+        "--target", &key, "comment", "--body", "Note", "--path", "a.txt", "--line", "3",
+    ]);
+    assert_eq!(comment["thread"]["anchor"]["commit"], head);
+}
+
+#[test]
+fn range_fix_check_and_repair_use_a_descendant_head() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let end = env.commit_all("reviewed range end");
+    let range = format!("main..{end}");
+    let run = env.run(&["--range", &range, "run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let full = [
+        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
+    ];
+    env.run(&full);
+    env.run(&[
+        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.write("a.txt", &numbered(10, &[(3, "THREE")]));
+    let fix = env.commit_all("fix");
+
+    let unrelated = env.fail(
+        &[
+            "--range",
+            &range,
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "fix-check",
+            "--head",
+            "main",
+        ],
+        None,
+    );
+    assert!(unrelated.contains("does not descend from"), "{unrelated}");
+    let check = env.run(&[
+        "--range",
+        &range,
+        "pass",
+        "start",
+        "--run",
+        &run,
+        "--kind",
+        "fix-check",
+        "--head",
+        &fix,
+    ]);
+    assert_eq!(check["pass"]["head"], fix, "{check}");
+    assert_eq!(check["pass"]["base"], end);
+    env.run(&[
+        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p1",
+    ]);
+    env.write("a.txt", &numbered(10, &[(3, "THREE"), (9, "nine")]));
+    let repair = env.commit_all("repair");
+    let ended = env.run(&[
+        "--range", &range, "run", "end", "--run", &run, "--head", &repair,
+    ]);
+    assert_eq!(ended["repaired_head"], repair, "{ended}");
+}
