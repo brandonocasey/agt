@@ -1248,7 +1248,7 @@ fn status_is_brief_and_compact_unless_asked() {
     env.review("full");
     let brief = env.run(&["status"]);
     assert_eq!(brief["reviewed"], true);
-    for field in ["commits", "runs", "imported_records", "head_tree"] {
+    for field in ["commits", "runs", "head_tree"] {
         assert!(brief.get(field).is_none(), "{field} in {brief}");
     }
     let full = env.run(&["status", "--full"]);
@@ -1287,4 +1287,62 @@ fn run_id_finds_its_range_target() {
     assert_eq!(ended["target"], key, "{ended}");
     let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
     assert!(error.starts_with("agent-review: error: "), "{error}");
+}
+
+#[test]
+fn run_lookup_never_picks_another_branch_target() {
+    let env = Env::with_branch();
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("on main");
+    let run = env.run(&["run", "start"])["run"].as_str().unwrap().to_owned();
+    env.run_stdin(
+        &["pass", "start", "--run", &run, "--kind", "full", "--reviewers", "-"],
+        REVIEWER,
+    );
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    // The fix goes on a new branch; main's target would evaluate main's old tip.
+    env.git(&["switch", "-q", "-c", "fix"]);
+    env.write("a.txt", &numbered(10, &[(3, "fixed")]));
+    env.commit_all("fix");
+    let error = env.fail(
+        &["pass", "start", "--run", &run, "--kind", "fix-check"],
+        None,
+    );
+    assert!(error.contains(&format!("run {run} not found")), "{error}");
+}
+
+#[test]
+fn failed_first_pass_leaves_no_run() {
+    let env = Env::with_branch();
+    env.fail(&["run", "start", "--kind", "fix-check"], None);
+    env.fail(&["run", "start", "--kind", "full", "--reviewers", "-"], Some("not json"));
+    let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
+    assert!(error.contains("open runs: none"), "{error}");
+}
+
+#[test]
+fn pass_end_lists_ids_in_input_order() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let started = env.run_stdin(
+        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        r#"[{"model":"a","harness":"codex"},{"id":"manual","model":"m","harness":"claude-code"}]"#,
+    );
+    let run = started["run"].as_str().unwrap().to_owned();
+    let ended = env.run_stdin(
+        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"[
+            {"type":"bug","severity":"low","scenario":"A"},
+            {"reviewer":"manual","type":"bug","severity":"low","scenario":"B"},
+            {"type":"bug","severity":"low","scenario":"C"}
+        ]"#,
+    );
+    let p = format!("{run}.c1p0");
+    assert_eq!(
+        ended["added"],
+        serde_json::json!([format!("{p}.r1.f1"), format!("{p}.manual.f1"), format!("{p}.r1.f2")]),
+        "{ended}"
+    );
 }

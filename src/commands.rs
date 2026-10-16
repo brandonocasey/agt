@@ -100,14 +100,25 @@ pub fn run(cli: Cli) -> Result<Output> {
             match kind {
                 Some(kind) => {
                     let run = started["run"].as_str().unwrap_or_default().to_owned();
-                    pass_start(
+                    let pass = pass_start(
                         &ctx,
                         &run,
                         kind,
                         base.as_deref(),
                         reviewers.as_deref(),
                         head.as_deref(),
-                    )?
+                    );
+                    // A first pass that fails leaves no empty run behind.
+                    if pass.is_err() {
+                        let scope = ctx.scope()?;
+                        ctx.update(&scope, |target, _| {
+                            target
+                                .runs
+                                .retain(|known| known.id != run || !known.passes.is_empty());
+                            Ok(())
+                        })?;
+                    }
+                    pass?
                 }
                 None => started,
             }
@@ -249,20 +260,40 @@ impl Ctx {
             return Ok(());
         }
         let has_run = |target: &Target| target.runs.iter().any(|known| known.id == run);
-        if let Ok(scope) = self.scope()
+        let scope = self.scope();
+        if let Ok(scope) = &scope
             && scope.existing.as_ref().is_some_and(has_run)
         {
             return Ok(());
         }
+        // Only a range, commit or PR/MR target: another branch's target would evaluate that
+        // branch's tip, not the checked-out fix.
         let holders: Vec<String> = self
             .store
             .targets(&self.dir)?
             .into_iter()
             .filter(|target| has_run(target))
+            .filter(|target| {
+                target.kind != TargetKind::Branch
+                    || target.key.starts_with("gh-")
+                    || target.key.starts_with("gl-")
+            })
             .map(|target| target.key)
             .collect();
-        if let [key] = holders.as_slice() {
-            self.selection.target = Some(key.clone());
+        match (holders.as_slice(), scope) {
+            ([key], _) => self.selection.target = Some(key.clone()),
+            (_, Ok(_)) => {}
+            ([], Err(why)) => {
+                return fail(format!(
+                    "run {run} is in no range or PR/MR target here, and {why}"
+                ));
+            }
+            (keys, Err(_)) => {
+                return fail(format!(
+                    "run {run} is in several targets ({}); pass --target <key>",
+                    keys.join(", ")
+                ));
+            }
         }
         Ok(())
     }
@@ -1395,27 +1426,39 @@ fn pass_end(
         Some(source) => read_findings(source, true)?,
         None => Vec::new(),
     };
-    // Group by reviewer, keeping input order, so each reviewer's ids number in order.
-    let mut groups: Vec<(String, Vec<FindingInput>)> = Vec::new();
+    // Group by reviewer, keeping input order, so each reviewer's ids number in order; the
+    // output lists ids in input order.
+    let mut groups: Vec<(String, Vec<usize>, Vec<FindingInput>)> = Vec::new();
+    let mut is_killed = Vec::new();
     for (index, mut finding) in findings.into_iter().enumerate() {
         let id = finding
             .reviewer
             .take()
             .or_else(|| reviewer.map(str::to_owned))
             .ok_or_else(|| Error(format!("finding {index}: no reviewer; add one or --reviewer")))?;
-        match groups.iter_mut().find(|(known, _)| *known == id) {
-            Some((_, group)) => group.push(finding),
-            None => groups.push((id, vec![finding])),
+        is_killed.push(finding.reason.is_some());
+        match groups.iter_mut().find(|(known, _, _)| *known == id) {
+            Some((_, indexes, group)) => {
+                indexes.push(index);
+                group.push(finding);
+            }
+            None => groups.push((id, vec![index], vec![finding])),
         }
     }
     let (pass, added, killed) = ctx.update(&scope, |target, now| {
-        let mut added = Vec::new();
-        let mut killed = Vec::new();
-        for (reviewer, group) in groups {
+        let mut ids = vec![String::new(); is_killed.len()];
+        for (reviewer, indexes, group) in groups {
             let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
-            added.extend(new);
-            killed.extend(dead);
+            let (mut new, mut dead) = (new.into_iter(), dead.into_iter());
+            for index in indexes {
+                let next = if is_killed[index] { dead.next() } else { new.next() };
+                ids[index] = next.unwrap_or_default();
+            }
         }
+        let (killed, added): (Vec<_>, Vec<_>) =
+            ids.into_iter().enumerate().partition(|(index, _)| is_killed[*index]);
+        let added: Vec<String> = added.into_iter().map(|(_, id)| id).collect();
+        let killed: Vec<String> = killed.into_iter().map(|(_, id)| id).collect();
         let major = major_found(target, run_id, pass_id);
         let pass = find_pass_mut(target, run_id, pass_id)?;
         if pass.ended_at.is_some() {
@@ -2550,7 +2593,7 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
 /// prints them.
 fn brief_status(mut status: Value) -> Value {
     if let Some(fields) = status.as_object_mut() {
-        for field in ["commits", "runs", "imported_records", "head_tree"] {
+        for field in ["commits", "runs", "head_tree"] {
             fields.remove(field);
         }
         if let Some(worktree) = fields.get_mut("worktree").and_then(Value::as_object_mut) {

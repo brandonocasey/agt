@@ -117,7 +117,7 @@ agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 `pass end --findings <file|->` adds findings and ends the pass in one write, as
 `finding add` would for each reviewer: each finding names its `"reviewer"`, or
 takes `--reviewer`; `[]` ends a clean pass. Output lists the new ids under
-`added` and `killed`. `pass end --lock` freezes the pass for a blind review:
+`added` and `killed`, each in input order. `pass end --lock` freezes the pass for a blind review:
 `finding add` to it then fails. `finding kill` moves a surviving finding to its pass's killed list, also
 on a locked pass; a finding that is posted or being posted to the PR/MR is
 resolved as `stale` instead. `run end` closes the run, records commit patch-ids
@@ -131,9 +131,11 @@ old targets of this repository. Its output ends with `status`: the brief
 A wrong run, pass or reviewer id fails with the valid ones named: the open
 runs, the run's passes, or the pass's reviewers. Run ids are unique in the repository. With no `--target` or `--range`, a
 command that names a run (`--run`, or a thread, killed finding or pass id that
-starts with one) works on the target holding that run, unless the current
-branch's own target holds it; so a `--range` review needs `--range` only on
-`run start`.
+starts with one) works on the range, commit or PR/MR target holding that run,
+unless the current branch's own target holds it; so a `--range` review needs
+`--range` only on `run start`. Another branch's target is never picked, since it
+would evaluate that branch's tip rather than the checked-out work. `run start
+--kind` that fails to start its pass leaves no run behind.
 
 Threads for humans and agents:
 
@@ -207,8 +209,8 @@ people's comments. A posted thread also shows its forge URL on a `URL:` line.
 as a fix after a range target's end.
 
 `status` never writes: not to the store, not to the git index or object
-database. By default it leaves out `commits`, `runs`, `imported_records` and
-tree ids; `--full` adds them. It reports whether the head is reviewed, `reviews_at_head`, the passes
+database. By default it leaves out `commits`, `runs` and tree ids; `--full`
+adds them. It reports whether the head is reviewed, `reviews_at_head`, the passes
 that cover it, each commit's reviewed state, `unreviewed_commits`,
 `last_reviewed_head` (the nearest ancestor of the head that a whole-branch pass
 reviewed or a run repaired, across this repository's branch and range targets,
