@@ -4,9 +4,21 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result, ctx, fail};
-use crate::model::{Target, VERSION};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::model::{Forge, Target, VERSION};
 
 const MAX_KEY: usize = 200;
+const ACCOUNT_FILE: &str = ".account.json";
+
+/// The forge login `sync` authenticated as, cached per repository for author defaults.
+#[derive(Serialize, Deserialize)]
+pub struct Account {
+    pub forge: Forge,
+    pub host: String,
+    pub login: String,
+}
 
 pub struct Store {
     root: PathBuf,
@@ -124,11 +136,7 @@ impl Store {
         change: impl FnOnce(&mut Target) -> Result<R>,
     ) -> Result<R> {
         validate_key(key)?;
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(ctx(format!("create {}", dir.display())))?;
+        create_dir(dir)?;
         let _lock = lock(&dir.join(format!(".{key}.lock")))?;
         let path = dir.join(format!("{key}.json"));
         let current = read_target(&path)?;
@@ -139,6 +147,70 @@ impl Store {
         target.updated_at = now.to_owned();
         write_target(dir, &path, &target, expected)?;
         Ok(result)
+    }
+
+    /// Like [`Store::update`], but stores the result under `to` and deletes `from`. Both locks are
+    /// held, taken in key order so two renames cannot deadlock. When both files exist, `from`'s
+    /// runs, threads and records that `to` lacks are merged in.
+    pub fn update_renamed<R>(
+        &self,
+        dir: &Path,
+        from: &str,
+        to: &str,
+        now: &str,
+        init: impl FnOnce() -> Target,
+        change: impl FnOnce(&mut Target) -> Result<R>,
+    ) -> Result<R> {
+        if from == to {
+            return self.update(dir, to, now, init, change);
+        }
+        validate_key(from)?;
+        validate_key(to)?;
+        create_dir(dir)?;
+        let from_lock = dir.join(format!(".{from}.lock"));
+        let to_lock = dir.join(format!(".{to}.lock"));
+        let (first, second) = if from < to {
+            (&from_lock, &to_lock)
+        } else {
+            (&to_lock, &from_lock)
+        };
+        let _first = lock(first)?;
+        let _second = lock(second)?;
+        let from_path = dir.join(format!("{from}.json"));
+        let to_path = dir.join(format!("{to}.json"));
+        let old = read_target(&from_path)?;
+        let current = read_target(&to_path)?;
+        let expected = current.as_ref().map(|target| target.revision);
+        let had_old = old.is_some();
+        let base_revision = expected.or(old.as_ref().map(|target| target.revision));
+        let mut target = match (current, old) {
+            (Some(mut current), Some(old)) => {
+                merge_targets(&mut current, old);
+                current
+            }
+            (Some(current), None) => current,
+            (None, Some(old)) => old,
+            (None, None) => init(),
+        };
+        target.key = to.to_owned();
+        let result = change(&mut target)?;
+        target.revision = base_revision.unwrap_or(0) + 1;
+        target.updated_at = now.to_owned();
+        write_target(dir, &to_path, &target, expected)?;
+        if had_old {
+            fs::remove_file(&from_path).map_err(ctx(format!("remove {}", from_path.display())))?;
+            fs::remove_file(&from_lock).map_err(ctx(format!("remove {}", from_lock.display())))?;
+        }
+        Ok(result)
+    }
+
+    pub fn load_account(&self, dir: &Path) -> Result<Option<Account>> {
+        read_json(&dir.join(ACCOUNT_FILE))
+    }
+
+    pub fn save_account(&self, dir: &Path, account: &Account) -> Result<()> {
+        create_dir(dir)?;
+        persist_json(dir, &dir.join(ACCOUNT_FILE), account, || Ok(()))
     }
 
     /// Deletes the target when `remove` approves it, re-reading it under its lock first.
@@ -210,7 +282,7 @@ fn lock(path: &Path) -> Result<File> {
     }
 }
 
-fn read_target(path: &Path) -> Result<Option<Target>> {
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -232,25 +304,38 @@ fn read_target(path: &Path) -> Result<Option<Target>> {
     let mut raw = String::new();
     file.read_to_string(&mut raw)
         .map_err(ctx(format!("read {}", path.display())))?;
-    let target: Target =
-        serde_json::from_str(&raw).map_err(ctx(format!("parse {}", path.display())))?;
-    if target.version != VERSION {
+    serde_json::from_str(&raw).map_err(ctx(format!("parse {}", path.display())))
+}
+
+fn read_target(path: &Path) -> Result<Option<Target>> {
+    let target: Option<Target> = read_json(path)?;
+    if let Some(target) = &target
+        && target.version != VERSION
+    {
         return fail(format!(
             "{} has unsupported version {}",
             path.display(),
             target.version
         ));
     }
-    Ok(Some(target))
+    Ok(target)
 }
 
-fn write_target(dir: &Path, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
+/// Writes `value` to a temporary file in `dir`, fsyncs it, runs `check` and renames it over
+/// `path`.
+fn persist_json(
+    dir: &Path,
+    path: &Path,
+    value: &impl Serialize,
+    check: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let mut temp = tempfile::Builder::new()
         .prefix(".tmp-")
         .suffix(".json")
         .tempfile_in(dir)
         .map_err(ctx(format!("create temporary file in {}", dir.display())))?;
-    serde_json::to_writer_pretty(&mut temp, target).map_err(ctx("serialize target"))?;
+    serde_json::to_writer_pretty(&mut temp, value)
+        .map_err(ctx(format!("serialize {}", path.display())))?;
     temp.write_all(b"\n")
         .map_err(ctx(format!("write {}", temp.path().display())))?;
     temp.as_file()
@@ -259,16 +344,54 @@ fn write_target(dir: &Path, path: &Path, target: &Target, expected: Option<u64>)
     temp.as_file()
         .sync_all()
         .map_err(ctx(format!("sync {}", temp.path().display())))?;
-    let on_disk = read_target(path)?.map(|current| current.revision);
-    if on_disk != expected {
-        return fail(format!(
-            "target {} changed during update; retry",
-            target.key
-        ));
-    }
+    check()?;
     temp.persist(path)
         .map_err(|error| Error(format!("replace {}: {}", path.display(), error.error)))?;
     File::open(dir)
         .and_then(|handle| handle.sync_all())
         .map_err(ctx(format!("sync {}", dir.display())))
+}
+
+fn write_target(dir: &Path, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
+    persist_json(dir, path, target, || {
+        let on_disk = read_target(path)?.map(|current| current.revision);
+        if on_disk != expected {
+            return fail(format!(
+                "target {} changed during update; retry",
+                target.key
+            ));
+        }
+        Ok(())
+    })
+}
+
+fn create_dir(dir: &Path) -> Result<()> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(ctx(format!("create {}", dir.display())))
+}
+
+/// Moves runs, threads and records that `into` lacks over from `from`.
+fn merge_targets(into: &mut Target, from: Target) {
+    for run in from.runs {
+        if !into.runs.iter().any(|known| known.id == run.id) {
+            into.runs.push(run);
+        }
+    }
+    for thread in from.threads {
+        if !into.threads.iter().any(|known| known.id == thread.id) {
+            into.threads.push(thread);
+        }
+    }
+    for record in from.records {
+        if !into
+            .records
+            .iter()
+            .any(|known| known.comment_id == record.comment_id)
+        {
+            into.records.push(record);
+        }
+    }
 }

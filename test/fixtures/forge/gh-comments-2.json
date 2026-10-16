@@ -1,0 +1,37 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "comments": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "ic-3" },
+          "nodes": [
+            {
+              "databaseId": 2003,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#issuecomment-2003",
+              "body": "**bug (low):** A finding outside the diff.\n\nm1 xhigh codex {{RUN}}.c1p0.r1\n<!-- review-finding v1 id={{RUN}}.c1p0.r1.f5 sha={{HEAD}} -->",
+              "createdAt": "2026-10-16T16:32:00Z",
+              "author": { "login": "me" },
+              "editor": null
+            },
+            {
+              "databaseId": 2004,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#issuecomment-2004",
+              "body": "Fixed in abc1234.\n\nm1 xhigh codex {{RUN}}.c1p0.fix\nRe: {{RUN}}.c1p0.r1.f5",
+              "createdAt": "2026-10-16T16:40:00Z",
+              "author": { "login": "me" },
+              "editor": null
+            },
+            {
+              "databaseId": 2005,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#issuecomment-2005",
+              "body": "Carol asks for docs.",
+              "createdAt": "2026-10-16T16:41:00Z",
+              "author": { "login": "carol" },
+              "editor": null
+            }
+          ]
+        }
+      }
+    }
+  }
+}

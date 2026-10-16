@@ -1,0 +1,19 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "number": {{NUMBER}},
+        "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}",
+        "state": "{{STATE}}",
+        "closedAt": {{CLOSED}},
+        "headRefName": "feat",
+        "headRefOid": "{{HEAD}}",
+        "baseRefOid": "{{BASE}}",
+        "baseRepository": { "nameWithOwner": "{{REPO}}" },
+        "reviewThreads": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+        "reviews": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+        "comments": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] }
+      }
+    }
+  }
+}

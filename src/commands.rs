@@ -15,10 +15,13 @@ use crate::clock;
 use crate::error::{Error, Result, ctx, fail};
 use crate::git::{CommitInfo, Repo};
 use crate::model::{
-    Anchor, Author, Comment, CommitPatch, FindingInfo, KilledFinding, Pass, PassKind, Reviewer,
-    Run, Severity, Side, Target, TargetKind, Thread, ThreadType, Triage, VERSION,
+    Anchor, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
+    PassKind, PostState, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind, Thread,
+    ThreadType, Triage, VERSION,
 };
 use crate::store::Store;
+
+mod sync;
 
 const PRUNE_AFTER_SECS: i64 = 90 * 24 * 60 * 60;
 const MAX_TEXT: usize = 65_536;
@@ -101,6 +104,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,
         Command::Status { head } => status(&ctx, head.as_deref())?,
+        Command::Sync { pr } => sync::sync(&ctx, pr.as_deref())?,
         Command::Prune { dry_run, .. } => {
             let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, dry_run)?;
             json!({ "dry_run": dry_run, "pruned": pruned })
@@ -124,6 +128,14 @@ impl Ctx {
             dir,
             selection,
         })
+    }
+
+    /// Author default: the forge login cached by `sync`, else git `user.name`.
+    fn default_login(&self) -> Result<Option<String>> {
+        match self.store.load_account(&self.dir)? {
+            Some(account) => Ok(Some(account.login)),
+            None => self.repo.user_name(),
+        }
     }
 
     fn scope(&self) -> Result<Scope> {
@@ -320,7 +332,9 @@ impl Ctx {
             head: (scope.kind != TargetKind::Branch).then(|| scope.head.clone()),
             created_at: now.to_owned(),
             updated_at: now.to_owned(),
+            review: None,
             runs: Vec::new(),
+            records: Vec::new(),
             threads: Vec::new(),
         }
     }
@@ -541,6 +555,17 @@ fn build_anchor(
     }))
 }
 
+fn local_comment(author: Author, body: String, now: &str) -> Comment {
+    Comment {
+        author,
+        body,
+        created_at: now.to_owned(),
+        post: PostState::Pending,
+        remote: None,
+        draft_id: None,
+    }
+}
+
 fn author(args: &AuthorArgs, target: &Target, login: Option<&str>) -> Result<Author> {
     let agent = args.model.is_some()
         || args.effort.is_some()
@@ -625,55 +650,58 @@ struct Recorded {
     head_patch_id: Option<String>,
 }
 
-fn run_end(ctx: &Ctx, run_id: &str) -> Result<Value> {
-    let scope = ctx.scope()?;
-    let Some(existing) = &scope.existing else {
-        return fail(format!("run {run_id} not found in target {}", scope.key));
-    };
-    let head_tree = ctx.repo.tree_of(&scope.head)?;
-    // Patch-ids are computed before taking the lock, which only covers the read-modify-write.
-    let mut records: HashMap<String, Recorded> = HashMap::new();
-    for run in &existing.runs {
-        for pass in &run.passes {
-            if pass.tree != head_tree || pass.head == scope.head {
-                continue;
+/// Patch-ids to adopt for passes whose reviewed tree now equals the head's tree, computed
+/// before taking the lock, which only covers the read-modify-write.
+struct Adoption {
+    head: String,
+    head_tree: String,
+    passes: HashMap<String, Recorded>,
+}
+
+impl Ctx {
+    fn adoption(&self, scope: &Scope) -> Result<Adoption> {
+        let head_tree = self.repo.tree_of(&scope.head)?;
+        let mut passes = HashMap::new();
+        for run in scope.existing.iter().flat_map(|target| &target.runs) {
+            for pass in &run.passes {
+                if pass.tree != head_tree || pass.head == scope.head {
+                    continue;
+                }
+                let from = if self.repo.is_ancestor(&pass.head, &scope.head)? {
+                    Some(pass.head.clone())
+                } else {
+                    scope.base.clone()
+                };
+                let commits = self.repo.commits(from.as_deref(), &scope.head)?;
+                let head_patch_id = match commits.iter().find(|commit| commit.sha == scope.head) {
+                    Some(commit) => commit.patch_id.clone(),
+                    None => self.repo.commit_patch_id(&scope.head)?,
+                };
+                passes.insert(
+                    format!("{}.{}", run.id, pass.id),
+                    Recorded {
+                        commits,
+                        head_patch_id,
+                    },
+                );
             }
-            let from = if ctx.repo.is_ancestor(&pass.head, &scope.head)? {
-                Some(pass.head.clone())
-            } else {
-                scope.base.clone()
-            };
-            let commits = ctx.repo.commits(from.as_deref(), &scope.head)?;
-            let head_patch_id = match commits.iter().find(|commit| commit.sha == scope.head) {
-                Some(commit) => commit.patch_id.clone(),
-                None => ctx.repo.commit_patch_id(&scope.head)?,
-            };
-            records.insert(
-                format!("{}.{}", run.id, pass.id),
-                Recorded {
-                    commits,
-                    head_patch_id,
-                },
-            );
         }
+        Ok(Adoption {
+            head: scope.head.clone(),
+            head_tree,
+            passes,
+        })
     }
-    let (ended_at, recorded) = ctx.update(&scope, |target, now| {
-        let run = find_run_mut(target, run_id)?;
-        if run.ended_at.is_some() {
-            return fail(format!("run {run_id} already ended"));
-        }
-        if let Some(open) = run.passes.iter().find(|pass| pass.ended_at.is_none()) {
-            return fail(format!(
-                "pass {run_id}.{} is still open; end it first",
-                open.id
-            ));
-        }
-        run.ended_at = Some(now.to_owned());
+}
+
+impl Adoption {
+    /// Records the patch-ids and points tree-only anchors at the head; returns the pass ids.
+    fn apply(&self, target: &mut Target) -> Vec<String> {
         let mut recorded = Vec::new();
         for run in &mut target.runs {
             for pass in &mut run.passes {
                 let id = format!("{}.{}", run.id, pass.id);
-                let Some(record) = records.get(&id) else {
+                let Some(record) = self.passes.get(&id) else {
                     continue;
                 };
                 for commit in &record.commits {
@@ -693,12 +721,34 @@ fn run_end(ctx: &Ctx, run_id: &str) -> Result<Value> {
         for thread in &mut target.threads {
             if let Some(anchor) = &mut thread.anchor
                 && anchor.commit.is_none()
-                && anchor.tree == head_tree
+                && anchor.tree == self.head_tree
             {
-                anchor.commit = Some(scope.head.clone());
+                anchor.commit = Some(self.head.clone());
             }
         }
-        Ok((now.to_owned(), recorded))
+        recorded
+    }
+}
+
+fn run_end(ctx: &Ctx, run_id: &str) -> Result<Value> {
+    let scope = ctx.scope()?;
+    if scope.existing.is_none() {
+        return fail(format!("run {run_id} not found in target {}", scope.key));
+    }
+    let adoption = ctx.adoption(&scope)?;
+    let (ended_at, recorded) = ctx.update(&scope, |target, now| {
+        let run = find_run_mut(target, run_id)?;
+        if run.ended_at.is_some() {
+            return fail(format!("run {run_id} already ended"));
+        }
+        if let Some(open) = run.passes.iter().find(|pass| pass.ended_at.is_none()) {
+            return fail(format!(
+                "pass {run_id}.{} is still open; end it first",
+                open.id
+            ));
+        }
+        run.ended_at = Some(now.to_owned());
+        Ok((now.to_owned(), adoption.apply(target)))
     })?;
     let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?;
     Ok(json!({
@@ -1053,11 +1103,8 @@ fn finding_add(ctx: &Ctx, run_id: &str, pass_id: &str, reviewer_id: &str) -> Res
                     tests_run: finding.tests_run,
                     post_reveal: finding.post_reveal,
                 }),
-                comments: vec![Comment {
-                    author: agent.clone(),
-                    body: finding.scenario,
-                    created_at: now.to_owned(),
-                }],
+                remote: None,
+                comments: vec![local_comment(agent.clone(), finding.scenario, now)],
                 created_at: now.to_owned(),
                 updated_at: now.to_owned(),
             });
@@ -1109,7 +1156,7 @@ fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
     } else {
         build_anchor(&anchor_input, None, String::new())?
     };
-    let login = ctx.repo.user_name()?;
+    let login = ctx.default_login()?;
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, login.as_deref())?;
         let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
@@ -1123,11 +1170,8 @@ fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
             triage: None,
             held: false,
             finding: None,
-            comments: vec![Comment {
-                author,
-                body,
-                created_at: now.to_owned(),
-            }],
+            remote: None,
+            comments: vec![local_comment(author, body, now)],
             created_at: now.to_owned(),
             updated_at: now.to_owned(),
         };
@@ -1143,15 +1187,11 @@ fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
         return fail(format!("thread {} not found", args.id));
     }
     let body = read_body(&args.body)?;
-    let login = ctx.repo.user_name()?;
+    let login = ctx.default_login()?;
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, login.as_deref())?;
         let thread = find_thread_mut(target, &args.id)?;
-        thread.comments.push(Comment {
-            author,
-            body,
-            created_at: now.to_owned(),
-        });
+        thread.comments.push(local_comment(author, body, now));
         thread.updated_at = now.to_owned();
         Ok(thread.clone())
     })?;
@@ -1247,13 +1287,20 @@ impl Locator<'_> {
         }
     }
 
+    /// Local anchors map through git; imported threads use the host's path, line and outdated
+    /// state.
     fn current(&mut self, thread: &Thread) -> Value {
-        match &thread.anchor {
-            Some(anchor) => {
-                let location = self.locate(anchor);
-                json!({ "path": location.path, "line": location.line, "outdated": location.outdated })
-            }
-            None => Value::Null,
+        if let Some(anchor) = &thread.anchor {
+            let location = self.locate(anchor);
+            return json!({ "path": location.path, "line": location.line, "outdated": location.outdated });
+        }
+        match &thread.remote {
+            Some(remote) if remote.path.is_some() => json!({
+                "path": remote.path,
+                "line": remote.line.or(remote.old_line).or(remote.original_line),
+                "outdated": remote.outdated.unwrap_or(false),
+            }),
+            _ => Value::Null,
         }
     }
 
@@ -1345,31 +1392,23 @@ fn kind_label(kind: ThreadType, severity: Option<Severity>) -> String {
     }
 }
 
-fn place(anchor: Option<&Anchor>, location: Option<&Location>) -> String {
-    let Some(anchor) = anchor else {
+const HIDDEN: &str = "  (comment by another author, text hidden)\n";
+
+/// Comments written here or by the authenticated forge user; reviewers never see other text.
+fn mine(comment: &Comment) -> bool {
+    comment.remote.as_ref().is_none_or(|remote| remote.is_me)
+}
+
+fn place(current: &Value) -> String {
+    let Some(path) = current["path"].as_str() else {
         return "general".to_owned();
     };
-    let line = match anchor.side {
-        Side::New => anchor.line,
-        Side::Old => anchor.old_line,
+    let mut text = match current["line"].as_u64() {
+        Some(line) => format!("{path}:{line}"),
+        None => path.to_owned(),
     };
-    let mut text = match line {
-        Some(line) => format!("{}:{line}", anchor.path),
-        None => anchor.path.clone(),
-    };
-    if anchor.side == Side::Old {
-        text.push_str(" (old side)");
-    }
-    if let Some(location) = location {
-        if location.outdated {
-            text.push_str(" (outdated)");
-        } else if location.path != anchor.path || location.line != line {
-            let _ = write!(text, " (now {}", location.path);
-            if let Some(line) = location.line {
-                let _ = write!(text, ":{line}");
-            }
-            text.push(')');
-        }
+    if current["outdated"] == true {
+        text.push_str(" (outdated)");
     }
     text
 }
@@ -1387,7 +1426,7 @@ fn prompt(
         out.push_str("- none\n");
     }
     for thread in threads {
-        let location = thread.anchor.as_ref().map(|anchor| locator.locate(anchor));
+        let current = locator.current(thread);
         let state = match (&thread.resolution, thread.resolved, thread.held) {
             (_, false, true) => "held question".to_owned(),
             (Some(resolution), true, _) => format!("resolved: {resolution}"),
@@ -1400,16 +1439,20 @@ fn prompt(
             "- {} [{}] {} ({state})",
             thread.id,
             kind_label(thread.kind, thread.severity),
-            place(thread.anchor.as_ref(), location.as_ref())
+            place(&current)
         );
         let mut comments = thread.comments.iter();
         if let Some(first) = comments.next() {
-            let _ = writeln!(
-                out,
-                "  {}: {}",
-                author_label(&first.author),
-                indent(&first.body)
-            );
+            if mine(first) {
+                let _ = writeln!(
+                    out,
+                    "  {}: {}",
+                    author_label(&first.author),
+                    indent(&first.body)
+                );
+            } else {
+                out.push_str(HIDDEN);
+            }
         }
         if let Some(finding) = &thread.finding {
             if let Some(evidence) = &finding.evidence {
@@ -1423,6 +1466,10 @@ fn prompt(
             }
         }
         for reply in comments {
+            if !mine(reply) {
+                out.push_str(HIDDEN);
+                continue;
+            }
             let _ = writeln!(
                 out,
                 "  Reply from {}: {}",
@@ -1441,7 +1488,14 @@ fn prompt(
             "- {} [{}] {}: {}\n  Killed: {}",
             finding.id,
             kind_label(finding.kind, finding.severity),
-            place(finding.anchor.as_ref(), None),
+            finding.anchor.as_ref().map_or_else(
+                || "general".to_owned(),
+                |anchor| place(&json!({
+                    "path": anchor.path,
+                    "line": anchor.line.or(anchor.old_line),
+                    "outdated": false,
+                }))
+            ),
             indent(&finding.scenario),
             indent(&finding.reason)
         );
@@ -1641,7 +1695,7 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         if current["outdated"] == true {
             outdated.push(thread.id.clone());
         }
-        if thread.resolved {
+        if !is_open(thread) {
             continue;
         }
         if thread.held {
@@ -1667,17 +1721,28 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             })
         })
         .collect();
+    let records: Vec<&ImportedRecord> = target
+        .iter()
+        .flat_map(|target| &target.records)
+        .filter(|record| {
+            record.head == head || (record.head.len() >= 7 && head.starts_with(&record.head))
+        })
+        .collect();
+    let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();
+    let local = count(&covered);
     Ok(json!({
         "repo": ctx.repo_key,
         "target": target.map(|_| &scope.key),
+        "review": target.and_then(|target| target.review.as_ref()),
         "kind": scope.kind,
         "branch": scope.branch,
         "base": scope.base,
         "head": head,
         "head_tree": head_tree,
-        "reviewed": !covered.is_empty(),
-        "reviews_at_head": count(&covered),
+        "reviewed": !covered.is_empty() || imported > 0,
+        "reviews_at_head": local + usize::try_from(imported).unwrap_or(usize::MAX),
         "covered_by": coverage_json(&covered),
+        "imported_records": records,
         "worktree": worktree,
         "commits": commit_views,
         "unreviewed_commits": unreviewed,
@@ -1688,8 +1753,25 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     }))
 }
 
+/// Open review items: unresolved threads, except other people's general comments, which have
+/// no resolved state on the host.
+fn is_open(thread: &Thread) -> bool {
+    !thread.resolved
+        && (thread.finding.is_some()
+            || thread
+                .remote
+                .as_ref()
+                .is_none_or(|remote| remote.resolvable))
+}
+
+/// Age reference for pruning: when the PR/MR closed, else the last change.
 fn last_change(target: &Target) -> Result<i64> {
-    clock::parse(&target.updated_at)
+    let closed = target
+        .review
+        .as_ref()
+        .filter(|review| review.state != ReviewState::Open)
+        .and_then(|review| review.closed_at.as_deref());
+    clock::parse(closed.unwrap_or(&target.updated_at))
 }
 
 fn prune_dir(store: &Store, dir: &Path, now: i64, dry_run: bool) -> Result<Vec<Value>> {
@@ -1707,6 +1789,7 @@ fn prune_dir(store: &Store, dir: &Path, now: i64, dry_run: bool) -> Result<Vec<V
                 "repo": store.relative(dir),
                 "target": target.key,
                 "updated_at": target.updated_at,
+                "closed_at": target.review.as_ref().and_then(|review| review.closed_at.as_ref()),
             }));
         }
     }

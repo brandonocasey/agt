@@ -3,7 +3,10 @@ mod cli;
 mod clock;
 mod commands;
 mod error;
+mod forge;
 mod git;
+mod github;
+mod gitlab;
 mod model;
 mod store;
 

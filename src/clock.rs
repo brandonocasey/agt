@@ -34,38 +34,69 @@ pub fn format(secs: i64) -> String {
     )
 }
 
-/// Parses the `YYYY-MM-DDTHH:MM:SSZ` form that [`format`] writes.
+/// Parses an RFC 3339 timestamp (`T` separator, optional fraction, `Z` or `±HH:MM`) into Unix
+/// seconds.
 pub fn parse(text: &str) -> Result<i64> {
     let invalid = || Error(format!("invalid timestamp: {text}"));
     let bytes = text.as_bytes();
-    if bytes.len() != 20
+    if bytes.len() < 20
         || bytes[4] != b'-'
         || bytes[7] != b'-'
-        || bytes[10] != b'T'
+        || !matches!(bytes[10], b'T' | b't')
         || bytes[13] != b':'
         || bytes[16] != b':'
-        || bytes[19] != b'Z'
     {
         return Err(invalid());
     }
-    let number = |range: std::ops::Range<usize>| -> Result<i64> {
-        let part = text.get(range).ok_or_else(invalid)?;
-        if !part.bytes().all(|b| b.is_ascii_digit()) {
+    let number = |part: &str| -> Result<i64> {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
             return Err(invalid());
         }
         part.parse().map_err(|_| invalid())
     };
-    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
-    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let field = |range: std::ops::Range<usize>| number(text.get(range).unwrap_or_default());
+    let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
+    let (hour, minute, second) = (field(11..13)?, field(14..16)?, field(17..19)?);
+    let mut rest = text.get(19..).ok_or_else(invalid)?;
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return Err(invalid());
+        }
+        rest = fraction.get(digits..).ok_or_else(invalid)?;
+    }
+    let offset = match rest {
+        "Z" | "z" => 0,
+        _ => {
+            let sign = match rest.as_bytes().first() {
+                Some(b'+') => 1,
+                Some(b'-') => -1,
+                _ => return Err(invalid()),
+            };
+            let (hours, minutes) = rest
+                .get(1..)
+                .and_then(|zone| zone.split_once(':'))
+                .ok_or_else(invalid)?;
+            if hours.len() != 2 || minutes.len() != 2 {
+                return Err(invalid());
+            }
+            sign * (number(hours)? * 3600 + number(minutes)? * 60)
+        }
+    };
     if !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || hour > 23
         || minute > 59
-        || second > 59
+        || second > 60
     {
         return fail(format!("invalid timestamp: {text}"));
     }
-    Ok(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+    Ok(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// Rewrites a forge timestamp in the store's `YYYY-MM-DDTHH:MM:SSZ` form.
+pub fn normalize(text: &str) -> Result<String> {
+    Ok(format(parse(text)?))
 }
 
 // Proleptic Gregorian conversions from https://howardhinnant.github.io/date_algorithms.html
@@ -106,7 +137,20 @@ mod tests {
 
     #[test]
     fn rejects_other_forms() {
-        assert!(parse("2026-10-16T12:00:00+00:00").is_err());
+        assert!(parse("2026-10-16 12:00:00Z").is_err());
         assert!(parse("2026-13-16T12:00:00Z").is_err());
+        assert!(parse("2026-10-16T12:00:00").is_err());
+    }
+
+    #[test]
+    fn normalizes_fractions_and_offsets() {
+        assert_eq!(
+            normalize("2026-10-12T21:42:34.471Z").unwrap(),
+            "2026-10-12T21:42:34Z"
+        );
+        assert_eq!(
+            normalize("2026-10-12T23:42:34+02:00").unwrap(),
+            "2026-10-12T21:42:34Z"
+        );
     }
 }

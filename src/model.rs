@@ -16,8 +16,55 @@ pub struct Target {
     pub head: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub review: Option<Review>,
     pub runs: Vec<Run>,
+    pub records: Vec<ImportedRecord>,
     pub threads: Vec<Thread>,
+}
+
+/// The PR or MR a target is linked to, as of the last `sync`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Review {
+    pub forge: Forge,
+    pub host: String,
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    pub state: ReviewState,
+    pub closed_at: Option<String>,
+    pub head_branch: String,
+    pub head_sha: String,
+    pub base_sha: Option<String>,
+    pub start_sha: Option<String>,
+    pub login: String,
+    pub synced_at: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Forge {
+    Github,
+    Gitlab,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewState {
+    Open,
+    Closed,
+    Merged,
+}
+
+/// A trusted `review-record v2` comment from the PR/MR.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ImportedRecord {
+    pub run: String,
+    pub head: String,
+    pub reviews_at_head: u32,
+    pub open: Option<u32>,
+    pub comment_id: String,
+    pub url: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +141,38 @@ pub struct Thread {
     pub held: bool,
     pub finding: Option<FindingInfo>,
     pub comments: Vec<Comment>,
+    pub remote: Option<RemoteThread>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Host-side state of a thread. `resolvable` is false for general comments and review bodies.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RemoteThread {
+    pub kind: RemoteKind,
+    pub id: String,
+    pub url: Option<String>,
+    pub resolvable: bool,
+    pub outdated: Option<bool>,
+    pub path: Option<String>,
+    pub old_path: Option<String>,
+    pub line: Option<u32>,
+    pub old_line: Option<u32>,
+    pub original_line: Option<u32>,
+    pub start_line: Option<u32>,
+    pub original_start_line: Option<u32>,
+    pub side: Option<Side>,
+    pub commit: Option<String>,
+    pub review_state: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoteKind {
+    ReviewThread,
+    Review,
+    General,
+    Discussion,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,6 +250,27 @@ pub struct Comment {
     pub author: Author,
     pub body: String,
     pub created_at: String,
+    pub post: PostState,
+    pub remote: Option<RemoteComment>,
+    pub draft_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostState {
+    Pending,
+    Posting,
+    Posted,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RemoteComment {
+    pub id: String,
+    pub url: Option<String>,
+    pub login: Option<String>,
+    pub is_me: bool,
+    pub editor: Option<String>,
+    pub review_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

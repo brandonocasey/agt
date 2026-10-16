@@ -1,0 +1,124 @@
+[
+  {
+    "id": "93d1baffca995dafc5cbaa7caeb02680191cb1ba",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 4000889251,
+        "type": null,
+        "body": "added 1 commit",
+        "author": { "username": "me" },
+        "created_at": "2026-10-12T21:42:34.471Z",
+        "system": true,
+        "resolvable": false
+      }
+    ]
+  },
+  {
+    "id": "0c94200c744bc890ec2494edf9a2adaec3bc6415",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 4005224826,
+        "type": "DiffNote",
+        "body": "Bot finding on line 3.",
+        "author": { "username": "dj-bot" },
+        "created_at": "2026-10-13T13:40:28.268Z",
+        "system": false,
+        "position": {
+          "base_sha": "{{BASE}}",
+          "start_sha": "{{BASE}}",
+          "head_sha": "{{OLD}}",
+          "old_path": "a.txt",
+          "new_path": "a.txt",
+          "position_type": "text",
+          "old_line": null,
+          "new_line": 3,
+          "line_range": null
+        },
+        "resolvable": true,
+        "resolved": true
+      },
+      {
+        "id": 4006315211,
+        "type": "DiffNote",
+        "body": "changed this line in version 5 of the diff",
+        "author": { "username": "me" },
+        "created_at": "2026-10-13T16:01:13.669Z",
+        "system": true,
+        "resolvable": false
+      }
+    ]
+  },
+  {
+    "id": "aa4f06793a2cb5e35dc2d9eaf702a3d4f4a87096",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 4005300001,
+        "type": "DiffNote",
+        "body": "**bug (high):** Posted finding text.\n\nm1 xhigh codex {{RUN}}.c1p0.r1\n<!-- review-finding v1 id={{RUN}}.c1p0.r1.f1 sha={{HEAD}} -->",
+        "author": { "username": "me" },
+        "created_at": "2026-10-13T14:00:00.000Z",
+        "system": false,
+        "position": {
+          "base_sha": "{{BASE}}",
+          "start_sha": "{{BASE}}",
+          "head_sha": "{{HEAD}}",
+          "old_path": "a.txt",
+          "new_path": "a.txt",
+          "position_type": "text",
+          "old_line": null,
+          "new_line": 3,
+          "line_range": null
+        },
+        "resolvable": true,
+        "resolved": false
+      }
+    ]
+  }
+]
+[
+  {
+    "id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 4007000001,
+        "type": null,
+        "body": "Alice leaves a general note.",
+        "author": { "username": "alice" },
+        "created_at": "2026-10-14T09:00:00.000+02:00",
+        "system": false,
+        "resolvable": false
+      }
+    ]
+  },
+  {
+    "id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 4007000002,
+        "type": "DiffNote",
+        "body": "Bob on an unchanged line.",
+        "author": { "username": "bob" },
+        "created_at": "2026-10-14T10:00:00.000Z",
+        "system": false,
+        "position": {
+          "base_sha": "{{BASE}}",
+          "start_sha": "{{BASE}}",
+          "head_sha": "{{OLD}}",
+          "old_path": "a.txt",
+          "new_path": "a.txt",
+          "position_type": "text",
+          "old_line": 8,
+          "new_line": 8,
+          "line_range": null
+        },
+        "resolvable": true,
+        "resolved": false
+      }
+    ]
+  }
+]

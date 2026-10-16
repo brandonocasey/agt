@@ -1,6 +1,7 @@
 mod commands;
 mod reviewed;
 mod support;
+mod sync;
 
 use assert_cmd::Command;
 

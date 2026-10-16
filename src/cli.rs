@@ -54,7 +54,13 @@ pub enum Command {
         #[arg(long)]
         head: Option<String>,
     },
-    /// Drop targets unchanged for 90 days.
+    /// Import the PR/MR of this branch (or `--pr`) from GitHub or GitLab. Read-only on the forge.
+    Sync {
+        /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
+        #[arg(long)]
+        pr: Option<String>,
+    },
+    /// Drop targets 90 days after their PR/MR closed, else 90 days after their last change.
     Prune {
         /// Prune every repository in the store, not only the current one.
         #[arg(long)]

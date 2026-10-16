@@ -1,0 +1,40 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviews": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "r-1" },
+          "nodes": [
+            {
+              "databaseId": 5001,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#pullrequestreview-5001",
+              "body": "",
+              "state": "COMMENTED",
+              "submittedAt": "2026-10-16T15:55:05Z",
+              "author": { "login": "me" },
+              "editor": null
+            },
+            {
+              "databaseId": 5401,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#pullrequestreview-5401",
+              "body": "Bob approves overall.",
+              "state": "APPROVED",
+              "submittedAt": "2026-10-16T16:20:00Z",
+              "author": { "login": "bob" },
+              "editor": null
+            },
+            {
+              "databaseId": 5402,
+              "url": null,
+              "body": "My unsubmitted draft review.",
+              "state": "PENDING",
+              "submittedAt": null,
+              "author": { "login": "me" },
+              "editor": null
+            }
+          ]
+        }
+      }
+    }
+  }
+}

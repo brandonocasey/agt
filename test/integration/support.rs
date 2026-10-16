@@ -7,6 +7,8 @@ use assert_fs::TempDir;
 use serde_json::Value;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agent-review");
+const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
+const FORGE_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/forge");
 
 /// A temporary HOME, XDG dirs, git config and repository; nothing reads the user's real state.
 pub struct Env {
@@ -19,7 +21,7 @@ impl Env {
     pub fn new() -> Self {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        for dir in ["home", "state", "config", "repo"] {
+        for dir in ["home", "state", "config", "repo", "forge"] {
             fs::create_dir_all(root.join(dir)).unwrap();
         }
         fs::write(
@@ -58,10 +60,45 @@ impl Env {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_OBJECT_DIRECTORY")
+            .env("AGENT_REVIEW_GH_BIN", FAKE_FORGE)
+            .env("AGENT_REVIEW_GLAB_BIN", FAKE_FORGE)
+            .env("FAKE_FORGE_DIR", self.root.join("forge"))
+            .env_remove("GITLAB_HOST")
             .env_remove("AGENT_REVIEW_NOW");
         command
     }
 
+    /// Registers a canned fake gh/glab response for exactly these arguments, with a GraphQL
+    /// query given as `query=<operation name>`.
+    pub fn respond(&self, args: &[&str], body: &str) {
+        let key = self.git_stdin(
+            &["hash-object", "--stdin"],
+            &format!("{}\n", args.join("\n")),
+        );
+        fs::write(self.root.join("forge").join(format!("{key}.json")), body).unwrap();
+    }
+
+    /// Every fake gh/glab call as `<GITLAB_HOST>\t<arguments>`.
+    pub fn forge_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.root.join("forge").join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// A forge fixture with `{{NAME}}` placeholders replaced.
+pub fn fixture(name: &str, vars: &[(&str, &str)]) -> String {
+    let mut text = fs::read_to_string(Path::new(FORGE_FIXTURES).join(name)).unwrap();
+    for (name, value) in vars {
+        text = text.replace(&format!("{{{{{name}}}}}"), value);
+    }
+    assert!(!text.contains("{{"), "unfilled placeholder in {name}");
+    text
+}
+
+impl Env {
     pub fn git(&self, args: &[&str]) -> String {
         self.git_env(args, &[])
     }

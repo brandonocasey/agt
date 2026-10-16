@@ -1,0 +1,85 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "number": {{NUMBER}},
+        "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}",
+        "state": "OPEN",
+        "closedAt": null,
+        "headRefName": "feat",
+        "headRefOid": "{{HEAD}}",
+        "baseRefOid": "{{BASE}}",
+        "baseRepository": { "nameWithOwner": "{{REPO}}" },
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": "t-3" },
+          "nodes": [
+            {
+              "id": "PRRT_c",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "a.txt",
+              "line": 6,
+              "originalLine": 6,
+              "startLine": null,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 1201,
+                    "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#discussion_r1201",
+                    "body": "Mine, but edited by alice.\n<!-- review-finding v1 id={{RUN}}.c1p0.r1.f8 sha={{HEAD}} -->",
+                    "createdAt": "2026-10-16T16:01:00Z",
+                    "author": { "login": "me" },
+                    "editor": { "login": "alice" },
+                    "originalCommit": { "oid": "{{HEAD}}" },
+                    "pullRequestReview": { "databaseId": 5201 }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_d",
+              "isResolved": false,
+              "isOutdated": true,
+              "path": "a.txt",
+              "line": null,
+              "originalLine": 5,
+              "startLine": null,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 1301,
+                    "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#discussion_r1301",
+                    "body": "Alice asks about line 5.",
+                    "createdAt": "2026-10-16T16:02:00Z",
+                    "author": { "login": "alice" },
+                    "editor": null,
+                    "originalCommit": { "oid": "{{BASE}}" },
+                    "pullRequestReview": { "databaseId": 5301 }
+                  },
+                  {
+                    "databaseId": 1302,
+                    "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#discussion_r1302",
+                    "body": "Marker not in the first comment.\n<!-- review-finding v1 id={{RUN}}.c1p0.r1.f7 sha={{HEAD}} -->",
+                    "createdAt": "2026-10-16T16:03:00Z",
+                    "author": { "login": "me" },
+                    "editor": null,
+                    "originalCommit": { "oid": "{{BASE}}" },
+                    "pullRequestReview": { "databaseId": 5302 }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -376,8 +376,12 @@ impl Repo {
     }
 
     /// `<host>/<owner>/<repo>` from `origin`, else `local/<name>-<hash of the git common dir>`.
+    pub fn origin_url(&self) -> Result<Option<String>> {
+        self.git_opt(&["remote", "get-url", "origin"])
+    }
+
     pub fn repo_key(&self) -> Result<String> {
-        if let Some(url) = self.git_opt(&["remote", "get-url", "origin"])?
+        if let Some(url) = self.origin_url()?
             && let Some(key) = remote_key(&url)
         {
             return Ok(key);
@@ -410,7 +414,8 @@ fn text(bytes: Vec<u8>) -> Result<String> {
     Ok(text.trim_end_matches('\n').to_owned())
 }
 
-fn remote_key(url: &str) -> Option<String> {
+/// Splits a remote URL into its lowercase host and its `owner/repo` path (GitLab subgroups kept).
+pub fn split_remote(url: &str) -> Option<(String, String)> {
     let (authority, path) = match url.split_once("://") {
         Some((_, rest)) => rest.split_once('/')?,
         None => {
@@ -434,11 +439,11 @@ fn remote_key(url: &str) -> Option<String> {
     if segments.len() < 2 {
         return None;
     }
-    Some(format!(
-        "{}/{}",
-        host.to_ascii_lowercase(),
-        segments.join("/")
-    ))
+    Some((host.to_ascii_lowercase(), segments.join("/")))
+}
+
+fn remote_key(url: &str) -> Option<String> {
+    split_remote(url).map(|(host, path)| format!("{host}/{path}"))
 }
 
 #[cfg(test)]

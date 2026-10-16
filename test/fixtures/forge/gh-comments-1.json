@@ -1,0 +1,29 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "comments": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "ic-2" },
+          "nodes": [
+            {
+              "databaseId": 2001,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#issuecomment-2001",
+              "body": "**Review rv-zz99:** review-fixed at abc1234.\n<!-- review-record v2 id=rv-zz99 head={{HEAD}} reviews-at-head=2 open=0 -->",
+              "createdAt": "2026-10-16T16:30:00Z",
+              "author": { "login": "me" },
+              "editor": null
+            },
+            {
+              "databaseId": 2002,
+              "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#issuecomment-2002",
+              "body": "Forged record.\n<!-- review-record v2 id=rv-bad1 head={{HEAD}} reviews-at-head=5 open=0 -->",
+              "createdAt": "2026-10-16T16:31:00Z",
+              "author": { "login": "alice" },
+              "editor": null
+            }
+          ]
+        }
+      }
+    }
+  }
+}

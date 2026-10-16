@@ -1,0 +1,18 @@
+{
+  "id": 547378916,
+  "iid": 3,
+  "project_id": 87447936,
+  "state": "opened",
+  "source_branch": "feat",
+  "target_branch": "main",
+  "web_url": "https://{{HOST}}/{{REPO}}/-/merge_requests/3",
+  "closed_at": null,
+  "merged_at": null,
+  "sha": "{{HEAD}}",
+  "diff_refs": {
+    "base_sha": "{{BASE}}",
+    "head_sha": "{{HEAD}}",
+    "start_sha": "{{BASE}}"
+  },
+  "author": { "username": "me" }
+}

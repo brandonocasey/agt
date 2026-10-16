@@ -1,0 +1,85 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "number": {{NUMBER}},
+        "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}",
+        "state": "OPEN",
+        "closedAt": null,
+        "headRefName": "feat",
+        "headRefOid": "{{HEAD}}",
+        "baseRefOid": "{{BASE}}",
+        "baseRepository": { "nameWithOwner": "{{REPO}}" },
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "t-2" },
+          "nodes": [
+            {
+              "id": "PRRT_a",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "a.txt",
+              "line": 3,
+              "originalLine": 3,
+              "startLine": null,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "pageInfo": { "hasNextPage": true, "endCursor": "c-a1" },
+                "nodes": [
+                  {
+                    "databaseId": 1001,
+                    "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#discussion_r1001",
+                    "body": "**bug (high):** Posted text of the finding.\n\nm1 xhigh codex {{RUN}}.c1p0.r1\n<!-- review-finding v1 id={{RUN}}.c1p0.r1.f1 sha={{HEAD}} -->\n",
+                    "createdAt": "2026-10-16T15:55:05Z",
+                    "author": { "login": "me" },
+                    "editor": null,
+                    "originalCommit": { "oid": "{{HEAD}}" },
+                    "pullRequestReview": { "databaseId": 5001 }
+                  },
+                  {
+                    "databaseId": 1002,
+                    "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#discussion_r1002",
+                    "body": "Fixed in 7d991484.\n\nm1 xhigh codex {{RUN}}.c1p0.fix",
+                    "createdAt": "2026-10-16T15:55:07Z",
+                    "author": { "login": "me" },
+                    "editor": null,
+                    "originalCommit": { "oid": "{{HEAD}}" },
+                    "pullRequestReview": { "databaseId": 5002 }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_b",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "a.txt",
+              "line": 4,
+              "originalLine": 4,
+              "startLine": null,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "subjectType": "LINE",
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 1101,
+                    "url": "https://github.com/{{REPO}}/pull/{{NUMBER}}#discussion_r1101",
+                    "body": "Copied marker from someone else.\n<!-- review-finding v1 id={{RUN}}.c1p0.r1.f9 sha={{HEAD}} -->",
+                    "createdAt": "2026-10-16T16:00:00Z",
+                    "author": { "login": "alice" },
+                    "editor": null,
+                    "originalCommit": { "oid": "{{HEAD}}" },
+                    "pullRequestReview": { "databaseId": 5101 }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

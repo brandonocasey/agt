@@ -5,7 +5,8 @@ per repository. It records review runs and passes, each reviewer's model,
 effort, harness and harness version, the findings reviewers kept or killed, and
 line-anchored threads with replies and resolutions. It works without a PR or
 MR, so Claude Code, Codex, Cursor or a person can pick up where a review left
-off.
+off. When a GitHub PR or GitLab MR exists, `sync` imports all of its threads
+and comments.
 
 ## Install
 
@@ -14,7 +15,8 @@ mise run install
 ```
 
 This runs `cargo install --locked --path .` and puts `agent-review` in
-`~/.cargo/bin`. Git 2.31 or newer must be on `PATH`.
+`~/.cargo/bin`. Git 2.31 or newer must be on `PATH`. `sync` also needs an
+authenticated `gh` (GitHub) or `glab` (GitLab).
 
 ## Output and errors
 
@@ -100,7 +102,8 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still 
 - Author: `--author <login>` for a human, or agent flags `--model`,
   `--effort`, `--harness`, `--harness-version`, `--run`, `--pass`,
   `--reviewer`. `--reviewer` with `--run` and `--pass` fills the rest from the
-  stored reviewer. With no author flags the author is git `user.name`.
+  stored reviewer. With no author flags the author is the forge login that
+  `sync` last authenticated as for this repository, else git `user.name`.
 - `resolve`: `--resolution` is one of `fixed <sha>`, `not fixed: <reason>`,
   `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
   `stale` resolution; `fixed` needs `--resolution "fixed <sha>"`).
@@ -119,14 +122,32 @@ agent-review status
 agent-review status --head 1a2b3c4
 ```
 
-`list` prints threads (each with `current`: the anchor mapped to `HEAD`) and
-killed findings. `--run` keeps only that run's findings.
+`list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
+for imported threads the host's path, line and outdated state) and killed
+findings. `--run` keeps only that run's findings. `--format prompt` prints the
+text only of comments written locally or by the authenticated forge user;
+every other comment shows as `(comment by another author, text hidden)`, so
+reviewers never read other people's comments.
 
 `status` never writes: not to the store, not to the git index or object
 database. It reports whether the head is reviewed, `reviews_at_head`, the
 passes that cover it, each commit's reviewed state, `unreviewed_commits`, open
-threads, `outdated_threads`, held questions and runs. Without `--head` on a
-branch, `worktree` reports the same for uncommitted work.
+threads, `outdated_threads`, held questions, runs, the linked PR/MR and the
+trusted imported review records for the head. Without `--head` on a branch,
+`worktree` reports the same for uncommitted work. Open threads exclude other
+people's general comments and review bodies, which have no resolved state on
+the host.
+
+Sync with a PR or MR:
+
+```sh
+agent-review sync                     # the PR/MR whose head is this branch
+agent-review sync --pr 1235
+agent-review sync --pr https://gitlab.example.com/group/proj/-/merge_requests/3
+```
+
+`sync` is read-only on the forge: it sends only `GET` requests and GraphQL
+queries. See [Sync](#sync).
 
 Cleanup:
 
@@ -162,8 +183,50 @@ agent-review prune --all
   `agent-review` never writes refs to pin it, so once `git gc` prunes it (by
   default about two weeks later, unless `run end` has since moved the anchor
   to a commit) the anchor counts as outdated.
-- A target is deleted 90 days after its last change. `run end` and `prune`
+- A target is deleted 90 days after its PR/MR closed or merged, or, with no
+  closed PR/MR, 90 days after its last change. `sync`, `run end` and `prune`
   apply this to the current repository; `prune --all` to every repository.
+- Each trusted `review-record v2` comment whose `head` is the evaluated head
+  adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
+
+## Sync
+
+- Forge: `github.com` uses `gh`; any other host uses `glab` with
+  `GITLAB_HOST=<host>`, so self-hosted GitLab works. The host and repository
+  come from `--pr <url>` or the `origin` remote.
+- PR/MR lookup: the PR whose head is `<origin owner>:<branch>` (GitHub) or the
+  MR whose source branch is the current branch (GitLab), first in `origin`,
+  then in the repository `origin` was forked from. Open ones win, then the
+  newest.
+- The target is renamed to `gh-<number>` or `gl-<iid>` under both locks, keeping
+  its runs and threads; later commands on the branch find it by reflog birth or
+  shared patch-ids. `sync` also adopts patch-ids like `run end` and prunes.
+- GitHub: review threads with all their comments (`reviewThreads` and inner
+  comments are paginated), review bodies (empty and pending ones skipped) and
+  issue comments, through GraphQL. GitLab: the MR, all discussions
+  (`--paginate`) minus `system` notes, and your draft notes. An
+  `individual_note` is a general comment; resolvability comes from the first
+  note. A GitLab position is outdated when its `head_sha` is not the MR's
+  latest head and the line no longer maps to it (`git diff -U0 -M`); a position
+  whose commits are not in the local repository counts as outdated.
+- Merge: remote wins for posted text and resolved state. Local fields (type,
+  severity, triage, held, killed findings, anchors of our findings) and
+  comments not yet posted stay. Remote threads match local ones by remote id,
+  then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the
+  first comment. Unmatched threads are imported as `gh-t<comment id>` (review
+  thread), `gh-r<review id>` (review body), `gh-c<comment id>` (general
+  comment) or `gl-n<note id>`.
+- Trust: a marker or record counts only when its comment's author is the
+  authenticated user, `editor` is null or that user, and (for a marker) it is
+  in the thread's first comment. Untrusted ones import as plain comments.
+  Trusted records are stored under `records`; a trusted general comment ending
+  in `Re: <finding id>` after `Fixed in <sha>` answers that finding: it is
+  added as a reply and, when the finding's thread is not resolvable, resolves
+  it as `fixed <sha>`.
+- A draft note with a marker for a local finding marks that finding's first
+  comment `posting` with its `draft_id`, so a later publish can finish it.
+- The authenticated login is cached in `.account.json` in the repository's
+  store directory.
 
 ## Store
 
@@ -174,7 +237,7 @@ Files live under `$XDG_STATE_HOME/agents/reviews/` (default
 common directory path). Each target is one JSON file, mode 0600, in a 0700
 directory. Writes take a per-target lock (`.<key>.lock`), write a temporary
 file in the same directory, fsync it and rename it over the target. Symbolic
-links are refused.
+links are refused. After `sync`, the key is `gh-<number>` or `gl-<iid>`.
 
 Target file:
 
@@ -191,6 +254,18 @@ Target file:
   "head": null,
   "created_at": "2026-10-16T12:00:00Z",
   "updated_at": "2026-10-16T13:10:00Z",
+  "review": {
+    "forge": "github", "host": "github.com", "repo": "owner/repo",
+    "number": 42, "url": "https://github.com/owner/repo/pull/42",
+    "state": "open", "closed_at": null, "head_branch": "feat/login",
+    "head_sha": "5d6e7f...", "base_sha": "1a2b3c...", "start_sha": null,
+    "login": "brandonocasey", "synced_at": "2026-10-16T13:00:00Z"
+  },
+  "records": [
+    { "run": "rv-zz99", "head": "5d6e7f...", "reviews_at_head": 2, "open": 0,
+      "comment_id": "2001", "url": "https://github.com/...#issuecomment-2001",
+      "created_at": "2026-10-16T12:45:00Z" }
+  ],
   "runs": [
     {
       "id": "rv-7k2m",
@@ -244,10 +319,21 @@ Target file:
                       "harness_version": "2.1.296", "run": "rv-7k2m",
                       "pass": "c1p0", "reviewer": "r1" },
           "body": "Retry loop drops the last response when ...",
-          "created_at": "2026-10-16T12:20:00Z" },
+          "created_at": "2026-10-16T12:20:00Z",
+          "post": "posted", "draft_id": null,
+          "remote": { "id": "1001", "url": "https://github.com/...#discussion_r1001",
+                      "login": "brandonocasey", "is_me": true, "editor": null,
+                      "review_id": "5001" } },
         { "author": { "kind": "human", "login": "Brandon" },
-          "body": "Fixed in 9e8d7c6.", "created_at": "2026-10-16T12:40:00Z" }
+          "body": "Fixed in 9e8d7c6.", "created_at": "2026-10-16T12:40:00Z",
+          "post": "pending", "remote": null, "draft_id": null }
       ],
+      "remote": { "kind": "review-thread", "id": "PRRT_kwDO...", "url": "...",
+                  "resolvable": true, "outdated": false, "path": "src/net.rs",
+                  "old_path": null, "line": 42, "old_line": null,
+                  "original_line": 42, "start_line": null,
+                  "original_start_line": null, "side": "new",
+                  "commit": "5d6e7f...", "review_state": null },
       "created_at": "2026-10-16T12:20:00Z",
       "updated_at": "2026-10-16T12:40:00Z"
     }
@@ -258,7 +344,10 @@ Target file:
 Anchors carry `commit` when the line numbers refer to a commit; for uncommitted
 work `commit` is `null` and `tree` names the reviewed tree (`run end` fills in
 `commit` once `HEAD` has that tree). Human thread ids are `h<n>`; finding ids are
-`<run>.<pass>.<reviewer>.f<n>`.
+`<run>.<pass>.<reviewer>.f<n>`. Comment `post` is `pending` for comments written
+locally, `posting` when a draft exists on the forge, and `posted` once the
+forge has it; `remote` and the target's `review` and `records` are filled by
+`sync`. Imported threads have no `anchor`; their position is in `remote`.
 
 ## Finding input
 
@@ -299,7 +388,9 @@ for uncommitted work. The output lists the new ids under `added` and
 
 ## Testing
 
-`AGENT_REVIEW_NOW=<unix seconds>` replaces the current time. It exists only so
+`AGENT_REVIEW_GH_BIN` and `AGENT_REVIEW_GLAB_BIN` replace the `gh` and `glab`
+executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
+canned responses and fails on any other call. `AGENT_REVIEW_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning; do not set it otherwise. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`. See `AGENTS.md` for the checks.
