@@ -210,15 +210,18 @@ agent-review prune --all
   the pass tree, the range's patch-id equals the pass's whole-range patch-id, or
   the head commit's patch-id equals the pass's head or whole-range patch-id. A
   partial pass's range patch-id runs from its own base. A commit is reviewed
-  when its patch-id, tree or sha matches any ended pass. The head is reviewed
+  when its patch-id, tree or sha matches any ended pass of the target, or its
+  sha or patch-id matches an ended pass of another target of this repository
+  (such as a `--range` review of the branch's end point). The head is reviewed
   when a pass or trusted record covers it, or when every commit since the
   merge-base is reviewed. Squashes, fixups and plain rebases stay reviewed; a
   conflict resolution changes the patch and shows as unreviewed. Merge commits
   are listed only when their tree differs from git's automatic merge of their
   parents (`git merge-tree --write-tree`, run with objects in a temporary
-  directory); such a merge is unreviewed, and while one sits after
-  `last_reviewed_head` no pass covers the head. A run of only partial passes
-  adds no repaired head to `last_reviewed_head`.
+  directory); such a merge is unreviewed until a whole-branch pass reviews a
+  head that contains it (it is then an ancestor of `last_reviewed_head`), and
+  while one sits after `last_reviewed_head` no pass covers the head. A run of
+  only partial passes adds no repaired head to `last_reviewed_head`.
 - `run end` adds commit patch-ids to passes whose tree now equals `HEAD`'s
   tree, so reviewed uncommitted work stays reviewed after it is committed and
   later rebased.
@@ -253,8 +256,11 @@ agent-review prune --all
   newest. On GitLab, only MRs whose source project is `origin` count, so a
   fork's MR with the same branch name is skipped.
 - The target is renamed to `gh-<number>` or `gl-<iid>` under both locks, keeping
-  its runs and threads; later commands on the branch find it by reflog birth or
-  shared patch-ids. `sync` also adopts patch-ids like `run end` and prunes.
+  its runs and threads. Away from the branch (such as on a detached `HEAD`),
+  `sync` joins the local branch target of the PR/MR's head branch the same way,
+  unless that target's passes do not lead to the PR/MR head; later commands on
+  the branch find it by reflog birth or shared patch-ids. `sync` also adopts
+  patch-ids like `run end` and prunes.
 - GitHub: review threads with all their comments (`reviewThreads` and inner
   comments are paginated), review bodies (empty and pending ones skipped) and
   issue comments, through GraphQL. GitLab: the MR, all discussions

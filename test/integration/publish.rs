@@ -1384,3 +1384,17 @@ fn target_on_detached_rebased_pr_head_uses_head() {
     let fix = env.commit_all("fix on the pushed head");
     assert_eq!(env.run(&["--target", "gh-42", "status"])["head"], fix);
 }
+
+#[test]
+fn sync_from_detached_head_adopts_the_branch_target() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let branch_key = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    env.git(&["switch", "-q", "--detach"]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    let synced = env.run(&["sync", "--pr", "42"]);
+    assert_eq!(synced["target"], "gh-42");
+    assert_eq!(synced["renamed_from"], branch_key);
+    let list = env.run(&["--target", "gh-42", "list"]);
+    assert!(ids(&list).contains(&setup.finding(1)), "{list}");
+}

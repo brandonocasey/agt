@@ -1879,13 +1879,17 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let last_reviewed = last_reviewed_head(ctx, &head)?;
     // A changed merge after the last reviewed head brings in unreviewed code, so no pass may
     // cover the head through its tree or patch-ids.
-    let mut merge_after = false;
+    let mut unreviewed_merges = HashSet::new();
     for merge in &merges {
-        merge_after |= match &last_reviewed {
+        let after = match &last_reviewed {
             Some(last) => !ctx.repo.is_ancestor(&merge.sha, last)?,
             None => true,
         };
+        if after {
+            unreviewed_merges.insert(merge.sha.as_str());
+        }
     }
+    let merge_after = !unreviewed_merges.is_empty();
     let head_patch_id = match commits.iter().find(|commit| commit.sha == head) {
         Some(commit) => commit.patch_id.clone(),
         None => None,
@@ -1916,6 +1920,22 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         reviewed
             .shas
             .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
+    }
+    // Commits a review of another target of this repository recorded (a `--range` review of
+    // the branch's end point, an earlier branch target) are reviewed here too.
+    for other in ctx.store.targets(&ctx.dir)? {
+        if Some(&other.key) == target.map(|target| &target.key) {
+            continue;
+        }
+        for pass in passes(&other).filter(|pass| pass.ended_at.is_some()) {
+            reviewed.patch_ids.extend(pass_patch_ids(pass).cloned());
+            if !pass.dirty {
+                reviewed.shas.insert(pass.head.clone());
+            }
+            reviewed
+                .shas
+                .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
+        }
     }
     // Repaired commits (fixes after a run's last pass) count as reviewed but never add to
     // reviews_at_head.
@@ -1955,13 +1975,15 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             })
         })
         .collect();
+    // A changed merge is reviewed once a whole-branch pass reviewed a head that contains it.
     commit_views.extend(merges.iter().map(|merge| {
+        let reviewed = !unreviewed_merges.contains(merge.sha.as_str());
         json!({
             "sha": merge.sha,
             "subject": merge.subject,
             "patch_id": null,
-            "reviewed": false,
-            "match": null,
+            "reviewed": reviewed,
+            "match": reviewed.then_some("pass"),
             "merge": true,
         })
     }));

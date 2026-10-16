@@ -291,19 +291,66 @@ fn sync_scope(
     if ctx.selection.target.is_some() || (own_branch && ctx.selection.range.is_none()) {
         return Ok((ctx.scope()?, true));
     }
+    let branch_target = match ctx.selection.range {
+        Some(_) => None,
+        None => branch_target(ctx, key, fetched)?,
+    };
+    let (from, existing) = match branch_target {
+        Some(target) => (target.key.clone(), Some(target)),
+        None => (key.to_owned(), ctx.store.load(&ctx.dir, key)?),
+    };
     Ok((
         Scope {
-            key: key.to_owned(),
+            key: from,
             kind: TargetKind::Branch,
             branch: Some(fetched.pr.head_branch.clone()),
-            birth: None,
+            birth: existing
+                .as_ref()
+                .and_then(|target| target.branch_birth.clone()),
             base: fetched.pr.base_sha.clone(),
             head: fetched.pr.head_sha.clone(),
             head_known: true,
-            existing: ctx.store.load(&ctx.dir, key)?,
+            existing,
         },
         false,
     ))
+}
+
+/// The local branch target of the PR/MR's head branch, so a sync away from that branch (such
+/// as on a detached HEAD) still joins branch and PR/MR reviews in one target. A target of an
+/// older branch with the same name is skipped: one of its passes MUST be an ancestor of the
+/// PR/MR head, or it has none.
+fn branch_target(ctx: &Ctx, key: &str, fetched: &Fetched) -> Result<Option<Target>> {
+    let head = &fetched.pr.head_sha;
+    let head_here = ctx.repo.object_exists(&format!("{head}^{{commit}}"))?;
+    let mut candidates: Vec<Target> = ctx
+        .store
+        .targets(&ctx.dir)?
+        .into_iter()
+        .filter(|target| {
+            target.key != key
+                && target.kind == TargetKind::Branch
+                && target.branch.as_deref() == Some(fetched.pr.head_branch.as_str())
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    for candidate in candidates {
+        let mut heads = candidate
+            .runs
+            .iter()
+            .flat_map(|run| &run.passes)
+            .map(|pass| &pass.head)
+            .peekable();
+        if heads.peek().is_none() || !head_here {
+            return Ok(Some(candidate));
+        }
+        for pass_head in heads {
+            if ctx.repo.is_ancestor(pass_head, head)? {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// GitLab gives no outdated flag: a position is outdated when its head is not the latest diff

@@ -513,3 +513,50 @@ fn conflict_resolved_merge_is_unreviewed() {
     assert_eq!(unreviewed, [merge.as_str()], "{status}");
     assert_eq!(status["reviewed"], false, "{status}");
 }
+
+#[test]
+fn range_review_clears_branch_commits() {
+    let env = Env::with_branch();
+    let main = env.git(&["rev-parse", "main"]);
+    env.write("a.txt", &numbered(10, &[(2, "A")]));
+    env.commit_all("A");
+    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B")]));
+    let b = env.commit_all("B");
+    let range = format!("{main}..{b}");
+    let run = env.run(&["--range", &range, "run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&[
+        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
+    ]);
+    env.run(&[
+        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.run(&["--range", &range, "run", "end", "--run", &run]);
+    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B"), (8, "C")]));
+    let c = env.commit_all("C");
+    let status = env.run(&["status"]);
+    assert_eq!(status["unreviewed_commits"], json!([c]), "{status}");
+    assert_eq!(status["review_from"], b);
+}
+
+#[test]
+fn reviewed_merge_counts_after_a_new_pass() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    env.review("full");
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", &numbered(10, &[(4, "four")]));
+    env.commit_all("main change");
+    env.git(&["switch", "-q", "feat"]);
+    assert!(!env.git_status(&["merge", "-q", "main"]));
+    env.write("a.txt", &numbered(10, &[(3, "three"), (4, "four")]));
+    env.commit_all("merge main");
+    assert_eq!(env.run(&["status"])["reviewed"], false);
+    env.review("full");
+    let status = env.run(&["status"]);
+    assert_eq!(status["reviewed"], true, "{status}");
+    assert_eq!(status["unreviewed_commits"], json!([]));
+}
