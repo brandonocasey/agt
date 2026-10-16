@@ -1,0 +1,19 @@
+[tools]
+rust = { version = "1.97.1", components = "rustfmt,clippy" }
+"ubi:nextest-rs/nextest" = { version = "cargo-nextest-0.9.140", exe = "cargo-nextest" }
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks.clippy]
+description = "Lint with clippy (warnings are errors)"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Run the test suite"
+run = "cargo nextest run"
+
+[tasks.install]
+description = "Install agent-review into ~/.cargo/bin"
+run = "cargo install --locked --path ."
