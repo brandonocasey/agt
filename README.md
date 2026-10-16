@@ -197,6 +197,7 @@ Publish to an own PR or MR:
 agent-review publish --dry-run        # print every payload; writes nothing
 agent-review publish
 agent-review publish --pr 1235 --not-own
+agent-review publish --only rv-7k2m.c1p0.r1.f1,h1
 ```
 
 `publish` posts what changed locally since the last publish. See
@@ -342,10 +343,14 @@ agent-review prune --all
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
   threads imported from the host (other people's threads); our findings, local
-  threads and final records are listed under `skipped`. `--not-own --findings`,
-  when the user asks for it, also posts our surviving findings, their replies
-  and resolves, and local threads the user wrote; final records never go to
+  threads and final records are listed under `skipped`. `--not-own --findings
+  --only <id,...>`, when the user asks for it, also posts the named surviving
+  findings and local threads the user wrote, with their replies and resolves;
+  `--findings` without `--only` is refused, and final records never go to
   someone else's PR/MR.
+- `--only <id>[,<id>...]` limits writes to those threads and their pending
+  replies and resolves; every other thread and all final records are listed
+  under `skipped`.
   `publish` syncs first, then posts in this order: new threads, sync, replies,
   resolves and reopens, final records, then a last sync to fill in ids.
 - Posted: new surviving findings of ended passes (a locked pass's findings wait

@@ -113,18 +113,28 @@ struct Planner<'a> {
     attempt: &'a str,
     /// `--findings`: on someone else's PR/MR, also post our findings and local threads.
     findings: bool,
+    /// `--only`: the thread ids to post; empty means all.
+    only: &'a [String],
     repo: &'a Repo,
     connection: &'a Connection,
     review: &'a Review,
 }
 
-pub(super) fn publish(
-    ctx: &Ctx,
-    pr: Option<&str>,
-    dry_run: bool,
-    not_own: bool,
-    findings: bool,
-) -> Result<Value> {
+/// `publish` flags.
+pub(super) struct Options {
+    pub dry_run: bool,
+    pub not_own: bool,
+    pub findings: bool,
+    pub only: Vec<String>,
+}
+
+pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, options: &Options) -> Result<Value> {
+    let Options {
+        dry_run, not_own, ..
+    } = *options;
+    if options.findings && options.only.is_empty() {
+        return fail("--findings posts on someone else's PR/MR only what --only <id,...> names");
+    }
     let connection = sync::connect(ctx, pr)?;
     let plan = sync::plan(ctx, &connection)?;
     let author = plan.review.author.clone();
@@ -138,7 +148,7 @@ pub(super) fn publish(
     }
     if dry_run {
         let target = plan.preview(ctx, &connection);
-        return dry(ctx, &connection, target, findings);
+        return dry(ctx, &connection, target, options);
     }
     sync::sync_planned(ctx, &connection, plan)?;
     // One attempt id per publish: sync claims a marked note only for a write of that attempt.
@@ -147,17 +157,17 @@ pub(super) fn publish(
     let mut skipped = Vec::new();
     let target = load(ctx, &connection)?;
     let (writes, skips, _) =
-        planner(ctx, &connection, &target, &attempt, findings)?.threads(&target);
+        planner(ctx, &connection, &target, &attempt, options)?.threads(&target);
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     sync::sync_with(ctx, &connection)?;
     let target = load(ctx, &connection)?;
-    let (writes, skips) = planner(ctx, &connection, &target, &attempt, findings)?.replies(&target);
+    let (writes, skips) = planner(ctx, &connection, &target, &attempt, options)?.replies(&target);
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let target = load(ctx, &connection)?;
     let (writes, skips) =
-        planner(ctx, &connection, &target, &attempt, findings)?.records(&target)?;
+        planner(ctx, &connection, &target, &attempt, options)?.records(&target)?;
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let synced = sync::sync_with(ctx, &connection)?;
@@ -181,7 +191,7 @@ fn planner<'a>(
     connection: &'a Connection,
     target: &'a Target,
     attempt: &'a str,
-    findings: bool,
+    options: &'a Options,
 ) -> Result<Planner<'a>> {
     let review = target
         .review
@@ -190,7 +200,8 @@ fn planner<'a>(
     Ok(Planner {
         ctx,
         attempt,
-        findings,
+        findings: options.findings,
+        only: &options.only,
         repo: &ctx.repo,
         connection,
         review,
@@ -198,11 +209,11 @@ fn planner<'a>(
 }
 
 /// Every payload a publish would send, from an in-memory sync; nothing is written.
-fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, findings: bool) -> Result<Value> {
+fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options) -> Result<Value> {
     // A dry run sends nothing, so its markers name no real attempt.
     let attempt = "<attempt>";
     let (threads, skipped, expected) =
-        planner(ctx, connection, &target, attempt, findings)?.threads(&target);
+        planner(ctx, connection, &target, attempt, options)?.threads(&target);
     // Treat the threads above as posted so their replies and resolves show too.
     for (id, kind) in expected {
         if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
@@ -212,7 +223,7 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, findings: bool) -
             }
         }
     }
-    let planner = planner(ctx, connection, &target, attempt, findings)?;
+    let planner = planner(ctx, connection, &target, attempt, options)?;
     let (replies, more) = planner.replies(&target);
     let (records, held) = planner.records(&target)?;
     let writes: Vec<Value> = threads
@@ -408,6 +419,9 @@ impl Planner<'_> {
     /// Why a new thread is not posted: a finding of a pass still in progress, or another
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
+        if let Some(reason) = self.unnamed(thread) {
+            return Some(reason);
+        }
         if let Some(reason) = self.foreign_threads() {
             return Some(reason);
         }
@@ -585,7 +599,8 @@ impl Planner<'_> {
                 continue;
             }
             let foreign = self.foreign_threads().filter(|_| !imported(thread));
-            if let Some(reason) = foreign.or_else(|| self.pre_pr(target, thread)) {
+            let held = self.unnamed(thread).or(foreign);
+            if let Some(reason) = held.or_else(|| self.pre_pr(target, thread)) {
                 skipped.push(skip(&thread.id, reason));
                 continue;
             }
@@ -613,6 +628,7 @@ impl Planner<'_> {
             };
             if thread.deleted_remote
                 || self.pre_pr(target, thread).is_some()
+                || self.unnamed(thread).is_some()
                 || (self.foreign_threads().is_some() && !imported(thread))
             {
                 continue;
@@ -735,13 +751,17 @@ impl Planner<'_> {
                     .is_none_or(|record| record.post != PostState::Posted)
             })
             .collect();
-        if let Some(reason) = self.foreign() {
+        let reason = self
+            .foreign()
+            .map(|reason| format!("{reason}: final records are never posted there"));
+        let reason = reason.or_else(|| {
+            (!self.only.is_empty())
+                .then(|| "--only posts named threads, not final records".to_owned())
+        });
+        if let Some(reason) = reason {
             let held = due
                 .iter()
-                .map(|run| {
-                    let why = format!("{reason}: final records are never posted there");
-                    skip(&format!("{}/record", run.id), why)
-                })
+                .map(|run| skip(&format!("{}/record", run.id), reason.clone()))
                 .collect();
             return Ok((Vec::new(), held));
         }
@@ -760,6 +780,11 @@ impl Planner<'_> {
             })
             .collect::<Result<_>>()?;
         Ok((writes, Vec::new()))
+    }
+
+    fn unnamed(&self, thread: &Thread) -> Option<String> {
+        (!self.only.is_empty() && !self.only.contains(&thread.id))
+            .then(|| "not named by --only".to_owned())
     }
 
     /// Why our findings and local threads are held on someone else's PR/MR, unless

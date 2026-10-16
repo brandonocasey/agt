@@ -71,6 +71,9 @@ pub enum Command {
         /// With `--not-own`, also post our findings and local threads (never final records).
         #[arg(long, requires = "not_own")]
         findings: bool,
+        /// Post only these thread ids (comma-separated) and their replies and resolves.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
         /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
         #[arg(long)]
         pr: Option<String>,

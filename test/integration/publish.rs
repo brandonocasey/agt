@@ -1737,20 +1737,91 @@ fn not_own_findings_posts_findings_and_my_threads_but_no_record() {
     env.run(&["sync", "--pr", "42"]);
     env.run(&["comment", "--body", "My own note.", "--author", "me"]);
     env.run(&["run", "end", "--run", &setup.run]);
+    let only = format!("{},h1", setup.finding(1));
     let dry = env.run(&[
         "publish",
         "--pr",
         "42",
         "--not-own",
         "--findings",
+        "--only",
+        &only,
         "--dry-run",
     ]);
-    assert_eq!(
-        kinds(&dry, "writes"),
-        ["review", "thread", "thread"],
-        "{dry}"
-    );
+    assert_eq!(kinds(&dry, "writes"), ["review", "thread"], "{dry}");
     assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
     let skipped = dry["skipped"].to_string();
     assert!(skipped.contains(&format!("{}/record", setup.run)), "{dry}");
+}
+
+#[test]
+fn only_limits_publish_to_named_threads() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let mut pr = GhPr::new();
+    pr.author = "alice";
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let second = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pass = [
+        "pass",
+        "start",
+        "--run",
+        &second,
+        "--kind",
+        "full",
+        "--reviewers",
+        "-",
+    ];
+    env.run_stdin(&pass, REVIEWER);
+    let add = [
+        "finding",
+        "add",
+        "--run",
+        &second,
+        "--pass",
+        "c1p0",
+        "--reviewer",
+        "r1",
+    ];
+    env.run_stdin(&add, FINDINGS);
+    env.run(&["pass", "end", "--run", &second, "--pass", "c1p0"]);
+    let wanted = format!("{second}.c1p0.r1.f1");
+
+    let error = env.fail(
+        &[
+            "publish",
+            "--pr",
+            "42",
+            "--not-own",
+            "--findings",
+            "--dry-run",
+        ],
+        None,
+    );
+    assert!(error.contains("--only"), "{error}");
+    let dry = env.run(&[
+        "publish",
+        "--pr",
+        "42",
+        "--not-own",
+        "--findings",
+        "--only",
+        &wanted,
+        "--dry-run",
+    ]);
+    let items: Vec<String> = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|write| write["items"].as_array().unwrap().clone())
+        .map(|item| item.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(items, [format!("{wanted}/c1")], "{dry}");
+    let skipped = dry["skipped"].to_string();
+    assert!(skipped.contains(&setup.finding(1)), "{dry}");
 }
