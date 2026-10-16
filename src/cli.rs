@@ -68,6 +68,9 @@ pub enum Command {
         /// Allow a PR/MR authored by someone else.
         #[arg(long)]
         not_own: bool,
+        /// With `--not-own`, also post our findings and local threads (never final records).
+        #[arg(long, requires = "not_own")]
+        findings: bool,
         /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
         #[arg(long)]
         pr: Option<String>,

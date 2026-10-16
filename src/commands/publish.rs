@@ -111,12 +111,20 @@ enum Spot {
 struct Planner<'a> {
     ctx: &'a Ctx,
     attempt: &'a str,
+    /// `--findings`: on someone else's PR/MR, also post our findings and local threads.
+    findings: bool,
     repo: &'a Repo,
     connection: &'a Connection,
     review: &'a Review,
 }
 
-pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, dry_run: bool, not_own: bool) -> Result<Value> {
+pub(super) fn publish(
+    ctx: &Ctx,
+    pr: Option<&str>,
+    dry_run: bool,
+    not_own: bool,
+    findings: bool,
+) -> Result<Value> {
     let connection = sync::connect(ctx, pr)?;
     let plan = sync::plan(ctx, &connection)?;
     let author = plan.review.author.clone();
@@ -130,7 +138,7 @@ pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, dry_run: bool, not_own: bool)
     }
     if dry_run {
         let target = plan.preview(ctx, &connection);
-        return dry(ctx, &connection, target);
+        return dry(ctx, &connection, target, findings);
     }
     sync::sync_planned(ctx, &connection, plan)?;
     // One attempt id per publish: sync claims a marked note only for a write of that attempt.
@@ -138,16 +146,18 @@ pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, dry_run: bool, not_own: bool)
     let mut posted = Vec::new();
     let mut skipped = Vec::new();
     let target = load(ctx, &connection)?;
-    let (writes, skips, _) = planner(ctx, &connection, &target, &attempt)?.threads(&target);
+    let (writes, skips, _) =
+        planner(ctx, &connection, &target, &attempt, findings)?.threads(&target);
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     sync::sync_with(ctx, &connection)?;
     let target = load(ctx, &connection)?;
-    let (writes, skips) = planner(ctx, &connection, &target, &attempt)?.replies(&target);
+    let (writes, skips) = planner(ctx, &connection, &target, &attempt, findings)?.replies(&target);
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let target = load(ctx, &connection)?;
-    let (writes, skips) = planner(ctx, &connection, &target, &attempt)?.records(&target)?;
+    let (writes, skips) =
+        planner(ctx, &connection, &target, &attempt, findings)?.records(&target)?;
     skipped.extend(skips);
     run_writes(ctx, &connection, &target, writes, &attempt, &mut posted)?;
     let synced = sync::sync_with(ctx, &connection)?;
@@ -171,6 +181,7 @@ fn planner<'a>(
     connection: &'a Connection,
     target: &'a Target,
     attempt: &'a str,
+    findings: bool,
 ) -> Result<Planner<'a>> {
     let review = target
         .review
@@ -179,6 +190,7 @@ fn planner<'a>(
     Ok(Planner {
         ctx,
         attempt,
+        findings,
         repo: &ctx.repo,
         connection,
         review,
@@ -186,10 +198,11 @@ fn planner<'a>(
 }
 
 /// Every payload a publish would send, from an in-memory sync; nothing is written.
-fn dry(ctx: &Ctx, connection: &Connection, mut target: Target) -> Result<Value> {
+fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, findings: bool) -> Result<Value> {
     // A dry run sends nothing, so its markers name no real attempt.
     let attempt = "<attempt>";
-    let (threads, skipped, expected) = planner(ctx, connection, &target, attempt)?.threads(&target);
+    let (threads, skipped, expected) =
+        planner(ctx, connection, &target, attempt, findings)?.threads(&target);
     // Treat the threads above as posted so their replies and resolves show too.
     for (id, kind) in expected {
         if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
@@ -199,7 +212,7 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target) -> Result<Value> 
             }
         }
     }
-    let planner = planner(ctx, connection, &target, attempt)?;
+    let planner = planner(ctx, connection, &target, attempt, findings)?;
     let (replies, more) = planner.replies(&target);
     let (records, held) = planner.records(&target)?;
     let writes: Vec<Value> = threads
@@ -395,7 +408,7 @@ impl Planner<'_> {
     /// Why a new thread is not posted: a finding of a pass still in progress, or another
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
-        if let Some(reason) = self.foreign() {
+        if let Some(reason) = self.foreign_threads() {
             return Some(reason);
         }
         if let Some(reason) = self.pre_pr(target, thread) {
@@ -571,7 +584,7 @@ impl Planner<'_> {
             if thread.deleted_remote {
                 continue;
             }
-            let foreign = self.foreign().filter(|_| !imported(thread));
+            let foreign = self.foreign_threads().filter(|_| !imported(thread));
             if let Some(reason) = foreign.or_else(|| self.pre_pr(target, thread)) {
                 skipped.push(skip(&thread.id, reason));
                 continue;
@@ -600,7 +613,7 @@ impl Planner<'_> {
             };
             if thread.deleted_remote
                 || self.pre_pr(target, thread).is_some()
-                || (self.foreign().is_some() && !imported(thread))
+                || (self.foreign_threads().is_some() && !imported(thread))
             {
                 continue;
             }
@@ -725,7 +738,10 @@ impl Planner<'_> {
         if let Some(reason) = self.foreign() {
             let held = due
                 .iter()
-                .map(|run| skip(&format!("{}/record", run.id), reason.clone()))
+                .map(|run| {
+                    let why = format!("{reason}: final records are never posted there");
+                    skip(&format!("{}/record", run.id), why)
+                })
                 .collect();
             return Ok((Vec::new(), held));
         }
@@ -746,13 +762,24 @@ impl Planner<'_> {
         Ok((writes, Vec::new()))
     }
 
-    /// On someone else's PR/MR (`--not-own`), why only replies and resolves on their threads
-    /// are posted: our findings, threads and records there would speak for its author.
+    /// Why our findings and local threads are held on someone else's PR/MR, unless
+    /// `--findings` asks for them.
+    fn foreign_threads(&self) -> Option<String> {
+        self.foreign().filter(|_| !self.findings).map(|reason| {
+            format!(
+                "{reason}: --not-own posts only replies and resolves on others' threads \
+                     (add --findings for ours)"
+            )
+        })
+    }
+
+    /// Whose PR/MR this is when it is not ours (`--not-own`): a final record there would
+    /// speak for its author, and our findings and threads go out only with `--findings`.
     fn foreign(&self) -> Option<String> {
         let author = self.review.author.as_deref();
         (author != Some(self.connection.login.as_str())).then(|| {
             format!(
-                "{} is authored by {}: --not-own posts only replies and resolves on others' threads",
+                "{} is authored by {}",
                 self.review.url,
                 author.unwrap_or("an unknown user")
             )

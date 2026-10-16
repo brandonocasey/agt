@@ -1726,3 +1726,31 @@ fn local_reply_is_never_published() {
     let prompt = env.text(&["list", "--format", "prompt"]);
     assert!(prompt.contains("Answer to the held question."), "{prompt}");
 }
+
+#[test]
+fn not_own_findings_posts_findings_and_my_threads_but_no_record() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let mut pr = GhPr::new();
+    pr.author = "alice";
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["comment", "--body", "My own note.", "--author", "me"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let dry = env.run(&[
+        "publish",
+        "--pr",
+        "42",
+        "--not-own",
+        "--findings",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        kinds(&dry, "writes"),
+        ["review", "thread", "thread"],
+        "{dry}"
+    );
+    assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
+    let skipped = dry["skipped"].to_string();
+    assert!(skipped.contains(&format!("{}/record", setup.run)), "{dry}");
+}

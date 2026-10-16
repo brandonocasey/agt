@@ -140,8 +140,9 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Publish {
             dry_run,
             not_own,
+            findings,
             pr,
-        } => publish::publish(&ctx, pr.as_deref(), dry_run, not_own)?,
+        } => publish::publish(&ctx, pr.as_deref(), dry_run, not_own, findings)?,
         Command::Prune { dry_run, .. } => {
             let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, dry_run)?;
             json!({ "dry_run": dry_run, "pruned": pruned })
