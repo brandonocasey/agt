@@ -13,40 +13,43 @@ pub fn login(glab: &Client) -> Result<String> {
     )
 }
 
-/// Finds the MR from `branch`, in `origin` or, for a fork, in the project it was forked from.
+/// Finds the MR from `branch` of `origin`, in `origin` or, for a fork, in the project it was
+/// forked from. MRs from other forks with the same branch name are skipped.
 pub fn find_mr(glab: &Client, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
     let branch = forge::encode(branch);
-    let search = |project: &str| -> Result<Vec<Value>> {
+    let project = glab.json(&[
+        "api",
+        "-X",
+        "GET",
+        &format!("projects/{}", forge::encode(origin)),
+    ])?;
+    let own_id = project["id"].as_u64();
+    let search = |target: &str| -> Result<Option<u64>> {
         let path = format!(
             "projects/{}/merge_requests?source_branch={branch}&state=all&per_page=20",
-            forge::encode(project)
+            forge::encode(target)
         );
-        Ok(glab
+        let mrs: Vec<Value> = glab
             .json(&["api", "-X", "GET", &path])?
             .as_array()
             .cloned()
-            .unwrap_or_default())
-    };
-    let pick = |mrs: &[Value]| {
-        mrs.iter()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|mr| mr["source_project_id"].as_u64() == own_id)
+            .collect();
+        Ok(mrs
+            .iter()
             .find(|mr| mr["state"] == "opened")
             .or(mrs.first())
-            .and_then(|mr| mr["iid"].as_u64())
+            .and_then(|mr| mr["iid"].as_u64()))
     };
-    if let Some(iid) = pick(&search(origin)?) {
+    if let Some(iid) = search(origin)? {
         return Ok(Some((origin.to_owned(), iid)));
     }
-    let path = format!("projects/{}", forge::encode(origin));
-    let project = glab.json(&["api", "-X", "GET", &path])?;
     let Some(parent) = forge::text(&project, "/forked_from_project/path_with_namespace") else {
         return Ok(None);
     };
-    let own_id = project["id"].as_u64();
-    let mrs: Vec<Value> = search(&parent)?
-        .into_iter()
-        .filter(|mr| mr["source_project_id"].as_u64() == own_id)
-        .collect();
-    Ok(pick(&mrs).map(|iid| (parent, iid)))
+    Ok(search(&parent)?.map(|iid| (parent, iid)))
 }
 
 fn state(text: &str) -> ReviewState {

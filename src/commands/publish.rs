@@ -12,8 +12,8 @@ use crate::error::{Error, Result, fail};
 use crate::forge;
 use crate::git::Repo;
 use crate::model::{
-    Anchor, Author, Comment, Forge, PassKind, PostState, RecordPost, RemoteComment, RemoteKind,
-    RemoteThread, Review, Run, Side, Target, Thread,
+    Anchor, Author, Comment, Forge, Pass, PassKind, PostState, RecordPost, RemoteComment,
+    RemoteKind, RemoteThread, Review, Run, Side, Target, Thread,
 };
 
 /// Stands for the id of the draft created by the write before; filled in when it returns.
@@ -231,7 +231,7 @@ fn placeholder(id: &str, kind: RemoteKind, forge: Forge) -> RemoteThread {
 fn allowed(author: &Author, login: &str) -> bool {
     match author {
         Author::Agent { .. } => true,
-        Author::Human { login: name } => name == login,
+        Author::Human { login: name, .. } => name == login,
     }
 }
 
@@ -382,16 +382,30 @@ impl Planner<'_> {
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
         if let Some(finding) = &thread.finding {
-            let ended = target
+            let passes: Vec<&Pass> = target
                 .runs
                 .iter()
                 .filter(|run| run.id == finding.run)
                 .flat_map(|run| &run.passes)
-                .any(|pass| pass.id == finding.pass && pass.ended_at.is_some());
-            if !ended {
+                .collect();
+            let pass = passes.iter().find(|pass| pass.id == finding.pass);
+            let Some(pass) = pass.filter(|pass| pass.ended_at.is_some()) else {
                 return Some(format!(
                     "pass {}.{} has not ended",
                     finding.run, finding.pass
+                ));
+            };
+            // A blind pass's findings stay hidden from the host until its reveal ends.
+            let revealed = passes.iter().any(|later| {
+                later.kind == PassKind::Reveal
+                    && later.cycle == pass.cycle
+                    && later.number > pass.number
+                    && later.ended_at.is_some()
+            });
+            if pass.locked && !revealed {
+                return Some(format!(
+                    "pass {}.{} is locked until a reveal pass in cycle {} ends",
+                    finding.run, finding.pass, pass.cycle
                 ));
             }
         }
@@ -817,7 +831,12 @@ fn record_body(target: &Target, run: &Run) -> (String, String) {
             (Some(base), PassKind::FixCheck) => format!("{}..{}", short(base), short(&pass.head)),
             _ => short(&pass.head).to_owned(),
         };
-        for reviewer in &pass.reviewers {
+        // The fixer reviews nothing; it shows on the `Fixed by:` line.
+        for reviewer in pass
+            .reviewers
+            .iter()
+            .filter(|reviewer| reviewer.id != "fix")
+        {
             let label = if seen.contains(&reviewer.id.as_str()) {
                 reviewer.id.clone()
             } else {

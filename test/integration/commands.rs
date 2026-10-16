@@ -840,3 +840,92 @@ fn list_cycle_selects_one_cycle() {
     let none = env.run(&["list", "--run", &run, "--cycle", "3"]);
     assert_eq!(none["threads"], serde_json::json!([]));
 }
+
+#[test]
+fn long_branch_names_get_short_keys() {
+    let env = Env::with_branch();
+    let branch = format!("feature/{}", "very-long-name-".repeat(12));
+    env.git(&["switch", "-q", "-c", &branch]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let first = env.run(&["run", "start"]);
+    let key = first["target"].as_str().unwrap().to_owned();
+    assert!(key.len() <= 200, "{key}");
+    assert_eq!(
+        env.run(&["run", "start"])["target"],
+        key,
+        "the key is stable"
+    );
+}
+
+#[test]
+fn manual_and_fix_reviewer_ids() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reviewers = r#"[{"id":"manual","model":"m1","effort":"high","harness":"claude-code"},
+      {"id":"fix","model":"m2","effort":"low","harness":"codex","harness_version":"0.162.1"}]"#;
+    env.run_stdin(
+        &[
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "full",
+            "--reviewers",
+            "-",
+        ],
+        reviewers,
+    );
+    env.run_stdin(
+        &[
+            "finding",
+            "add",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--reviewer",
+            "manual",
+        ],
+        r#"{"type":"nit","scenario":"Manual pass finding."}"#,
+    );
+    let id = format!("{run}.c1p0.manual.f1");
+    let replied = env.run(&[
+        "reply",
+        &id,
+        "--body",
+        "Fixed in abc.",
+        "--run",
+        &run,
+        "--pass",
+        "c1p0",
+        "--reviewer",
+        "fix",
+    ]);
+    let author = &replied["thread"]["comments"][1]["author"];
+    assert_eq!(
+        (&author["model"], &author["harness"]),
+        (&serde_json::json!("m2"), &serde_json::json!("codex"))
+    );
+}
+
+#[test]
+fn target_branch_missing_without_pr_errors() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let key = env.run(&["run", "start"])["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.git(&["switch", "-q", "--detach", "main"]);
+    env.git(&["branch", "-q", "-D", "feat"]);
+    let error = env.fail(&["--target", &key, "status"], None);
+    assert!(error.contains("branch feat"), "{error}");
+}

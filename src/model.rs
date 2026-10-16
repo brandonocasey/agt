@@ -310,6 +310,9 @@ pub struct RemoteComment {
 pub enum Author {
     Human {
         login: String,
+        /// The login is git `user.name`, written before any sync; sync replaces it with the
+        /// forge login.
+        git_name: bool,
     },
     Agent {
         model: String,

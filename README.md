@@ -40,10 +40,15 @@ A target is one thing under review. Commands pick it like this:
   missing); else a new target. So a rebase keeps the target even when every
   commit conflicts, and a branch deleted and created again (same name, same
   base) starts fresh. Two births in the same second at the same sha cannot be
-  told apart.
+  told apart. A branch name longer than 100 encoded characters is cut and
+  followed by a hash of the full name, so keys stay within the store's limit.
 - `--range <from>..<to>` reviews a range; `--range <rev>` reviews one commit.
   Each gets its own target.
-- `--target <key>` uses a stored target by its key.
+- `--target <key>` uses a stored target by its key. For a branch target whose
+  branch is not in this repository, the head is the synced PR/MR head; with no
+  PR/MR it is an error, never the current `HEAD`. With a `gh-<n>` or `gl-<iid>`
+  target, `sync` and `publish` use that PR/MR without `--pr`, also on a
+  detached `HEAD`.
 
 On the default branch itself, the root commit names the target and passes cover
 only uncommitted work; use `--range` to review commits there.
@@ -64,11 +69,13 @@ agent-review pass start --run rv-7k2m --kind full --reviewers - <<'EOF'
 EOF
 ```
 
-Reviewer ids are `r<n>`, assigned in order unless you pass `"id"`. A reviewer
-continued in a later pass keeps its id; give only `"id"` and
-`"starting_context"` and the rest is copied from its earlier pass. `--base
-<rev>` sets the start of the reviewed delta (default: the merge-base for a full
-pass, the previous pass's head otherwise).
+Reviewer ids are `r<n>`, assigned in order unless you pass `"id"`. Two ids are
+reserved: `manual` for the main session's own pass and `fix` for the fixer,
+whose replies feed the final record's `Fixed by:` line; give them model, effort,
+harness and version like any reviewer. A reviewer continued in a later pass
+keeps its id; give only `"id"` and `"starting_context"` and the rest is copied
+from its earlier pass. `--base <rev>` sets the start of the reviewed delta
+(default: the merge-base for a full pass, the previous pass's head otherwise).
 
 ```sh
 agent-review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
@@ -80,8 +87,8 @@ agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 
 `pass end --lock` freezes the pass for a blind review: `finding add` to it then
 fails. `finding kill` moves a surviving finding to its pass's killed list, also
-on a locked pass; a finding already posted to the PR/MR is resolved as `stale`
-instead. `run end` closes the run, records commit patch-ids for every pass whose
+on a locked pass; a finding that is posted or being posted to the PR/MR is
+resolved as `stale` instead. `run end` closes the run, records commit patch-ids for every pass whose
 reviewed tree now equals `HEAD`'s tree (see below), records `HEAD` as the run's
 `repaired_head` (commits after the last pass up to it are the run's `repair`),
 stores the reveal counts for the final record, and prunes old targets of this
@@ -109,7 +116,8 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still 
   `--effort`, `--harness`, `--harness-version`, `--run`, `--pass`,
   `--reviewer`. `--reviewer` with `--run` and `--pass` fills the rest from the
   stored reviewer. With no author flags the author is the forge login that
-  `sync` last authenticated as for this repository, else git `user.name`.
+  `sync` last authenticated as for this repository, else git `user.name`,
+  which the next `sync` (or `publish`) replaces with the forge login.
 - `resolve`: `--resolution` is one of `fixed <sha>`, `not fixed: <reason>`,
   `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
   `stale` resolution; `fixed` needs `--resolution "fixed <sha>"`).
@@ -131,20 +139,22 @@ agent-review status --head 1a2b3c4
 
 `list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
 for imported threads the host's path, line and outdated state) and killed
-findings. `--run` keeps only that run's findings, and `--cycle <n>` (with
-`--run`) only that cycle's threads and killed findings. `--format prompt` prints
-the text only of comments written locally or by the authenticated forge user;
-every other comment shows as `(comment by another author, text hidden)`, so
-reviewers never read other people's comments.
+findings. `--open` keeps the threads `status` counts as open. `--run` keeps only
+that run's findings, and `--cycle <n>` (with `--run`) only that cycle's threads
+and killed findings. `--format prompt` prints the text only of comments written
+locally or by the authenticated forge user; every other comment shows as
+`(comment by another author, text hidden)`, so reviewers never read other
+people's comments.
 
 `status` never writes: not to the store, not to the git index or object
 database. It reports whether the head is reviewed, `reviews_at_head`, the
 passes that cover it, each commit's reviewed state, `unreviewed_commits`, open
 threads, `outdated_threads`, held questions, runs, the linked PR/MR and the
 trusted imported review records for the head. Without `--head` on a branch,
-`worktree` reports the same for uncommitted work. Open threads exclude other
-people's general comments and review bodies, which have no resolved state on
-the host.
+`worktree` reports the same for uncommitted work. Open threads are unresolved
+threads still on the host, minus other people's general comments and review
+bodies, which have no resolved state there; your own general comments stay
+open until you resolve them.
 
 Sync with a PR or MR:
 
@@ -220,7 +230,8 @@ agent-review prune --all
 - PR/MR lookup: the PR whose head is `<origin owner>:<branch>` (GitHub) or the
   MR whose source branch is the current branch (GitLab), first in `origin`,
   then in the repository `origin` was forked from. Open ones win, then the
-  newest.
+  newest. On GitLab, only MRs whose source project is `origin` count, so a
+  fork's MR with the same branch name is skipped.
 - The target is renamed to `gh-<number>` or `gl-<iid>` under both locks, keeping
   its runs and threads; later commands on the branch find it by reflog birth or
   shared patch-ids. `sync` also adopts patch-ids like `run end` and prunes.
@@ -242,8 +253,11 @@ agent-review prune --all
   comment, then by a trusted `<!-- agent-review id=<local id> -->` marker that
   `publish` adds to every body. Unmatched threads are imported as
   `gh-t<comment id>` (review thread), `gh-r<review id>` (review body),
-  `gh-c<comment id>` (general comment) or `gl-n<note id>`. `publish`'s own
-  review bodies are not imported.
+  `gh-c<comment id>` (general comment) or `gl-n<note id>`, with `-2`, `-3`
+  added when that id is taken; an id is never reused, including a killed
+  finding's. A GitLab discussion keeps its thread when a reply turns an
+  individual note into a discussion. `publish`'s own review bodies are not
+  imported.
 - Trust: a marker or record counts only when its comment's author is the
   authenticated user, `editor` is null or that user, and (for a marker) it is
   in the thread's first comment. Untrusted ones import as plain comments.
@@ -266,10 +280,11 @@ agent-review prune --all
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`.
   `publish` syncs first, then posts in this order: new threads, sync, replies,
   resolves and reopens, final records, then a last sync to fill in ids.
-- Posted: new surviving findings of ended passes and local comment threads,
-  new replies, resolve and reopen changes, and the final record of each ended
-  run not posted yet. Never posted: killed findings, imported comments, and
-  local comments by another human author (listed under `skipped`).
+- Posted: new surviving findings of ended passes (a locked pass's findings wait
+  until a later `reveal` pass of the same cycle has ended) and local comment
+  threads, new replies, resolve and reopen changes, and the final record of each
+  ended run not posted yet. Never posted: killed findings, imported comments,
+  and local comments by another human author (listed under `skipped`).
 - Every body ends with a signature (agent: `<model> <effort> <harness>
   <run>.<pass>.<reviewer>`, plus ` post-reveal`; human: the login) and
   `<!-- agent-review id=<local id> -->`. Finding threads also carry
@@ -403,7 +418,7 @@ Target file:
                       "login": "brandonocasey", "is_me": true, "editor": null,
                       "review_id": "5001" } },
         { "id": "rv-7k2m.c1p0.r1.f1/c2",
-          "author": { "kind": "human", "login": "Brandon" },
+          "author": { "kind": "human", "login": "Brandon", "git_name": false },
           "body": "Fixed in 9e8d7c6.", "created_at": "2026-10-16T12:40:00Z",
           "post": "pending", "remote": null, "draft_id": null, "attempt": null,
           "deleted_remote": false, "deleted_seen_at": null }

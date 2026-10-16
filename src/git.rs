@@ -407,14 +407,19 @@ impl Repo {
             .map(|name| name.to_string_lossy().trim_end_matches(".git").to_owned())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "repo".to_owned());
-        // git hash-object keeps the key stable across Rust versions, unlike std hashers.
-        let hash = text(self.checked(
-            &["hash-object", "--stdin"],
-            Some(common.clone().into_bytes()),
-            &[],
-        )?)?;
+        let hash = self.hash_text(&common)?;
         let short = hash.get(..12).unwrap_or(&hash);
         Ok(format!("local/{name}-{short}"))
+    }
+
+    /// A stable id for `value`: git hash-object stays the same across Rust versions, unlike std
+    /// hashers. It writes no object.
+    pub fn hash_text(&self, value: &str) -> Result<String> {
+        text(self.checked(
+            &["hash-object", "--stdin"],
+            Some(value.as_bytes().to_vec()),
+            &[],
+        )?)
     }
 }
 

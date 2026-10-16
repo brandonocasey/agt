@@ -54,12 +54,17 @@ pub fn parse(diff: &str) -> Vec<FileDiff> {
         } else if line == "+++ /dev/null" || line.starts_with("deleted file mode") {
             file.new = None;
         } else if let Some(path) = line.strip_prefix("--- a/") {
-            file.old = Some(path.to_owned());
+            file.old = Some(header_name(path));
         } else if let Some(path) = line.strip_prefix("+++ b/") {
-            file.new = Some(path.to_owned());
+            file.new = Some(header_name(path));
         }
     }
     files
+}
+
+/// Git ends a `---`/`+++` header with a tab when the path contains a space.
+fn header_name(path: &str) -> String {
+    path.strip_suffix('\t').unwrap_or(path).to_owned()
 }
 
 fn header_path(rest: &str) -> Option<String> {
@@ -184,9 +189,9 @@ pub fn diff_line(diff: &str, path: &str, side: Side, line: u32) -> Option<DiffLi
             } else if let Some(found) = text.strip_prefix("rename to ") {
                 *new_path = found.to_owned();
             } else if let Some(found) = text.strip_prefix("--- a/") {
-                *old_path = found.to_owned();
+                *old_path = header_name(found);
             } else if let Some(found) = text.strip_prefix("+++ b/") {
-                *new_path = found.to_owned();
+                *new_path = header_name(found);
             }
             continue;
         };
@@ -268,6 +273,24 @@ rename to b.txt\n\
         );
         let first = locate(&files, &anchor("a.txt", 2));
         assert_eq!((first.line, first.outdated), (Some(2), false));
+    }
+
+    #[test]
+    fn paths_with_spaces_drop_the_header_tab() {
+        let diff = "diff --git a/my file.txt b/my file.txt\n--- a/my file.txt\t\n+++ b/my file.txt\t\n@@ -2 +2 @@\n-2\n+X\n";
+        let anchor = |line| Anchor {
+            path: "my file.txt".into(),
+            line: Some(line),
+            old_line: None,
+            side: Side::New,
+            start_line: None,
+            commit: None,
+            tree: String::new(),
+        };
+        assert!(locate(&parse(diff), &anchor(2)).outdated);
+        assert!(!locate(&parse(diff), &anchor(3)).outdated);
+        let found = diff_line(diff, "my file.txt", Side::New, 2).unwrap();
+        assert_eq!(found.new_path, "my file.txt");
     }
 
     #[test]

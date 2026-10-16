@@ -445,8 +445,9 @@ fn gitlab_responses(setup: &Setup, old: &str) {
             "GET",
             &format!("{project}/merge_requests?source_branch=feat&state=all&per_page=20"),
         ],
-        r#"[{"iid":3,"state":"opened"}]"#,
+        r#"[{"iid":9,"state":"opened","source_project_id":555},{"iid":3,"state":"opened","source_project_id":87447936}]"#,
     );
+    env.respond(&["api", "-X", "GET", project], r#"{"id":87447936}"#);
     let mr = format!("{project}/merge_requests/3");
     env.respond(&["api", "-X", "GET", &mr], &fixture("gl-mr.json", &vars));
     env.respond(

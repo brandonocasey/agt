@@ -42,6 +42,25 @@ pub(super) struct Connection {
 }
 
 pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
+    if pr.is_none()
+        && let Some(key) = &ctx.selection.target
+        && let Some(review) = ctx
+            .store
+            .load(&ctx.dir, key)?
+            .and_then(|target| target.review)
+    {
+        // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`.
+        let (client, login) = authenticate(review.forge, &review.host)?;
+        return Ok(Connection {
+            key: pr_key(review.forge, review.number),
+            forge: review.forge,
+            host: review.host,
+            client,
+            login,
+            repo: review.repo,
+            number: review.number,
+        });
+    }
     let pr_ref = pr.map(forge::parse_pr).transpose()?;
     let origin = ctx.repo.origin_url()?.and_then(|url| split_remote(&url));
     let location = pr_ref
@@ -56,14 +75,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     } else {
         Forge::Gitlab
     };
-    let client = match forge {
-        Forge::Github => Client::gh(),
-        Forge::Gitlab => Client::glab(&host),
-    };
-    let login = match forge {
-        Forge::Github => github::login(&client)?,
-        Forge::Gitlab => gitlab::login(&client)?,
-    };
+    let (client, login) = authenticate(forge, &host)?;
     let (repo, number) = match &pr_ref {
         Some(pr) => (origin_repo, pr.number),
         None => {
@@ -82,19 +94,34 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
             })?
         }
     };
-    let key = match forge {
-        Forge::Github => format!("gh-{number}"),
-        Forge::Gitlab => format!("gl-{number}"),
-    };
     Ok(Connection {
+        key: pr_key(forge, number),
         forge,
         host,
         client,
         login,
         repo,
         number,
-        key,
     })
+}
+
+fn authenticate(forge: Forge, host: &str) -> Result<(Client, String)> {
+    let client = match forge {
+        Forge::Github => Client::gh(),
+        Forge::Gitlab => Client::glab(host),
+    };
+    let login = match forge {
+        Forge::Github => github::login(&client)?,
+        Forge::Gitlab => gitlab::login(&client)?,
+    };
+    Ok((client, login))
+}
+
+fn pr_key(forge: Forge, number: u64) -> String {
+    match forge {
+        Forge::Github => format!("gh-{number}"),
+        Forge::Gitlab => format!("gl-{number}"),
+    }
 }
 
 /// Everything fetched and computed before the lock: the target to merge into and the merge
@@ -156,6 +183,7 @@ impl Plan {
         if target.branch_birth.is_none() {
             target.branch_birth.clone_from(&self.scope.birth);
         }
+        claim_git_names(target, &connection.login);
         let summary = merge(
             target,
             self.fetched,
@@ -445,6 +473,7 @@ fn imported_comment(comment: CommentData, login: &str) -> Comment {
         deleted_seen_at: None,
         author: Author::Human {
             login: comment.login.clone().unwrap_or_else(|| "ghost".to_owned()),
+            git_name: false,
         },
         remote: Some(remote_comment(&comment, login)),
         body: comment.body,
@@ -482,35 +511,23 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
         .collect();
     for data in fetched.threads {
         if let [comment] = data.comments.as_slice()
-            && data.info.kind == RemoteKind::General
             && trusted(comment, login)
         {
-            if let Some(record) = parse_record(comment) {
-                if let Some(local) = own_id(comment, login)
-                    && let Some(run_id) = local.strip_suffix("/record")
-                    && let Some(run) = target.runs.iter_mut().find(|run| run.id == run_id)
-                    && let Some(post) = &mut run.record
-                {
-                    post.post = PostState::Posted;
-                    post.remote_id = Some(comment.id.clone());
-                    post.url.clone_from(&comment.url);
-                }
-                target
-                    .records
-                    .retain(|known| known.comment_id != record.comment_id);
-                target.records.push(record);
-                summary.records += 1;
-                continue;
-            }
             let own = own_id(comment, login);
-            if let Some(id) = answered_id(&comment.body, own.is_some()) {
-                answers.push((id, data));
-                continue;
-            }
             if data.info.kind == RemoteKind::Review
-                && own.is_some_and(|id| id.starts_with(REVIEW_ID))
+                && own.as_ref().is_some_and(|id| id.starts_with(REVIEW_ID))
             {
                 continue;
+            }
+            if data.info.kind == RemoteKind::General {
+                if take_record(target, comment, own.as_deref()) {
+                    summary.records += 1;
+                    continue;
+                }
+                if let Some(id) = answered_id(&comment.body, own.is_some()) {
+                    answers.push((id, data));
+                    continue;
+                }
             }
         }
         import(target, data, login, forge, now, &mut summary);
@@ -566,6 +583,47 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
     summary
 }
 
+/// Comments written before the first sync name git `user.name`; they are the authenticated
+/// user's.
+fn claim_git_names(target: &mut Target, login: &str) {
+    for comment in target
+        .threads
+        .iter_mut()
+        .flat_map(|thread| thread.comments.iter_mut())
+    {
+        if let Author::Human {
+            login: name,
+            git_name,
+        } = &mut comment.author
+            && *git_name
+        {
+            login.clone_into(name);
+            *git_name = false;
+        }
+    }
+}
+
+/// Stores a trusted record comment and marks our run's record posted; false when the comment
+/// is no record.
+fn take_record(target: &mut Target, comment: &CommentData, own: Option<&str>) -> bool {
+    let Some(record) = parse_record(comment) else {
+        return false;
+    };
+    if let Some(run_id) = own.and_then(|local| local.strip_suffix("/record"))
+        && let Some(run) = target.runs.iter_mut().find(|run| run.id == run_id)
+        && let Some(post) = &mut run.record
+    {
+        post.post = PostState::Posted;
+        post.remote_id = Some(comment.id.clone());
+        post.url.clone_from(&comment.url);
+    }
+    target
+        .records
+        .retain(|known| known.comment_id != record.comment_id);
+    target.records.push(record);
+    true
+}
+
 /// Marks threads and comments the host no longer returns. They are kept, never dropped.
 fn flag_deleted(target: &mut Target, threads: &[String], comments: &[String], now: &str) -> usize {
     let mut flagged = 0;
@@ -613,10 +671,11 @@ fn import(
         .filter(|first| trusted(first, login))
         .and_then(|first| marker_id(&first.body));
     let by_remote = target.threads.iter().position(|thread| {
-        thread
-            .remote
-            .as_ref()
-            .is_some_and(|remote| remote.id == data.info.id && remote.kind == data.info.kind)
+        thread.remote.as_ref().is_some_and(|remote| {
+            // A GitLab note that gets a reply turns from general into a discussion with the
+            // same id; GitHub ids of different kinds come from separate sequences.
+            remote.id == data.info.id && (remote.kind == data.info.kind || forge == Forge::Gitlab)
+        })
     });
     let by_agent = || {
         let local = own_id(data.comments.first()?, login)?;
@@ -652,10 +711,27 @@ fn import(
         summary.updated += 1;
         return;
     }
-    let taken = |id: &str| target.threads.iter().any(|thread| thread.id == id);
+    let taken = |id: &str| {
+        target.threads.iter().any(|thread| thread.id == id)
+            || target
+                .runs
+                .iter()
+                .flat_map(|run| &run.passes)
+                .flat_map(|pass| &pass.killed)
+                .any(|killed| killed.id == id)
+    };
     let id = match marker {
         Some(marker) if !taken(&marker) => marker,
-        _ => imported_id(forge, &data),
+        _ => {
+            let base = imported_id(forge, &data);
+            let mut id = base.clone();
+            let mut number = 1;
+            while taken(&id) {
+                number += 1;
+                id = format!("{base}-{number}");
+            }
+            id
+        }
     };
     let finding = data
         .comments

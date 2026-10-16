@@ -152,12 +152,19 @@ impl Ctx {
         })
     }
 
-    /// Author default: the forge login cached by `sync`, else git `user.name`.
-    fn default_login(&self) -> Result<Option<String>> {
-        match self.store.load_account(&self.dir)? {
-            Some(account) => Ok(Some(account.login)),
-            None => self.repo.user_name(),
+    /// Author default: the forge login cached by `sync`, else git `user.name`, which the next
+    /// sync replaces with the forge login.
+    fn default_author(&self) -> Result<Option<Author>> {
+        if let Some(account) = self.store.load_account(&self.dir)? {
+            return Ok(Some(Author::Human {
+                login: account.login,
+                git_name: false,
+            }));
         }
+        Ok(self.repo.user_name()?.map(|login| Author::Human {
+            login,
+            git_name: true,
+        }))
     }
 
     fn scope(&self) -> Result<Scope> {
@@ -178,9 +185,27 @@ impl Ctx {
         let (base, head) = match target.kind {
             TargetKind::Branch => {
                 let branch = target.branch.clone().unwrap_or_default();
+                // Without the local branch the PR/MR head stands in; the current HEAD MUST NOT,
+                // since it may be any other work.
                 let head = match self.repo.commit(&format!("refs/heads/{branch}")) {
                     Ok(head) => head,
-                    Err(_) => self.repo.head()?,
+                    Err(_) => match target.review.as_ref().map(|review| &review.head_sha) {
+                        Some(sha) if self.repo.object_exists(&format!("{sha}^{{commit}}"))? => {
+                            sha.clone()
+                        }
+                        Some(sha) => {
+                            return fail(format!(
+                                "branch {branch} of target {key} is not here and its PR/MR head \
+                                 {sha} is not in this repository; fetch it or check out the branch"
+                            ));
+                        }
+                        None => {
+                            return fail(format!(
+                                "branch {branch} of target {key} is not here and no PR/MR head \
+                                 is known; check out the branch"
+                            ));
+                        }
+                    },
                 };
                 (Some(self.branch_base(&branch, &head)?.0), head)
             }
@@ -250,7 +275,7 @@ impl Ctx {
         let head = self.repo.head()?;
         let (base, key_base) = self.branch_base(&branch, &head)?;
         let birth = self.repo.branch_birth(&branch)?;
-        let mut key = format!("branch-{}-{key_base}", encode_key(&branch));
+        let mut key = format!("branch-{}-{key_base}", self.branch_key(&branch)?);
         if let Some((time, sha)) = birth.as_ref().and_then(|birth| birth.split_once(' ')) {
             let short = sha.get(..12).unwrap_or(sha);
             let _ = write!(key, "-{time}-{short}");
@@ -285,6 +310,27 @@ impl Ctx {
             head,
             existing,
         })
+    }
+
+    /// The encoded branch name, shortened with a hash of the full name so the target key stays
+    /// under the store's length limit.
+    fn branch_key(&self, branch: &str) -> Result<String> {
+        const KEEP: usize = 87;
+        let encoded = encode_key(branch);
+        if encoded.len() <= KEEP + 13 {
+            return Ok(encoded);
+        }
+        let mut cut = KEEP;
+        // MUST NOT split a `%XX` escape.
+        while encoded[..cut].ends_with('%') || encoded[..cut - 1].ends_with('%') {
+            cut -= 1;
+        }
+        let hash = self.repo.hash_text(branch)?;
+        Ok(format!(
+            "{}-{}",
+            &encoded[..cut],
+            hash.get(..12).unwrap_or(&hash)
+        ))
     }
 
     /// Returns the review base and the commit that names the target. On the default branch
@@ -631,7 +677,7 @@ fn local_thread(new: NewThread, author: Author, body: String, now: &str) -> Thre
     }
 }
 
-fn author(args: &AuthorArgs, target: &Target, login: Option<&str>) -> Result<Author> {
+fn author(args: &AuthorArgs, target: &Target, default: Option<Author>) -> Result<Author> {
     let agent = args.model.is_some()
         || args.effort.is_some()
         || args.harness.is_some()
@@ -645,13 +691,11 @@ fn author(args: &AuthorArgs, target: &Target, login: Option<&str>) -> Result<Aut
         }
         return Ok(Author::Human {
             login: limited(login.clone(), "author")?,
+            git_name: false,
         });
     }
     if !agent {
-        return login
-            .map(|login| Author::Human {
-                login: login.to_owned(),
-            })
+        return default
             .ok_or_else(|| Error("no author: pass --author or set git user.name".into()));
     }
     let stored = match (&args.run, &args.pass, &args.reviewer) {
@@ -866,9 +910,15 @@ fn finding_kill(ctx: &Ctx, id: &str, reason: &str) -> Result<Value> {
             .iter()
             .position(|thread| thread.id == id && thread.finding.is_some())
             .ok_or_else(|| Error(format!("finding {id} not found")))?;
-        if target.threads[index].remote.is_some() {
+        let thread = &target.threads[index];
+        let sent = thread.remote.is_some()
+            || thread
+                .comments
+                .iter()
+                .any(|comment| comment.post != PostState::Pending);
+        if sent {
             return fail(format!(
-                "finding {id} is already posted; resolve it with --triage stale instead"
+                "finding {id} is posted or being posted; resolve it with --triage stale instead"
             ));
         }
         let thread = target.threads.remove(index);
@@ -923,6 +973,9 @@ fn read_reviewers(source: Option<&Path>) -> Result<Vec<ReviewerInput>> {
     serde_json::from_str(&text).map_err(ctx("parse reviewers (expected a JSON array)"))
 }
 
+/// `manual` is the main session's own pass and `fix` the fixer, which signs fix replies.
+const SPECIAL_REVIEWERS: [&str; 2] = ["manual", "fix"];
+
 fn reviewer_number(id: &str) -> Option<u32> {
     id.strip_prefix('r')?.parse().ok()
 }
@@ -943,8 +996,10 @@ fn assign_reviewers(run: &Run, inputs: Vec<ReviewerInput>) -> Result<Vec<Reviewe
     for input in inputs {
         let id = match input.id {
             Some(id) => {
-                if reviewer_number(&id).is_none() {
-                    return fail(format!("reviewer id must look like r<n>: {id}"));
+                if reviewer_number(&id).is_none() && !SPECIAL_REVIEWERS.contains(&id.as_str()) {
+                    return fail(format!(
+                        "reviewer id must look like r<n>, or be manual or fix: {id}"
+                    ));
                 }
                 id
             }
@@ -1293,9 +1348,9 @@ fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
     } else {
         build_anchor(&anchor_input, None, String::new())?
     };
-    let login = ctx.default_login()?;
+    let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
-        let author = author(&args.author, target, login.as_deref())?;
+        let author = author(&args.author, target, default)?;
         let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
         let thread = local_thread(
             NewThread {
@@ -1321,9 +1376,9 @@ fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
         return fail(format!("thread {} not found", args.id));
     }
     let body = read_body(&args.body)?;
-    let login = ctx.default_login()?;
+    let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
-        let author = author(&args.author, target, login.as_deref())?;
+        let author = author(&args.author, target, default)?;
         let thread = find_thread_mut(target, &args.id)?;
         let comment = local_comment(&thread.id, &thread.comments, author, body, now);
         thread.comments.push(comment);
@@ -1473,7 +1528,7 @@ fn list(ctx: &Ctx, args: &ListArgs) -> Result<Output> {
     };
     let selected: Vec<&Thread> = threads
         .iter()
-        .filter(|thread| !args.open || !thread.resolved)
+        .filter(|thread| !args.open || is_open(thread))
         .filter(|thread| in_run(&thread.id))
         .collect();
     let killed: Vec<&KilledFinding> = runs
@@ -1508,7 +1563,7 @@ fn list(ctx: &Ctx, args: &ListArgs) -> Result<Output> {
 
 fn author_label(author: &Author) -> String {
     match author {
-        Author::Human { login } => login.clone(),
+        Author::Human { login, .. } => login.clone(),
         Author::Agent {
             model,
             effort,
@@ -1929,8 +1984,8 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     }))
 }
 
-/// Open review items: unresolved threads, except other people's general comments, which have
-/// no resolved state on the host.
+/// Open review items: unresolved threads still on the host, except other people's general
+/// comments and review bodies, which have no resolved state there.
 fn is_open(thread: &Thread) -> bool {
     !thread.resolved
         && !thread.deleted_remote
@@ -1938,7 +1993,8 @@ fn is_open(thread: &Thread) -> bool {
             || thread
                 .remote
                 .as_ref()
-                .is_none_or(|remote| remote.resolvable))
+                .is_none_or(|remote| remote.resolvable)
+            || thread.comments.first().is_some_and(mine))
 }
 
 /// Age reference for pruning: when the PR/MR closed, else the last change.

@@ -225,7 +225,8 @@ pub struct ResolveArgs {
 
 #[derive(Args)]
 pub struct ListArgs {
-    /// Only unresolved threads.
+    /// Only open threads, as `status` counts them: unresolved, still on the host, and not
+    /// another person's general comment.
     #[arg(long)]
     pub open: bool,
     /// Only findings of this run.

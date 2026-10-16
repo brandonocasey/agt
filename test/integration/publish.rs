@@ -37,6 +37,11 @@ impl Setup {
 /// A `feat` branch changing line 3 of `a.txt`, reviewed by one full pass with an in-diff
 /// finding (f1), an out-of-diff one (f2, line 9) and a killed one (f3). The run is still open.
 fn reviewed(origin: &str) -> Setup {
+    reviewed_with(origin, false)
+}
+
+/// Like [`reviewed`]; `lock` ends the pass locked, as a blind review does.
+fn reviewed_with(origin: &str, lock: bool) -> Setup {
     let env = Env::with_branch();
     env.git(&["remote", "add", "origin", origin]);
     env.write("a.txt", &numbered(10, &[(3, "three")]));
@@ -68,7 +73,11 @@ fn reviewed(origin: &str) -> Setup {
         "r1",
     ];
     env.run_stdin(&add, FINDINGS);
-    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    let mut end = vec!["pass", "end", "--run", &run, "--pass", "c1p0"];
+    if lock {
+        end.push("--lock");
+    }
+    env.run(&end);
     Setup {
         env,
         run,
@@ -520,6 +529,10 @@ fn assert_gh_posted(setup: &Setup) {
     assert_eq!(f1["resolve_pending"], Value::Null);
     assert_eq!(thread(&list, "gh-t301")["resolved"], false);
     assert_eq!(thread(&list, "h2")["comments"][0]["post"], "pending");
+    assert!(
+        !ids(&list).contains(&"gh-r700".to_owned()),
+        "our review body is not a thread"
+    );
     let status = env.run(&["status"]);
     assert_eq!(
         status["reviews_at_head"], 1,
@@ -767,6 +780,8 @@ fn gl_done(setup: &Setup) -> Vec<Value> {
         vec![gl_note(4001, "alice", "Alice thread text.")],
         setup,
     );
+    // A reply turns an individual note into a discussion.
+    list[1]["individual_note"] = json!(false);
     list[1]["notes"].as_array_mut().unwrap().push(gl_note(
         5012,
         "me",
@@ -1016,4 +1031,270 @@ fn gitlab_crash_after_write_does_not_duplicate() {
     assert_eq!(thread(&list, &f1)["comments"][0]["draft_id"], Value::Null);
     assert_eq!(thread(&list, &f2)["comments"][0]["remote"]["id"], "5002");
     assert_never_posted(env);
+}
+
+const GH: &str = "git@github.com:me/repo.git";
+const GL: &str = "git@gitlab.com:me/proj.git";
+
+fn ids(list: &Value) -> Vec<String> {
+    list["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn open_ids(status: &Value) -> Vec<String> {
+    status["open_threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn writes_for(dry: &Value, item: &str) -> Vec<String> {
+    dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|write| {
+            write["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == item)
+        })
+        .map(|write| write["kind"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn gitlab_reply_on_general_note_keeps_one_thread() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    let note = gl_note(4002, "alice", "Alice general text.");
+    gl_sync(env, &setup, &[gl_general("d-g", note)], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    let mut replied = gl_general("d-g", gl_note(4002, "alice", "Alice general text."));
+    replied["individual_note"] = json!(false);
+    replied["notes"]
+        .as_array_mut()
+        .unwrap()
+        .push(gl_note(4003, "bob", "Bob reply text."));
+    gl_sync(env, &setup, &[replied], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    let list = env.run(&["list"]);
+    let same: Vec<String> = ids(&list)
+        .into_iter()
+        .filter(|id| id.starts_with("gl-n4002"))
+        .collect();
+    assert_eq!(same, ["gl-n4002"], "one thread per discussion");
+    assert_eq!(
+        thread(&list, "gl-n4002")["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn own_published_general_thread_stays_open() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&[
+        "comment",
+        "--body",
+        "General note from me.",
+        "--author",
+        "me",
+    ]);
+    let mut pr = gh_before(&setup);
+    pr.comments.push(gh_comment(
+        602,
+        "me",
+        &marked("General note from me.", "h1/c1"),
+    ));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let open = open_ids(&env.run(&["status"]));
+    assert!(open.contains(&"h1".to_owned()), "{open:?}");
+    assert!(!open.contains(&"gh-c900".to_owned()), "{open:?}");
+    let listed = ids(&env.run(&["list", "--open"]));
+    assert_eq!(listed, open, "list --open and status agree");
+}
+
+#[test]
+fn own_review_body_is_not_imported() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let mut pr = GhPr::new();
+    pr.review(&setup.head);
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    assert!(!ids(&env.run(&["list"])).contains(&"gh-r700".to_owned()));
+}
+
+#[test]
+fn finding_kill_refuses_a_posting_finding() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["run", "end", "--run", &setup.run]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.fail_call(&strs(&post(GH_REVIEWS)));
+    env.fail(&["publish", "--pr", "42"], None);
+    let error = env.fail(
+        &["finding", "kill", &setup.finding(1), "--reason", "late"],
+        None,
+    );
+    assert!(error.contains("resolve"), "{error}");
+}
+
+#[test]
+fn sync_never_reuses_a_killed_finding_id() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f2 = setup.finding(2);
+    env.run(&["finding", "kill", &f2, "--reason", "wrong"]);
+    let mut pr = GhPr::new();
+    let body = format!(
+        "**nit:** x\n<!-- review-finding v1 id={f2} sha={} -->",
+        setup.head
+    );
+    pr.comments.push(gh_comment(601, "me", &body));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    assert!(!ids(&list).contains(&f2), "{list}");
+    assert!(ids(&list).contains(&"gh-c601".to_owned()));
+}
+
+#[test]
+fn comments_before_first_sync_are_mine() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["comment", "--body", "Written before sync."]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(dry["skipped"], json!([]), "{dry}");
+    assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, "h1")["comments"][0]["author"]["login"], "me");
+}
+
+#[test]
+fn target_without_local_branch_uses_pr_head() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.git(&["switch", "-q", "--detach", "main"]);
+    env.git(&["branch", "-q", "-D", "feat"]);
+    let status = env.run(&["--target", "gh-42", "status"]);
+    assert_eq!(status["head"], setup.head);
+}
+
+#[test]
+fn publish_target_on_detached_head() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["run", "end", "--run", &setup.run]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.git(&["switch", "-q", "--detach"]);
+    let dry = env.run(&["--target", "gh-42", "publish", "--dry-run"]);
+    assert_eq!(kinds(&dry, "writes"), ["review", "thread", "record"]);
+}
+
+#[test]
+fn github_reply_on_general_finding_posts_re_answer() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let (f1, f2) = (setup.finding(1), setup.finding(2));
+    env.run(&["run", "end", "--run", &setup.run]);
+    let mut pr = GhPr::new();
+    pr.threads.push(gh_thread(
+        "PRRT_f1",
+        false,
+        3,
+        vec![gh_comment(501, "me", &marked("f1", &format!("{f1}/c1")))],
+        &setup.head,
+    ));
+    pr.review(&setup.head);
+    pr.comments
+        .push(gh_comment(601, "me", &marked("f2", &format!("{f2}/c1"))));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&[
+        "reply",
+        &f2,
+        "--body",
+        "Not fixed: needs a design change.",
+        "--author",
+        "me",
+    ]);
+
+    env.reset_calls();
+    gh_sync(env, Some(1), &pr.render(&setup));
+    gh_sync(env, Some(2), &pr.render(&setup));
+    let answer = format!(
+        "{}\nRe: {f2}",
+        marked(
+            "Not fixed: needs a design change.\n\nme",
+            &format!("{f2}/c2")
+        )
+    );
+    pr.comments.push(gh_comment(603, "me", &answer));
+    gh_sync(env, None, &pr.render(&setup));
+    env.respond_nth(&strs(&post(GH_COMMENTS)), 1, r#"{"id":603}"#);
+    env.respond_nth(&strs(&post(GH_COMMENTS)), 2, r#"{"id":604}"#);
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["reply", "record"]);
+    let sent: Value = serde_json::from_str(&env.forge_inputs()[0].1).unwrap();
+    assert_eq!(sent["body"], answer);
+    let list = env.run(&["list"]);
+    let general = thread(&list, &f2);
+    assert_eq!(general["comments"].as_array().unwrap().len(), 2);
+    assert_eq!(general["comments"][1]["remote"]["id"], "603");
+    assert!(!ids(&list).contains(&"gh-c603".to_owned()));
+}
+
+#[test]
+fn locked_pass_findings_wait_for_reveal() {
+    let setup = reviewed_with(GH, true);
+    let env = &setup.env;
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    let held = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(
+        writes_for(&held, &format!("{}/c1", setup.finding(1))),
+        Vec::<String>::new()
+    );
+    assert!(
+        held["skipped"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("reveal"),
+        "{held}"
+    );
+    let reveal = [
+        "pass",
+        "start",
+        "--run",
+        &setup.run,
+        "--kind",
+        "reveal",
+        "--reviewers",
+        "-",
+    ];
+    env.run_stdin(&reveal, REVIEWER);
+    env.run(&["pass", "end", "--run", &setup.run, "--pass", "c1p1"]);
+    let shown = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(
+        writes_for(&shown, &format!("{}/c1", setup.finding(1))),
+        ["review"]
+    );
 }
