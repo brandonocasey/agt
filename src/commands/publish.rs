@@ -298,6 +298,10 @@ impl Planner<'_> {
             {
                 continue;
             }
+            // A finding judged stale before it was ever posted has nothing to tell the host.
+            if thread.finding.is_some() && thread.resolution.as_deref() == Some("stale") {
+                continue;
+            }
             if let Some(reason) = self.blocked(target, thread, first) {
                 skipped.push(skip(&thread.id, reason));
                 continue;
@@ -395,16 +399,22 @@ impl Planner<'_> {
                     finding.run, finding.pass
                 ));
             };
-            // A blind pass's findings stay hidden from the host until its reveal ends.
-            let revealed = passes.iter().any(|later| {
-                later.kind == PassKind::Reveal
-                    && later.cycle == pass.cycle
-                    && later.number > pass.number
-                    && later.ended_at.is_some()
-            });
+            // A blind pass's findings stay hidden from the host until its reveal ends, or its
+            // run ends when the harness cannot continue reviewers for a reveal.
+            let run_ended = target
+                .runs
+                .iter()
+                .any(|run| run.id == finding.run && run.ended_at.is_some());
+            let revealed = run_ended
+                || passes.iter().any(|later| {
+                    later.kind == PassKind::Reveal
+                        && later.cycle == pass.cycle
+                        && later.number > pass.number
+                        && later.ended_at.is_some()
+                });
             if pass.locked && !revealed {
                 return Some(format!(
-                    "pass {}.{} is locked until a reveal pass in cycle {} ends",
+                    "pass {}.{} is locked until a reveal pass in cycle {} or the run ends",
                     finding.run, finding.pass, pass.cycle
                 ));
             }

@@ -236,6 +236,7 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
         birth: plan.scope.birth.clone(),
         base: plan.scope.base.clone(),
         head: plan.scope.head.clone(),
+        head_known: true,
         existing: None,
     };
     let (summary, recorded, total) = ctx.store.update_renamed(
@@ -298,6 +299,7 @@ fn sync_scope(
             birth: None,
             base: fetched.pr.base_sha.clone(),
             head: fetched.pr.head_sha.clone(),
+            head_known: true,
             existing: ctx.store.load(&ctx.dir, key)?,
         },
         false,
@@ -541,8 +543,9 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
             None => import(target, data, login, forge, now, &mut summary),
         }
     }
-    // A draft that is gone was published or deleted; the comment is posted again unless a
-    // published note matched it above.
+    // A draft that is gone was published or deleted, and a write that left no marker on the
+    // host did not land or was rejected: unless a note matched above or a draft below, it goes
+    // back to pending, to post again or for `finding kill`. The attempt id stays.
     for comment in target
         .threads
         .iter_mut()
@@ -555,6 +558,9 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
             .is_some_and(|id| !fetched.drafts.iter().any(|draft| &draft.id == id))
         {
             comment.draft_id = None;
+        }
+        if comment.draft_id.is_none() && comment.post == PostState::Posting {
+            comment.post = PostState::Pending;
         }
     }
     for draft in fetched.drafts {

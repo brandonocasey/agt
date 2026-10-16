@@ -404,3 +404,52 @@ fn linked_worktrees_resolve_same_target() {
         2
     );
 }
+
+#[test]
+fn partial_pass_does_not_cover_earlier_commits() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(2, "two")]));
+    env.commit_all("A unreviewed");
+    env.write("a.txt", &numbered(10, &[(2, "two"), (8, "eight")]));
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&[
+        "pass", "start", "--run", &run, "--kind", "full", "--base", "HEAD",
+    ]);
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    env.commit_all("B reviewed");
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert!(!commit_reviewed(&status, "A unreviewed"));
+    assert!(commit_reviewed(&status, "B reviewed"));
+    assert_eq!(status["reviewed"], false, "{status}");
+    assert_eq!(status["reviews_at_head"], 0);
+}
+
+#[test]
+fn status_reports_last_reviewed_head() {
+    let env = Env::with_branch();
+    assert_eq!(env.run(&["status"])["last_reviewed_head"], Value::Null);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let reviewed = env.commit_all("change");
+    env.review("full");
+    env.write("a.txt", &numbered(10, &[(3, "three"), (4, "four")]));
+    env.commit_all("later");
+    assert_eq!(env.run(&["status"])["last_reviewed_head"], reviewed);
+    env.git(&["switch", "-q", "main"]);
+    env.git(&["merge", "-q", "--ff-only", "feat"]);
+    env.write("b.txt", "b\n");
+    env.commit_all("on main");
+    let status = env.run(&["status"]);
+    assert_eq!(
+        status["last_reviewed_head"], reviewed,
+        "found across targets"
+    );
+    assert_eq!(
+        env.run(&["status", "--head", "main~3"])["last_reviewed_head"],
+        Value::Null,
+        "only ancestors of the inspected head"
+    );
+}

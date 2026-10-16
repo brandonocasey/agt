@@ -251,6 +251,15 @@ impl Repo {
         ])
     }
 
+    /// Commits in `to` that `from` lacks (`git rev-list --count from..to`).
+    pub fn distance(&self, from: &str, to: &str) -> Result<u64> {
+        let range = format!("{from}..{to}");
+        let count = self.git(&["rev-list", "--count", "--end-of-options", &range])?;
+        count
+            .parse()
+            .map_err(|_| Error(format!("git rev-list --count printed {count}")))
+    }
+
     pub fn object_exists(&self, spec: &str) -> Result<bool> {
         self.succeeds(&["cat-file", "-e", "--end-of-options", spec])
     }

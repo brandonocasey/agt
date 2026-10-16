@@ -44,11 +44,14 @@ A target is one thing under review. Commands pick it like this:
   followed by a hash of the full name, so keys stay within the store's limit.
 - `--range <from>..<to>` reviews a range; `--range <rev>` reviews one commit.
   Each gets its own target.
-- `--target <key>` uses a stored target by its key. For a branch target whose
-  branch is not in this repository, the head is the synced PR/MR head; with no
-  PR/MR it is an error, never the current `HEAD`. With a `gh-<n>` or `gl-<iid>`
-  target, `sync` and `publish` use that PR/MR without `--pr`, also on a
-  detached `HEAD`.
+- `--target <key>` uses a stored target by its key. A branch target's head is
+  `HEAD` when that branch is checked out or when `HEAD` is detached on top of
+  the branch's known head (a review worktree with fix commits); else the local
+  branch; else the synced PR/MR head. An unrelated `HEAD` never stands in. With
+  none of these, reading commands (`status`, `list`, `show`) use the last pass
+  head, or report `head: null` and `current: null` when there is no pass;
+  writing commands fail. With a `gh-<n>` or `gl-<iid>` target, `sync` and
+  `publish` use that PR/MR without `--pr`, also on a detached `HEAD`.
 
 On the default branch itself, the root commit names the target and passes cover
 only uncommitted work; use `--range` to review commits there.
@@ -75,7 +78,10 @@ whose replies feed the final record's `Fixed by:` line; give them model, effort,
 harness and version like any reviewer. A reviewer continued in a later pass
 keeps its id; give only `"id"` and `"starting_context"` and the rest is copied
 from its earlier pass. `--base <rev>` sets the start of the reviewed delta
-(default: the merge-base for a full pass, the previous pass's head otherwise).
+(default: the merge-base for a full pass, the previous pass's head otherwise). A
+pass whose base is after the merge-base, and that does not continue a
+whole-branch pass from its head, is `partial`: it marks the commits it reviewed
+but never covers the whole head.
 
 ```sh
 agent-review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
@@ -88,11 +94,11 @@ agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 `pass end --lock` freezes the pass for a blind review: `finding add` to it then
 fails. `finding kill` moves a surviving finding to its pass's killed list, also
 on a locked pass; a finding that is posted or being posted to the PR/MR is
-resolved as `stale` instead. `run end` closes the run, records commit patch-ids for every pass whose
-reviewed tree now equals `HEAD`'s tree (see below), records `HEAD` as the run's
-`repaired_head` (commits after the last pass up to it are the run's `repair`),
-stores the reveal counts for the final record, and prunes old targets of this
-repository.
+resolved as `stale` instead. `run end` closes the run, records commit patch-ids
+for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
+`HEAD` as the run's `repaired_head` (commits after the last pass up to it are
+the run's `repair`), stores the reveal counts for the final record, and prunes
+old targets of this repository.
 
 Threads for humans and agents:
 
@@ -147,14 +153,17 @@ locally or by the authenticated forge user; every other comment shows as
 people's comments.
 
 `status` never writes: not to the store, not to the git index or object
-database. It reports whether the head is reviewed, `reviews_at_head`, the
-passes that cover it, each commit's reviewed state, `unreviewed_commits`, open
-threads, `outdated_threads`, held questions, runs, the linked PR/MR and the
-trusted imported review records for the head. Without `--head` on a branch,
-`worktree` reports the same for uncommitted work. Open threads are unresolved
-threads still on the host, minus other people's general comments and review
-bodies, which have no resolved state there; your own general comments stay
-open until you resolve them.
+database. It reports whether the head is reviewed, `reviews_at_head`, the passes
+that cover it, each commit's reviewed state, `unreviewed_commits`,
+`last_reviewed_head` (the nearest ancestor of the head that a whole-branch pass
+reviewed or a run repaired, across this repository's branch and range targets,
+to scope the next review), open threads, `outdated_threads`, held questions,
+runs, the linked PR/MR and the trusted imported review records for the head.
+Without `--head`, when the target's branch is checked out, `worktree` reports
+the same for uncommitted work. Open threads are unresolved findings and threads
+still on the host; a general comment or review body counts only when it is ours
+(written here, or posted by `publish` with its marker), so other people's and my
+own unmarked ones (a "PTAL") are not open.
 
 Sync with a PR or MR:
 
@@ -193,12 +202,15 @@ agent-review prune --all
   copy of the real index in a temporary `GIT_INDEX_FILE` after `git add -A`
   and `git write-tree`, so tracked files that match `.gitignore` stay in the
   tree and the real index is untouched.
-- An ended pass covers a head when the head's tree equals the pass tree, the
-  range's patch-id equals the pass's whole-range patch-id, or the head commit's
-  patch-id equals the pass's head or whole-range patch-id. A commit is
-  reviewed when its patch-id, tree or sha matches any ended pass. Squashes,
-  fixups and plain rebases stay reviewed; a conflict resolution changes the
-  patch and shows as unreviewed. Merge commits are not listed.
+- An ended pass that is not partial covers a head when the head's tree equals
+  the pass tree, the range's patch-id equals the pass's whole-range patch-id, or
+  the head commit's patch-id equals the pass's head or whole-range patch-id. A
+  partial pass's range patch-id runs from its own base. A commit is reviewed
+  when its patch-id, tree or sha matches any ended pass. The head is reviewed
+  when a pass or trusted record covers it, or when every commit since the
+  merge-base is reviewed. Squashes, fixups and plain rebases stay reviewed; a
+  conflict resolution changes the patch and shows as unreviewed. Merge commits
+  are not listed.
 - `run end` adds commit patch-ids to passes whose tree now equals `HEAD`'s
   tree, so reviewed uncommitted work stays reviewed after it is committed and
   later rebased.
@@ -281,10 +293,11 @@ agent-review prune --all
   `publish` syncs first, then posts in this order: new threads, sync, replies,
   resolves and reopens, final records, then a last sync to fill in ids.
 - Posted: new surviving findings of ended passes (a locked pass's findings wait
-  until a later `reveal` pass of the same cycle has ended) and local comment
-  threads, new replies, resolve and reopen changes, and the final record of each
-  ended run not posted yet. Never posted: killed findings, imported comments,
-  and local comments by another human author (listed under `skipped`).
+  until a later `reveal` pass of the same cycle, or the run, has ended) and
+  local comment threads, new replies, resolve and reopen changes, and the final
+  record of each ended run not posted yet. Never posted: killed findings,
+  findings resolved `stale` before they were posted, imported comments, and
+  local comments by another human author (listed under `skipped`).
 - Every body ends with a signature (agent: `<model> <effort> <harness>
   <run>.<pass>.<reviewer>`, plus ` post-reveal`; human: the login) and
   `<!-- agent-review id=<local id> -->`. Finding threads also carry
@@ -309,8 +322,10 @@ agent-review prune --all
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`.
 - Crash safety: each item is saved as `posting` with an attempt id before its
   write and gets its remote id right after. A rerun syncs first and matches
-  `posting` items by their `agent-review` marker before retrying, and
-  publishes a GitLab draft that was created but not published.
+  `posting` items by their `agent-review` marker before retrying, and publishes
+  a GitLab draft that was created but not published. A `posting` item that a
+  sync finds neither as a note nor as a draft goes back to `pending` (keeping
+  its attempt id), so it is retried or can be killed.
 - `--dry-run` syncs in memory and prints every payload, including the final
   record; it writes nothing to the store, the repository or the forge.
 
@@ -345,7 +360,8 @@ Target file:
     "number": 42, "url": "https://github.com/owner/repo/pull/42",
     "state": "open", "closed_at": null, "head_branch": "feat/login",
     "head_sha": "5d6e7f...", "base_sha": "1a2b3c...", "start_sha": null,
-    "author": "brandonocasey", "login": "brandonocasey", "synced_at": "2026-10-16T13:00:00Z"
+    "author": "brandonocasey", "login": "brandonocasey",
+    "synced_at": "2026-10-16T13:00:00Z"
   },
   "records": [
     { "run": "rv-zz99", "head": "5d6e7f...", "reviews_at_head": 2, "open": 0,
@@ -364,6 +380,7 @@ Target file:
           "dirty": false,
           "commits": [{ "sha": "5d6e7f...", "patch_id": "aa11..." }],
           "range_patch_id": "aa11...", "head_patch_id": "aa11...",
+          "partial": false,
           "reviewers": [
             { "id": "r1", "model": "claude-opus-5-5", "effort": "xhigh",
               "harness": "claude-code", "harness_version": "2.1.296",
@@ -386,7 +403,8 @@ Target file:
       "repair": [{ "sha": "9e8d7c...", "patch_id": "bb22..." }],
       "reveal": null,
       "record": { "post": "posted", "attempt": "at-x1y2", "head": "9e8d7c...",
-                  "remote_id": "2002", "url": "https://github.com/...#issuecomment-2002" }
+                  "remote_id": "2002",
+                  "url": "https://github.com/...#issuecomment-2002" }
     }
   ],
   "threads": [

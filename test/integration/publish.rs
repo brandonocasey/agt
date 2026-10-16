@@ -1298,3 +1298,68 @@ fn locked_pass_findings_wait_for_reveal() {
         ["review"]
     );
 }
+
+#[test]
+fn rejected_finding_returns_to_pending_and_can_be_killed() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    env.run(&["run", "end", "--run", &setup.run]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.fail_call(&strs(&post(GH_REVIEWS)));
+    env.fail(&["publish", "--pr", "42"], None);
+    env.fail(&["publish", "--pr", "42"], None);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let first = &thread(&list, &f1)["comments"][0];
+    assert_eq!(first["post"], "pending", "no marker found: back to pending");
+    assert!(first["attempt"].is_string(), "the attempt id stays");
+    env.run(&["finding", "kill", &f1, "--reason", "the host rejects it"]);
+}
+
+#[test]
+fn stale_unposted_findings_are_not_posted() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f2 = setup.finding(2);
+    env.run(&["resolve", &f2, "--triage", "stale"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(writes_for(&dry, &format!("{f2}/c1")), Vec::<String>::new());
+    assert_eq!(kinds(&dry, "writes"), ["review", "record"]);
+}
+
+#[test]
+fn run_end_releases_locked_findings() {
+    let setup = reviewed_with(GH, true);
+    let env = &setup.env;
+    env.run(&["run", "end", "--run", &setup.run]);
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(kinds(&dry, "writes"), ["review", "thread", "record"]);
+}
+
+#[test]
+fn my_unmarked_comments_are_not_open() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let mut pr = GhPr::new();
+    pr.comments.push(gh_comment(950, "me", "PTAL"));
+    pr.reviews.push(json!({
+        "databaseId": 751,
+        "url": "https://github.com/me/repo/pull/42#pullrequestreview-751",
+        "body": "Looked at the retry path.",
+        "state": "COMMENTED",
+        "submittedAt": TIME,
+        "author": { "login": "me" },
+        "editor": null,
+    }));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["comment", "--body", "Local note.", "--author", "me"]);
+    let open = open_ids(&env.run(&["status"]));
+    assert!(!open.contains(&"gh-c950".to_owned()), "{open:?}");
+    assert!(!open.contains(&"gh-r751".to_owned()), "{open:?}");
+    assert!(open.contains(&"h1".to_owned()), "{open:?}");
+}

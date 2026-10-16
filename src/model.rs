@@ -118,6 +118,10 @@ pub struct Pass {
     pub commits: Vec<CommitPatch>,
     pub range_patch_id: Option<String>,
     pub head_patch_id: Option<String>,
+    /// The pass started after the target merge-base and did not continue a whole-branch pass:
+    /// it covers the commits it reviewed, never the whole head. Missing in earlier builds.
+    #[serde(default)]
+    pub partial: bool,
     pub reviewers: Vec<Reviewer>,
     pub started_at: String,
     pub ended_at: Option<String>,
@@ -311,7 +315,8 @@ pub enum Author {
     Human {
         login: String,
         /// The login is git `user.name`, written before any sync; sync replaces it with the
-        /// forge login.
+        /// forge login. Missing in target files from builds before the field existed.
+        #[serde(default)]
         git_name: bool,
     },
     Agent {
@@ -323,4 +328,21 @@ pub enum Author {
         pass: Option<String>,
         reviewer: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_authors_from_earlier_builds_parse() {
+        let author: Author = serde_json::from_str(r#"{"kind":"human","login":"me"}"#).unwrap();
+        assert!(matches!(
+            author,
+            Author::Human {
+                git_name: false,
+                ..
+            }
+        ));
+    }
 }

@@ -926,6 +926,88 @@ fn target_branch_missing_without_pr_errors() {
         .to_owned();
     env.git(&["switch", "-q", "--detach", "main"]);
     env.git(&["branch", "-q", "-D", "feat"]);
-    let error = env.fail(&["--target", &key, "status"], None);
+    let error = env.fail(&["--target", &key, "run", "start"], None);
     assert!(error.contains("branch feat"), "{error}");
+}
+
+/// A branch target whose branch was deleted, after one reviewed pass with an anchored finding.
+fn orphaned_target(with_pass: bool) -> (Env, String, String) {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let head = env.commit_all("change");
+    env.run(&[
+        "comment",
+        "--body",
+        "Human note",
+        "--path",
+        "a.txt",
+        "--line",
+        "3",
+    ]);
+    if with_pass {
+        let run = env.run(&["run", "start"])["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        start_pass(&env, &run);
+        add_findings(
+            &env,
+            &run,
+            "c1p0",
+            r#"{"type":"nit","path":"a.txt","line":3,"scenario":"Anchored."}"#,
+        );
+        env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    }
+    let key = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    env.git(&["switch", "-q", "--detach", "main"]);
+    env.git(&["branch", "-q", "-D", "feat"]);
+    (env, key, head)
+}
+
+#[test]
+fn read_only_commands_use_the_last_pass_head() {
+    let (env, key, head) = orphaned_target(true);
+    let status = env.run(&["--target", &key, "status"]);
+    assert_eq!(status["head"], head);
+    let list = env.run(&["--target", &key, "list"]);
+    assert_eq!(list["threads"][0]["current"]["line"], 3);
+    env.run(&["--target", &key, "show", "h1"]);
+    let error = env.fail(&["--target", &key, "comment", "--body", "x"], None);
+    assert!(error.contains("branch feat"), "{error}");
+}
+
+#[test]
+fn read_only_commands_without_any_head() {
+    let (env, key, _) = orphaned_target(false);
+    let status = env.run(&["--target", &key, "status"]);
+    assert_eq!(status["head"], serde_json::Value::Null);
+    assert_eq!(
+        status["open_threads"][0]["current"],
+        serde_json::Value::Null
+    );
+    let list = env.run(&["--target", &key, "list"]);
+    assert_eq!(list["threads"][0]["current"], serde_json::Value::Null);
+    let shown = env.run(&["--target", &key, "show", "h1"]);
+    assert_eq!(shown["thread"]["current"], serde_json::Value::Null);
+}
+
+#[test]
+fn target_on_detached_review_worktree_uses_head() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let key = env.run(&["run", "start"])["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.git(&["switch", "-q", "--detach"]);
+    env.write("a.txt", &numbered(10, &[(3, "three"), (5, "five")]));
+    let fix = env.commit_all("fix on detached head");
+    assert_eq!(env.run(&["--target", &key, "status"])["head"], fix);
+    env.git(&["switch", "-q", "--detach", "main"]);
+    assert_ne!(
+        env.run(&["--target", &key, "status"])["head"],
+        env.git(&["rev-parse", "main"]),
+        "an unrelated detached HEAD is not the target's"
+    );
 }

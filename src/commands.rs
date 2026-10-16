@@ -40,6 +40,7 @@ struct Selection {
 
 struct Ctx {
     repo: Repo,
+    read_only: bool,
     store: Store,
     repo_key: String,
     dir: PathBuf,
@@ -54,6 +55,9 @@ struct Scope {
     birth: Option<String>,
     base: Option<String>,
     head: String,
+    /// False only for a reading command on a branch target with no branch, PR/MR head or
+    /// pass; `head` is then empty.
+    head_known: bool,
     existing: Option<Target>,
 }
 
@@ -145,6 +149,7 @@ impl Ctx {
         let dir = store.repo_dir(&repo_key)?;
         Ok(Self {
             repo,
+            read_only,
             store,
             repo_key,
             dir,
@@ -182,32 +187,33 @@ impl Ctx {
             .store
             .load(&self.dir, key)?
             .ok_or_else(|| Error(format!("target {key} does not exist")))?;
+        let mut headless = false;
         let (base, head) = match target.kind {
             TargetKind::Branch => {
                 let branch = target.branch.clone().unwrap_or_default();
-                // Without the local branch the PR/MR head stands in; the current HEAD MUST NOT,
-                // since it may be any other work.
-                let head = match self.repo.commit(&format!("refs/heads/{branch}")) {
-                    Ok(head) => head,
-                    Err(_) => match target.review.as_ref().map(|review| &review.head_sha) {
-                        Some(sha) if self.repo.object_exists(&format!("{sha}^{{commit}}"))? => {
-                            sha.clone()
-                        }
-                        Some(sha) => {
-                            return fail(format!(
-                                "branch {branch} of target {key} is not here and its PR/MR head \
-                                 {sha} is not in this repository; fetch it or check out the branch"
-                            ));
-                        }
-                        None => {
-                            return fail(format!(
-                                "branch {branch} of target {key} is not here and no PR/MR head \
-                                 is known; check out the branch"
-                            ));
-                        }
-                    },
+                let found = match self.branch_head(&target, &branch)? {
+                    Ok(head) => Some(head),
+                    // Reading commands still work: anchors map to the last reviewed head, or
+                    // nowhere when nothing was reviewed.
+                    Err(_) if self.read_only => target
+                        .runs
+                        .iter()
+                        .flat_map(|run| &run.passes)
+                        .max_by(|a, b| a.started_at.cmp(&b.started_at))
+                        .map(|pass| pass.head.clone()),
+                    Err(why) => {
+                        return fail(format!(
+                            "branch {branch} of target {key} is not here and {why}"
+                        ));
+                    }
                 };
-                (Some(self.branch_base(&branch, &head)?.0), head)
+                match found {
+                    Some(head) => (Some(self.branch_base(&branch, &head)?.0), head),
+                    None => {
+                        headless = true;
+                        (target.base.clone(), String::new())
+                    }
+                }
             }
             TargetKind::Range | TargetKind::Commit => {
                 let head = target
@@ -224,6 +230,7 @@ impl Ctx {
             birth: target.branch_birth.clone(),
             base,
             head,
+            head_known: !headless,
             existing: Some(target),
         })
     }
@@ -262,6 +269,7 @@ impl Ctx {
             birth: None,
             base,
             head,
+            head_known: true,
             existing,
         })
     }
@@ -308,6 +316,7 @@ impl Ctx {
             birth,
             base: Some(base),
             head,
+            head_known: true,
             existing,
         })
     }
@@ -331,6 +340,38 @@ impl Ctx {
             &encoded[..cut],
             hash.get(..12).unwrap_or(&hash)
         ))
+    }
+
+    /// The head of a branch target: `HEAD` when on its branch, or when detached on top of the
+    /// branch's known head (a review worktree with fix commits); else the local branch, else the
+    /// synced PR/MR head. An unrelated `HEAD` MUST NOT stand in. The error says why there is none.
+    fn branch_head(&self, target: &Target, branch: &str) -> Result<Result<String, String>> {
+        let current = self.repo.current_branch()?;
+        let head = self.repo.head()?;
+        if current.as_deref() == Some(branch) {
+            return Ok(Ok(head));
+        }
+        let known = match self.repo.commit(&format!("refs/heads/{branch}")) {
+            Ok(local) => local,
+            Err(_) => match target.review.as_ref().map(|review| &review.head_sha) {
+                Some(sha) if self.repo.object_exists(&format!("{sha}^{{commit}}"))? => sha.clone(),
+                Some(sha) => {
+                    return Ok(Err(format!(
+                        "its PR/MR head {sha} is not in this repository; fetch it or check out \
+                         the branch"
+                    )));
+                }
+                None => {
+                    return Ok(Err(
+                        "no PR/MR head is known; check out the branch".to_owned()
+                    ));
+                }
+            },
+        };
+        if current.is_none() && self.repo.is_ancestor(&known, &head)? {
+            return Ok(Ok(head));
+        }
+        Ok(Ok(known))
     }
 
     /// Returns the review base and the commit that names the target. On the default branch
@@ -780,12 +821,13 @@ impl Ctx {
                 if pass.tree != head_tree || pass.head == scope.head {
                     continue;
                 }
-                let from = if self.repo.is_ancestor(&pass.head, &scope.head)? {
-                    Some(pass.head.clone())
+                let commits = if self.repo.is_ancestor(&pass.head, &scope.head)? {
+                    self.repo.commits(Some(&pass.head), &scope.head)?
+                } else if pass.partial {
+                    Vec::new()
                 } else {
-                    scope.base.clone()
+                    self.repo.commits(scope.base.as_deref(), &scope.head)?
                 };
-                let commits = self.repo.commits(from.as_deref(), &scope.head)?;
                 let head_patch_id = match commits.iter().find(|commit| commit.sha == scope.head) {
                     Some(commit) => commit.patch_id.clone(),
                     None => self.repo.commit_patch_id(&scope.head)?,
@@ -1047,23 +1089,28 @@ fn pass_start(
     let scope = ctx.scope()?;
     let inputs = read_reviewers(reviewers)?;
     let (commit, tree) = ctx.reviewed_state(&scope)?;
-    let previous_head = scope.existing.as_ref().and_then(|target| {
+    let previous = scope.existing.as_ref().and_then(|target| {
         target
             .runs
             .iter()
             .find(|run| run.id == run_id)
             .and_then(|run| run.passes.last())
-            .map(|pass| pass.head.clone())
     });
+    let previous_head = previous.map(|pass| pass.head.clone());
     let base = match (base, kind) {
         (Some(rev), _) => Some(ctx.repo.commit(rev)?),
         (None, PassKind::Full) => scope.base.clone(),
         (None, PassKind::FixCheck | PassKind::Reveal) => {
-            previous_head.or_else(|| scope.base.clone())
+            previous_head.clone().or_else(|| scope.base.clone())
         }
     };
+    // A pass that starts after the merge-base reviews only its own delta, unless it continues a
+    // whole-branch pass from that pass's head.
+    let continues = previous.is_some_and(|pass| !pass.partial) && base == previous_head;
+    let partial = base != scope.base && !continues;
+    let range_base = if partial { &base } else { &scope.base };
     let commits = ctx.repo.commits(base.as_deref(), &scope.head)?;
-    let range_patch_id = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
+    let range_patch_id = ctx.repo.range_patch_id(range_base.as_deref(), &tree)?;
     let head_patch_id = match (&commit, commits.last()) {
         (Some(_), Some(last)) if last.sha == scope.head => last.patch_id.clone(),
         _ => None,
@@ -1112,6 +1159,7 @@ fn pass_start(
                 .collect(),
             range_patch_id,
             head_patch_id,
+            partial,
             reviewers,
             started_at: now.to_owned(),
             ended_at: None,
@@ -1454,19 +1502,19 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
 /// Maps anchors to the current head, caching one diff per anchor commit or tree.
 struct Locator<'a> {
     repo: &'a Repo,
-    head: String,
+    /// `None` when no head is known; local anchors then have no current place.
+    head: Option<String>,
     diffs: HashMap<String, Option<Vec<FileDiff>>>,
 }
 
 impl Locator<'_> {
     /// An anchor whose commit or tree is gone (collected) counts as outdated.
-    fn locate(&mut self, anchor: &Anchor) -> Location {
+    fn locate(&mut self, anchor: &Anchor, head: &str) -> Location {
         let from = anchor.commit.clone().unwrap_or_else(|| anchor.tree.clone());
-        if from == self.head {
+        if from == head {
             return anchors::unchanged(anchor);
         }
         let repo = self.repo;
-        let head = &self.head;
         let files = self.diffs.entry(from).or_insert_with_key(|from| {
             repo.diff_u0(from, head)
                 .ok()
@@ -1485,7 +1533,10 @@ impl Locator<'_> {
     /// state.
     fn current(&mut self, thread: &Thread) -> Value {
         if let Some(anchor) = &thread.anchor {
-            let location = self.locate(anchor);
+            let Some(head) = self.head.clone() else {
+                return Value::Null;
+            };
+            let location = self.locate(anchor, &head);
             return json!({ "path": location.path, "line": location.line, "outdated": location.outdated });
         }
         match &thread.remote {
@@ -1539,7 +1590,7 @@ fn list(ctx: &Ctx, args: &ListArgs) -> Result<Output> {
         .collect();
     let mut locator = Locator {
         repo: &ctx.repo,
-        head: scope.head.clone(),
+        head: scope.head_known.then(|| scope.head.clone()),
         diffs: HashMap::new(),
     };
     if let Format::Prompt = args.format {
@@ -1714,7 +1765,7 @@ fn show(ctx: &Ctx, id: &str) -> Result<Value> {
     let target = scope.existing.as_ref().ok_or_else(not_found)?;
     let mut locator = Locator {
         repo: &ctx.repo,
-        head: scope.head.clone(),
+        head: scope.head_known.then(|| scope.head.clone()),
         diffs: HashMap::new(),
     };
     if let Some(thread) = target.threads.iter().find(|thread| thread.id == id) {
@@ -1757,7 +1808,12 @@ fn coverage<'a>(
 ) -> Vec<(String, &'a Pass, Vec<&'static str>)> {
     let mut covered = Vec::new();
     for run in target.iter().flat_map(|target| &target.runs) {
-        for pass in run.passes.iter().filter(|pass| pass.ended_at.is_some()) {
+        // A partial pass reviewed only its delta, so it covers commits, never the whole head.
+        for pass in run
+            .passes
+            .iter()
+            .filter(|pass| pass.ended_at.is_some() && !pass.partial)
+        {
             let mut matched = Vec::new();
             if pass.tree == tree {
                 matched.push("tree");
@@ -1808,6 +1864,10 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let mut scope = ctx.scope()?;
     if let Some(rev) = head_arg {
         scope.head = ctx.repo.commit(rev)?;
+        scope.head_known = true;
+    }
+    if !scope.head_known {
+        return Ok(status_without_head(ctx, &scope));
     }
     let target = scope.existing.as_ref();
     let head = scope.head.clone();
@@ -1884,7 +1944,11 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         .map(|view| &view["sha"])
         .collect();
 
-    let worktree = if head_arg.is_none() && scope.kind == TargetKind::Branch {
+    // The work tree belongs to the target only when its branch is checked out.
+    let checked_out = scope.kind == TargetKind::Branch
+        && scope.branch.is_some()
+        && ctx.repo.current_branch()? == scope.branch;
+    let worktree = if head_arg.is_none() && checked_out {
         let tree = ctx.repo.worktree_tree()?;
         let dirty = tree != head_tree;
         let covered = if dirty {
@@ -1904,50 +1968,14 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         Value::Null
     };
 
-    let mut locator = Locator {
-        repo: &ctx.repo,
-        head: head.clone(),
-        diffs: HashMap::new(),
-    };
-    let mut open = Vec::new();
-    let mut outdated = Vec::new();
-    let mut held = Vec::new();
-    for thread in target.iter().flat_map(|target| &target.threads) {
-        let current = locator.current(thread);
-        if current["outdated"] == true {
-            outdated.push(thread.id.clone());
-        }
-        if !is_open(thread) {
-            continue;
-        }
-        if thread.held {
-            held.push(thread.id.clone());
-        }
-        open.push(json!({
-            "id": thread.id,
-            "type": thread.kind,
-            "severity": thread.severity,
-            "triage": thread.triage,
-            "current": current,
-            "post": thread.comments.first().map(|first| first.post),
-            "remote_id": thread.remote.as_ref().map(|remote| &remote.id),
-            "url": thread.remote.as_ref().and_then(|remote| remote.url.as_ref()),
-        }));
-    }
-    let runs: Vec<Value> = target
-        .iter()
-        .flat_map(|target| &target.runs)
-        .map(|run| {
-            json!({
-                "id": run.id,
-                "started_at": run.started_at,
-                "ended_at": run.ended_at,
-                "passes": run.passes.iter().map(|pass| &pass.id).collect::<Vec<_>>(),
-                "repaired_head": run.repaired_head,
-                "record": run.record,
-            })
-        })
-        .collect();
+    let threads = thread_views(
+        target,
+        &mut Locator {
+            repo: &ctx.repo,
+            head: Some(head.clone()),
+            diffs: HashMap::new(),
+        },
+    );
     let records: Vec<&ImportedRecord> = target
         .iter()
         .flat_map(|target| &target.records)
@@ -1961,6 +1989,8 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         .collect();
     let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();
     let local = count(&covered);
+    // Without a pass covering the whole head, each commit since the merge-base must be reviewed.
+    let every_commit = !commit_views.is_empty() && unreviewed.is_empty();
     Ok(json!({
         "repo": ctx.repo_key,
         "target": target.map(|_| &scope.key),
@@ -1970,23 +2000,154 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         "base": scope.base,
         "head": head,
         "head_tree": head_tree,
-        "reviewed": !covered.is_empty() || imported > 0,
+        "reviewed": !covered.is_empty() || imported > 0 || every_commit,
         "reviews_at_head": local + usize::try_from(imported).unwrap_or(usize::MAX),
+        "last_reviewed_head": last_reviewed_head(ctx, &head)?,
         "covered_by": coverage_json(&covered),
         "imported_records": records,
         "worktree": worktree,
         "commits": commit_views,
         "unreviewed_commits": unreviewed,
-        "open_threads": open,
-        "outdated_threads": outdated,
-        "held_questions": held,
-        "runs": runs,
+        "open_threads": threads.open,
+        "outdated_threads": threads.outdated,
+        "held_questions": threads.held,
+        "runs": run_views(target),
     }))
 }
 
-/// Open review items: unresolved threads still on the host, except other people's general
-/// comments and review bodies, which have no resolved state there.
+/// `status` for a branch target with no branch, PR/MR head or pass: nothing is reviewed and
+/// local anchors have no current place.
+fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
+    let target = scope.existing.as_ref();
+    let threads = thread_views(
+        target,
+        &mut Locator {
+            repo: &ctx.repo,
+            head: None,
+            diffs: HashMap::new(),
+        },
+    );
+    json!({
+        "repo": ctx.repo_key,
+        "target": target.map(|_| &scope.key),
+        "review": target.and_then(|target| target.review.as_ref()),
+        "kind": scope.kind,
+        "branch": scope.branch,
+        "base": scope.base,
+        "head": null,
+        "head_tree": null,
+        "reviewed": false,
+        "reviews_at_head": 0,
+        "last_reviewed_head": null,
+        "covered_by": [],
+        "imported_records": [],
+        "worktree": null,
+        "commits": [],
+        "unreviewed_commits": [],
+        "open_threads": threads.open,
+        "outdated_threads": threads.outdated,
+        "held_questions": threads.held,
+        "runs": run_views(target),
+    })
+}
+
+/// The reviewed head nearest to `head` among its ancestors: whole-branch pass heads and
+/// repaired heads of this repository's branch and range targets. It scopes the next review,
+/// such as on the default branch after a merge.
+fn last_reviewed_head(ctx: &Ctx, head: &str) -> Result<Option<String>> {
+    let mut best: Option<(u64, String)> = None;
+    let targets = ctx.store.targets(&ctx.dir)?;
+    let candidates = targets
+        .iter()
+        .filter(|target| matches!(target.kind, TargetKind::Branch | TargetKind::Range))
+        .flat_map(|target| &target.runs)
+        .flat_map(|run| {
+            run.passes
+                .iter()
+                .filter(|pass| pass.ended_at.is_some() && !pass.dirty && !pass.partial)
+                .map(|pass| &pass.head)
+                .chain(&run.repaired_head)
+        });
+    for candidate in candidates {
+        if best.as_ref().is_some_and(|(_, sha)| sha == candidate)
+            || !ctx.repo.object_exists(&format!("{candidate}^{{commit}}"))?
+            || !ctx.repo.is_ancestor(candidate, head)?
+        {
+            continue;
+        }
+        let distance = ctx.repo.distance(candidate, head)?;
+        if best.as_ref().is_none_or(|(nearest, _)| distance < *nearest) {
+            best = Some((distance, candidate.clone()));
+        }
+    }
+    Ok(best.map(|(_, sha)| sha))
+}
+
+struct ThreadViews {
+    open: Vec<Value>,
+    outdated: Vec<String>,
+    held: Vec<String>,
+}
+
+fn thread_views(target: Option<&Target>, locator: &mut Locator) -> ThreadViews {
+    let mut views = ThreadViews {
+        open: Vec::new(),
+        outdated: Vec::new(),
+        held: Vec::new(),
+    };
+    for thread in target.iter().flat_map(|target| &target.threads) {
+        let current = locator.current(thread);
+        if current["outdated"] == true {
+            views.outdated.push(thread.id.clone());
+        }
+        if !is_open(thread) {
+            continue;
+        }
+        if thread.held {
+            views.held.push(thread.id.clone());
+        }
+        views.open.push(json!({
+            "id": thread.id,
+            "type": thread.kind,
+            "severity": thread.severity,
+            "triage": thread.triage,
+            "current": current,
+            "post": thread.comments.first().map(|first| first.post),
+            "remote_id": thread.remote.as_ref().map(|remote| &remote.id),
+            "url": thread.remote.as_ref().and_then(|remote| remote.url.as_ref()),
+        }));
+    }
+    views
+}
+
+fn run_views(target: Option<&Target>) -> Vec<Value> {
+    target
+        .iter()
+        .flat_map(|target| &target.runs)
+        .map(|run| {
+            json!({
+                "id": run.id,
+                "started_at": run.started_at,
+                "ended_at": run.ended_at,
+                "passes": run.passes.iter().map(|pass| &pass.id).collect::<Vec<_>>(),
+                "repaired_head": run.repaired_head,
+                "record": run.record,
+            })
+        })
+        .collect()
+}
+
+/// Open review items: unresolved findings and threads still on the host. A general comment or
+/// review body counts only when it is ours: written here, or posted by `publish` (it carries an
+/// `agent-review` marker). Other people's, and my own unmarked ones, have no resolved state.
 fn is_open(thread: &Thread) -> bool {
+    let ours = thread
+        .comments
+        .first()
+        .is_some_and(|first| match &first.remote {
+            None => true,
+            Some(remote) => remote.is_me && sync::agent_id(&first.body).is_some(),
+        });
     !thread.resolved
         && !thread.deleted_remote
         && (thread.finding.is_some()
@@ -1994,7 +2155,7 @@ fn is_open(thread: &Thread) -> bool {
                 .remote
                 .as_ref()
                 .is_none_or(|remote| remote.resolvable)
-            || thread.comments.first().is_some_and(mine))
+            || ours)
 }
 
 /// Age reference for pruning: when the PR/MR closed, else the last change.
