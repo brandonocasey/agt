@@ -1,0 +1,25 @@
+[
+  {
+    "type": "bug",
+    "severity": "high",
+    "path": "a.txt",
+    "line": 3,
+    "scenario": "Line 3 drops the value when the input is empty.",
+    "evidence": "a.txt:3 returns before the check.",
+    "tests_run": ["cargo test empty_input"]
+  },
+  {
+    "type": "question",
+    "scenario": "Should the default stay at 5?"
+  },
+  {
+    "type": "bug",
+    "severity": "low",
+    "path": "a.txt",
+    "old_line": 2,
+    "side": "old",
+    "scenario": "The removed guard was still needed.",
+    "killed": true,
+    "reason": "The guard moved to the caller."
+  }
+]

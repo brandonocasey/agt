@@ -1,3 +1,7 @@
+mod commands;
+mod reviewed;
+mod support;
+
 use assert_cmd::Command;
 
 #[test]

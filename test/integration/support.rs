@@ -1,0 +1,269 @@
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use assert_fs::TempDir;
+use serde_json::Value;
+
+pub const BIN: &str = env!("CARGO_BIN_EXE_agent-review");
+
+/// A temporary HOME, XDG dirs, git config and repository; nothing reads the user's real state.
+pub struct Env {
+    _temp: TempDir,
+    root: PathBuf,
+    pub repo: PathBuf,
+}
+
+impl Env {
+    pub fn new() -> Self {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for dir in ["home", "state", "config", "repo"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(
+            root.join("gitconfig"),
+            "[user]\n\tname = Tester\n\temail = tester@example.com\n[init]\n\tdefaultBranch = main\n",
+        )
+        .unwrap();
+        let env = Self {
+            repo: root.join("repo"),
+            root,
+            _temp: temp,
+        };
+        env.git(&["init", "-q", "-b", "main"]);
+        env
+    }
+
+    pub fn state(&self) -> PathBuf {
+        self.root.join("state").join("agents").join("reviews")
+    }
+
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
+
+    pub fn command(&self, program: &str, dir: &Path) -> Command {
+        let mut command = Command::new(program);
+        command
+            .current_dir(dir)
+            .env("HOME", self.root.join("home"))
+            .env("XDG_STATE_HOME", self.root.join("state"))
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_EDITOR", "true")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("AGENT_REVIEW_NOW");
+        command
+    }
+
+    pub fn git(&self, args: &[&str]) -> String {
+        self.git_env(args, &[])
+    }
+
+    pub fn git_env(&self, args: &[&str], env: &[(&str, &str)]) -> String {
+        let output = self
+            .command("git", &self.repo)
+            .args(args)
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    pub fn git_stdin(&self, args: &[&str], input: &str) -> String {
+        let mut child = self
+            .command("git", &self.repo)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    pub fn git_status(&self, args: &[&str]) -> bool {
+        self.command("git", &self.repo)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    pub fn write(&self, path: &str, content: &str) {
+        let file = self.repo.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, content).unwrap();
+    }
+
+    pub fn commit_all(&self, message: &str) -> String {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "-m", message]);
+        self.git(&["rev-parse", "HEAD"])
+    }
+
+    pub fn exec(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Output {
+        let mut command = self.command(BIN, &self.repo);
+        command
+            .args(args)
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(stdin.unwrap_or("").as_bytes()).unwrap();
+        drop(input);
+        child.wait_with_output().unwrap()
+    }
+
+    pub fn run_with(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Value {
+        let output = self.exec(args, stdin, env);
+        assert!(
+            output.status.success(),
+            "agent-review {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    pub fn run(&self, args: &[&str]) -> Value {
+        self.run_with(args, None, &[])
+    }
+
+    /// Runs agent-review from another directory, such as a linked worktree.
+    pub fn run_in(&self, dir: &Path, args: &[&str]) -> Value {
+        let output = self.command(BIN, dir).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "agent-review {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    pub fn run_stdin(&self, args: &[&str], stdin: &str) -> Value {
+        self.run_with(args, Some(stdin), &[])
+    }
+
+    pub fn text(&self, args: &[&str]) -> String {
+        let output = self.exec(args, None, &[]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Runs a command that must fail and returns its stderr.
+    pub fn fail(&self, args: &[&str], stdin: Option<&str>) -> String {
+        let output = self.exec(args, stdin, &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "agent-review {args:?} should fail"
+        );
+        assert!(output.stdout.is_empty());
+        String::from_utf8(output.stderr).unwrap()
+    }
+
+    /// Starts a run with one reviewer, runs one full pass and returns the run id.
+    pub fn review(&self, kind: &str) -> String {
+        let run = self.run(&["run", "start"])["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.reviewed_pass(&run, kind);
+        self.run(&["run", "end", "--run", &run]);
+        run
+    }
+
+    pub fn reviewed_pass(&self, run: &str, kind: &str) -> String {
+        let reviewers = r#"[{"model":"claude-opus-5-5","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296"}]"#;
+        let pass = self.run_stdin(
+            &[
+                "pass",
+                "start",
+                "--run",
+                run,
+                "--kind",
+                kind,
+                "--reviewers",
+                "-",
+            ],
+            reviewers,
+        );
+        let id = pass["pass"]["id"].as_str().unwrap().to_owned();
+        self.run(&["pass", "end", "--run", run, "--pass", &id]);
+        id
+    }
+
+    /// Base repo: `a.txt` with ten numbered lines on `main`, then a `feat` branch.
+    pub fn with_branch() -> Self {
+        let env = Self::new();
+        env.write("a.txt", &numbered(10, &[]));
+        env.commit_all("base");
+        env.git(&["switch", "-q", "-c", "feat"]);
+        env
+    }
+}
+
+/// Lines `1..=count`, with `(line, text)` replacements.
+pub fn numbered(count: usize, changes: &[(usize, &str)]) -> String {
+    (1..=count)
+        .map(|line| {
+            let text = changes
+                .iter()
+                .find(|(at, _)| *at == line)
+                .map_or_else(|| line.to_string(), |(_, text)| (*text).to_owned());
+            format!("{text}\n")
+        })
+        .collect()
+}
+
+/// Every file under `dir` with its contents and modification time.
+pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            if meta.is_dir() {
+                pending.push(entry.path());
+                found.push((entry.path(), Vec::new(), meta.modified().unwrap()));
+            } else {
+                found.push((
+                    entry.path(),
+                    fs::read(entry.path()).unwrap(),
+                    meta.modified().unwrap(),
+                ));
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}

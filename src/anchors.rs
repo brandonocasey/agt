@@ -1,0 +1,208 @@
+use crate::model::{Anchor, Side};
+
+pub struct FileDiff {
+    old: Option<String>,
+    new: Option<String>,
+    hunks: Vec<Hunk>,
+}
+
+struct Hunk {
+    old_start: u32,
+    old_len: u32,
+    new_len: u32,
+}
+
+pub struct Location {
+    pub path: String,
+    pub line: Option<u32>,
+    pub outdated: bool,
+}
+
+/// Parses `git diff -U0 -M` output into per-file hunks; `None` paths mean `/dev/null`.
+pub fn parse(diff: &str) -> Vec<FileDiff> {
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let path = header_path(rest);
+            files.push(FileDiff {
+                old: path.clone(),
+                new: path,
+                hunks: Vec::new(),
+            });
+            in_hunk = false;
+            continue;
+        }
+        let Some(file) = files.last_mut() else {
+            continue;
+        };
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            file.hunks.extend(parse_hunk(rest));
+            in_hunk = true;
+            continue;
+        }
+        // Content lines such as a removed "-- a/x" would look like headers.
+        if in_hunk {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("rename from ") {
+            file.old = Some(path.to_owned());
+        } else if let Some(path) = line.strip_prefix("rename to ") {
+            file.new = Some(path.to_owned());
+        } else if line == "--- /dev/null" || line.starts_with("new file mode") {
+            file.old = None;
+        } else if line == "+++ /dev/null" || line.starts_with("deleted file mode") {
+            file.new = None;
+        } else if let Some(path) = line.strip_prefix("--- a/") {
+            file.old = Some(path.to_owned());
+        } else if let Some(path) = line.strip_prefix("+++ b/") {
+            file.new = Some(path.to_owned());
+        }
+    }
+    files
+}
+
+fn header_path(rest: &str) -> Option<String> {
+    let half = rest.len().checked_sub(5)? / 2;
+    let old = rest.strip_prefix("a/")?.get(..half)?;
+    let new = rest.get(2 + half..)?.strip_prefix(" b/")?;
+    (old == new).then(|| old.to_owned())
+}
+
+fn parse_hunk(rest: &str) -> Option<Hunk> {
+    let mut parts = rest.split_whitespace();
+    let (old_start, old_len) = range(parts.next()?.strip_prefix('-')?)?;
+    let (_, new_len) = range(parts.next()?.strip_prefix('+')?)?;
+    Some(Hunk {
+        old_start,
+        old_len,
+        new_len,
+    })
+}
+
+fn range(text: &str) -> Option<(u32, u32)> {
+    match text.split_once(',') {
+        Some((start, len)) => Some((start.parse().ok()?, len.parse().ok()?)),
+        None => Some((text.parse().ok()?, 1)),
+    }
+}
+
+/// Maps an anchor through a diff from its commit or tree to the current head. A new-side line
+/// inside a changed hunk is outdated; an old-side anchor is outdated once its file changes.
+pub fn locate(files: &[FileDiff], anchor: &Anchor) -> Location {
+    let Some(file) = files
+        .iter()
+        .find(|file| file.old.as_deref() == Some(anchor.path.as_str()))
+    else {
+        return unchanged(anchor);
+    };
+    let Some(path) = file.new.clone() else {
+        return Location {
+            path: anchor.path.clone(),
+            line: None,
+            outdated: true,
+        };
+    };
+    let line = match (anchor.side, anchor.line) {
+        (Side::Old, _) => {
+            return Location {
+                path,
+                line: anchor.old_line,
+                outdated: !file.hunks.is_empty(),
+            };
+        }
+        (Side::New, None) => {
+            return Location {
+                path,
+                line: None,
+                outdated: false,
+            };
+        }
+        (Side::New, Some(line)) => line,
+    };
+    let start = anchor.start_line.unwrap_or(line).min(line);
+    let mut shift = 0_i64;
+    let mut outdated = false;
+    for hunk in &file.hunks {
+        if hunk.old_len == 0 {
+            // Pure insertion after line `old_start`.
+            if hunk.old_start < start {
+                shift += i64::from(hunk.new_len);
+            } else if hunk.old_start < line {
+                outdated = true;
+            }
+            continue;
+        }
+        let end = hunk.old_start + hunk.old_len - 1;
+        if end < start {
+            shift += i64::from(hunk.new_len) - i64::from(hunk.old_len);
+        } else if hunk.old_start <= line {
+            outdated = true;
+        }
+    }
+    Location {
+        path,
+        line: u32::try_from(i64::from(line) + shift).ok(),
+        outdated,
+    }
+}
+
+pub fn unchanged(anchor: &Anchor) -> Location {
+    Location {
+        path: anchor.path.clone(),
+        line: match anchor.side {
+            Side::New => anchor.line,
+            Side::Old => anchor.old_line,
+        },
+        outdated: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn anchor(path: &str, line: u32) -> Anchor {
+        Anchor {
+            path: path.into(),
+            line: Some(line),
+            old_line: None,
+            side: Side::New,
+            start_line: None,
+            commit: None,
+            tree: String::new(),
+        }
+    }
+
+    const DIFF: &str = "diff --git a/a.txt b/b.txt\n\
+similarity index 90%\n\
+rename from a.txt\n\
+rename to b.txt\n\
+--- a/a.txt\n\
++++ b/b.txt\n\
+@@ -2,0 +3,2 @@ ctx\n\
++new\n\
++--- a/fake\n\
+@@ -5 +7 @@\n\
+-old\n\
++changed\n";
+
+    #[test]
+    fn shifts_lines_across_rename() {
+        let files = parse(DIFF);
+        let moved = locate(&files, &anchor("a.txt", 4));
+        assert_eq!(
+            (moved.path.as_str(), moved.line, moved.outdated),
+            ("b.txt", Some(6), false)
+        );
+        let first = locate(&files, &anchor("a.txt", 2));
+        assert_eq!((first.line, first.outdated), (Some(2), false));
+    }
+
+    #[test]
+    fn changed_line_is_outdated() {
+        let files = parse(DIFF);
+        assert!(locate(&files, &anchor("a.txt", 5)).outdated);
+        assert!(!locate(&files, &anchor("other.txt", 5)).outdated);
+    }
+}
