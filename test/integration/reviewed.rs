@@ -587,6 +587,13 @@ fn range_review_of_the_branch_head_counts_and_names_its_run() {
     // The covering target's open finding shows too, so a count never hides it.
     assert_eq!(status["open_threads"][0]["id"], added["added"][0], "{status}");
     assert_eq!(status["open_threads"][0]["target"], key, "{status}");
+
+    // A dirty work tree with the same change, on a branch the range never reviewed.
+    env.git(&["switch", "-q", "-c", "other", "main"]);
+    env.write("a.txt", &numbered(10, &[(2, "A")]));
+    let status = env.run(&["status"]);
+    assert_eq!(status["worktree"]["reviews"], 1, "{status}");
+    assert_eq!(status["open_threads"][0]["target"], key, "{status}");
 }
 
 #[test]

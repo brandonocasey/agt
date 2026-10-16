@@ -2187,10 +2187,11 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let checked_out = scope.kind == TargetKind::Branch
         && scope.branch.is_some()
         && ctx.repo.current_branch()? == scope.branch;
+    let mut worktree_covered = Vec::new();
     let worktree = if head_arg.is_none() && checked_out {
         let tree = ctx.repo.worktree_tree()?;
         let dirty = tree != head_tree;
-        let covered = if dirty && !merge_after {
+        worktree_covered = if dirty && !merge_after {
             let range = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
             covered_at(&tree, range.as_deref(), None)
         } else {
@@ -2199,9 +2200,9 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         json!({
             "dirty": dirty,
             "tree": tree,
-            "reviewed": !covered.is_empty(),
-            "reviews": count(&covered),
-            "covered_by": coverage_json(&covered),
+            "reviewed": !worktree_covered.is_empty(),
+            "reviews": count(&worktree_covered),
+            "covered_by": coverage_json(&worktree_covered),
         })
     } else {
         Value::Null
@@ -2213,10 +2214,17 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         diffs: HashMap::new(),
     };
     let mut threads = thread_views(target, &mut locator);
+    for view in &mut threads.open {
+        view["target"] = json!(target.map(|_| &scope.key));
+    }
     // A covering pass of another target counts here, so its open threads show here too.
     let mut shown = HashSet::new();
     for other in others.iter().filter(|other| {
-        covered.iter().any(|covered| covered.target == other.key) && shown.insert(&other.key)
+        covered
+            .iter()
+            .chain(&worktree_covered)
+            .any(|covered| covered.target == other.key)
+            && shown.insert(&other.key)
     }) {
         let views = thread_views(Some(other), &mut locator);
         threads.open.extend(views.open.into_iter().map(|mut view| {

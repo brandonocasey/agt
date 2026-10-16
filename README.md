@@ -249,8 +249,10 @@ agent-review prune --all
   head's patch-id; a tree match alone does not, since it says nothing about the
   base. A run stored under two targets counts once. Each `covered_by` entry
   names its `target` and `run`, so `--target <key> list --run <run>` finds it,
-  and the open threads and held questions of each covering target show in
-  `open_threads` and `held_questions`, with `target` on each open thread.
+  and the open threads and held questions of each target covering the head or
+  the work tree show in `open_threads` and `held_questions`. Each open thread
+  names its `target` (null for a target not yet stored); `held_questions` lists
+  bare ids, so act on another target's held question with `--target`.
 - Anchors map through `git diff -U0 -M <anchor commit or tree> HEAD`. A
   new-side line inside a changed hunk, or a deleted file, is outdated; other
   lines shift and follow renames. An old-side anchor is outdated once its file
