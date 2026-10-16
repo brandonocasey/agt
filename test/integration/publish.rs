@@ -181,6 +181,8 @@ fn gh_thread(id: &str, resolved: bool, line: u32, comments: Vec<Value>, head: &s
 /// One response for all three PR queries, as GitHub would page them.
 struct GhPr {
     author: &'static str,
+    /// The PR head when it is not the setup's head, as after a force-push.
+    head: Option<String>,
     threads: Vec<Value>,
     reviews: Vec<Value>,
     comments: Vec<Value>,
@@ -190,6 +192,7 @@ impl GhPr {
     fn new() -> Self {
         Self {
             author: "me",
+            head: None,
             threads: Vec::new(),
             reviews: Vec::new(),
             comments: Vec::new(),
@@ -205,7 +208,7 @@ impl GhPr {
             "closedAt": null,
             "author": { "login": self.author },
             "headRefName": "feat",
-            "headRefOid": setup.head,
+            "headRefOid": self.head.as_deref().unwrap_or(&setup.head),
             "baseRefOid": setup.base,
             "baseRepository": { "nameWithOwner": "me/repo" },
             "reviewThreads": page(&self.threads),
@@ -1362,4 +1365,22 @@ fn my_unmarked_comments_are_not_open() {
     assert!(!open.contains(&"gh-c950".to_owned()), "{open:?}");
     assert!(!open.contains(&"gh-r751".to_owned()), "{open:?}");
     assert!(open.contains(&"h1".to_owned()), "{open:?}");
+}
+
+#[test]
+fn target_on_detached_rebased_pr_head_uses_head() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    gh_sync(env, None, &GhPr::new().render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.git(&["switch", "-q", "--detach", "main"]);
+    env.write("a.txt", &numbered(10, &[(3, "THREE")]));
+    let pushed = env.commit_all("force-pushed PR head");
+    let mut pr = GhPr::new();
+    pr.head = Some(pushed);
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["--target", "gh-42", "sync"]);
+    env.write("a.txt", &numbered(10, &[(3, "THREE"), (5, "five")]));
+    let fix = env.commit_all("fix on the pushed head");
+    assert_eq!(env.run(&["--target", "gh-42", "status"])["head"], fix);
 }

@@ -13,7 +13,7 @@ use crate::cli::{
 };
 use crate::clock;
 use crate::error::{Error, Result, ctx, fail};
-use crate::git::{CommitInfo, Repo};
+use crate::git::{CommitInfo, LogEntry, Repo};
 use crate::model::{
     Anchor, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
     PassKind, PostState, Reveal, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind,
@@ -343,35 +343,36 @@ impl Ctx {
     }
 
     /// The head of a branch target: `HEAD` when on its branch, or when detached on top of the
-    /// branch's known head (a review worktree with fix commits); else the local branch, else the
-    /// synced PR/MR head. An unrelated `HEAD` MUST NOT stand in. The error says why there is none.
+    /// local branch or the synced PR/MR head (a review worktree with fix commits, also after a
+    /// force-push); else the local branch, else the PR/MR head. An unrelated `HEAD` MUST NOT
+    /// stand in. The error says why there is none.
     fn branch_head(&self, target: &Target, branch: &str) -> Result<Result<String, String>> {
         let current = self.repo.current_branch()?;
         let head = self.repo.head()?;
         if current.as_deref() == Some(branch) {
             return Ok(Ok(head));
         }
-        let known = match self.repo.commit(&format!("refs/heads/{branch}")) {
-            Ok(local) => local,
-            Err(_) => match target.review.as_ref().map(|review| &review.head_sha) {
-                Some(sha) if self.repo.object_exists(&format!("{sha}^{{commit}}"))? => sha.clone(),
-                Some(sha) => {
-                    return Ok(Err(format!(
-                        "its PR/MR head {sha} is not in this repository; fetch it or check out \
-                         the branch"
-                    )));
-                }
-                None => {
-                    return Ok(Err(
-                        "no PR/MR head is known; check out the branch".to_owned()
-                    ));
-                }
-            },
+        let local = self.repo.commit(&format!("refs/heads/{branch}")).ok();
+        let pr_head = target.review.as_ref().map(|review| &review.head_sha);
+        let pr_local = match pr_head {
+            Some(sha) if self.repo.object_exists(&format!("{sha}^{{commit}}"))? => Some(sha),
+            _ => None,
         };
-        if current.is_none() && self.repo.is_ancestor(&known, &head)? {
-            return Ok(Ok(head));
+        if current.is_none() {
+            for known in local.iter().chain(pr_local) {
+                if self.repo.is_ancestor(known, &head)? {
+                    return Ok(Ok(head));
+                }
+            }
         }
-        Ok(Ok(known))
+        Ok(match (local, pr_local, pr_head) {
+            (Some(local), _, _) => Ok(local),
+            (None, Some(sha), _) => Ok(sha.clone()),
+            (None, None, Some(sha)) => Err(format!(
+                "its PR/MR head {sha} is not in this repository; fetch it or check out the branch"
+            )),
+            (None, None, None) => Err("no PR/MR head is known; check out the branch".to_owned()),
+        })
     }
 
     /// Returns the review base and the commit that names the target. On the default branch
@@ -1873,17 +1874,33 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let head = scope.head.clone();
     let head_tree = ctx.repo.tree_of(&head)?;
     let commits = ctx.repo.commits(scope.base.as_deref(), &head)?;
+    let history = ctx.repo.log(scope.base.as_deref(), &head)?;
+    let merges = changed_merges(&ctx.repo, &history)?;
+    let last_reviewed = last_reviewed_head(ctx, &head)?;
+    // A changed merge after the last reviewed head brings in unreviewed code, so no pass may
+    // cover the head through its tree or patch-ids.
+    let mut merge_after = false;
+    for merge in &merges {
+        merge_after |= match &last_reviewed {
+            Some(last) => !ctx.repo.is_ancestor(&merge.sha, last)?,
+            None => true,
+        };
+    }
     let head_patch_id = match commits.iter().find(|commit| commit.sha == head) {
         Some(commit) => commit.patch_id.clone(),
         None => None,
     };
     let range_patch_id = ctx.repo.range_patch_id(scope.base.as_deref(), &head)?;
-    let covered = coverage(
-        target,
-        &head_tree,
-        range_patch_id.as_deref(),
-        head_patch_id.as_deref(),
-    );
+    let covered = if merge_after {
+        Vec::new()
+    } else {
+        coverage(
+            target,
+            &head_tree,
+            range_patch_id.as_deref(),
+            head_patch_id.as_deref(),
+        )
+    };
 
     let mut reviewed = Reviewed::default();
     for pass in target
@@ -1911,7 +1928,7 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         repaired.shas.insert(commit.sha.clone());
         repaired.patch_ids.extend(commit.patch_id.clone());
     }
-    let commit_views: Vec<Value> = commits
+    let mut commit_views: Vec<Value> = commits
         .iter()
         .map(|commit| {
             let in_set = |set: &Reviewed| {
@@ -1938,11 +1955,33 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             })
         })
         .collect();
+    commit_views.extend(merges.iter().map(|merge| {
+        json!({
+            "sha": merge.sha,
+            "subject": merge.subject,
+            "patch_id": null,
+            "reviewed": false,
+            "match": null,
+            "merge": true,
+        })
+    }));
+    let order: HashMap<&str, usize> = history
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.sha.as_str(), index))
+        .collect();
+    commit_views.sort_by_key(|view| view["sha"].as_str().and_then(|sha| order.get(sha)).copied());
     let unreviewed: Vec<&Value> = commit_views
         .iter()
         .filter(|view| view["reviewed"] == false)
         .map(|view| &view["sha"])
         .collect();
+    // Where the next review starts: before the oldest unreviewed commit, else after the last
+    // reviewed head.
+    let review_from = match unreviewed.first().and_then(|sha| sha.as_str()) {
+        Some(oldest) => ctx.repo.parent(oldest)?,
+        None => last_reviewed.clone(),
+    };
 
     // The work tree belongs to the target only when its branch is checked out.
     let checked_out = scope.kind == TargetKind::Branch
@@ -1951,7 +1990,7 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let worktree = if head_arg.is_none() && checked_out {
         let tree = ctx.repo.worktree_tree()?;
         let dirty = tree != head_tree;
-        let covered = if dirty {
+        let covered = if dirty && !merge_after {
             let range = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
             coverage(target, &tree, range.as_deref(), None)
         } else {
@@ -2002,7 +2041,8 @@ fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         "head_tree": head_tree,
         "reviewed": !covered.is_empty() || imported > 0 || every_commit,
         "reviews_at_head": local + usize::try_from(imported).unwrap_or(usize::MAX),
-        "last_reviewed_head": last_reviewed_head(ctx, &head)?,
+        "last_reviewed_head": last_reviewed,
+        "review_from": review_from,
         "covered_by": coverage_json(&covered),
         "imported_records": records,
         "worktree": worktree,
@@ -2039,6 +2079,7 @@ fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
         "reviewed": false,
         "reviews_at_head": 0,
         "last_reviewed_head": null,
+        "review_from": null,
         "covered_by": [],
         "imported_records": [],
         "worktree": null,
@@ -2066,7 +2107,12 @@ fn last_reviewed_head(ctx: &Ctx, head: &str) -> Result<Option<String>> {
                 .iter()
                 .filter(|pass| pass.ended_at.is_some() && !pass.dirty && !pass.partial)
                 .map(|pass| &pass.head)
-                .chain(&run.repaired_head)
+                // A run of only partial passes repaired a delta, not the branch.
+                .chain(
+                    run.repaired_head
+                        .iter()
+                        .filter(|_| run.passes.iter().any(|pass| !pass.partial)),
+                )
         });
     for candidate in candidates {
         if best.as_ref().is_some_and(|(_, sha)| sha == candidate)
@@ -2081,6 +2127,22 @@ fn last_reviewed_head(ctx: &Ctx, head: &str) -> Result<Option<String>> {
         }
     }
     Ok(best.map(|(_, sha)| sha))
+}
+
+/// Merge commits whose tree is not git's automatic merge of their parents: a conflict
+/// resolution or another hand edit nobody reviewed. Octopus merges always count.
+fn changed_merges<'a>(repo: &Repo, history: &'a [LogEntry]) -> Result<Vec<&'a LogEntry>> {
+    let mut changed = Vec::new();
+    for entry in history.iter().filter(|entry| entry.parents.len() > 1) {
+        let automatic = match entry.parents.as_slice() {
+            [ours, theirs] => repo.merge_tree(ours, theirs)?,
+            _ => None,
+        };
+        if automatic.as_deref() != Some(entry.tree.as_str()) {
+            changed.push(entry);
+        }
+    }
+    Ok(changed)
 }
 
 struct ThreadViews {

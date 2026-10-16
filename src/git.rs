@@ -23,6 +23,13 @@ pub struct CommitInfo {
     pub patch_id: Option<String>,
 }
 
+pub struct LogEntry {
+    pub sha: String,
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub subject: String,
+}
+
 pub struct Repo {
     root: PathBuf,
     env: Vec<(OsString, OsString)>,
@@ -348,6 +355,66 @@ impl Repo {
     }
 
     /// Patch-id of the whole change from `from` (empty tree when `None`) to a commit or tree.
+    /// Every commit in `from..to`, merges included, oldest first.
+    pub fn log(&self, from: Option<&str>, to: &str) -> Result<Vec<LogEntry>> {
+        let range = match from {
+            Some(from) => format!("{from}..{to}"),
+            None => to.to_owned(),
+        };
+        let listing = self.git(&[
+            "log",
+            "--reverse",
+            "--format=%H%x00%T%x00%P%x00%s",
+            "--end-of-options",
+            &range,
+            "--",
+        ])?;
+        listing
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let mut parts = line.splitn(4, '\0');
+                let (Some(sha), Some(tree), Some(parents), Some(subject)) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return fail(format!("unexpected git log line: {line}"));
+                };
+                Ok(LogEntry {
+                    sha: sha.to_owned(),
+                    tree: tree.to_owned(),
+                    parents: parents.split_whitespace().map(str::to_owned).collect(),
+                    subject: subject.to_owned(),
+                })
+            })
+            .collect()
+    }
+
+    /// The tree of git's automatic merge of `ours` and `theirs`, conflict markers included;
+    /// `None` when git cannot tell (`merge-tree --write-tree` needs git 2.38). It writes
+    /// objects, so it only runs on a read-only repository.
+    pub fn merge_tree(&self, ours: &str, theirs: &str) -> Result<Option<String>> {
+        if self._scratch.is_none() {
+            return fail("merge-tree needs a read-only repository");
+        }
+        let output = self.exec(
+            &[
+                "merge-tree",
+                "--write-tree",
+                "--end-of-options",
+                ours,
+                theirs,
+            ],
+            None,
+            &[],
+        )?;
+        // Exit 1 means conflicts; the first line is still the merged tree.
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Ok(None);
+        }
+        let printed = text(output.stdout)?;
+        Ok(printed.lines().next().map(str::to_owned))
+    }
+
     pub fn range_patch_id(&self, from: Option<&str>, to: &str) -> Result<Option<String>> {
         let from = match from {
             Some(from) => from.to_owned(),

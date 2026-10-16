@@ -426,6 +426,11 @@ fn partial_pass_does_not_cover_earlier_commits() {
     assert!(commit_reviewed(&status, "B reviewed"));
     assert_eq!(status["reviewed"], false, "{status}");
     assert_eq!(status["reviews_at_head"], 0);
+    assert_eq!(
+        status["last_reviewed_head"],
+        Value::Null,
+        "a partial run's repaired head hides nothing"
+    );
 }
 
 #[test]
@@ -452,4 +457,59 @@ fn status_reports_last_reviewed_head() {
         Value::Null,
         "only ancestors of the inspected head"
     );
+}
+
+#[test]
+fn review_from_starts_at_oldest_unreviewed_commit() {
+    let env = Env::with_branch();
+    let main = env.git(&["rev-parse", "main"]);
+    let mut commits = Vec::new();
+    for (line, text) in [(2, "A"), (5, "B"), (8, "C")] {
+        let mut changes: Vec<(usize, &str)> = vec![(2, "A"), (5, "B"), (8, "C")];
+        changes.retain(|(at, _)| *at <= line);
+        env.write("a.txt", &numbered(10, &changes));
+        commits.push(env.commit_all(text));
+    }
+    let range = format!("{}..{}", commits[1], commits[2]);
+    let run = env.run(&["--range", &range, "run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&[
+        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
+    ]);
+    env.run(&[
+        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.run(&["--range", &range, "run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["last_reviewed_head"], commits[2]);
+    assert_eq!(status["review_from"], main, "A and B are unreviewed");
+}
+
+#[test]
+fn conflict_resolved_merge_is_unreviewed() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    env.review("full");
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", &numbered(10, &[(4, "four")]));
+    env.commit_all("main change");
+    env.git(&["switch", "-q", "feat"]);
+    assert!(
+        !env.git_status(&["merge", "-q", "main"]),
+        "the merge conflicts"
+    );
+    env.write("a.txt", &numbered(10, &[(3, "three"), (4, "four")]));
+    let merge = env.commit_all("merge main");
+    let status = env.run(&["status"]);
+    let unreviewed: Vec<&str> = status["unreviewed_commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sha| sha.as_str().unwrap())
+        .collect();
+    assert_eq!(unreviewed, [merge.as_str()], "{status}");
+    assert_eq!(status["reviewed"], false, "{status}");
 }

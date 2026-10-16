@@ -15,8 +15,9 @@ mise run install
 ```
 
 This runs `cargo install --locked --path .` and puts `agent-review` in
-`~/.cargo/bin`. Git 2.31 or newer must be on `PATH`. `sync` also needs an
-authenticated `gh` (GitHub) or `glab` (GitLab).
+`~/.cargo/bin`. Git 2.31 or newer must be on `PATH`; before git 2.38 (no
+`merge-tree --write-tree`) every merge commit in a range counts as unreviewed.
+`sync` also needs an authenticated `gh` (GitHub) or `glab` (GitLab).
 
 ## Output and errors
 
@@ -46,12 +47,13 @@ A target is one thing under review. Commands pick it like this:
   Each gets its own target.
 - `--target <key>` uses a stored target by its key. A branch target's head is
   `HEAD` when that branch is checked out or when `HEAD` is detached on top of
-  the branch's known head (a review worktree with fix commits); else the local
-  branch; else the synced PR/MR head. An unrelated `HEAD` never stands in. With
-  none of these, reading commands (`status`, `list`, `show`) use the last pass
-  head, or report `head: null` and `current: null` when there is no pass;
-  writing commands fail. With a `gh-<n>` or `gl-<iid>` target, `sync` and
-  `publish` use that PR/MR without `--pr`, also on a detached `HEAD`.
+  the local branch or the synced PR/MR head (a review worktree with fix commits,
+  also after a force-push); else the local branch; else the synced PR/MR head.
+  An unrelated `HEAD` never stands in. With none of these, reading commands
+  (`status`, `list`, `show`) use the last pass head, or report `head: null` and
+  `current: null` when there is no pass; writing commands fail. With a `gh-<n>`
+  or `gl-<iid>` target, `sync` and `publish` use that PR/MR without `--pr`, also
+  on a detached `HEAD`.
 
 On the default branch itself, the root commit names the target and passes cover
 only uncommitted work; use `--range` to review commits there.
@@ -157,13 +159,15 @@ database. It reports whether the head is reviewed, `reviews_at_head`, the passes
 that cover it, each commit's reviewed state, `unreviewed_commits`,
 `last_reviewed_head` (the nearest ancestor of the head that a whole-branch pass
 reviewed or a run repaired, across this repository's branch and range targets,
-to scope the next review), open threads, `outdated_threads`, held questions,
-runs, the linked PR/MR and the trusted imported review records for the head.
-Without `--head`, when the target's branch is checked out, `worktree` reports
-the same for uncommitted work. Open threads are unresolved findings and threads
-still on the host; a general comment or review body counts only when it is ours
-(written here, or posted by `publish` with its marker), so other people's and my
-own unmarked ones (a "PTAL") are not open.
+to scope the next review), `review_from` (the parent of the oldest unreviewed
+commit, else `last_reviewed_head`, else null: where the next review starts),
+open threads, `outdated_threads`, held questions, runs, the linked PR/MR and the
+trusted imported review records for the head. Without `--head`, when the
+target's branch is checked out, `worktree` reports the same for uncommitted
+work. Open threads are unresolved findings and threads still on the host; a
+general comment or review body counts only when it is ours (written here, or
+posted by `publish` with its marker), so other people's and my own unmarked ones
+(a "PTAL") are not open.
 
 Sync with a PR or MR:
 
@@ -210,7 +214,11 @@ agent-review prune --all
   when a pass or trusted record covers it, or when every commit since the
   merge-base is reviewed. Squashes, fixups and plain rebases stay reviewed; a
   conflict resolution changes the patch and shows as unreviewed. Merge commits
-  are not listed.
+  are listed only when their tree differs from git's automatic merge of their
+  parents (`git merge-tree --write-tree`, run with objects in a temporary
+  directory); such a merge is unreviewed, and while one sits after
+  `last_reviewed_head` no pass covers the head. A run of only partial passes
+  adds no repaired head to `last_reviewed_head`.
 - `run end` adds commit patch-ids to passes whose tree now equals `HEAD`'s
   tree, so reviewed uncommitted work stays reviewed after it is committed and
   later rebased.
