@@ -1,7 +1,8 @@
 name: release
 
 # A `v*` tag builds one archive per platform and attaches them to a GitHub
-# release, named so `mise use github:brandonocasey/agent-review` finds them.
+# release, named `agt-<tag>-<target>.tar.gz`, each holding one `agt` file, so
+# `mise use github:brandonocasey/agent-review` finds them.
 on:
   push:
     tags: ["v*"]
@@ -36,13 +37,13 @@ jobs:
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Package
         run: |
-          name=agent-review-${{ github.ref_name }}-${{ matrix.target }}
-          cp dist/target/${{ matrix.target }}/release/agent-review .
-          tar -czf "$name.tar.gz" agent-review
+          name=agt-${{ github.ref_name }}-${{ matrix.target }}
+          cp dist/target/${{ matrix.target }}/release/agt .
+          tar -czf "$name.tar.gz" agt
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: agent-review-*.tar.gz
+          path: agt-*.tar.gz
 
   release:
     needs: build
@@ -54,6 +55,6 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "${{ github.ref_name }}" agent-review-*.tar.gz
+          gh release create "${{ github.ref_name }}" agt-*.tar.gz
           --repo "${{ github.repository }}" --title "${{ github.ref_name }}"
           --generate-notes
