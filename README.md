@@ -789,7 +789,7 @@ Queued writes (`<text>` is read from stdin when it is `-`):
 | `close <key> [--reason completed\|not-planned]` / `reopen <key>` | A state change. A reason is GitHub only. |
 | `assign <key> <login>...` / `unassign ...` | Assignees. GitLab takes one assignee here. |
 | `label add\|remove <key> <label>...` | Labels. |
-| `link-pr <key> --pr <n\|url>` | A comment `Linked: <url>` (the host then cross-references it) and a local link. Sent once. |
+| `link-pr <key> --pr <n\|url>` | A comment `Linked: <url>` and a local link. Sent once. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
 | `create --title T [--body B] [--label L]... [--assignee A]...` | A new issue under a `local-` key. With several trackers pass `--tracker`. |
 | `edit <key> [--title T] [--body B]` | A new title or body. |
 
@@ -814,7 +814,7 @@ instead of sending it again. A create works the same way (the marker is in the b
 `sync` or `push` then gives the local issue its number). A send the host refuses (a
 4xx other than a timeout or rate limit) puts the comment back in the queue with the
 error kept under `errors`; any other failure leaves it marked as possibly sent. A
-failure does not make `push` exit non-zero: it is listed under `failed`.
+failure does not make `push` exit non-zero: it is listed under `failed`. A create with no answer is not sent again for two minutes, since the hosts list a new issue late and a search right after proves nothing; `push` reports it under `deferred`, and a later push claims it or sends it again.
 
 ## Testing
 

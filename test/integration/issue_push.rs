@@ -34,10 +34,12 @@ matrix!(
     labels_merge_when_both_sides_change,
     a_lost_comment_response_is_claimed_by_its_marker_and_not_sent_again,
     a_refusal_keeps_the_comment_queued_with_its_error,
+    reopening_after_a_pushed_close_is_no_conflict,
     a_transport_failure_leaves_the_comment_possibly_sent,
     a_created_issue_is_sent_then_known_by_its_number,
     a_lost_create_is_claimed_by_its_marker_on_sync,
     a_lost_create_is_claimed_by_its_marker_on_the_next_push,
+    a_lost_create_is_not_sent_again_while_the_listing_may_lag,
     push_refuses_a_tracker_with_push_false,
     no_token_reaches_a_call_a_file_or_the_output,
 );
@@ -572,4 +574,52 @@ fn no_token_reaches_a_call_a_file_or_the_output(fake: Fake) {
         "the scenario must reach the failure path"
     );
     assert!(!seen.contains(TOKEN), "a token leaked");
+}
+
+fn reopening_after_a_pushed_close_is_no_conflict(fake: Fake) {
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["close", "1"]);
+    fake.accept_update(&env, 1);
+    env.issue(&["push"]);
+    // The host now shows the issue closed, with the reason it chose.
+    let mut remote = issue().closed().updated("2026-10-18T10:00:00Z");
+    remote.reason = Some("completed");
+    fake.serve_issue(&env, &remote);
+    env.issue(&["reopen", "1"]);
+    let report = env.issue(&["push", "--dry-run"]);
+    assert!(writes(&report, "conflicts").is_empty(), "{report}");
+    assert_eq!(kinds(&writes(&report, "writes")), ["update"]);
+    assert_eq!(
+        writes(&report, "writes")[0]["body"],
+        fake.update_body(&Update {
+            close: Some(false),
+            ..Update::default()
+        })
+    );
+}
+
+fn a_lost_create_is_not_sent_again_while_the_listing_may_lag(fake: Fake) {
+    let (env, key) = lose_a_create(fake);
+    env.pass_call(&strs(&fake.create_call()));
+    // The host lists nothing yet, as it may right after the create landed.
+    fake.serve_since(&env, "2026-10-17T11%3A55%3A00Z", &[]);
+    let report = env.issue(&["push"]);
+    assert!(writes(&report, "sent").is_empty(), "{report}");
+    assert_eq!(writes(&report, "deferred")[0]["what"], "create");
+    assert_eq!(
+        fake.count(&env, &fake.create_call()),
+        1,
+        "no second issue yet"
+    );
+    // Later the listing is trusted: still nothing, so the create is sent again.
+    let spec = created();
+    env.respond(
+        &strs(&fake.create_call()),
+        &fake.issue_json(&spec).to_string(),
+    );
+    let later = crate::support::issue::NOW + 300;
+    let report = env.issue_at(later, &["push"]);
+    assert_eq!(kinds(&writes(&report, "sent")), ["create"], "{report}");
+    assert_eq!(fake.count(&env, &fake.create_call()), 2);
+    assert!(doc(&env, fake, "5")["number"] == 5, "{key}");
 }

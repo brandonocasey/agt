@@ -20,6 +20,9 @@ use crate::store::Store;
 use crate::store::issues::{Category, Fields, Issue, TRACKER_FILE, WriteError};
 use crate::store::model::{PostState, RemoteComment};
 
+/// How long after a create with no answer a push waits before sending it again.
+const LISTING_LAG_SECS: i64 = 120;
+
 pub struct Options {
     pub dry_run: bool,
     pub force: bool,
@@ -65,6 +68,7 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
         options,
         writes: Vec::new(),
         failed: Vec::new(),
+        deferred: Vec::new(),
         conflicts: Vec::new(),
     };
     if !queued.is_empty() {
@@ -85,6 +89,7 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
         "tracker": tracker.doc.key,
         writes: pushing.writes,
         "failed": pushing.failed,
+        "deferred": pushing.deferred,
         "conflicts": pushing.conflicts,
     }))
 }
@@ -99,6 +104,8 @@ struct Push<'a> {
     options: &'a Options,
     writes: Vec<Value>,
     failed: Vec<Value>,
+    /// Writes left for a later push on purpose, not failures.
+    deferred: Vec<Value>,
     conflicts: Vec<Value>,
 }
 
@@ -279,6 +286,14 @@ impl Push<'_> {
                 .push(json!({"issue": doc.key, "kind": "claim", "number": found.number}));
             return Ok(Step::Done);
         }
+        if self.sent_recently(doc)? {
+            self.deferred.push(json!({
+                "issue": doc.key,
+                "what": "create",
+                "reason": "a create was sent moments ago and the host's listing may not show it yet; push again later",
+            }));
+            return Ok(Step::Stopped);
+        }
         let marker = markers::agent(&doc.key, Some(&self.attempt));
         let body = if doc.fields.body.is_empty() {
             marker
@@ -319,6 +334,23 @@ impl Push<'_> {
             }
             Err(error) => self.failure(name, doc, "create", &error),
         }
+    }
+
+    /// Whether a create of `doc` went out less than [`LISTING_LAG_SECS`] ago without an answer.
+    /// The hosts list new issues a little late, so a search that finds nothing right after a
+    /// lost response does not show that the create did not land.
+    fn sent_recently(&self, doc: &Issue) -> Result<bool> {
+        if !doc
+            .create
+            .as_ref()
+            .is_some_and(|create| create.is_posting())
+        {
+            return Ok(false);
+        }
+        let Some(error) = doc.errors.iter().find(|error| error.what == "create") else {
+            return Ok(false);
+        };
+        Ok(clock::now_secs()? - clock::parse(&error.at)? < LISTING_LAG_SECS)
     }
 
     /// The host's copy of a create that was sent but never answered, found by its marker.

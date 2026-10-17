@@ -133,7 +133,11 @@ pub fn set_state(
         issue.fields.state = state;
         issue.fields.reason = match state {
             Category::Open => None,
-            Category::Closed => reason.map(|reason| reason.as_str().to_owned()),
+            // The host records `completed` for a close sent without a reason, so the local
+            // copy says it too; otherwise the next merge sees a reason both sides "changed".
+            Category::Closed => reason
+                .map(|reason| reason.as_str().to_owned())
+                .or_else(|| caps.close_reasons.then(|| "completed".to_owned())),
         };
         Ok(())
     })

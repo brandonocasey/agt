@@ -60,7 +60,7 @@ fn comment_close_and_edit_queue_locally_and_show_as_queued(fake: Fake) {
     assert_eq!(shown["queued"]["body"], "New body\n");
     assert_eq!(
         shown["queued"]["state"],
-        json!({"state": "closed", "reason": null})
+        json!({"state": "closed", "reason": if fake.name() == "github" { json!("completed") } else { Value::Null }})
     );
     assert_eq!(shown["queued"]["comments"], json!(["c1", "c2"]));
     assert_eq!(shown["comments"][0]["post"], "pending");
@@ -96,6 +96,17 @@ fn close_with_a_reason_only_where_the_service_takes_one(fake: Fake) {
         assert!(error.contains("takes no close reason"), "{error}");
         assert_eq!(env.issue(&["close", "1"])["state"], "closed");
     }
+    // A close without a reason is `completed` on a service that has reasons.
+    let env = synced(fake, &[issue()]);
+    let reason = env.issue(&["close", "1"])["reason"].clone();
+    assert_eq!(
+        reason,
+        if fake.name() == "github" {
+            json!("completed")
+        } else {
+            Value::Null
+        }
+    );
 }
 
 fn assignees_follow_the_service_capability(fake: Fake) {
