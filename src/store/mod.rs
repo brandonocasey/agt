@@ -1088,29 +1088,70 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_migrations_leave_one_whole_backup() {
+    fn a_migration_waiting_on_the_backup_lock_rechecks_for_the_backup_made_meanwhile() {
         let base = tempfile::tempdir().unwrap();
         let store = Store::at(base.path(), Namespace::Reviews);
         let dir = store.repo_dir("o/r").unwrap();
         write_target_named(&store, &dir);
+        let agents = base.path().join("agents");
+        let backups = agents.join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        let guard = lock(&agents.join(".reviews-backup.lock")).unwrap();
         std::thread::scope(|scope| {
-            for _ in 0..6 {
-                scope.spawn(|| {
-                    let mut next = Store::at(base.path(), Namespace::Reviews);
+            let migrating = scope.spawn(|| {
+                let mut next = Store::at(base.path(), Namespace::Reviews);
+                next.schema = Schema {
+                    version: 2,
+                    migrations: &[|_| {}],
+                };
+                write_target_named(&next, &dir);
+            });
+            // The other process finishes its backup while this one waits on the lock.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            fs::create_dir(backups.join("reviews-v1-x")).unwrap();
+            drop(guard);
+            migrating.join().unwrap();
+        });
+        let names: Vec<String> = fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["reviews-v1-x".to_string()], "{names:?}");
+    }
+
+    #[test]
+    fn concurrent_migrations_leave_one_whole_backup() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let keys: Vec<String> = (0..6).map(|i| format!("k{i}")).collect();
+        let dir = store.repo_dir("o/r").unwrap();
+        for key in &keys {
+            store
+                .update(&dir, key, NOW, || target(Vec::new()), |_| Ok(()))
+                .unwrap();
+        }
+        let barrier = std::sync::Barrier::new(keys.len());
+        std::thread::scope(|scope| {
+            for key in &keys {
+                let (barrier, dir, root) = (&barrier, &dir, base.path());
+                scope.spawn(move || {
+                    let mut next = Store::at(root, Namespace::Reviews);
                     next.schema = Schema {
                         version: 2,
                         migrations: &[|_| {}],
                     };
-                    write_target_named(&next, &dir);
+                    barrier.wait();
+                    next.update(dir, key, NOW, || target(Vec::new()), |_| Ok(()))
+                        .unwrap();
                 });
             }
         });
         let names: Vec<String> = fs::read_dir(base.path().join("agents").join("backups"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains("-v1-"))
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].starts_with("reviews-v1-"), "{names:?}");
         assert!(!names[0].ends_with(".partial"), "{names:?}");
     }
 }
