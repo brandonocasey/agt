@@ -13,8 +13,6 @@ use crate::core::error::{Error, Result};
 
 pub const MIN_AGE_SECS: i64 = 86_400;
 const GRACE: Duration = Duration::from_secs(10);
-/// How long before a session's `startedAt` its process may have started.
-const START_SLACK_SECS: i64 = 600;
 const PID_OVERRIDE: &str = "AGT_CLEANUP_PID";
 
 #[derive(Clone)]
@@ -251,42 +249,88 @@ fn session_dirs() -> Vec<PathBuf> {
 enum Session {
     Alive,
     Gone,
-    /// No record and the pid still runs, or a record agt cannot read: leave its tools alone.
+    /// The pid still runs but no record says whose it is, or a record agt cannot read:
+    /// leave its tools alone.
     Unknown,
 }
 
-/// Whether Claude process `pid` is still the session that started the tool. The record goes
-/// away with the session; its `startedAt` tells a reused pid apart.
+/// `ps`'s `lstart` text, such as `Fri Oct 16 16:41:54 2026`, in local time, as Unix seconds.
+fn parse_lstart(text: &str) -> Option<i64> {
+    let text = std::ffi::CString::new(text.trim()).ok()?;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let end =
+        unsafe { libc::strptime(text.as_ptr(), c"%a %b %d %H:%M:%S %Y".as_ptr(), &raw mut tm) };
+    if end.is_null() || unsafe { *end } != 0 {
+        return None;
+    }
+    tm.tm_isdst = -1;
+    let secs = unsafe { libc::mktime(&raw mut tm) };
+    (secs != -1).then_some(secs)
+}
+
+/// Whether a session record describes the running process, by the `procStart` Claude Code
+/// wrote: clock ticks since boot on Linux, `ps` `lstart` text on macOS. `None` when the
+/// record cannot tell, such as one with no `procStart` or a time in a DST shift.
+fn record_matches(record: &Value, proc: &Proc) -> Option<bool> {
+    let value = record.get("procStart")?;
+    let text = value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_u64().map(|n| n.to_string()))?;
+    if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        return Some(text.parse::<u64>().ok()? == proc.start_key);
+    }
+    let diff = (parse_lstart(&text)? - proc.start).abs();
+    match diff {
+        0 | 1 => Some(true),
+        // A local time inside a daylight saving shift can read an hour off.
+        3599..=3601 => None,
+        _ => Some(false),
+    }
+}
+
+/// Whether Claude process `pid` is still the session that started the tool. Its record
+/// (`<pid>.json` in any config directory) goes away with the session, and its `procStart`
+/// tells a reused pid apart. A session is gone only when its pid no longer runs, or every
+/// record clearly names another process.
 fn session(pid: i32) -> Session {
-    let running = read(pid);
-    let record = session_dirs()
+    let records: Vec<Value> = session_dirs()
         .into_iter()
         .map(|dir| dir.join(format!("{pid}.json")))
-        .find(|path| path.is_file());
-    let Some(record) = record else {
+        .filter(|path| path.is_file())
+        .map(|path| {
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+    let Some(proc) = read(pid) else {
+        // Not ours to read (another user's) or not running at all.
         return if exists(pid) {
             Session::Unknown
         } else {
             Session::Gone
         };
     };
-    let started = std::fs::read(&record)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| value.get("startedAt").and_then(Value::as_i64));
-    let Some(started) = started else {
+    if records.is_empty() {
         return Session::Unknown;
-    };
-    match running {
-        Some(proc)
-            if proc.start <= started / 1000 + 5
-                && started / 1000 - proc.start <= START_SLACK_SECS =>
-        {
-            Session::Alive
+    }
+    let mut unsure = false;
+    for record in &records {
+        match record_matches(record, &proc) {
+            Some(true) => return Session::Alive,
+            Some(false) => {}
+            None => unsure = true,
         }
-        // Running as another user: it cannot be ours, but say nothing about it.
-        None if exists(pid) => Session::Unknown,
-        _ => Session::Gone,
+    }
+    if unsure {
+        Session::Unknown
+    } else {
+        Session::Gone
     }
 }
 

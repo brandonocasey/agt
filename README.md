@@ -360,10 +360,11 @@ for the whole period, so a task that is still writing keeps all of its files:
   themselves may be links (say, to a bigger disk); they are in the user's own cache.
 
 `processes` lists the user's own processes that carry `CLAUDE_PID` and are a day or more
-old, whose Claude Code session is gone. A session is alive while its
-`~/.claude*/sessions/<pid>.json` (or `$CLAUDE_CONFIG_DIR/sessions`) record exists and the
-process with that pid started at the record's `startedAt`. With no record, a pid that still
-runs is left alone. Claude and Codex themselves are never listed, nor agt and its parents.
+old, whose Claude Code session is gone. A session is gone when its pid no longer runs, or
+when every `<pid>.json` record in `~/.claude*/sessions` (and `$CLAUDE_CONFIG_DIR/sessions`)
+names a process that started at another time, by its `procStart` (clock ticks on Linux,
+`ps` `lstart` text on macOS). A pid that runs with no record, or with a record that cannot
+tell (no `procStart`, or a time inside a daylight saving shift), is left alone. Claude and Codex themselves are never listed, nor agt and its parents.
 `--yes` signals them only when `--only processes` is named: SIGTERM, then SIGKILL to any
 still running 10 seconds later, each only while its pid still has the planned start time.
 Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such as
@@ -374,7 +375,10 @@ clean worktrees in `.worktrees/` untouched for 3 days) and `branches` (merged lo
 branches, not `main`, `master` or `develop` and not checked out), as commands, for repositories at
 `~/projects/<owner>/<name>` or `~/Projects/<owner>/<name>`; `backups` (everything in the
 backups directory but agt's own, largest first); `codex_releases` (all but the current
-and the one before it); and `playwright` (superseded browser builds). `--yes` saves the list
+and the one before it); and `playwright` (superseded browser builds, in
+`$PLAYWRIGHT_BROWSERS_PATH`, else `~/Library/Caches/ms-playwright` and the cache root's
+`ms-playwright`). Commands quote any path or branch name the shell would read differently.
+`--yes` saves the list
 to `$XDG_STATE_HOME/agents/reports/cleanup-candidates.md` (`manual_report`), and `--count`
 reads it back without scanning: `agt: <n> cleanup candidates in <path>`, or nothing.
 

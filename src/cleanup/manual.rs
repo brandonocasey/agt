@@ -89,6 +89,17 @@ fn repos() -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// A word the shell reads back unchanged: as is when it holds only safe characters, else in
+/// single quotes. Branch names come from other people's PRs and may hold `;` or `$(`.
+fn quote(word: &str) -> String {
+    let safe = |ch: char| ch.is_ascii_alphanumeric() || "_-./@:+,=%".contains(ch);
+    if !word.is_empty() && word.chars().all(safe) {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
 fn base(repo: &Path) -> String {
     git(
         repo,
@@ -141,8 +152,8 @@ fn worktrees(repo: &Path, base: &str, now: i64, found: &mut Vec<Candidate>) {
                 section: "worktrees",
                 item: format!(
                     "git -C {} worktree remove {}",
-                    repo.display(),
-                    worktree.display()
+                    quote(&repo.display().to_string()),
+                    quote(&worktree.display().to_string())
                 ),
             });
         }
@@ -172,7 +183,11 @@ fn branches(repo: &Path, base: &str, found: &mut Vec<Candidate>) {
         }
         found.push(Candidate {
             section: "branches",
-            item: format!("git -C {} branch -d {branch}", repo.display()),
+            item: format!(
+                "git -C {} branch -d {}",
+                quote(&repo.display().to_string()),
+                quote(branch)
+            ),
         });
     }
 }
@@ -257,11 +272,29 @@ fn codex_releases(home: &Path, found: &mut Vec<Candidate>) {
     }
 }
 
+/// Playwright's browser cache: `$PLAYWRIGHT_BROWSERS_PATH`, else its per-OS default
+/// (`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere).
+fn playwright_roots(home: &Path) -> Vec<PathBuf> {
+    if let Some(path) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").filter(|p| !p.is_empty()) {
+        return vec![PathBuf::from(path)];
+    }
+    let mut roots = vec![home.join("Library").join("Caches").join("ms-playwright")];
+    if let Ok(cache) = super::files::cache_root() {
+        roots.push(cache.join("ms-playwright"));
+    }
+    roots.push(home.join(".cache").join("ms-playwright"));
+    roots.dedup();
+    roots
+}
+
 fn playwright(home: &Path, found: &mut Vec<Candidate>) {
-    let root = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
-        .filter(|path| !path.is_empty())
-        .map_or_else(|| home.join(".cache").join("ms-playwright"), PathBuf::from);
-    let Ok(entries) = fs::read_dir(&root) else {
+    for root in playwright_roots(home) {
+        playwright_in(&root, found);
+    }
+}
+
+fn playwright_in(root: &Path, found: &mut Vec<Candidate>) {
+    let Ok(entries) = fs::read_dir(root) else {
         return;
     };
     let mut builds: Vec<(String, u64)> = entries
@@ -396,6 +429,14 @@ pub fn saved_count() -> Result<Option<(usize, PathBuf)>> {
 #[cfg(test)]
 mod tests {
     use super::version_key;
+
+    #[test]
+    fn commands_quote_what_the_shell_would_read() {
+        assert_eq!(super::quote("feat/a-b"), "feat/a-b");
+        assert_eq!(super::quote("a;b"), "'a;b'");
+        assert_eq!(super::quote("c$(d)"), "'c$(d)'");
+        assert_eq!(super::quote("it's"), "'it'\\''s'");
+    }
 
     #[test]
     fn versions_sort_by_number() {

@@ -1099,21 +1099,36 @@ fn orphan_processes_are_signalled_only_when_named() {
     assert!(child.wait().unwrap().signal().is_some());
 }
 
+/// The `procStart` Claude Code records for `pid`: clock ticks since boot on Linux, `ps`'s
+/// `lstart` text on macOS.
+fn proc_start(pid: u32) -> String {
+    if cfg!(target_os = "linux") {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let after = &stat[stat.rfind(')').unwrap() + 2..];
+        after.split(' ').nth(19).unwrap().to_owned()
+    } else {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+}
+
 #[test]
-fn a_live_session_keeps_its_tools() {
+fn a_session_is_gone_only_when_no_record_matches_its_process() {
     let prune = Prune::new();
-    let sessions = prune.env.path("home").join(".claude-two/sessions");
-    fs::create_dir_all(&sessions).unwrap();
+    let home = prune.env.path("home");
     let me = std::process::id();
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    fs::write(
-        sessions.join(format!("{me}.json")),
-        json!({ "pid": me, "startedAt": started }).to_string(),
-    )
-    .unwrap();
+    let record = |dir: &str, start: &str| {
+        let sessions = home.join(dir).join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join(format!("{me}.json")),
+            json!({ "pid": me, "procStart": start }).to_string(),
+        )
+        .unwrap();
+    };
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -1127,19 +1142,43 @@ fn a_live_session_keeps_its_tools() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let output = prune
-        .env
-        .command(BIN, &prune.env.repo)
-        .args(["cleanup", "--only", "processes"])
-        .env("AGT_NOW", later().to_string())
-        .env("AGT_CLEANUP_PID", child.id().to_string())
-        .output()
-        .unwrap();
+    let child_pid = child.id().to_string();
+    let listed = || {
+        // The environment is readable a moment after the spawn, once the child has exec'd.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let output = prune
+                .env
+                .command(BIN, &prune.env.repo)
+                .args(["cleanup", "--only", "processes"])
+                .env("AGT_NOW", later().to_string())
+                .env("AGT_CLEANUP_PID", &child_pid)
+                .output()
+                .unwrap();
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let found = keys(&report, "processes");
+            if !found.is_empty() || std::time::Instant::now() > deadline {
+                return found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    let stale = if cfg!(target_os = "linux") {
+        "1"
+    } else {
+        "Mon Jan  1 00:00:00 2024"
+    };
+    // A record for a process that started at another time: the pid was reused.
+    record(".claude", stale);
+    assert_eq!(listed(), [child_pid.as_str()]);
+    // A matching record in another config directory wins over the stale one.
+    record(".claude-two", &proc_start(me));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+        assert_eq!(listed(), Vec::<String>::new());
+    }
     child.kill().unwrap();
     child.wait().unwrap();
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(keys(&report, "processes"), Vec::<String>::new(), "{report}");
 }
 
 #[test]
