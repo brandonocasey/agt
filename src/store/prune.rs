@@ -62,21 +62,26 @@ impl Store {
         };
         // A publish in flight has the target's comments in hand; deleting under it would lose them.
         let publish_path = dir.join(format!(".{key}.publish.lock"));
-        let Some(_publish) = try_lock(&publish_path)? else {
+        let created = !publish_path.exists();
+        let Some(file) = try_lock(&publish_path)? else {
             return Ok(Removal::Busy);
+        };
+        // Taking the lock may have made its file; it goes again on every way out unless it
+        // belongs to a target that stays.
+        let mut publish = PublishLock {
+            file,
+            path: &publish_path,
+            unlink: created,
         };
         let path = dir.join(format!("{key}.json"));
         let Some(target) = read_target(&path, self.schema)? else {
-            // Taking the publish lock made its file; do not leave it behind.
-            remove_if_present(&publish_path)?;
             return Ok(Removal::Kept);
         };
         if !remove(&target)? {
-            remove_if_present(&publish_path)?;
             return Ok(Removal::Kept);
         }
+        publish.unlink = true;
         let bytes = remove_with_lock(&path, &lock_path)?;
-        remove_if_present(&publish_path)?;
         Ok(Removal::Removed(bytes))
     }
 
@@ -309,6 +314,22 @@ pub(super) enum StrayLock {
     Kept,
 }
 
+/// A held publish lock that deletes its file when dropped and `unlink` is set, provided the path
+/// still names the file held, so a replacement made by someone else is never removed.
+struct PublishLock<'a> {
+    file: fs::File,
+    path: &'a Path,
+    unlink: bool,
+}
+
+impl Drop for PublishLock<'_> {
+    fn drop(&mut self) {
+        if self.unlink && is_current(&self.file, self.path).unwrap_or(false) {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
 /// Whether every entry of `dir` is one of `paths`.
 fn only_holds(dir: &Path, paths: &[PathBuf]) -> Result<bool> {
     let entries = match fs::read_dir(dir) {
@@ -515,6 +536,26 @@ mod tests {
             Removal::Kept
         );
         assert!(!dir.join(".missing.publish.lock").exists());
+    }
+
+    #[test]
+    fn a_publish_lock_made_before_an_error_is_removed_with_it() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("repo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("k.json"), "not json").unwrap();
+        assert!(store.try_remove_if(&dir, "k", |_| Ok(true)).is_err());
+        assert!(!dir.join(".k.publish.lock").exists());
+        // A lock file that was already there and whose target stays is not ours to delete.
+        let live = base.path().join("live");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join(".k.publish.lock"), "").unwrap();
+        assert!(store.try_remove_if(&live, "k", |_| Ok(true)).is_ok());
+        let present = live.join(".k.publish.lock");
+        fs::write(live.join("k.json"), "not json").unwrap();
+        assert!(store.try_remove_if(&live, "k", |_| Ok(true)).is_err());
+        assert!(present.exists());
     }
 
     #[test]
