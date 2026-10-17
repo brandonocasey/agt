@@ -947,31 +947,27 @@ fn a_remote_unresolve_clears_the_fixed_outcome(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let f1 = setup.finding(1);
-    let first = format!(
-        "**bug (high):** In-diff text of f1.\n\nm1 xhigh codex {}.c1p0.r1\n\
-         <!-- review-finding v1 id={f1} sha={} -->\n<!-- agent-review id={f1}/c1 attempt=at-1 -->",
-        setup.run, setup.head
-    );
-    let mut remote = Remote::new();
-    remote.thread("T1", false, 3, vec![Comment::new(801, "me", &first)]);
-    svc.sync(&setup, &remote);
-    sync(env, svc);
+    // The finding lands as this store sent it, so sync claims it on every service.
+    let (mut remote, _) = svc.land_findings(&setup);
+    let list = env.run(&["list"]);
+    let id = thread(&list, &f1)["remote"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{list}"))
+        .to_owned();
     env.run(&["resolve", &f1, "--fixed", &setup.head]);
-    remote.set_resolved("T1", true);
+    remote.set_resolved(&id, true);
     svc.sync(&setup, &remote);
     sync(env, svc);
     let list = env.run(&["list"]);
     assert_eq!(thread(&list, &f1)["resolved"], true);
-    remote.set_resolved("T1", false);
+    remote.set_resolved(&id, false);
     svc.sync(&setup, &remote);
     sync(env, svc);
     let list = env.run(&["list"]);
     let synced = thread(&list, &f1);
     assert_eq!(synced["resolved"], false, "{synced}");
     assert_eq!(synced["resolution"], Value::Null, "{synced}");
-    env.run(&["run", "end", "--run", &setup.run]);
     let dry = dry_run(env, svc, &[]);
     let record = write_starting(&dry, "body", "**Review ");
     assert!(record.contains(" 0 fixed, "), "{record}");
-    assert!(!record.contains(" 1 fixed"), "{record}");
 }

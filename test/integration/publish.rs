@@ -7,7 +7,7 @@ use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{
-    Setup, assert_never_posted, ids, kinds, open_ids, sent, strs, thread,
+    Setup, args, assert_never_posted, count_calls, ids, kinds, open_ids, sent, strs, thread,
 };
 use crate::support::{Env, fixture, numbered};
 
@@ -68,22 +68,19 @@ fn concurrent_publish_posts_a_pending_comment_once() {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
-    let setup = reviewed("git@gitlab.com:me/proj.git");
+    let svc = Gitlab::new();
+    let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    gl_sync(env, &setup, &[], &[]);
+    svc.sync(&setup, &Remote::new());
     env.run(&["sync", "--pr", "3"]);
     env.run(&["comment", "--body", "Post once"]);
-    let endpoint = format!("{GL_MR}/discussions");
     env.respond(
-        &strs(&gl_write("POST", &endpoint)),
+        &strs(&svc.call(Call::PostThread)),
         r#"{"id":"d-h1","notes":[{"id":5001}]}"#,
     );
-    gl_sync(
-        env,
-        &setup,
-        &[gl_general("d-h1", gl_note(5001, "me", "{{LAST_BODY}}"))],
-        &[],
-    );
+    let mut remote = Remote::new();
+    remote.general("d-h1", Comment::new(5001, "me", "{{LAST_BODY}}"));
+    svc.sync(&setup, &remote);
     env.reset_calls();
 
     let wrapper = env.path("publish-forge.sh");
@@ -170,7 +167,7 @@ exec "$FAKE_FORGE_REAL" "$@"
         first_ready && authenticated,
         "both publishers must reach the controlled race"
     );
-    assert_eq!(count_calls(env, &gl_write("POST", &endpoint)), 1);
+    assert_eq!(svc.count(env, Call::PostThread), 1);
     assert_eq!(
         thread(&env.run(&["list"]), "h1")["comments"][0]["post"],
         "posted"
