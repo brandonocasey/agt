@@ -349,10 +349,6 @@ pub struct Kind {
     /// The service's CLI is logged in to this host.
     pub probe: fn(&str) -> bool,
     pub connect: fn(&str) -> Box<dyn ReviewService>,
-    #[allow(
-        dead_code,
-        reason = "used by the issue writes, which land in a later change"
-    )]
     pub issue_caps: &'static IssueCaps,
     pub connect_issue: fn(&str) -> Box<dyn IssueService>,
 }

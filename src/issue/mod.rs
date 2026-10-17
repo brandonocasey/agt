@@ -16,6 +16,7 @@ use cli::Command;
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::core::output::Output;
+use crate::store::issues::Category;
 use crate::store::{Namespace, Store};
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -30,6 +31,17 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Find(args) => view::find(&store, filter, args)?,
         Command::Link(args) => local::link(&store, filter, args)?,
         Command::Note { key, text } => local::note(&store, filter, key, text)?,
+        Command::Comment { key, text } => local::comment(&store, filter, key, text)?,
+        Command::Close { key, reason } => {
+            local::set_state(&store, filter, key, Category::Closed, *reason)?
+        }
+        Command::Reopen { key } => local::set_state(&store, filter, key, Category::Open, None)?,
+        Command::Assign(args) => local::assign(&store, filter, &args.key, &args.logins, true)?,
+        Command::Unassign(args) => local::assign(&store, filter, &args.key, &args.logins, false)?,
+        Command::Label { action } => local::labels(&store, filter, action)?,
+        Command::LinkPr { key, pr } => local::link_pr(&store, filter, key, pr)?,
+        Command::Create(args) => local::create(&store, &Config::load()?, filter, args)?,
+        Command::Edit(args) => local::edit(&store, filter, args)?,
     };
     Ok(Output::Json(value))
 }

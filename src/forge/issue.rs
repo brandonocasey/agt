@@ -74,10 +74,6 @@ pub struct NewIssue<'a> {
     pub assignees: &'a [String],
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the issue writes, which land in a later change"
-)]
 pub struct IssueCaps {
     /// An issue takes more than one assignee.
     pub multi_assignee: bool,

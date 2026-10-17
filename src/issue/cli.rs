@@ -34,6 +34,41 @@ pub enum Command {
         /// The note; `-` reads stdin.
         text: String,
     },
+    /// Queue a comment.
+    Comment {
+        key: String,
+        /// The comment; `-` reads stdin.
+        text: String,
+    },
+    /// Queue closing the issue.
+    Close {
+        key: String,
+        /// Why it closed (GitHub only).
+        #[arg(long, value_enum)]
+        reason: Option<Reason>,
+    },
+    /// Queue reopening the issue.
+    Reopen { key: String },
+    /// Queue adding assignees.
+    Assign(People),
+    /// Queue removing assignees.
+    Unassign(People),
+    /// Queue adding or removing labels.
+    Label {
+        #[command(subcommand)]
+        action: LabelAction,
+    },
+    /// Queue a comment linking the issue to a PR/MR, and record the link.
+    LinkPr {
+        key: String,
+        /// A PR/MR number of the tracker's repository, or its URL.
+        #[arg(long)]
+        pr: String,
+    },
+    /// Queue a new issue.
+    Create(CreateArgs),
+    /// Queue a new title or body.
+    Edit(EditArgs),
 }
 
 #[derive(Args)]
@@ -56,6 +91,21 @@ pub enum StateFilter {
     Open,
     Closed,
     All,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Reason {
+    Completed,
+    NotPlanned,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -87,4 +137,47 @@ pub struct LinkArgs {
     pub task: Option<String>,
     #[arg(long, group = "target")]
     pub branch: Option<String>,
+}
+
+#[derive(Args)]
+pub struct People {
+    pub key: String,
+    #[arg(required = true)]
+    pub logins: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum LabelAction {
+    Add(Labels),
+    Remove(Labels),
+}
+
+#[derive(Args)]
+pub struct Labels {
+    pub key: String,
+    #[arg(required = true)]
+    pub labels: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct CreateArgs {
+    #[arg(long)]
+    pub title: String,
+    /// The body; `-` reads stdin.
+    #[arg(long, default_value = "")]
+    pub body: String,
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    #[arg(long = "assignee")]
+    pub assignees: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct EditArgs {
+    pub key: String,
+    #[arg(long, required_unless_present = "body")]
+    pub title: Option<String>,
+    /// The body; `-` reads stdin.
+    #[arg(long, required_unless_present = "title")]
+    pub body: Option<String>,
 }
