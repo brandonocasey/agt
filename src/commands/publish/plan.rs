@@ -2,8 +2,11 @@ use serde_json::{Value, json};
 
 use super::render::{body, location, record_body, record_head, short};
 use crate::anchors;
+use crate::commands::Ctx;
+use crate::commands::approve::blocking_threads;
+use crate::commands::status::run_reviews_at;
 use crate::commands::sync::Connection;
-use crate::commands::{Ctx, author_label, blocking_threads, run_reviews_at};
+use crate::commands::view::author_label;
 use crate::error::{Error, Result};
 use crate::git::Repo;
 use crate::markers;

@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Adoption, Ctx, Scope, prune_dir};
+use super::prune::prune_dir;
+use super::scope::Adoption;
+use super::{Ctx, Scope};
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};

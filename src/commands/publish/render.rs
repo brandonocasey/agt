@@ -2,7 +2,8 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use crate::commands::{author_label, is_open};
+use crate::commands::approve::is_open;
+use crate::commands::view::author_label;
 use crate::markers;
 use crate::model::{Anchor, Author, Comment, PassKind, Resolution, Run, Side, Target, Thread};
 
@@ -274,7 +275,7 @@ pub(super) fn record_body(
     if !fixers.is_empty() {
         let _ = writeln!(text, "Fixed by: {}", fixers.join("; "));
     }
-    if let Some(line) = spend_line(&crate::commands::run_spend(run)) {
+    if let Some(line) = spend_line(&crate::commands::usage::run_spend(run)) {
         let _ = writeln!(text, "{line}");
     }
     let _ = writeln!(text, "{}", markers::record(&run.id, head, at_head, open));
