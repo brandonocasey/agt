@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use crate::ci;
 use crate::core::error::Result;
 use crate::core::output::Output;
+use crate::issue;
 use crate::review;
 use crate::task;
 use crate::watch;
@@ -25,6 +26,8 @@ enum Command {
     Watch(watch::Cli),
     /// GitLab CI triage: failing specs versus the default branch, and waiting for a pipeline.
     Ci(ci::Cli),
+    /// GitHub and GitLab issues, synced locally; writes wait for `push`.
+    Issue(issue::Cli),
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -33,5 +36,6 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Task(args) => task::cli::run(args),
         Command::Watch(args) => watch::run(args),
         Command::Ci(args) => ci::run(args),
+        Command::Issue(args) => issue::run(args),
     }
 }

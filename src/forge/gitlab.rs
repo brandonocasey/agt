@@ -1,7 +1,3 @@
-#[allow(
-    dead_code,
-    reason = "read by `agt issue`, which lands in the next change"
-)]
 mod issues;
 
 use serde_json::Value;
@@ -38,6 +34,7 @@ pub const KIND: Kind = Kind {
             .is_some()
     },
     connect: |host| Box::new(Gitlab::new(Box::new(CliTransport::glab(host)))),
+    issue_caps: &issues::ISSUE_CAPS,
     connect_issue: |host| Box::new(Gitlab::new(Box::new(CliTransport::glab(host)))),
 };
 

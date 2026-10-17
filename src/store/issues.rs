@@ -17,6 +17,15 @@ pub enum Category {
     Closed,
 }
 
+impl Category {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// Every field of an issue that can be written back. `base` holds the last synced copy.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Fields {

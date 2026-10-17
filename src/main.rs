@@ -3,6 +3,7 @@ mod cli;
 mod core;
 mod forge;
 mod git;
+mod issue;
 mod review;
 mod store;
 mod task;

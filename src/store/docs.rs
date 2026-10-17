@@ -15,10 +15,6 @@ use super::{
 };
 use crate::core::error::Result;
 
-#[allow(
-    dead_code,
-    reason = "used by `agt issue`, which lands in the next change"
-)]
 impl Store {
     /// The directories directly under the namespace root.
     pub fn child_dirs(&self) -> Result<Vec<PathBuf>> {

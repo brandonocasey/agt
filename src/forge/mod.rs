@@ -3,10 +3,6 @@ pub mod anchors;
 mod contract;
 pub mod github;
 pub mod gitlab;
-#[allow(
-    dead_code,
-    reason = "read by `agt issue`, which lands in the next change"
-)]
 pub mod issue;
 pub mod markers;
 pub mod service;

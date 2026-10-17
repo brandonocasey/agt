@@ -1,8 +1,4 @@
 mod docs;
-#[allow(
-    dead_code,
-    reason = "read by `agt issue`, which lands in the next change"
-)]
 pub mod issues;
 pub mod model;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
@@ -36,10 +32,6 @@ pub struct Account {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Namespace {
     Reviews,
-    #[allow(
-        dead_code,
-        reason = "opened by `agt issue`, which lands in the next change"
-    )]
     Issues,
     Tasks,
 }

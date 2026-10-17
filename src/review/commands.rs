@@ -382,16 +382,5 @@ fn is_run_id(text: &str) -> bool {
 }
 
 fn random_id() -> String {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-    const ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u32(std::process::id());
-    let mut bits = hasher.finish();
-    let mut id = String::from(RUN_ID_PREFIX);
-    for _ in 0..RUN_ID_CHARS {
-        let index = usize::try_from(bits % 36).unwrap_or(0);
-        id.push(char::from(ALPHABET[index]));
-        bits /= 36;
-    }
-    id
+    crate::core::random::token(RUN_ID_PREFIX, RUN_ID_CHARS)
 }

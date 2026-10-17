@@ -66,6 +66,20 @@ pub fn agent_attempt(body: &str) -> Option<&str> {
         .find_map(|pair| pair.strip_prefix("attempt="))
 }
 
+/// `body` without its `agent-review` marker and the blank space before it, as a person reads it.
+pub fn strip_agent(body: &str) -> String {
+    let Some(start) = body.find(AGENT) else {
+        return body.to_owned();
+    };
+    let Some(len) = body[start..].find(CLOSE) else {
+        return body.to_owned();
+    };
+    let after = &body[start + len + CLOSE.len()..];
+    format!("{}{after}", body[..start].trim_end())
+        .trim_end()
+        .to_owned()
+}
+
 /// The finding id in a `review-finding` marker.
 pub fn finding_id(body: &str) -> Option<String> {
     first_token(body, FINDING)
@@ -97,6 +111,17 @@ pub fn parse_record(body: &str) -> Option<RecordMarker> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_agent_removes_only_the_marker() {
+        let body = format!("Text\n\n{}", agent("c1", Some("at-1")));
+        assert_eq!(strip_agent(&body), "Text");
+        assert_eq!(strip_agent("Plain"), "Plain");
+        assert_eq!(
+            strip_agent("<!-- agent-review id=x"),
+            "<!-- agent-review id=x"
+        );
+    }
 
     #[test]
     fn writers_match_the_wire_format() {

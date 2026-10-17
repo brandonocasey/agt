@@ -27,10 +27,6 @@ pub struct Issues {
 /// One repository whose issues are synced.
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
-    dead_code,
-    reason = "read by `agt issue`, which lands in a later phase"
-)]
 pub struct Tracker {
     pub forge: TrackerForge,
     pub host: String,
@@ -47,10 +43,6 @@ pub struct Tracker {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[allow(
-    dead_code,
-    reason = "read by `agt issue`, which lands in a later phase"
-)]
 pub enum TrackerForge {
     Github,
     Gitlab,
@@ -59,10 +51,6 @@ pub enum TrackerForge {
 /// Which issues a tracker pulls.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[allow(
-    dead_code,
-    reason = "read by `agt issue`, which lands in a later phase"
-)]
 pub enum Scope {
     #[default]
     Involved,
@@ -76,10 +64,6 @@ fn default_since_days() -> u32 {
 
 impl Config {
     /// The configuration from the default path, or defaults when the file is missing.
-    #[allow(
-        dead_code,
-        reason = "called by `agt issue`, which lands in a later phase"
-    )]
     pub fn load() -> Result<Self> {
         Self::load_from(&path()?)
     }

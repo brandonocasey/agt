@@ -17,7 +17,7 @@ use crate::store::model::Forge;
 
 /// Premium and Ultimate take several assignees; Free takes one, and a host that is not
 /// asked cannot say which it is.
-const ISSUE_CAPS: IssueCaps = IssueCaps {
+pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: false,
     close_reasons: false,
 };
@@ -31,10 +31,6 @@ fn base(subject: IssueSubject) -> String {
 }
 
 impl IssueService for Gitlab {
-    fn issue_caps(&self) -> &IssueCaps {
-        &ISSUE_CAPS
-    }
-
     fn list_changed(&self, query: &ListQuery) -> Result<Vec<IssueData>> {
         // GitLab has no "mentioned" filter, so involved is what the user wrote or holds.
         let scopes: &[&str] = match query.scope {
@@ -158,6 +154,10 @@ impl IssueService for Gitlab {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "used by the issue writes, which land in a later change"
+)]
 impl Gitlab {
     /// The ids of `logins`; `[0]` for none, which GitLab reads as "unassign everyone".
     fn user_ids(&self, logins: &[String]) -> Result<Vec<u64>> {

@@ -6,8 +6,8 @@
 # call number <c> in calls.log is saved as input-<c>. <key>.fail makes the call fail after its
 # input is read, as when a write reaches the host but its response is lost; a non-empty
 # <key>.fail is printed to stderr as the tool's error, such as `glab: 403 Forbidden (HTTP 403)`. In a response,
-# {{LAST_NOTE}} and {{LAST_BODY}} stand for the JSON-escaped "note" or "body" of the latest
-# request that sent one, the text the host then shows. A glab call (one with GITLAB_HOST set)
+# {{LAST_NOTE}}, {{LAST_BODY}} and {{LAST_DESCRIPTION}} stand for the JSON-escaped "note",
+# "body" or "description" of the latest request that sent one, the text the host then shows. A glab call (one with GITLAB_HOST set)
 # first tries <key>.glab.json, so gh and glab can answer the same arguments differently. Any
 # other call fails.
 set -eu
@@ -80,13 +80,16 @@ reply() {
     cat "$1"
     return
   fi
-  NOTE=$(last note) BODY=$(last body) awk '{
+  NOTE=$(last note) BODY=$(last body) DESC=$(last description) awk '{
     line = $0
     while ((at = index(line, "{{LAST_NOTE}}")) > 0) {
       line = substr(line, 1, at - 1) ENVIRON["NOTE"] substr(line, at + 13)
     }
     while ((at = index(line, "{{LAST_BODY}}")) > 0) {
       line = substr(line, 1, at - 1) ENVIRON["BODY"] substr(line, at + 13)
+    }
+    while ((at = index(line, "{{LAST_DESCRIPTION}}")) > 0) {
+      line = substr(line, 1, at - 1) ENVIRON["DESC"] substr(line, at + 20)
     }
     print line
   }' "$1"

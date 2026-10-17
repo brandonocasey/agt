@@ -2,21 +2,23 @@
 
 use serde_json::{Value, json};
 
-use super::{CAPS, Github};
+use super::Github;
 use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
 use crate::forge::issue::{
     Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, names,
 };
-use crate::forge::service::{IssueService, IssueSubject, Method, Request, Service, Var};
+use crate::forge::service::{
+    IssueService, IssueSubject, Method, Pagination, Request, Service, Var,
+};
 use crate::forge::{self, CommentData};
 use crate::store::issues::{Category, LinkSource, PrLink};
 use crate::store::model::Forge;
 
 const PR_FIELDS: &str = "{number url state headRefName repository{nameWithOwner}}";
 
-const ISSUE_CAPS: IssueCaps = IssueCaps {
+pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: true,
     close_reasons: true,
 };
@@ -30,10 +32,6 @@ fn base(subject: IssueSubject) -> String {
 }
 
 impl IssueService for Github {
-    fn issue_caps(&self) -> &IssueCaps {
-        &ISSUE_CAPS
-    }
-
     fn list_changed(&self, query: &ListQuery) -> Result<Vec<IssueData>> {
         let filters: Vec<String> = match query.scope {
             Scope::All => vec![String::new()],
@@ -52,7 +50,7 @@ impl IssueService for Github {
             );
             for item in self
                 .transport()
-                .items(&Request::get(path), &CAPS.pagination)?
+                .items(&Request::get(path), &Pagination::CliPaginate)?
             {
                 // The issues endpoint lists pull requests too.
                 if item.get("pull_request").is_some() {
@@ -79,7 +77,7 @@ impl IssueService for Github {
         }
         let items = transport.items(
             &Request::get(format!("{}/comments?per_page=100", base(subject))),
-            &CAPS.pagination,
+            &Pagination::CliPaginate,
         )?;
         let comments = items
             .iter()

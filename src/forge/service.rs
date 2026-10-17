@@ -31,6 +31,10 @@ pub enum Method {
     Get,
     Post,
     Put,
+    #[allow(
+        dead_code,
+        reason = "used by the issue writes, which land in a later change"
+    )]
     Patch,
 }
 
@@ -312,10 +316,9 @@ pub trait ReviewService: Service {
 /// A service as issue sync uses it. Builders are pure unless they return a `Result`.
 #[allow(
     dead_code,
-    reason = "read by `agt issue`, which lands in the next change"
+    reason = "used by the issue writes, which land in a later change"
 )]
 pub trait IssueService: Service {
-    fn issue_caps(&self) -> &IssueCaps;
     /// The issues of `query.repo` updated since `query.since`, pull requests left out.
     fn list_changed(&self, query: &ListQuery) -> Result<Vec<IssueData>>;
     /// The issue, its comments and the PRs/MRs the host links to it.
@@ -348,8 +351,9 @@ pub struct Kind {
     pub connect: fn(&str) -> Box<dyn ReviewService>,
     #[allow(
         dead_code,
-        reason = "read by `agt issue`, which lands in the next change"
+        reason = "used by the issue writes, which land in a later change"
     )]
+    pub issue_caps: &'static IssueCaps,
     pub connect_issue: fn(&str) -> Box<dyn IssueService>,
 }
 
