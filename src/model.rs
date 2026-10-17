@@ -215,6 +215,9 @@ pub struct Thread {
 pub struct Approval {
     pub head: String,
     pub formal: bool,
+    /// GitLab accepted the formal approval; a rerun does not send it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approved: bool,
 }
 
 /// Host-side state of a thread. `resolvable` is false for general comments and review bodies.

@@ -143,11 +143,13 @@ pub fn run(cli: Cli) -> Result<Output> {
                             .map_err(crate::error::ctx("parse usage (expected a JSON array)"))?;
                     inputs
                         .iter()
-                        .map(|input| RoleUsage {
-                            role: input.reviewer.clone(),
-                            usage: input.usage(),
+                        .map(|input| {
+                            Ok(RoleUsage {
+                                role: input.who("role")?,
+                                usage: input.usage(),
+                            })
                         })
-                        .collect()
+                        .collect::<Result<_>>()?
                 }
                 None => Vec::new(),
             };
@@ -887,6 +889,9 @@ fn build_anchor(
         });
     match side {
         Side::Old if input.old_line.is_none() => return fail("side old needs old_line"),
+        Side::Old if input.start_line.is_some() => {
+            return fail("start_line is for new-side ranges; side old takes one old_line");
+        }
         Side::New if input.line.is_none() && input.start_line.is_some() => {
             return fail("start_line needs line");
         }
@@ -1543,16 +1548,12 @@ fn pass_end(
             return fail(format!("pass {run_id}.{pass_id} already ended"));
         }
         for spent in &usage {
+            let id = spent.who("reviewer")?;
             let reviewer = pass
                 .reviewers
                 .iter_mut()
-                .find(|reviewer| reviewer.id == spent.reviewer)
-                .ok_or_else(|| {
-                    Error(format!(
-                        "usage: reviewer {} is not in pass {pass_id}",
-                        spent.reviewer
-                    ))
-                })?;
+                .find(|reviewer| reviewer.id == id)
+                .ok_or_else(|| Error(format!("usage: reviewer {id} is not in pass {pass_id}")))?;
             reviewer.usage = Some(spent.usage());
         }
         pass.ended_at = Some(now.to_owned());
@@ -1599,14 +1600,28 @@ struct FindingInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UsageInput {
-    #[serde(alias = "role")]
-    reviewer: String,
+    reviewer: Option<String>,
+    role: Option<String>,
     tokens: Option<u64>,
     duration_ms: Option<u64>,
     tool_uses: Option<u64>,
 }
 
 impl UsageInput {
+    /// The `reviewer` (pass end) or `role` (run end), whichever `field` names.
+    fn who(&self, field: &str) -> Result<String> {
+        let (wanted, other) = match field {
+            "reviewer" => (&self.reviewer, &self.role),
+            _ => (&self.role, &self.reviewer),
+        };
+        match (wanted, other) {
+            (Some(name), None) => Ok(name.clone()),
+            (_, Some(_)) if field == "reviewer" => fail("usage: pass end takes reviewer, not role"),
+            (_, Some(_)) => fail("usage: run end takes role, not reviewer"),
+            (None, None) => fail(format!("usage: every entry needs {field}")),
+        }
+    }
+
     fn usage(&self) -> Usage {
         Usage {
             tokens: self.tokens,
@@ -1941,6 +1956,15 @@ fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
     let default = ctx.default_author()?;
     let formal = args.formal;
     let thread = ctx.update(&scope, |target, now| {
+        // Approving the same head the same way again reuses the approval, so it posts once.
+        if let Some(existing) = target.threads.iter().find(|thread| {
+            thread
+                .approval
+                .as_ref()
+                .is_some_and(|approval| approval.head == head && approval.formal == formal)
+        }) {
+            return Ok(existing.clone());
+        }
         let author = author(&args.author, target, default)?;
         let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
         let mut thread = local_thread(
@@ -1959,6 +1983,7 @@ fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
         thread.approval = Some(Approval {
             head: head.clone(),
             formal,
+            approved: false,
         });
         target.threads.push(thread.clone());
         Ok(thread)

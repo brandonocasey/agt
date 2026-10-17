@@ -1978,13 +1978,25 @@ fn approvals_post_a_comment_unless_formal() {
         text.starts_with(&format!("Approved at {}.", &setup.head[..12])),
         "{text}"
     );
+    // On your own PR a formal approval posts as a comment, with a note on the formal part.
     let skipped = dry["skipped"].as_array().unwrap();
     assert!(
-        skipped.iter().any(|item| item["item"] == formal.as_str()
-            && item["reason"]
-                .as_str()
-                .unwrap()
-                .contains("approve their own PR")),
+        skipped
+            .iter()
+            .any(|item| item["item"] == format!("{formal}/formal")
+                && item["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("approve their own PR")),
+        "{dry}"
+    );
+    assert!(
+        dry["writes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|write| write["items"] == json!([format!("{formal}/c1")])
+                && write["call"] == json!(post(GH_COMMENTS))),
         "{dry}"
     );
 }
@@ -2068,4 +2080,132 @@ fn approval_of_an_old_head_is_not_posted() {
                     .contains("PR/MR head is now")),
         "{dry}"
     );
+}
+
+/// Approval text in the writes of a dry run.
+fn approval_writes(dry: &Value) -> usize {
+    dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|write| {
+            write["input"]["body"]
+                .as_str()
+                .is_some_and(|body| body.starts_with("Approved at"))
+        })
+        .count()
+}
+
+#[test]
+fn approving_twice_posts_once_and_reopened_findings_hold_it() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    env.run(&["resolve", &f1, "--triage", "stale"]);
+    let first = env.run(&["approve"])["thread"]["id"].clone();
+    assert_eq!(env.run(&["approve"])["thread"]["id"], first);
+    link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(approval_writes(&dry), 1, "{dry}");
+    env.run(&["resolve", &f1, "--reopen"]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(approval_writes(&dry), 0, "{dry}");
+    assert!(
+        dry["skipped"]
+            .to_string()
+            .contains("open findings block approval"),
+        "{dry}"
+    );
+}
+
+#[test]
+fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["approve", "--formal"]);
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let approve = gl_write("POST", &format!("{GL_MR}/approve"));
+    let notes = gl_write("POST", &format!("{GL_MR}/notes"));
+    let discussions = gl_write("POST", &format!("{GL_MR}/discussions"));
+    // GitLab refuses: already approved, or the author may not approve.
+    env.fail_call(&strs(&approve));
+    env.respond(&strs(&notes), r#"{"id":5020}"#);
+    env.respond(&strs(&discussions), r#"{"id":"d-1","notes":[{"id":5003}]}"#);
+    let out = env.run(&["publish", "--pr", "3"]);
+    let refused = out["posted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "approve")
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(refused["error"].is_string(), "{out}");
+    // The approval comment and the final record both went out as notes.
+    assert_eq!(count_calls(env, &notes), 2, "{out}");
+    env.pass_call(&strs(&approve));
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(
+        count_calls(env, &approve),
+        1,
+        "a posted approval is not sent again"
+    );
+}
+
+#[test]
+fn gitlab_accepted_approve_is_not_resent_after_a_failed_comment() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["approve", "--formal"]);
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let approve = gl_write("POST", &format!("{GL_MR}/approve"));
+    let notes = gl_write("POST", &format!("{GL_MR}/notes"));
+    let discussions = gl_write("POST", &format!("{GL_MR}/discussions"));
+    env.respond(&strs(&approve), r#"{"approved":true}"#);
+    env.respond(&strs(&discussions), r#"{"id":"d-1","notes":[{"id":5003}]}"#);
+    env.fail_call(&strs(&notes));
+    env.fail(&["publish", "--pr", "3"], None);
+    env.pass_call(&strs(&notes));
+    env.respond(&strs(&notes), r#"{"id":5020}"#);
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(count_calls(env, &approve), 1);
+}
+
+#[test]
+fn gitlab_finding_changed_by_a_fix_posts_with_its_location() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.write("a.txt", &numbered(10, &[(3, "THREE fixed")]));
+    let fixed = env.commit_all("fix");
+    env.respond(
+        &["api", "-X", "GET", GL_MR],
+        &fixture(
+            "gl-mr.json",
+            &[
+                ("HOST", "gitlab.com"),
+                ("REPO", "me/proj"),
+                ("HEAD", &fixed),
+                ("BASE", &setup.base),
+            ],
+        ),
+    );
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
+    let write = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|write| write["items"] == json!([format!("{f1}/c1")]))
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert!(write["call"].to_string().contains("/discussions"), "{dry}");
+    let text = write["input"]["body"].as_str().unwrap();
+    assert!(text.starts_with("`a.txt:3`"), "{text}");
 }

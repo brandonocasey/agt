@@ -135,16 +135,21 @@ old targets of this repository. Its output ends with `status`: the brief
 stores what the main session spent, as an array of `{"role": "fix", "tokens",
 "duration_ms", "tool_uses"}` (roles such as `fix`, `manual`, `main`). Its output's
 `spent` gives the run's wall time, the time inside passes (`reviewing_secs`) and
-between and after them (`fixing_secs`), and the reported reviewer and main-session
+outside them (`fixing_secs`), and the reported reviewer and main-session
 tokens; the final record carries the same as a `Time: ... Tokens: ...` line.
 
 `approve` records an approval of the head as a general thread, refused while a
-`bug`, `requirement` or `question` is open. `publish` posts it as a comment
-(default text `Approved at <sha>.`, or `--body`); `approve --formal` also
-submits the host's approval: a GitHub `APPROVE` review (never on your own PR,
-which GitHub refuses) or GitLab's `approve` at that head. An approval posts only
-while the PR/MR head is the head it approved, never counts as open, and goes to
-someone else's PR/MR with `publish --not-own --only <id>`.
+`bug`, `requirement` or `question` is open; approving the same head the same way
+again returns the same thread. `publish` posts it as a comment (default text
+`Approved at <sha>.`, or `--body`; a GitLab note, which never blocks merging).
+`approve --formal` also submits the host's approval: a GitHub `APPROVE` review,
+or GitLab's `approve` at that head. On your own GitHub PR, which GitHub refuses
+to approve, the comment still posts and `skipped` lists `<id>/formal`. A GitLab
+refusal (already approved, or not allowed) shows as an `error` under `posted`
+and blocks nothing; an accepted approval is never sent again. An approval posts
+only while the PR/MR head is the head it approved and no blocking finding is
+open, never counts as open, and goes to someone else's PR/MR with
+`publish --not-own --only <id>`.
 
 A wrong run, pass or reviewer id fails with the valid ones named: the open
 runs, the run's passes, or the pass's reviewers. Run ids are unique in the repository. With no `--target` or `--range`, a
@@ -445,7 +450,9 @@ agent-review prune --all
   whose first line names its location. A
   line range (`start_line`..`line`) posts only as one multi-line comment, with
   both ends on the new side of one hunk. Threads without an anchor post as
-  general comments.
+  general comments. On GitLab, lines a later commit changed (such as a fix)
+  are not in the latest MR diff, so they too post as a general comment with
+  their location.
 - GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
   (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
   review), with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
@@ -630,7 +637,7 @@ fields are rejected.
 | `scenario` (alias `body`) | string | yes | Failure scenario; becomes the first comment |
 | `path` | string | with any line field | File, relative to the repository root |
 | `line` | integer | no | New-side line; omit with `path` for a file-level finding |
-| `start_line` | integer | no | First line of a multi-line range ending at `line` |
+| `start_line` | integer | no | First line of a new-side multi-line range ending at `line` |
 | `old_line` | integer | for `side: old` | Old-side line |
 | `side` | `new`, `old` | no | Default `new`, or `old` when only `old_line` is set |
 | `evidence` | string | no | Evidence for the finding |

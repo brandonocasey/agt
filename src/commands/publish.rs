@@ -362,9 +362,12 @@ impl Planner<'_> {
             }
             if let Some(approval) = &thread.approval {
                 match self.approval(thread, first, approval, target) {
-                    Ok((mut approve, kind)) => {
+                    Ok((mut approve, kind, note)) => {
                         writes.append(&mut approve);
                         expected.push((thread.id.clone(), kind));
+                        if let Some(note) = note {
+                            skipped.push(skip(&format!("{}/formal", thread.id), note));
+                        }
                     }
                     Err(reason) => skipped.push(skip(&thread.id, reason)),
                 }
@@ -456,15 +459,16 @@ impl Planner<'_> {
         (writes, skipped, expected)
     }
 
-    /// An approval's writes: a comment, plus the host's approval when formal. Only for the
-    /// head it approved.
+    /// An approval's writes: a comment, plus the host's approval when formal, and a note on
+    /// a formal approval the host does not allow. Only for the head it approved, and only
+    /// while no finding blocks approval.
     fn approval(
         &self,
         thread: &Thread,
         first: &Comment,
         approval: &Approval,
         target: &Target,
-    ) -> std::result::Result<(Vec<Write>, RemoteKind), String> {
+    ) -> std::result::Result<(Vec<Write>, RemoteKind, Option<String>), String> {
         let head = &self.review.head_sha;
         if &approval.head != head {
             return Err(format!(
@@ -473,33 +477,39 @@ impl Planner<'_> {
                 short(head)
             ));
         }
+        let blocking: Vec<&str> = target
+            .threads
+            .iter()
+            .filter(|other| {
+                is_open(other)
+                    && matches!(
+                        other.kind,
+                        crate::model::ThreadType::Bug
+                            | crate::model::ThreadType::Requirement
+                            | crate::model::ThreadType::Question
+                    )
+            })
+            .map(|other| other.id.as_str())
+            .collect();
+        if !blocking.is_empty() {
+            return Err(format!(
+                "open findings block approval: {}",
+                blocking.join(", ")
+            ));
+        }
         let text = body(target, thread, first, None, self.attempt);
+        // A note, not a discussion: GitLab discussions are resolvable and can block merging.
+        let comment = |args: Vec<String>| Write {
+            item: Item::Thread {
+                comment: first.id.clone(),
+            },
+            args,
+            body: Some(json!({ "body": text })),
+        };
+        let note = || self.post(&format!("{}/notes", self.base_path()));
         let own = self.foreign().is_none();
         match (approval.formal, self.connection.forge) {
-            (false, Forge::Github) => Ok((
-                vec![Write {
-                    item: Item::Thread {
-                        comment: first.id.clone(),
-                    },
-                    args: self.general(),
-                    body: Some(json!({ "body": text })),
-                }],
-                RemoteKind::General,
-            )),
-            (false, Forge::Gitlab) => Ok((
-                vec![Write {
-                    item: Item::Thread {
-                        comment: first.id.clone(),
-                    },
-                    args: self.general(),
-                    body: Some(json!({ "body": text })),
-                }],
-                RemoteKind::Discussion,
-            )),
-            (true, Forge::Github) if own => {
-                Err("GitHub does not let the author approve their own PR".to_owned())
-            }
-            (true, Forge::Github) => {
+            (true, Forge::Github) if !own => {
                 let path = format!(
                     "{}/pulls/{}/reviews",
                     self.base_path(),
@@ -514,9 +524,18 @@ impl Planner<'_> {
                         body: Some(json!({ "commit_id": head, "event": "APPROVE", "body": text })),
                     }],
                     RemoteKind::Review,
+                    None,
                 ))
             }
-            (true, Forge::Gitlab) => Ok((
+            (formal, Forge::Github) => Ok((
+                vec![comment(self.general())],
+                RemoteKind::General,
+                formal.then(|| {
+                    "GitHub does not let the author approve their own PR; posted as a comment"
+                        .to_owned()
+                }),
+            )),
+            (true, Forge::Gitlab) if !approval.approved => Ok((
                 vec![
                     Write {
                         item: Item::Approve {
@@ -525,16 +544,12 @@ impl Planner<'_> {
                         args: self.post(&format!("{}/approve", self.base_path())),
                         body: Some(json!({ "sha": head })),
                     },
-                    Write {
-                        item: Item::Thread {
-                            comment: first.id.clone(),
-                        },
-                        args: self.general(),
-                        body: Some(json!({ "body": text })),
-                    },
+                    comment(note()),
                 ],
-                RemoteKind::Discussion,
+                RemoteKind::General,
+                None,
             )),
+            (_, Forge::Gitlab) => Ok((vec![comment(note())], RemoteKind::General, None)),
         }
     }
 
@@ -723,8 +738,10 @@ impl Planner<'_> {
         } else {
             let files = anchors::parse(&self.repo.diff_u0(commit, head).ok()?);
             let location = anchors::locate(&files, anchor);
+            // Changed since review, as by a fix: the latest MR diff no longer has these lines,
+            // so a general comment names where they were.
             if location.outdated {
-                return None;
+                return Some(Spot::OtherFile(self::location(anchor)));
             }
             // The range's first line maps to the head the same way, or the range is dropped.
             let first = match first {
@@ -736,7 +753,7 @@ impl Planner<'_> {
                     };
                     let mapped = anchors::locate(&files, &start);
                     if mapped.outdated {
-                        return None;
+                        return Some(Spot::OtherFile(self::location(anchor)));
                     }
                     Some(mapped.line?)
                 }
@@ -1010,13 +1027,18 @@ fn imported(thread: &Thread) -> bool {
             .is_some_and(|first| first.id.starts_with("remote-"))
 }
 
+/// `2m30s`, `45s`, `14m`: exact, so the parts add up to the total.
+fn duration(secs: i64) -> String {
+    match (secs / 60, secs % 60) {
+        (0, secs) => format!("{secs}s"),
+        (minutes, 0) => format!("{minutes}m"),
+        (minutes, secs) => format!("{minutes}m{secs}s"),
+    }
+}
+
 /// `Time: 14m (reviewing 9m, fixing 5m). Tokens: reviewers 120k, main session 80k.`
 fn spend_line(spent: &Value) -> Option<String> {
-    let minutes = |key: &str| {
-        spent[key]
-            .as_i64()
-            .map(|secs| format!("{}m", (secs + 30) / 60))
-    };
+    let minutes = |key: &str| spent[key].as_i64().map(duration);
     let thousands = |key: &str| {
         spent[key]
             .as_u64()
@@ -1327,7 +1349,16 @@ fn run_writes(
             Ok(())
         })?;
         let args: Vec<&str> = write.args.iter().map(String::as_str).collect();
-        let response = connection.client.send(&args, write.body.as_ref())?;
+        let response = match connection.client.send(&args, write.body.as_ref()) {
+            Ok(response) => response,
+            // GitLab refuses a repeat or ineligible approval; the comment still posts, and the
+            // refusal is reported instead of blocking every later write.
+            Err(error) if matches!(write.item, Item::Approve { .. }) => {
+                posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": error.to_string() }));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let remote = save(ctx, connection, target, &write.item, &response)?;
         if matches!(write.item, Item::Draft { .. }) {
             created.clone_from(&remote);
@@ -1524,7 +1555,20 @@ fn save(
             Ok(Some(draft))
         }
         Item::PublishDraft { draft, .. } => Ok(Some(draft.clone())),
-        Item::Approve { .. } => Ok(None),
+        Item::Approve { thread } => {
+            change(ctx, target, |target| {
+                if let Some(approval) = target
+                    .threads
+                    .iter_mut()
+                    .find(|local| local.id == *thread)
+                    .and_then(|local| local.approval.as_mut())
+                {
+                    approval.approved = true;
+                }
+                Ok(())
+            })?;
+            Ok(None)
+        }
         Item::Resolve { thread, .. } => {
             change(ctx, target, |target| {
                 clear_pending(target, thread);
