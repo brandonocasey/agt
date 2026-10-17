@@ -52,6 +52,16 @@ pub enum Forge {
     Gitlab,
 }
 
+impl Forge {
+    /// Prefix of the keys and imported ids of this service's targets: `gh-42`, `gl-7`.
+    pub fn key_prefix(self) -> &'static str {
+        match self {
+            Self::Github => "gh",
+            Self::Gitlab => "gl",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewState {
@@ -525,6 +535,18 @@ pub struct Comment {
 }
 
 impl Comment {
+    const IMPORTED_PREFIX: &'static str = "remote-";
+
+    /// The id of a comment imported from the host comment `remote_id`.
+    pub fn imported_id(remote_id: &str) -> String {
+        format!("{}{remote_id}", Self::IMPORTED_PREFIX)
+    }
+
+    /// Whether the comment was imported from the host rather than written here.
+    pub fn is_imported(&self) -> bool {
+        self.id.starts_with(Self::IMPORTED_PREFIX)
+    }
+
     /// A comment with no draft, attempt or deletion state yet.
     pub fn new(
         id: String,

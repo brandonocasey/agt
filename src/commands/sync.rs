@@ -157,10 +157,7 @@ fn authenticate(forge: Forge, host: &str) -> Result<(Client, String)> {
 }
 
 fn pr_key(forge: Forge, number: u64) -> String {
-    match forge {
-        Forge::Github => format!("gh-{number}"),
-        Forge::Gitlab => format!("gl-{number}"),
-    }
+    format!("{}-{number}", forge.key_prefix())
 }
 
 /// Everything fetched and computed before the lock: the target to merge into and the merge
@@ -623,7 +620,7 @@ fn imported_comment(comment: CommentData, login: &str) -> Comment {
     };
     let remote = remote_comment(&comment, login);
     Comment::new(
-        format!("remote-{}", comment.id),
+        Comment::imported_id(&comment.id),
         author,
         comment.body,
         comment.created_at,
@@ -637,11 +634,12 @@ fn imported_id(forge: Forge, data: &ThreadData) -> String {
         .comments
         .first()
         .map_or(data.info.id.as_str(), |comment| comment.id.as_str());
+    let prefix = forge.key_prefix();
     match (forge, data.info.kind) {
-        (Forge::Github, RemoteKind::ReviewThread) => format!("gh-t{first}"),
-        (Forge::Github, RemoteKind::Review) => format!("gh-r{first}"),
-        (Forge::Github, _) => format!("gh-c{first}"),
-        (Forge::Gitlab, _) => format!("gl-n{first}"),
+        (Forge::Github, RemoteKind::ReviewThread) => format!("{prefix}-t{first}"),
+        (Forge::Github, RemoteKind::Review) => format!("{prefix}-r{first}"),
+        (Forge::Github, _) => format!("{prefix}-c{first}"),
+        (Forge::Gitlab, _) => format!("{prefix}-n{first}"),
     }
 }
 

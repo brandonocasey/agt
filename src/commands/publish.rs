@@ -1083,11 +1083,7 @@ impl Planner<'_> {
 
 /// A thread imported from the host, started by someone else or outside this store.
 fn imported(thread: &Thread) -> bool {
-    thread.finding.is_none()
-        && thread
-            .comments
-            .first()
-            .is_some_and(|first| first.id.starts_with("remote-"))
+    thread.finding.is_none() && thread.comments.first().is_some_and(Comment::is_imported)
 }
 
 /// `2m30s`, `45s`, `14m`: exact, so the parts add up to the total.

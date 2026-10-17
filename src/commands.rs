@@ -244,7 +244,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 fn run_hint(command: &Command) -> Option<String> {
     let from_id = |id: &str| {
         let run = id.split('.').next()?;
-        (run.len() == 7 && run.starts_with("rv-")).then(|| run.to_owned())
+        is_run_id(run).then(|| run.to_owned())
     };
     match command {
         Command::Run {
@@ -292,11 +292,7 @@ impl Ctx {
             .targets(&self.dir)?
             .into_iter()
             .filter(|target| has_run(target))
-            .filter(|target| {
-                target.kind != TargetKind::Branch
-                    || target.key.starts_with("gh-")
-                    || target.key.starts_with("gl-")
-            })
+            .filter(|target| target.kind != TargetKind::Branch || target.review.is_some())
             .map(|target| target.key)
             .collect();
         match (holders.as_slice(), scope) {
@@ -786,14 +782,21 @@ fn major_found(target: &Target, run: &str, pass: &str) -> bool {
     })
 }
 
+const RUN_ID_PREFIX: &str = "rv-";
+const RUN_ID_CHARS: usize = 4;
+
+fn is_run_id(text: &str) -> bool {
+    text.len() == RUN_ID_PREFIX.len() + RUN_ID_CHARS && text.starts_with(RUN_ID_PREFIX)
+}
+
 fn random_id() -> String {
     use std::hash::{BuildHasher, Hasher, RandomState};
     const ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u32(std::process::id());
     let mut bits = hasher.finish();
-    let mut id = String::from("rv-");
-    for _ in 0..4 {
+    let mut id = String::from(RUN_ID_PREFIX);
+    for _ in 0..RUN_ID_CHARS {
         let index = usize::try_from(bits % 36).unwrap_or(0);
         id.push(char::from(ALPHABET[index]));
         bits /= 36;
