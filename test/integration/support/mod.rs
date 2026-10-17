@@ -6,9 +6,14 @@ use std::process::{Command, Output, Stdio};
 use assert_fs::TempDir;
 use serde_json::Value;
 
+#[allow(dead_code, reason = "the scenarios that use all of it follow")]
+pub mod forge;
+#[allow(dead_code, reason = "the scenarios that use all of it follow")]
+pub mod scenario;
+
 pub const BIN: &str = env!("CARGO_BIN_EXE_agent-review");
 const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
-const FORGE_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/forge");
+const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
 /// A temporary HOME, XDG dirs, git config and repository; nothing reads the user's real state.
 pub struct Env {
@@ -149,9 +154,9 @@ impl Env {
     }
 }
 
-/// A forge fixture with `{{NAME}}` placeholders replaced.
+/// A fixture of `test/fixtures` (`github/threads-1.json`) with `{{NAME}}` placeholders replaced.
 pub fn fixture(name: &str, vars: &[(&str, &str)]) -> String {
-    let mut text = fs::read_to_string(Path::new(FORGE_FIXTURES).join(name)).unwrap();
+    let mut text = fs::read_to_string(Path::new(FIXTURES).join(name)).unwrap();
     for (name, value) in vars {
         text = text.replace(&format!("{{{{{name}}}}}"), value);
     }

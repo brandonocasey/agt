@@ -14,5 +14,5 @@
     "head_sha": "{{HEAD}}",
     "start_sha": "{{BASE}}"
   },
-  "author": { "username": "me" }
+  "author": { "username": "{{AUTHOR}}" }
 }

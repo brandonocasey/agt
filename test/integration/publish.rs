@@ -779,8 +779,12 @@ fn gl_sync(env: &Env, setup: &Setup, discussions: &[Value], drafts: &[Value]) {
         ("REPO", "me/proj"),
         ("HEAD", setup.head.as_str()),
         ("BASE", setup.base.as_str()),
+        ("AUTHOR", "me"),
     ];
-    env.respond(&["api", "-X", "GET", GL_MR], &fixture("gl-mr.json", &vars));
+    env.respond(
+        &["api", "-X", "GET", GL_MR],
+        &fixture("gitlab/mr.json", &vars),
+    );
     for (path, items) in [("discussions", discussions), ("draft_notes", drafts)] {
         env.respond(
             &[
@@ -1649,7 +1653,7 @@ fn closed_unrelated_pr_is_not_attached_or_pruned() {
             "-f",
             &format!("query={query}"),
         ];
-        env.respond(&args, &fixture("gh-empty-pr.json", &vars));
+        env.respond(&args, &fixture("github/empty-pr.json", &vars));
     }
     let synced = env.run(&["sync"]);
     assert_eq!(synced["target"], "gh-5");
@@ -2354,12 +2358,13 @@ fn gitlab_finding_changed_by_a_fix_posts_with_its_location() {
     env.respond(
         &["api", "-X", "GET", GL_MR],
         &fixture(
-            "gl-mr.json",
+            "gitlab/mr.json",
             &[
                 ("HOST", "gitlab.com"),
                 ("REPO", "me/proj"),
                 ("HEAD", &fixed),
                 ("BASE", &setup.base),
+                ("AUTHOR", "me"),
             ],
         ),
     );
