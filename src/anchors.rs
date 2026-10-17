@@ -159,6 +159,8 @@ pub struct DiffLine {
     pub new_path: String,
     pub old_line: Option<u32>,
     pub new_line: Option<u32>,
+    /// Index of the hunk in the diff: a multi-line comment must start and end in one hunk.
+    pub hunk: u32,
 }
 
 /// Finds `line` on `side` of `path` inside a hunk of a `git diff -U3 -M` text, so a review
@@ -166,6 +168,7 @@ pub struct DiffLine {
 pub fn diff_line(diff: &str, path: &str, side: Side, line: u32) -> Option<DiffLine> {
     let mut paths: Option<(String, String)> = None;
     let mut numbers: Option<(u32, u32)> = None;
+    let mut hunk = 0;
     for text in diff.lines() {
         if let Some(rest) = text.strip_prefix("diff --git ") {
             let path = header_path(rest).unwrap_or_default();
@@ -181,6 +184,7 @@ pub fn diff_line(diff: &str, path: &str, side: Side, line: u32) -> Option<DiffLi
             let old = parts.next().and_then(|part| range(part.strip_prefix('-')?));
             let new = parts.next().and_then(|part| range(part.strip_prefix('+')?));
             numbers = old.zip(new).map(|((old, _), (new, _))| (old, new));
+            hunk += 1;
             continue;
         }
         let Some((old, new)) = &mut numbers else {
@@ -211,6 +215,7 @@ pub fn diff_line(diff: &str, path: &str, side: Side, line: u32) -> Option<DiffLi
                 new_path: new_path.clone(),
                 old_line,
                 new_line,
+                hunk,
             });
         }
         if old_line.is_some() {

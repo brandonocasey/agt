@@ -6,7 +6,7 @@ const REVIEWER: &str =
     r#"[{"model":"m1","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296"}]"#;
 const FINDINGS: &str = r#"[
   {"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"In-diff text of f1."},
-  {"type":"nit","path":"a.txt","line":9,"scenario":"Out-of-diff text of f2."},
+  {"type":"nit","scenario":"General text of f2."},
   {"type":"bug","severity":"low","path":"a.txt","line":3,"scenario":"Killed text of f3.","killed":true,"reason":"not reproducible"}
 ]"#;
 /// Text that `publish` must never send: killed findings and other people's comments.
@@ -513,7 +513,7 @@ fn assert_gh_dry_run(setup: &Setup, dry: &Value) {
         "<!-- agent-review id={f1}/c1 attempt=<attempt> -->"
     )));
     let outside = writes[1]["input"]["body"].as_str().unwrap();
-    assert!(outside.starts_with("`a.txt:9`\n\n**nit:** Out-of-diff text of f2."));
+    assert!(outside.starts_with("**nit:** General text of f2."));
     assert_eq!(writes[1]["call"], json!(post(GH_COMMENTS)));
     assert!(writes[2]["input"]["body"].as_str().unwrap().starts_with(
         "General note from me.\n\nme\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
@@ -953,7 +953,7 @@ fn assert_gl_payloads(setup: &Setup) {
         general[0]["body"]
             .as_str()
             .unwrap()
-            .starts_with("`a.txt:9`\n\n**nit:**")
+            .starts_with("**nit:** General text of f2.")
     );
     assert_eq!(
         input_of(
@@ -1824,4 +1824,39 @@ fn only_limits_publish_to_named_threads() {
     assert_eq!(items, [format!("{wanted}/c1")], "{dry}");
     let skipped = dry["skipped"].to_string();
     assert!(skipped.contains(&setup.finding(1)), "{dry}");
+}
+
+#[test]
+fn comments_outside_the_pr_diff_are_never_posted() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let started = env.run_stdin(&["run", "start", "--kind", "full", "--reviewers", "-"], REVIEWER);
+    let run = started["run"].as_str().unwrap();
+    let ended = env.run_stdin(
+        &["pass", "end", "--run", run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"[
+            {"type":"nit","path":"a.txt","line":9,"scenario":"Out of the diff."},
+            {"type":"nit","path":"a.txt","start_line":1,"line":3,"scenario":"Range in one hunk."}
+        ]"#,
+    );
+    let (outside, range) = (&ended["added"][0], &ended["added"][1]);
+    env.run(&["run", "end", "--run", run]);
+    link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let skipped = dry["skipped"].as_array().unwrap();
+    assert!(
+        skipped.iter().any(|item| &item["item"] == outside
+            && item["reason"].as_str().unwrap().contains("not in the PR/MR diff")),
+        "{dry}"
+    );
+    let comments = dry["writes"][0]["input"]["comments"].as_array().unwrap();
+    let multi = comments
+        .iter()
+        .find(|comment| comment["body"].as_str().unwrap().contains("Range in one hunk."))
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert_eq!(
+        (&multi["start_line"], &multi["line"], &multi["start_side"]),
+        (&json!(1), &json!(3), &json!("RIGHT")),
+        "{range}"
+    );
 }

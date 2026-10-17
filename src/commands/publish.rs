@@ -102,8 +102,13 @@ enum Spot {
         path: String,
         line: u32,
         side: &'static str,
+        /// First line of a multi-line comment, in the same hunk and on the same side.
+        start_line: Option<u32>,
     },
     Gitlab(Value),
+    /// No anchor: a general comment.
+    General,
+    /// Anchored, but not placeable in the PR/MR diff; never posted elsewhere.
     Outside,
 }
 
@@ -348,16 +353,22 @@ impl Planner<'_> {
             let spot = thread
                 .anchor
                 .as_ref()
-                .map_or(Spot::Outside, |anchor| self.spot(anchor));
+                .map_or(Spot::General, |anchor| self.spot(anchor));
             match spot {
                 Spot::Github {
                     commit,
                     path,
                     line,
                     side,
+                    start_line,
                 } => {
                     let body = body(target, thread, first, None, self.attempt);
-                    let comment = json!({ "path": path, "line": line, "side": side, "body": body });
+                    let mut comment =
+                        json!({ "path": path, "line": line, "side": side, "body": body });
+                    if let Some(start) = start_line {
+                        comment["start_line"] = json!(start);
+                        comment["start_side"] = json!(side);
+                    }
                     match reviews.iter_mut().find(|(sha, ..)| *sha == commit) {
                         Some((_, ids, comments)) => {
                             ids.push(first.id.clone());
@@ -380,8 +391,13 @@ impl Planner<'_> {
                     expected.push((thread.id.clone(), RemoteKind::Discussion));
                 }
                 Spot::Outside => {
-                    let location = thread.anchor.as_ref().map(location);
-                    let text = body(target, thread, first, location.as_deref(), self.attempt);
+                    skipped.push(skip(
+                        &thread.id,
+                        "its lines are not in the PR/MR diff of the reviewed range".to_owned(),
+                    ));
+                }
+                Spot::General => {
+                    let text = body(target, thread, first, None, self.attempt);
                     writes.push(Write {
                         item: Item::Thread {
                             comment: first.id.clone(),
@@ -540,6 +556,18 @@ impl Planner<'_> {
             Some(new) => (new, "RIGHT"),
             None => (found.old_line?, "LEFT"),
         };
+        // A range posts only as one multi-line comment: both ends on the new side of one
+        // hunk, as GitHub requires.
+        let start_line = match anchor.start_line.filter(|start| *start < line) {
+            Some(start) => {
+                let first = anchors::diff_line(&diff, &anchor.path, Side::New, start)?;
+                if side != "RIGHT" || first.hunk != found.hunk {
+                    return None;
+                }
+                first.new_line
+            }
+            None => None,
+        };
         let path = if side == "LEFT" {
             found.old_path
         } else {
@@ -550,6 +578,7 @@ impl Planner<'_> {
             path,
             line,
             side,
+            start_line,
         })
     }
 
@@ -819,14 +848,6 @@ fn imported(thread: &Thread) -> bool {
             .comments
             .first()
             .is_some_and(|first| first.id.starts_with("remote-"))
-}
-
-fn location(anchor: &Anchor) -> String {
-    match (anchor.side, anchor.line, anchor.old_line) {
-        (Side::New, Some(line), _) => format!("{}:{line}", anchor.path),
-        (Side::Old, _, Some(line)) => format!("{} (old):{line}", anchor.path),
-        _ => anchor.path.clone(),
-    }
 }
 
 /// The posted text: a finding heading, the text, the signature and the markers.
@@ -1315,17 +1336,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn locations_name_the_side() {
-        let anchor = Anchor {
-            path: "a.txt".into(),
-            line: None,
-            old_line: Some(4),
-            side: Side::Old,
-            start_line: None,
-            commit: None,
-            tree: String::new(),
-        };
-        assert_eq!(location(&anchor), "a.txt (old):4");
+    fn short_names() {
         assert_eq!(short("0123456789"), "0123456");
         assert_eq!(harness_name("claude-code"), "Claude Code");
     }
