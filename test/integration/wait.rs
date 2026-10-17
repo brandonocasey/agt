@@ -2,51 +2,69 @@
 
 use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
+use crate::support::Env;
 
-fn wait(args: &[&str]) -> Command {
-    let mut command = Command::cargo_bin("agt").expect("binary builds");
-    command.arg("wait").args(args);
-    command
+/// Exit code and stdout of `agt wait` in the isolated environment.
+fn wait(env: &Env, args: &[&str]) -> (Option<i32>, String) {
+    let output = env
+        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .arg("wait")
+        .args(args)
+        .output()
+        .expect("agt runs");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
 }
 
 #[test]
 fn a_passing_check_ends_the_wait() {
-    wait(&["--", "true"])
-        .assert()
-        .code(0)
-        .stdout("agt wait: done after 0s\n");
+    let env = Env::new();
+    assert_eq!(
+        wait(&env, &["--", "true"]),
+        (Some(0), "agt wait: done after 0s\n".into())
+    );
 }
 
 #[test]
 fn the_check_runs_until_it_passes() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let flag = dir.path().join("flag");
+    let env = Env::new();
+    let flag = env.path("flag");
     let script = format!("[ -e {0} ] || {{ touch {0}; exit 1; }}", flag.display());
     let started = Instant::now();
-    let output = wait(&["--every", "1", "--max", "10", "--", "sh", "-c", &script])
-        .output()
-        .expect("agt runs");
-    assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("agt wait: done after "));
+    let (code, out) = wait(
+        &env,
+        &["--every", "1", "--max", "10", "--", "sh", "-c", &script],
+    );
+    assert_eq!(code, Some(0));
+    assert!(out.starts_with("agt wait: done after "), "{out}");
     assert!(started.elapsed() >= Duration::from_secs(1));
 }
 
 #[test]
 fn a_failing_check_times_out_with_exit_3() {
-    wait(&["--max", "1", "--every", "1", "--", "false"])
-        .assert()
-        .code(3)
-        .stdout("agt wait: still running after 1s; check the job and re-arm\n");
-    wait(&["--max", "1", "--every", "1", "--", "/nonexistent/check"])
-        .assert()
-        .code(3);
+    let env = Env::new();
+    assert_eq!(
+        wait(&env, &["--max", "1", "--every", "1", "--", "false"]),
+        (
+            Some(3),
+            "agt wait: still running after 1s; check the job and re-arm\n".into()
+        )
+    );
+    let missing = ["--max", "1", "--every", "1", "--", "/nonexistent/check"];
+    assert_eq!(wait(&env, &missing).0, Some(3));
 }
 
 #[test]
 fn bad_usage_exits_2() {
-    wait(&["true"]).assert().code(2);
-    wait(&["--max", "0", "--", "true"]).assert().code(2);
-    wait(&["--every", "x", "--", "true"]).assert().code(2);
-    wait(&[]).assert().code(2);
+    let env = Env::new();
+    for args in [
+        &["true"][..],
+        &["--max", "0", "--", "true"],
+        &["--every", "x", "--", "true"],
+        &[],
+    ] {
+        assert_eq!(wait(&env, args).0, Some(2), "{args:?}");
+    }
 }

@@ -9,13 +9,15 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::sessions::py::{count, get, text};
+use crate::sessions::py::{self, count, get, text};
 
 /// Who wrote a rollout file, from its first line.
 pub struct Meta {
     pub cwd: String,
     pub session: String,
     pub agent: String,
+    /// Started by `codex exec`, so its prompts were not typed by a person.
+    pub scripted: bool,
 }
 
 /// The `session_meta` line, or `None` when `first` is not one.
@@ -42,8 +44,11 @@ pub fn meta(first: &Value) -> Option<Meta> {
     };
     Some(Meta {
         cwd: text(payload, "cwd").to_owned(),
-        session: session.chars().take(8).collect(),
+        // Thread ids are UUIDv7, whose first characters are a timestamp shared by sessions
+        // started in the same minute; the last ones are random.
+        session: py::tail(session, 8).to_owned(),
         agent: agent.to_owned(),
+        scripted: text(payload, "source") == "exec",
     })
 }
 
@@ -53,6 +58,10 @@ pub fn project(cwd: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
+
+static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^Process exited with code [1-9][0-9]*\s*$").expect("valid pattern")
+});
 
 static EXEC_COMMAND: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\bcmd"?\s*:\s*("(?:[^"\\]|\\.)*")"#).expect("valid pattern"));
@@ -130,12 +139,21 @@ fn output(payload: &Value) -> (Value, bool) {
         ),
         other => other.clone(),
     };
-    let first = match &content {
+    let whole = match &content {
         Value::String(text) => text.clone(),
-        Value::Array(items) => items.iter().map(|item| text(item, "text")).collect(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| text(item, "text"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => String::new(),
     };
-    let first = first.lines().next().unwrap_or_default();
+    let first = whole.lines().next().unwrap_or_default();
+    if let Some(exit) = EXIT_CODE.find(&whole) {
+        // Start at the exit line, past the chunk id and wall time, as Claude Code's
+        // "Exit code N" leads a failed command's result.
+        return (Value::String(whole[exit.start()..].to_owned()), true);
+    }
     let failed = first.starts_with("Script failed")
         || first.starts_with("aborted by user")
         || first.contains(" failed: ");
@@ -156,6 +174,10 @@ fn user_text(payload: &Value) -> Option<String> {
 /// Turns Codex records into Claude Code records for one file.
 pub struct Adapter {
     id: String,
+    scripted: bool,
+    /// Whether a `turn_context` has been seen. A forked rollout first replays its parent's
+    /// `token_count` events, before any turn of its own; those were billed in the parent.
+    started_turn: bool,
     model: String,
     calls: usize,
     total: Option<Value>,
@@ -165,9 +187,11 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    pub fn new(id: String) -> Self {
+    pub fn new(id: String, scripted: bool) -> Self {
         Self {
             id,
+            scripted,
+            started_turn: false,
             model: "?".into(),
             calls: 0,
             total: None,
@@ -199,6 +223,7 @@ impl Adapter {
         let timestamp = get(record, "timestamp").clone();
         match (text(record, "type"), text(payload, "type")) {
             ("turn_context", _) => {
+                self.started_turn = true;
                 if let Some(model) = payload.get("model").and_then(Value::as_str) {
                     self.model = model.to_owned();
                 }
@@ -209,11 +234,13 @@ impl Adapter {
             ),
             ("response_item", "message") if text(payload, "role") == "user" => {
                 if let Some(content) = user_text(payload) {
-                    self.send(
-                        json!({"type": "user", "timestamp": timestamp,
-                               "message": {"role": "user", "content": content}}),
-                        out,
-                    );
+                    let mut record = json!({"type": "user", "timestamp": timestamp,
+                                            "message": {"role": "user", "content": content}});
+                    if self.scripted {
+                        // As `claude -p` marks its prompts, so `friction` skips them.
+                        record["entrypoint"] = json!("sdk-codex-exec");
+                    }
+                    self.send(record, out);
                 }
             }
             ("response_item", "function_call" | "custom_tool_call" | "local_shell_call") => {
@@ -247,6 +274,14 @@ impl Adapter {
             return;
         }
         self.total = Some(total.clone());
+        if !self.started_turn {
+            self.tools.clear();
+            self.started = None;
+            for record in std::mem::take(&mut self.waiting) {
+                out(&record);
+            }
+            return;
+        }
         let last = get(info, "last_token_usage");
         let cached = count(last, "cached_input_tokens");
         let written = count(last, "cache_write_input_tokens");
@@ -283,7 +318,7 @@ mod tests {
     use super::*;
 
     fn run(lines: &[Value]) -> Vec<Value> {
-        let mut adapter = Adapter::new("f".into());
+        let mut adapter = Adapter::new("f".into(), false);
         let mut records = Vec::new();
         for line in lines {
             adapter.feed(line, &mut |record| records.push(record.clone()));
@@ -340,7 +375,7 @@ mod tests {
                                                      "agent_role": "explorer"}}}}});
         let meta = meta(&first).expect("session meta");
         assert_eq!(meta.agent, "explorer");
-        assert_eq!(meta.session, "99999999");
+        assert_eq!(meta.session, "99999zzz");
         assert_eq!(project(&meta.cwd), "-w-x-y");
     }
 }

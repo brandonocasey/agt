@@ -11,7 +11,7 @@ use crate::core::error::Result;
 use crate::sessions::Scope;
 use crate::sessions::prices::Prices;
 use crate::sessions::py::{self, count, fixed, get, grouped, key, object, text, tok, truthy};
-use crate::sessions::source::transcripts;
+use crate::sessions::source::{Kind, transcripts};
 use crate::sessions::spend::short_project;
 
 // Leading `cd DIR &&`, `cd DIR;`, and `VAR=value;` steps hide the command that did the work.
@@ -252,7 +252,15 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
                 return;
             };
             seen.insert(id_key);
-            let written = count(usage, "cache_creation_input_tokens");
+            // OpenAI bills a cache miss as plain input, with no write, so for Codex the
+            // uncached input is what a gap rewrites.
+            let codex = transcript.kind == Kind::Codex;
+            let written = count(usage, "cache_creation_input_tokens")
+                + if codex {
+                    count(usage, "input_tokens")
+                } else {
+                    0
+                };
             let cached = count(usage, "cache_read_input_tokens");
             if let Some(previous) = &previous {
                 let elapsed = (at - previous.at) as f64 / 1e6;
@@ -261,9 +269,15 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
                     if (cached as f64) < 0.5 * previous.context as f64 {
                         expired += 1;
                         rewrite_tokens += written;
-                        rewrite_usd += prices
-                            .usd(model, &json!({ "cache_creation_input_tokens": written }))
-                            .map_or(0.0, |parts| parts.write);
+                        rewrite_usd += if codex {
+                            prices
+                                .usd(model, &json!({ "input_tokens": written }))
+                                .map_or(0.0, |parts| parts.input)
+                        } else {
+                            prices
+                                .usd(model, &json!({ "cache_creation_input_tokens": written }))
+                                .map_or(0.0, |parts| parts.write)
+                        };
                         *per.entry((transcript.agent.clone(), transcript.project.clone()))
                             .or_default() += written;
                         *cause

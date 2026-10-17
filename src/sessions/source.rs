@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::core::transcripts::{claude_profiles, codex_roots};
+use crate::core::transcripts::codex_roots;
 use crate::sessions::codex::{self, Adapter};
 use crate::sessions::py::{self, get, key, object, text, truthy};
 use crate::sessions::{Harness, Scope};
@@ -34,6 +34,8 @@ pub struct Transcript {
     pub session: String,
     pub agent: String,
     pub kind: Kind,
+    /// A `codex exec` run, whose prompts no person typed.
+    pub scripted: bool,
 }
 
 /// One API response: its last record's usage and model, and how many tools it called.
@@ -91,7 +93,8 @@ impl Transcript {
         match self.kind {
             Kind::Claude => lines(&self.path, keep),
             Kind::Codex => {
-                let mut adapter = Adapter::new(self.path.to_string_lossy().into_owned());
+                let mut adapter =
+                    Adapter::new(self.path.to_string_lossy().into_owned(), self.scripted);
                 lines(&self.path, |record| adapter.feed(record, &mut keep));
                 adapter.finish(&mut keep);
             }
@@ -237,6 +240,21 @@ fn wanted(scope: &Scope, kind: Kind) -> bool {
     )
 }
 
+/// `HOME.glob('.claude*/projects')`, sorted: every `.claude` name, links followed.
+fn claude_roots(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(home) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".claude"))
+        .map(|entry| entry.path().join("projects"))
+        .filter(|root| root.is_dir())
+        .collect();
+    roots.sort();
+    roots
+}
+
 /// A file found under a root: which harness wrote it and, for Codex, its session line.
 fn codex_meta(path: &Path, kind: Option<Kind>) -> (Kind, Option<codex::Meta>) {
     if kind == Some(Kind::Claude) {
@@ -271,12 +289,14 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
                     project: codex::project(&meta.cwd),
                     session: meta.session,
                     agent: meta.agent,
+                    scripted: meta.scripted,
                     path,
                     kind,
                 },
                 None => Transcript {
                     session: stem(&path),
                     agent: "main".into(),
+                    scripted: false,
                     project,
                     path,
                     kind,
@@ -287,10 +307,8 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
     }
     // A root named on the command line can hold either harness; each file says which.
     let roots: Vec<(PathBuf, Option<Kind>)> = if scope.roots.is_empty() {
-        let mut roots: Vec<(PathBuf, Option<Kind>)> = claude_profiles(&home)
+        let mut roots: Vec<(PathBuf, Option<Kind>)> = claude_roots(&home)
             .into_iter()
-            .map(|profile| profile.join("projects"))
-            .filter(|root| root.is_dir())
             .map(|root| (root, Some(Kind::Claude)))
             .collect();
         roots.extend(
@@ -335,6 +353,16 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
                     continue;
                 }
             }
+            // A scratch file under a named root counts as skipped whatever its age, as the
+            // script counted it, unless it turns out to be Codex's.
+            if kind.is_none()
+                && !scope.scratch
+                && SCRATCH.is_match(&parts[0])
+                && codex::meta(&first_line(&path)).is_none()
+            {
+                skipped += 1;
+                continue;
+            }
             if modified(&path).is_none_or(|time| time < scope.cutoff) {
                 continue;
             }
@@ -354,14 +382,16 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
             let transcript = if kind == Kind::Codex {
                 let meta = meta.unwrap_or_else(|| codex::Meta {
                     cwd: String::new(),
-                    session: py::head(py::tail(&stem(&path), 36), 8).to_owned(),
+                    session: py::tail(&stem(&path), 8).to_owned(),
                     agent: "main".into(),
+                    scripted: false,
                 });
                 Transcript {
                     path,
                     project,
                     session: meta.session,
                     agent: meta.agent,
+                    scripted: meta.scripted,
                     kind,
                 }
             } else {
@@ -390,6 +420,7 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
                     project,
                     session: py::head(&session, 8).to_owned(),
                     agent,
+                    scripted: false,
                     path,
                     kind,
                 }
