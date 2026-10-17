@@ -8,14 +8,14 @@ use serde_json::{Value, json};
 
 use crate::anchors::{self, FileDiff, Location};
 use crate::cli::{
-    AuthorArgs, Cli, Command, CommentArgs, FindingAction, Format, ListArgs, PassAction, ReplyArgs,
+    ApproveArgs, AuthorArgs, Cli, Command, CommentArgs, FindingAction, Format, ListArgs, PassAction, ReplyArgs,
     ResolveArgs, RunAction,
 };
 use crate::clock;
 use crate::error::{Error, Result, ctx, fail};
 use crate::git::{CommitInfo, LogEntry, Repo};
 use crate::model::{
-    Anchor, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
+    Anchor, Approval, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
     PassKind, PostState, Reveal, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind,
     Thread, ThreadType, Triage, VERSION,
 };
@@ -190,6 +190,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Comment(args) => comment(&ctx, &args)?,
         Command::Reply(args) => reply(&ctx, &args)?,
         Command::Resolve(args) => resolve(&ctx, &args)?,
+        Command::Approve(args) => approve(&ctx, &args)?,
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,
         Command::Status { head, full } => {
@@ -936,6 +937,7 @@ fn local_thread(new: NewThread, author: Author, body: String, now: &str) -> Thre
         deleted_seen_at: None,
         created_at: now.to_owned(),
         updated_at: now.to_owned(),
+        approval: None,
     }
 }
 
@@ -1757,6 +1759,64 @@ fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
         thread.comments.push(comment);
         thread.updated_at = now.to_owned();
         Ok(thread.clone())
+    })?;
+    Ok(json!({ "target": scope.key, "thread": thread }))
+}
+
+/// Records an approval of the head as a general thread for `publish`.
+fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
+    let scope = ctx.scope()?;
+    if !scope.head_known {
+        return fail("approve needs a head: check out the branch or pass --target");
+    }
+    let head = scope.head.clone();
+    let blocking: Vec<&str> = scope
+        .existing
+        .iter()
+        .flat_map(|target| &target.threads)
+        .filter(|thread| {
+            is_open(thread)
+                && matches!(
+                    thread.kind,
+                    ThreadType::Bug | ThreadType::Requirement | ThreadType::Question
+                )
+        })
+        .map(|thread| thread.id.as_str())
+        .collect();
+    if !blocking.is_empty() {
+        return fail(format!(
+            "open findings block approval: {}",
+            blocking.join(", ")
+        ));
+    }
+    let body = match &args.body {
+        Some(body) => read_body(body)?,
+        None => format!("Approved at {}.", &head[..head.len().min(12)]),
+    };
+    let default = ctx.default_author()?;
+    let formal = args.formal;
+    let thread = ctx.update(&scope, |target, now| {
+        let author = author(&args.author, target, default)?;
+        let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
+        let mut thread = local_thread(
+            NewThread {
+                id: format!("h{number}"),
+                kind: ThreadType::Comment,
+                severity: None,
+                anchor: None,
+                finding: None,
+            },
+            author,
+            body,
+            now,
+        );
+        thread.resolved = true;
+        thread.approval = Some(Approval {
+            head: head.clone(),
+            formal,
+        });
+        target.threads.push(thread.clone());
+        Ok(thread)
     })?;
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
@@ -2759,7 +2819,9 @@ fn is_open(thread: &Thread) -> bool {
             None => true,
             Some(remote) => remote.is_me && sync::agent_id(&first.body).is_some(),
         });
-    !thread.resolved
+    // An approval is a statement, never something left to resolve.
+    thread.approval.is_none()
+        && !thread.resolved
         && !thread.deleted_remote
         && (thread.finding.is_some()
             || thread

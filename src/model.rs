@@ -181,6 +181,16 @@ pub struct Thread {
     pub deleted_seen_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// An approval of `head`: `publish` posts it as a comment, or with `formal` as the
+    /// host's approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Approval {
+    pub head: String,
+    pub formal: bool,
 }
 
 /// Host-side state of a thread. `resolvable` is false for general comments and review bodies.

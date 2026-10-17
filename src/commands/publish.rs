@@ -12,7 +12,7 @@ use crate::error::{Error, Result, fail};
 use crate::forge;
 use crate::git::Repo;
 use crate::model::{
-    Anchor, Author, Comment, Forge, Pass, PassKind, PostState, RecordPost, RemoteComment,
+    Anchor, Approval, Author, Comment, Forge, Pass, PassKind, PostState, RecordPost, RemoteComment,
     RemoteKind, RemoteThread, Review, Run, Side, Target, Thread,
 };
 
@@ -51,6 +51,10 @@ enum Item {
         run: String,
         head: String,
     },
+    /// GitLab's approval of the MR head, sent before the approval comment.
+    Approve {
+        thread: String,
+    },
 }
 
 struct Write {
@@ -70,6 +74,7 @@ impl Write {
             Item::Resolve { resolved: true, .. } => "resolve",
             Item::Resolve { .. } => "unresolve",
             Item::Record { .. } => "record",
+            Item::Approve { .. } => "approve",
         }
     }
 
@@ -80,7 +85,7 @@ impl Write {
             | Item::Draft { comment }
             | Item::PublishDraft { comment, .. }
             | Item::Reply { comment } => vec![comment.clone()],
-            Item::Resolve { thread, .. } => vec![thread.clone()],
+            Item::Resolve { thread, .. } | Item::Approve { thread } => vec![thread.clone()],
             Item::Record { run, .. } => vec![format!("{run}/record")],
         }
     }
@@ -350,6 +355,16 @@ impl Planner<'_> {
                 expected.push((thread.id.clone(), RemoteKind::Discussion));
                 continue;
             }
+            if let Some(approval) = &thread.approval {
+                match self.approval(thread, first, approval, target) {
+                    Ok((mut approve, kind)) => {
+                        writes.append(&mut approve);
+                        expected.push((thread.id.clone(), kind));
+                    }
+                    Err(reason) => skipped.push(skip(&thread.id, reason)),
+                }
+                continue;
+            }
             let spot = thread
                 .anchor
                 .as_ref()
@@ -432,13 +447,97 @@ impl Planner<'_> {
         (writes, skipped, expected)
     }
 
+    /// An approval's writes: a comment, plus the host's approval when formal. Only for the
+    /// head it approved.
+    fn approval(
+        &self,
+        thread: &Thread,
+        first: &Comment,
+        approval: &Approval,
+        target: &Target,
+    ) -> std::result::Result<(Vec<Write>, RemoteKind), String> {
+        let head = &self.review.head_sha;
+        if &approval.head != head {
+            return Err(format!(
+                "it approves {}, but the PR/MR head is now {}",
+                short(&approval.head),
+                short(head)
+            ));
+        }
+        let text = body(target, thread, first, None, self.attempt);
+        let own = self.foreign().is_none();
+        match (approval.formal, self.connection.forge) {
+            (false, Forge::Github) => Ok((
+                vec![Write {
+                    item: Item::Thread {
+                        comment: first.id.clone(),
+                    },
+                    args: self.general(),
+                    body: Some(json!({ "body": text })),
+                }],
+                RemoteKind::General,
+            )),
+            (false, Forge::Gitlab) => Ok((
+                vec![Write {
+                    item: Item::Thread {
+                        comment: first.id.clone(),
+                    },
+                    args: self.general(),
+                    body: Some(json!({ "body": text })),
+                }],
+                RemoteKind::Discussion,
+            )),
+            (true, Forge::Github) if own => {
+                Err("GitHub does not let the author approve their own PR".to_owned())
+            }
+            (true, Forge::Github) => {
+                let path = format!(
+                    "{}/pulls/{}/reviews",
+                    self.base_path(),
+                    self.connection.number
+                );
+                Ok((
+                    vec![Write {
+                        item: Item::Thread {
+                            comment: first.id.clone(),
+                        },
+                        args: self.post(&path),
+                        body: Some(json!({ "commit_id": head, "event": "APPROVE", "body": text })),
+                    }],
+                    RemoteKind::Review,
+                ))
+            }
+            (true, Forge::Gitlab) => Ok((
+                vec![
+                    Write {
+                        item: Item::Approve {
+                            thread: thread.id.clone(),
+                        },
+                        args: self.post(&format!("{}/approve", self.base_path())),
+                        body: Some(json!({ "sha": head })),
+                    },
+                    Write {
+                        item: Item::Thread {
+                            comment: first.id.clone(),
+                        },
+                        args: self.general(),
+                        body: Some(json!({ "body": text })),
+                    },
+                ],
+                RemoteKind::Discussion,
+            )),
+        }
+    }
+
     /// Why a new thread is not posted: a finding of a pass still in progress, or another
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
         if let Some(reason) = self.unnamed(thread) {
             return Some(reason);
         }
-        if let Some(reason) = self.foreign_threads() {
+        // An approval the user named with --only may go to someone else's PR/MR.
+        let named_approval = thread.approval.is_some() && self.only.contains(&thread.id);
+        if let Some(reason) = self.foreign_threads().filter(|_| !named_approval) {
             return Some(reason);
         }
         if let Some(reason) = self.pre_pr(target, thread) {
@@ -1227,7 +1326,7 @@ fn mark(target: &mut Target, write: &Write, attempt: &str) {
             }
             return;
         }
-        Item::PublishDraft { .. } | Item::Resolve { .. } => return,
+        Item::PublishDraft { .. } | Item::Resolve { .. } | Item::Approve { .. } => return,
     };
     for id in ids {
         let text = texts.next().flatten();
@@ -1344,6 +1443,7 @@ fn save(
             Ok(Some(draft))
         }
         Item::PublishDraft { draft, .. } => Ok(Some(draft.clone())),
+        Item::Approve { .. } => Ok(None),
         Item::Resolve { thread, .. } => {
             change(ctx, target, |target| {
                 clear_pending(target, thread);

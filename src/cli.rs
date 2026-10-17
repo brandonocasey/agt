@@ -44,6 +44,9 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Resolve, triage or reopen a thread.
     Resolve(ResolveArgs),
+    /// Approve the head: `publish` posts an approval comment, or with `--formal` the host's
+    /// approval. Refused while a bug, requirement or question is open.
+    Approve(ApproveArgs),
     /// List threads and killed findings.
     List(ListArgs),
     /// Show a thread, killed finding, run (`rv-xxxx`) or pass (`rv-xxxx.c1p0`).
@@ -273,6 +276,19 @@ pub struct ResolveArgs {
     /// Also add this reply to each thread, or `-` for stdin.
     #[arg(long)]
     pub reply: Option<String>,
+    #[command(flatten)]
+    pub author: AuthorArgs,
+}
+
+#[derive(Args)]
+pub struct ApproveArgs {
+    /// Also submit the host's approval (GitHub APPROVE review, GitLab approve), not only a
+    /// comment.
+    #[arg(long)]
+    pub formal: bool,
+    /// Comment text, or `-` for stdin [default: "Approved at <sha>."].
+    #[arg(long)]
+    pub body: Option<String>,
     #[command(flatten)]
     pub author: AuthorArgs,
 }

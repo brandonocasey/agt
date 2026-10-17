@@ -972,6 +972,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
         deleted_seen_at: None,
         created_at,
         updated_at: now.to_owned(),
+        approval: None,
     });
     summary.imported += 1;
 }

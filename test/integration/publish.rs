@@ -1871,9 +1871,9 @@ fn gitlab_ranges_post_with_line_codes() {
         &["pass", "end", "--run", run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
         r#"[{"type":"nit","path":"a.txt","start_line":2,"line":3,"scenario":"Range in one hunk."}]"#,
     );
-    env.run(&["run", "end", "--run", run]);
     gl_sync(env, &setup, &[], &[]);
     env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", run]);
     let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
     let draft = dry["writes"]
         .as_array()
@@ -1892,4 +1892,95 @@ fn gitlab_ranges_post_with_line_codes() {
     // sha1("a.txt"), then the old and new line counters.
     let code = range["end"]["line_code"].as_str().unwrap();
     assert_eq!(code, "cfc7b4885384957ae445bc14914d4588f607651c_4_3", "{dry}");
+}
+
+#[test]
+fn approvals_post_a_comment_unless_formal() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    let error = env.fail(&["approve"], None);
+    assert!(error.contains(&format!("open findings block approval: {f1}")), "{error}");
+    env.run(&["resolve", &f1, "--triage", "stale"]);
+    let approved = env.run(&["approve"]);
+    let id = approved["thread"]["id"].as_str().unwrap().to_owned();
+    let open = env.run(&["status"])["open_threads"].to_string();
+    assert!(!open.contains(&format!("\"{id}\"")), "an approval is never open: {open}");
+    let formal = env.run(&["approve", "--formal"])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let comment = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|write| write["items"] == json!([format!("{id}/c1")]))
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert_eq!(comment["call"], json!(post(GH_COMMENTS)));
+    let text = comment["input"]["body"].as_str().unwrap();
+    assert!(text.starts_with(&format!("Approved at {}.", &setup.head[..12])), "{text}");
+    let skipped = dry["skipped"].as_array().unwrap();
+    assert!(
+        skipped.iter().any(|item| item["item"] == formal.as_str()
+            && item["reason"].as_str().unwrap().contains("approve their own PR")),
+        "{dry}"
+    );
+}
+
+#[test]
+fn formal_approval_on_someone_elses_pr() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    let id = env.run(&["approve", "--formal"])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut pr = GhPr::new();
+    pr.author = "alice";
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let dry = env.run(&["publish", "--pr", "42", "--not-own", "--only", &id, "--dry-run"]);
+    let writes = dry["writes"].as_array().unwrap();
+    assert_eq!(writes.len(), 1, "{dry}");
+    assert_eq!(writes[0]["input"]["event"], "APPROVE");
+    assert_eq!(writes[0]["input"]["commit_id"], setup.head.as_str());
+}
+
+#[test]
+fn gitlab_formal_approval_approves_then_comments() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["approve", "--formal"]);
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
+    let kinds = kinds(&dry, "writes");
+    let at = kinds.iter().position(|kind| kind == "approve").unwrap_or_else(|| panic!("{dry}"));
+    assert_eq!(kinds[at + 1], "thread");
+    let approve = &dry["writes"][at];
+    assert_eq!(approve["input"]["sha"], setup.head.as_str());
+    assert!(approve["call"].to_string().contains("merge_requests/3/approve"));
+}
+
+#[test]
+fn approval_of_an_old_head_is_not_posted() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    let id = env.run(&["approve"])["thread"]["id"].as_str().unwrap().to_owned();
+    let mut pr = GhPr::new();
+    pr.head = Some(env.git(&["rev-parse", "main"]));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert!(
+        dry["skipped"].as_array().unwrap().iter().any(|item| item["item"] == id.as_str()
+            && item["reason"].as_str().unwrap().contains("PR/MR head is now")),
+        "{dry}"
+    );
 }
