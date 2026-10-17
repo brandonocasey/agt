@@ -197,8 +197,10 @@ fn scope(common: Common, files: Vec<String>) -> Result<Scope> {
     };
     // A file that cannot be read must not price as nothing.
     for file in &files {
-        if let Err(error) = std::fs::File::open(file) {
-            return fail(format!("read {file}: {error}"));
+        match std::fs::metadata(file) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return fail(format!("read {file}: not a file; --root takes a directory")),
+            Err(error) => return fail(format!("read {file}: {error}")),
         }
     }
     Ok(Scope {

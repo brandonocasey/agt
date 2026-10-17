@@ -884,8 +884,8 @@ first line is a Codex `session_meta` is read as Codex. Prices come from
 reported as unpriced.
 
 Codex rollouts are read as Claude Code records: each billed `token_count` is one call, with
-`input_tokens` net of cached tokens. A forked rollout's replay of its parent (the records stamped
-with its `session_meta` time) is left to the parent. Shell calls (`exec`, `exec_command`, `shell`)
+`input_tokens` net of cached tokens. A forked rollout's replay of its parent, everything before the
+fork's first `thread_settings_applied` event, is left to the parent. Shell calls (`exec`, `exec_command`, `shell`)
 count as `Bash`. An output starting `Script failed` or `aborted by user`, holding ` failed: `, with
 a `Process exited with code N` or `Exit code: N` header line other than 0, or an `exec` script
 result whose `exit_code` is not 0 is an error, read as Claude Code's `Exit code N`. Injected `AGENTS.md` and

@@ -253,6 +253,12 @@ fn bad_input_fails_with_a_reason() {
     let (code, _, err) = run(sessions(&env, &["cost", "/nonexistent/run.jsonl"]));
     assert_eq!(code, Some(1));
     assert!(err.contains("read /nonexistent/run.jsonl"), "{err}");
+    let (code, _, err) = run(sessions(&env, &["cost", "projects"]));
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("not a file; --root takes a directory"),
+        "{err}"
+    );
     let mut missing = sessions(&env, &["cost", "--root", "projects"]);
     missing.env("AGT_PRICES", "/nonexistent/prices.json");
     let (code, _, err) = run(missing);

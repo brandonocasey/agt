@@ -215,9 +215,10 @@ pub struct Adapter {
     /// Whether a `turn_context` of this file's own has been seen; older rollouts bill replayed
     /// history before one.
     started_turn: bool,
-    /// A forked rollout's write time: it replays its parent's history, billed and typed there,
-    /// with the `session_meta` timestamp.
-    replay: Option<Value>,
+    /// Inside a forked rollout's replay of its parent's history, billed and typed there. The
+    /// replay ends at the fork's first `thread_settings_applied`; a fork without one never ran
+    /// a turn of its own.
+    replaying: bool,
     model: String,
     calls: usize,
     total: Option<Value>,
@@ -232,7 +233,7 @@ impl Adapter {
             id,
             scripted,
             started_turn: false,
-            replay: None,
+            replaying: false,
             model: "?".into(),
             calls: 0,
             total: None,
@@ -264,14 +265,18 @@ impl Adapter {
         let timestamp = get(record, "timestamp").clone();
         let kind = text(record, "type");
         if kind == "session_meta" && !text(payload, "forked_from_id").is_empty() {
-            self.replay.get_or_insert(timestamp.clone());
+            self.replaying = true;
         }
-        if self.replay.as_ref() == Some(&timestamp) && kind != "turn_context" {
-            return;
+        if self.replaying {
+            if text(payload, "type") == "thread_settings_applied" {
+                self.replaying = false;
+            } else if kind != "turn_context" {
+                return;
+            }
         }
         match (kind, text(payload, "type")) {
             ("turn_context", _) => {
-                self.started_turn |= self.replay.as_ref() != Some(&timestamp);
+                self.started_turn |= !self.replaying;
                 if let Some(model) = payload.get("model").and_then(Value::as_str) {
                     self.model = model.to_owned();
                 }
