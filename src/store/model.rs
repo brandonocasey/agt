@@ -189,8 +189,9 @@ pub struct Delivery {
     #[serde(default)]
     pub sent: Option<String>,
     /// When the call was about to go out, written with the `Posting` mark; absent in documents
-    /// stored before it existed.
-    #[serde(default)]
+    /// stored before it existed. Left out when unset, so review documents stay readable and
+    /// writable by agent-review 0.4.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub began_at: Option<String>,
 }
 
