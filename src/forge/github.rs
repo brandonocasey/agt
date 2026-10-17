@@ -1,3 +1,9 @@
+#[allow(
+    dead_code,
+    reason = "read by `agt issue`, which lands in the next change"
+)]
+mod issues;
+
 use serde_json::Value;
 
 use crate::core::clock;
@@ -41,6 +47,7 @@ pub const KIND: Kind = Kind {
             .is_some()
     },
     connect: |host| Box::new(Github::new(Box::new(CliTransport::gh(host)))),
+    connect_issue: |host| Box::new(Github::new(Box::new(CliTransport::gh(host)))),
 };
 
 const CAPS: Capabilities = Capabilities {

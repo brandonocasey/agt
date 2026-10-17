@@ -104,7 +104,7 @@ pub struct Review {
     pub attached_at: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum Forge {
     Github,

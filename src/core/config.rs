@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::error::{Error, Result, fail};
 
@@ -57,7 +57,7 @@ pub enum TrackerForge {
 }
 
 /// Which issues a tracker pulls.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[allow(
     dead_code,

@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::core::error::Result;
 use crate::forge::Fetched;
+use crate::forge::issue::{Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue};
 use crate::forge::transport::{Response, Transport, TransportError};
 use crate::git::Repo;
 use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review};
@@ -20,10 +21,6 @@ pub struct ReviewSubject<'a> {
 /// The issue a write or read is about. A different type from [`ReviewSubject`], so an issue
 /// number cannot reach a review call.
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "built by `agt issue`, which lands in a later phase"
-)]
 pub struct IssueSubject<'a> {
     pub repo: &'a str,
     pub number: u64,
@@ -34,6 +31,7 @@ pub enum Method {
     Get,
     Post,
     Put,
+    Patch,
 }
 
 impl Method {
@@ -42,6 +40,7 @@ impl Method {
             Self::Get => "GET",
             Self::Post => "POST",
             Self::Put => "PUT",
+            Self::Patch => "PATCH",
         }
     }
 }
@@ -310,16 +309,26 @@ pub trait ReviewService: Service {
     ) -> Result<(String, Vec<Posted>)>;
 }
 
-/// A service as issue sync uses it. Builders are pure; phase 5 adds listing and fetching.
+/// A service as issue sync uses it. Builders are pure unless they return a `Result`.
 #[allow(
     dead_code,
-    reason = "implemented by the services once `agt issue` lands"
+    reason = "read by `agt issue`, which lands in the next change"
 )]
 pub trait IssueService: Service {
+    fn issue_caps(&self) -> &IssueCaps;
+    /// The issues of `query.repo` updated since `query.since`, pull requests left out.
+    fn list_changed(&self, query: &ListQuery) -> Result<Vec<IssueData>>;
+    /// The issue, its comments and the PRs/MRs the host links to it.
+    fn fetch_issue(&self, subject: IssueSubject) -> Result<IssueFetched>;
     /// A new comment on the issue.
     fn comment(&self, subject: IssueSubject, text: &str) -> Request;
-    /// Opens or closes the issue.
-    fn set_state(&self, subject: IssueSubject, open: bool) -> Request;
+    /// One request that applies `changes`. May read from the host, such as a user id lookup.
+    fn update(&self, subject: IssueSubject, changes: &Changes) -> Result<Request>;
+    fn create(&self, repo: &str, new: &NewIssue) -> Result<Request>;
+    /// The issue from the response to [`IssueService::create`].
+    fn created(&self, response: &Value) -> Result<IssueData>;
+    /// The id and URL of a comment from the response to [`IssueService::comment`].
+    fn issue_comment_created(&self, response: &Value) -> Option<(String, Option<String>)>;
 }
 
 /// One registered service: what is needed to find it for a host and build it. Adding a service
@@ -337,6 +346,11 @@ pub struct Kind {
     /// The service's CLI is logged in to this host.
     pub probe: fn(&str) -> bool,
     pub connect: fn(&str) -> Box<dyn ReviewService>,
+    #[allow(
+        dead_code,
+        reason = "read by `agt issue`, which lands in the next change"
+    )]
+    pub connect_issue: fn(&str) -> Box<dyn IssueService>,
 }
 
 pub const SERVICES: &[Kind] = &[crate::forge::github::KIND, crate::forge::gitlab::KIND];
