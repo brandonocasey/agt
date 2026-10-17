@@ -2,7 +2,7 @@ name: release
 
 # A `v*` tag builds one archive per platform and attaches them to a GitHub
 # release, named `agt-<tag>-<target>.tar.gz`, each holding one `agt` file, so
-# `mise use github:brandonocasey/agent-review` finds them.
+# `mise use github:brandonocasey/agt` finds them.
 on:
   push:
     tags: ["v*"]

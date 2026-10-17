@@ -14,7 +14,7 @@ On macOS (arm64) and Linux (x64, arm64), from the private GitHub releases;
 mise reads the token of an authenticated `gh`:
 
 ```sh
-mise use -g github:brandonocasey/agent-review
+mise use -g github:brandonocasey/agt
 ```
 
 From a checkout, `mise run install` runs `cargo install --locked --path .` and
