@@ -1,0 +1,7 @@
+# No retries: a flaky test must fail the run. Slow tests are named so a hang or a contended
+# fixture shows up in the output instead of only in the wall clock.
+[profile.default]
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
+slow-timeout = { period = "30s" }
