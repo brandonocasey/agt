@@ -1,0 +1,30 @@
+{
+ "args": [
+  "wait",
+  "!5",
+  "-R",
+  "group/proj",
+  "--interval",
+  "0"
+ ],
+ "env": {},
+ "responses": [
+  {
+   "args": [
+    "api",
+    "projects/group%2Fproj"
+   ],
+   "body": "{\"id\": 12, \"path_with_namespace\": \"group/proj\", \"default_branch\": \"main\"}"
+  },
+  {
+   "args": [
+    "api",
+    "projects/12/merge_requests/5"
+   ],
+   "body": "{\"iid\": 5, \"title\": \"Fix login\", \"sha\": \"abcdef0123456789\", \"head_pipeline\": null}"
+  }
+ ],
+ "code": 2,
+ "stdout": "",
+ "stderr": "agt ci: !5 has no pipeline\n"
+}

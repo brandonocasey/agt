@@ -1,0 +1,19 @@
+{
+ "args": [
+  "failures",
+  "https://gitlab.example.com/group/proj/-/pipelines/100"
+ ],
+ "env": {},
+ "responses": [
+  {
+   "args": [
+    "api",
+    "projects/group%2Fproj"
+   ],
+   "body": "{\"id\": 12, \"path_with_namespace\": \"group/proj\", \"default_branch\": \"main\"}"
+  }
+ ],
+ "code": 2,
+ "stdout": "",
+ "stderr": "agt ci: failures takes an MR, not a pipeline\n"
+}

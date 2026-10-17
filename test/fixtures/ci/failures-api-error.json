@@ -1,0 +1,22 @@
+{
+ "args": [
+  "failures",
+  "5",
+  "-R",
+  "group/proj"
+ ],
+ "env": {},
+ "responses": [
+  {
+   "args": [
+    "api",
+    "projects/group%2Fproj"
+   ],
+   "body": "",
+   "fail": "glab: 404 Not Found"
+  }
+ ],
+ "code": 2,
+ "stdout": "",
+ "stderr": "agt ci: glab api projects/group%2Fproj failed: glab: 404 Not Found\n"
+}

@@ -1,0 +1,15 @@
+{
+ "args": [
+  "failures",
+  "5",
+  "-R",
+  "group/proj",
+  "-n",
+  "0"
+ ],
+ "env": {},
+ "responses": [],
+ "code": 2,
+ "stdout": "",
+ "stderr": null
+}

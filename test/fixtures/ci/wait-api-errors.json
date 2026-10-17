@@ -1,0 +1,31 @@
+{
+ "args": [
+  "wait",
+  "100",
+  "-R",
+  "group/proj",
+  "--interval",
+  "0"
+ ],
+ "env": {},
+ "responses": [
+  {
+   "args": [
+    "api",
+    "projects/group%2Fproj"
+   ],
+   "body": "{\"id\": 12, \"path_with_namespace\": \"group/proj\", \"default_branch\": \"main\"}"
+  },
+  {
+   "args": [
+    "api",
+    "projects/12/pipelines/100"
+   ],
+   "body": "",
+   "fail": "glab: 502 Bad Gateway"
+  }
+ ],
+ "code": 2,
+ "stdout": "",
+ "stderr": "agt ci: glab api projects/12/pipelines/100 failed: glab: 502 Bad Gateway (1/5)\nagt ci: glab api projects/12/pipelines/100 failed: glab: 502 Bad Gateway (2/5)\nagt ci: glab api projects/12/pipelines/100 failed: glab: 502 Bad Gateway (3/5)\nagt ci: glab api projects/12/pipelines/100 failed: glab: 502 Bad Gateway (4/5)\nagt ci: glab api projects/12/pipelines/100 failed: glab: 502 Bad Gateway (5/5)\n"
+}

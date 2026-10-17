@@ -1,0 +1,11 @@
+{
+ "args": [
+  "wait",
+  "nope"
+ ],
+ "env": {},
+ "responses": [],
+ "code": 2,
+ "stdout": "",
+ "stderr": "agt ci: expected an id, !id, or URL, got 'nope'\n"
+}

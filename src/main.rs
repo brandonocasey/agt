@@ -1,3 +1,4 @@
+mod ci;
 mod cli;
 mod core;
 mod forge;

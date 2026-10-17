@@ -1,0 +1,11 @@
+{
+ "args": [
+  "failures",
+  "abc"
+ ],
+ "env": {},
+ "responses": [],
+ "code": 2,
+ "stdout": "",
+ "stderr": "agt ci: expected an id, !id, or URL, got 'abc'\n"
+}
