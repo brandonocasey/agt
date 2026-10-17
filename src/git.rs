@@ -281,8 +281,20 @@ impl Repo {
         let index = self.git(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
         let scratch = tempfile::tempdir().map_err(ctx("create temporary index directory"))?;
         let temp_index = scratch.path().join("index");
+        // Keep the index's mtime on the copy: git trusts cached stat data only for entries
+        // older than the index file, so a newer copy would hide files changed in the same
+        // second as the last `git add` (racy git). macOS copies keep it; Linux copies do not.
         match fs::copy(&index, &temp_index) {
-            Ok(_) => {}
+            Ok(_) => {
+                let modified = fs::metadata(&index)
+                    .and_then(|meta| meta.modified())
+                    .map_err(ctx(format!("read git index time {index}")))?;
+                fs::File::options()
+                    .write(true)
+                    .open(&temp_index)
+                    .and_then(|file| file.set_modified(modified))
+                    .map_err(ctx("set temporary index time"))?;
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return fail(format!("copy git index {index}: {error}")),
         }
