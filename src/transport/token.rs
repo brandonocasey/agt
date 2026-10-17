@@ -114,16 +114,41 @@ impl TokenTransport {
         }
     }
 
-    fn url(&self, path: &str) -> String {
+    /// The URL for `path`. An absolute URL (a next-page link) is only followed when it is https
+    /// on the host of the base URL, so the token is never sent anywhere else.
+    fn url(&self, path: &str) -> std::result::Result<String, TransportError> {
         if path.starts_with("https://") || path.starts_with("http://") {
-            path.to_owned()
+            let authority = |url: &str| {
+                url.split_once("://")
+                    .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+                    .map(str::to_ascii_lowercase)
+            };
+            let same_host = path.starts_with("https://")
+                && authority(path).is_some_and(|host| {
+                    !host.contains('@') && Some(host) == authority(&self.base_url)
+                });
+            if !same_host {
+                return Err(TransportError::new(format!(
+                    "refusing to send the token to {path}: not https on {}",
+                    self.base_url
+                )));
+            }
+            Ok(path.to_owned())
         } else {
-            format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+            Ok(format!(
+                "{}/{}",
+                self.base_url,
+                path.trim_start_matches('/')
+            ))
         }
     }
 
     /// The curl config for `request`.
-    fn config(&self, request: &Request, token: &Secret) -> String {
+    fn config(
+        &self,
+        request: &Request,
+        token: &Secret,
+    ) -> std::result::Result<String, TransportError> {
         let (path, body) = match &request.endpoint {
             Endpoint::Rest(path) => (path.clone(), request.body.clone()),
             Endpoint::Graphql(vars) => {
@@ -156,7 +181,7 @@ impl TokenTransport {
         };
         let mut config = format!(
             "url = {}\nrequest = {}\nheader = {}\nheader = \"Accept: application/json\"\n",
-            curl_quote(&self.url(&path)),
+            curl_quote(&self.url(&path)?),
             curl_quote(method),
             curl_quote(&format!("Authorization: {} {}", self.scheme, token.0)),
         );
@@ -164,16 +189,24 @@ impl TokenTransport {
             config.push_str("header = \"Content-Type: application/json\"\n");
             config.push_str(&format!("data-raw = {}\n", curl_quote(&body.to_string())));
         }
-        config
+        Ok(config)
     }
 }
 
 impl Transport for TokenTransport {
     fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
         let token = self.auth.token(&self.host)?;
-        let config = self.config(request, &token);
+        let config = self.config(request, &token)?;
         let mut child = Command::new(&self.program)
-            .args(["--silent", "--show-error", "--include", "--config", "-"])
+            // `-q` first, or curl reads ~/.curlrc, which could redirect the request or log it.
+            .args([
+                "-q",
+                "--silent",
+                "--show-error",
+                "--include",
+                "--config",
+                "-",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -186,7 +219,7 @@ impl Transport for TokenTransport {
         if !output.status.success() {
             return Err(TransportError::new(format!(
                 "curl failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                redact(String::from_utf8_lossy(&output.stderr).trim(), &token)
             )));
         }
         let Parsed {
@@ -197,12 +230,12 @@ impl Transport for TokenTransport {
         let text = String::from_utf8_lossy(body);
         if !(200..300).contains(&status) {
             return Err(TransportError {
-                status: Some(status),
+                status: Some(super::as_seen_by_retries(status, &text)),
                 message: format!(
                     "{} {} failed: HTTP {status}: {}",
                     request.method.as_str(),
                     self.host,
-                    text.trim()
+                    redact(text.trim(), &token)
                 ),
             });
         }
@@ -223,7 +256,17 @@ impl Transport for TokenTransport {
             Endpoint::Rest(path) => path.as_str(),
             Endpoint::Graphql(_) => "graphql",
         };
-        vec![request.method.as_str().to_owned(), self.url(path)]
+        let url = self.url(path).unwrap_or_else(|error| error.message);
+        vec![request.method.as_str().to_owned(), url]
+    }
+}
+
+/// `text` without the token, in case a tool or server echoes it back.
+fn redact(text: &str, token: &Secret) -> String {
+    if token.0.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(&token.0, "[redacted]")
     }
 }
 
@@ -252,7 +295,8 @@ fn curl_quote(text: &str) -> String {
 }
 
 /// The final status, headers (lowercase names) and body of `curl --include` output, which
-/// starts with a block for each interim `100 Continue`.
+/// starts with a block for each interim (1xx) reply and for a proxy's `200 Connection
+/// established`.
 fn parse_http(raw: &[u8]) -> Result<Parsed<'_>> {
     let mut rest = raw;
     loop {
@@ -260,12 +304,17 @@ fn parse_http(raw: &[u8]) -> Result<Parsed<'_>> {
             split_head(rest).ok_or_else(|| Error("curl printed no headers".into()))?;
         let text = String::from_utf8_lossy(head);
         let mut lines = text.lines();
-        let status: u16 = lines
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
+        let status_line = lines.next().unwrap_or_default();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
             .and_then(|status| status.parse().ok())
             .ok_or_else(|| Error("curl printed no status".into()))?;
-        if status == 100 {
+        let tunnel = status == 200
+            && status_line
+                .to_ascii_lowercase()
+                .contains("connection established");
+        if (100..200).contains(&status) || tunnel {
             rest = body;
             continue;
         }
@@ -305,6 +354,60 @@ mod tests {
         assert!(headers.contains(&("link".to_owned(), "<u>; rel=\"next\"".to_owned())));
         assert_eq!(body, b"{\"id\":1}");
         assert!(parse_http(b"garbage").is_err());
+    }
+
+    #[test]
+    fn proxy_tunnel_and_interim_blocks_are_skipped() {
+        let raw = b"HTTP/1.1 200 Connection established\r\nProxy-Agent: p\r\n\r\nHTTP/1.1 103 Early Hints\r\nlink: <x>\r\n\r\nHTTP/2 404\r\nx-a: b\r\n\r\nnope";
+        let parsed = parse_http(raw).unwrap();
+        assert_eq!(parsed.status, 404);
+        assert_eq!(parsed.body, b"nope");
+        assert_eq!(parsed.headers, [("x-a".to_owned(), "b".to_owned())]);
+    }
+
+    fn transport(base: &str) -> TokenTransport {
+        let auth = Auth::Command(vec!["echo".into(), "t".into()]);
+        TokenTransport::new(base, "h", auth, "Bearer")
+    }
+
+    #[test]
+    fn the_token_only_goes_to_https_on_the_base_host() {
+        let transport = transport("https://h/api/v1");
+        for ok in ["https://h/api/v1/x?page=2", "https://H/x"] {
+            assert_eq!(transport.url(ok).unwrap(), ok);
+        }
+        assert_eq!(transport.url("/x").unwrap(), "https://h/api/v1/x");
+        for bad in [
+            "http://h/x",
+            "https://evil.example/x",
+            "https://h.evil.example/x",
+            "https://h@evil.example/x",
+            "https://h:8443/x",
+        ] {
+            assert!(transport.url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_token_in_error_text_is_redacted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let curl = dir.path().join("curl");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\ncat > /dev/null\necho \"curl: bad header Bearer s3cret-token\" >&2\nexit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut transport = transport("https://h");
+        transport.auth = Auth::Command(vec!["echo".into(), "s3cret-token".into()]);
+        transport.program = curl.into_os_string();
+        let error = transport
+            .send(&Request::rest(Method::Get, "x", None))
+            .err()
+            .expect("curl failed");
+        assert!(!error.message.contains("s3cret-token"), "{error}");
+        assert!(error.message.contains("[redacted]"), "{error}");
     }
 
     #[test]
@@ -375,6 +478,7 @@ mod tests {
             Some("<https://h/a?page=2>; rel=\"next\"")
         );
         let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        assert_eq!(argv.lines().next(), Some("-q"), "{argv}");
         assert!(!argv.contains("s3cret-token"), "{argv}");
         assert!(!argv.contains("issues"), "{argv}");
         let stdin = std::fs::read_to_string(dir.path().join("stdin")).unwrap();
@@ -391,6 +495,26 @@ mod tests {
             stdin.contains(r#"data-raw = "{\"body\":\"a \\\"q\\\"\\nb\"}""#),
             "{stdin}"
         );
+    }
+
+    #[test]
+    fn a_rate_limited_403_is_not_a_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let curl = dir.path().join("curl");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\ncat > /dev/null\nprintf 'HTTP/2 403\\r\\n\\r\\n{\"message\":\"API rate limit exceeded\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut transport = transport("https://h");
+        transport.program = curl.into_os_string();
+        let error = transport
+            .send(&Request::rest(Method::Get, "x", None))
+            .err()
+            .expect("403 is an error");
+        assert!(!error.refused(), "{error}");
     }
 
     #[test]
