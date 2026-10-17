@@ -481,7 +481,8 @@ impl<'a> Planner<'a> {
                         })
                     })
                     .collect();
-                let summary = review_body(target, &commit, &threads);
+                // The summary is never posted on someone else's PR/MR.
+                let summary = review_body(target, &commit, &threads, self.foreign().is_none());
                 let request = self.service().review_batch(
                     self.connection.subject(),
                     &commit,
