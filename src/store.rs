@@ -174,6 +174,29 @@ impl Store {
         Ok(result)
     }
 
+    /// Like [`Store::update`] for the target `earlier` was read as, but fails when it is gone, so
+    /// a change planned from an earlier read never recreates a target deleted since.
+    pub fn update_existing<R>(
+        &self,
+        dir: &Path,
+        earlier: &Target,
+        now: &str,
+        change: impl FnOnce(&mut Target) -> Result<R>,
+    ) -> Result<R> {
+        let key = earlier.key.as_str();
+        let missing = std::cell::Cell::new(false);
+        let init = || {
+            missing.set(true);
+            earlier.clone()
+        };
+        self.update(dir, key, now, init, |target| {
+            if missing.get() {
+                return fail(format!("target {key} vanished"));
+            }
+            change(target)
+        })
+    }
+
     /// Like [`Store::update`], but stores the result under `to` and deletes `from`. Both locks are
     /// held, taken in key order so two renames cannot deadlock. When both files exist, `from`'s
     /// runs, threads and records that `to` lacks are merged in.
@@ -641,6 +664,42 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn update_existing_refuses_a_deleted_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            root: dir.path().to_owned(),
+        };
+        let kept = target(Vec::new());
+        let result = store.update_existing(dir.path(), &kept, "2026-10-16T12:00:00Z", |_| Ok(()));
+        assert!(result.unwrap_err().to_string().contains("vanished"));
+        assert!(!dir.path().join("k.json").exists());
+        store
+            .update(
+                dir.path(),
+                "k",
+                "2026-10-16T12:00:00Z",
+                || kept.clone(),
+                |_| Ok(()),
+            )
+            .unwrap();
+        store
+            .update_existing(dir.path(), &kept, "2026-10-16T12:00:01Z", |target| {
+                target.branch = Some("other".into());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .load(dir.path(), "k")
+                .unwrap()
+                .unwrap()
+                .branch
+                .as_deref(),
+            Some("other")
+        );
     }
 
     #[test]
