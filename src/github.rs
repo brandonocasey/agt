@@ -15,9 +15,13 @@ use serde_json::json;
 
 const COMMENT_FIELDS: &str = "databaseId url body createdAt author{login} editor{login} originalCommit{oid} pullRequestReview{databaseId}";
 
-fn pull_query(name: &str, selection: &str) -> String {
+/// The GraphQL field a PR is read through; an issue would use `issue`, with the same comment
+/// connections.
+const PULL: &str = "pullRequest";
+
+fn subject_query(root: &str, name: &str, selection: &str) -> String {
     format!(
-        "query {name}($owner:String!,$name:String!,$number:Int!,$cursor:String){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{selection}}}}}}}"
+        "query {name}($owner:String!,$name:String!,$number:Int!,$cursor:String){{repository(owner:$owner,name:$name){{{root}(number:$number){{{selection}}}}}}}"
     )
 }
 
@@ -308,6 +312,8 @@ fn find_pr(gh: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(Str
 
 struct Pager<'a> {
     gh: &'a dyn Transport,
+    /// The GraphQL field of the subject, such as [`PULL`].
+    root: &'static str,
     owner: String,
     name: String,
     number: String,
@@ -330,7 +336,7 @@ impl Pager<'_> {
                 vars.push(Var::text("cursor", cursor.clone()));
             }
             let response = self.gh.json(&Request::graphql(vars))?;
-            let pointer = format!("/data/repository/pullRequest/{connection}");
+            let pointer = format!("/data/repository/{}/{connection}", self.root);
             let page = response
                 .pointer(&pointer)
                 .ok_or_else(|| Error(format!("GitHub returned no {connection}")))?;
@@ -466,11 +472,13 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
     };
     let pager = Pager {
         gh,
+        root: PULL,
         owner: owner.to_owned(),
         name: name.to_owned(),
         number: number.to_string(),
     };
-    let threads_query = pull_query(
+    let threads_query = subject_query(
+        PULL,
         "PullRequest",
         &format!(
             "number url state closedAt author{{login}} headRefName headRefOid baseRefOid baseRepository{{nameWithOwner}} reviewThreads(first:50,after:$cursor){{pageInfo{{hasNextPage endCursor}} nodes{{id isResolved isOutdated path line originalLine startLine originalStartLine diffSide subjectType comments(first:50){{pageInfo{{hasNextPage endCursor}} nodes{{{COMMENT_FIELDS}}}}}}}}}"
@@ -478,7 +486,7 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
     );
     let (first, thread_nodes) = pager.pages(&threads_query, "reviewThreads")?;
     let pull = first
-        .pointer("/data/repository/pullRequest")
+        .pointer(&format!("/data/repository/{}", pager.root))
         .ok_or_else(|| Error(format!("GitHub has no PR {repo}#{number}")))?;
     let pr = PrInfo {
         repo: forge::text(pull, "/baseRepository/nameWithOwner").unwrap_or_else(|| repo.to_owned()),
@@ -498,7 +506,8 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         .map(|node| review_thread(&pager, node))
         .collect::<Result<Vec<_>>>()?;
 
-    let reviews_query = pull_query(
+    let reviews_query = subject_query(
+        pager.root,
         "PullReviews",
         "reviews(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId url body state submittedAt author{login} editor{login}}}",
     );
@@ -527,7 +536,8 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         ));
     }
 
-    let comments_query = pull_query(
+    let comments_query = subject_query(
+        pager.root,
         "PullComments",
         "comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId url body createdAt author{login} editor{login}}}",
     );

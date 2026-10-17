@@ -403,6 +403,19 @@ fn discussion(discussion: &Value, mr_url: &str) -> Result<Option<ThreadData>> {
     }))
 }
 
+/// Every discussion under `base` (an MR, or an issue, which has the same discussion shape).
+fn discussions(glab: &dyn Transport, base: &str, url: &str) -> Result<Vec<ThreadData>> {
+    let items = glab.items(
+        &Request::get(format!("{base}/discussions?per_page=100")),
+        &CAPS.pagination,
+    )?;
+    let mut threads = Vec::new();
+    for item in &items {
+        threads.extend(discussion(item, url)?);
+    }
+    Ok(threads)
+}
+
 fn fetch(glab: &dyn Transport, project: &str, iid: u64) -> Result<Fetched> {
     let base = format!("projects/{}/merge_requests/{iid}", forge::encode(project));
     let mr = glab.json(&Request::get(base.clone()))?;
@@ -424,14 +437,7 @@ fn fetch(glab: &dyn Transport, project: &str, iid: u64) -> Result<Fetched> {
         author: forge::text(&mr, "/author/username"),
         url: url.clone(),
     };
-    let discussions = glab.items(
-        &Request::get(format!("{base}/discussions?per_page=100")),
-        &CAPS.pagination,
-    )?;
-    let mut threads = Vec::new();
-    for item in &discussions {
-        threads.extend(discussion(item, &url)?);
-    }
+    let threads = discussions(glab, &base, &url)?;
     let drafts = glab
         .items(
             &Request::get(format!("{base}/draft_notes?per_page=100")),
