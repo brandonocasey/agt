@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use super::super::scenario::{Setup, args, ids, marked, strs, thread};
+use super::super::scenario::{Setup, args, ids, marked, sent, strs, thread};
 use super::super::{Env, fixture};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
 
@@ -150,8 +150,6 @@ fn render(setup: &Setup, remote: &Remote) -> String {
             Item::General { comments: list, .. } => {
                 comments.extend(list.iter().map(|c| comment(c.id, &c.login, &c.body)))
             }
-            Item::RawThread(raw) => threads.push(raw.clone()),
-            Item::RawGeneral(raw) => comments.push(raw.clone()),
         }
     }
     json!({ "data": { "repository": { "pullRequest": {
@@ -172,10 +170,6 @@ fn render(setup: &Setup, remote: &Remote) -> String {
 }
 
 impl FakeService for Github {
-    fn name(&self) -> &'static str {
-        "github"
-    }
-
     fn origin(&self) -> &'static str {
         ORIGIN
     }
@@ -258,10 +252,6 @@ impl FakeService for Github {
         format!("gh-c{id}")
     }
 
-    fn alice_remote(&self) -> &'static str {
-        "PRRT_o"
-    }
-
     fn before(&self, _setup: &Setup) -> Remote {
         let mut remote = Remote::new();
         remote.thread(
@@ -272,6 +262,34 @@ impl FakeService for Github {
         );
         remote.general("g", Comment::new(900, "alice", "Alice general text."));
         remote
+    }
+
+    fn plain_review(&self, id: u64, login: &str, body: &str) -> Option<Value> {
+        Some(review(id, login, "COMMENTED", body))
+    }
+
+    fn land_findings(&self, setup: &Setup) -> (Remote, String) {
+        let env = &setup.env;
+        let (f1, f2) = (setup.finding(1), setup.finding(2));
+        self.link(setup);
+        self.lose(env, Call::PostInline);
+        env.fail(&["publish", "--pr", "42"], None);
+        let mut remote = Remote::new();
+        remote.thread(
+            "PRRT_f1",
+            false,
+            3,
+            vec![Comment::new(501, "me", &sent(env, &f1))],
+        );
+        remote.reviews.push(own_review(&setup.head));
+        self.sync(setup, &remote);
+        self.lose(env, Call::PostNote);
+        env.fail(&["publish", "--pr", "42"], None);
+        self.restore(env, Call::PostNote);
+        remote.general("601", Comment::new(601, "me", &sent(env, &f2)));
+        self.sync(setup, &remote);
+        env.run(&["sync", "--pr", "42"]);
+        (remote, "601".to_owned())
     }
 
     fn stages(&self, setup: &Setup) -> [Remote; 3] {

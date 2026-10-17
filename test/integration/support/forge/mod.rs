@@ -4,12 +4,12 @@
 //! scenario function then runs against every service in [`all`].
 //!
 //! A new service adds `<service>.rs` here, a `test/fixtures/<service>/capabilities.json` and its
-//! fixtures, and one line to [`all`].
+//! fixtures, and one `#[test]` per scenario to the `matrix!` of `matrix.rs`.
 
 use serde_json::Value;
 
 use super::Env;
-use super::scenario::{Setup, count_calls, input_of, strs};
+use super::scenario::{Setup, count_calls, strs};
 
 pub mod github;
 pub mod gitlab;
@@ -48,10 +48,6 @@ pub enum Item {
         discussion: bool,
         comments: Vec<Comment>,
     },
-    /// A thread in the service's own response shape, for what the neutral items cannot say.
-    RawThread(Value),
-    /// A general comment or discussion in the service's own response shape.
-    RawGeneral(Value),
 }
 
 /// The state of a PR/MR on the host: what a sync reads.
@@ -107,6 +103,21 @@ impl Remote {
         });
     }
 
+    /// Adds `comment` to the general comments `id`.
+    pub fn add_reply(&mut self, id: &str, comment: Comment) {
+        for item in &mut self.items {
+            if let Item::General {
+                id: at, comments, ..
+            } = item
+                && at == id
+            {
+                comments.push(comment);
+                return;
+            }
+        }
+        panic!("no general comments {id}");
+    }
+
     /// Sets the resolved state of the thread `id`.
     pub fn set_resolved(&mut self, id: &str, value: bool) {
         for item in &mut self.items {
@@ -123,7 +134,7 @@ impl Remote {
 
 /// A write a service takes, named by what it does rather than how the service spells it.
 #[derive(Clone, Copy)]
-pub enum Call {
+pub enum Call<'a> {
     /// The in-diff comments: a review (GitHub) or a draft note (GitLab).
     PostInline,
     /// Publishes the draft `PostInline` made; only with drafts.
@@ -133,9 +144,9 @@ pub enum Call {
     /// A general comment that blocks nothing: the record, an approval comment.
     PostNote,
     /// A native reply to the remote thread.
-    Reply(&'static str),
-    Resolve(&'static str),
-    Unresolve(&'static str),
+    Reply(&'a str),
+    Resolve(&'a str),
+    Unresolve(&'a str),
     /// The formal approval.
     Approve,
 }
@@ -179,10 +190,6 @@ impl Expect {
         self.word("reply") == "all"
     }
 
-    pub fn resolves_on_host(&self) -> bool {
-        self.flag("resolve")
-    }
-
     /// The formal approval is a separate call next to a note.
     pub fn approves_by_call(&self) -> bool {
         self.word("approve") == "call"
@@ -203,7 +210,6 @@ impl Expect {
 }
 
 pub trait FakeService {
-    fn name(&self) -> &'static str;
     /// The `origin` remote of a repository on this service.
     fn origin(&self) -> &'static str;
     /// The PR/MR number a scenario syncs.
@@ -234,10 +240,17 @@ pub trait FakeService {
     fn local_thread(&self, id: u64) -> String;
     /// The local id a general comment `id` is imported as.
     fn local_general(&self, id: u64) -> String;
-    /// The host's id of Alice's thread in [`FakeService::before`], as a [`Call`] names it.
-    fn alice_remote(&self) -> &'static str;
     /// A PR with Alice's resolved thread (line 5) and general comment.
     fn before(&self, setup: &Setup) -> Remote;
+
+    /// A review of someone, with a body and no comments, if the service has reviews.
+    fn plain_review(&self, _id: u64, _login: &str, _body: &str) -> Option<Value> {
+        None
+    }
+    /// Publishes both findings of the reviewed branch with the host losing every response,
+    /// then syncs them back by their markers. Returns the PR as last synced and the id of
+    /// the general comments holding the second finding.
+    fn land_findings(&self, setup: &Setup) -> (Remote, String);
 
     /// The PR the publish of every payload sees on its first sync (`before`), on its second
     /// (everything but the record and the replies posted) and from its third on (all posted).
@@ -261,11 +274,6 @@ pub trait FakeService {
         self.sync(setup, &Remote::new());
         setup.env.run(&["sync", "--pr", self.number()]);
         setup.env.run(&["run", "end", "--run", &setup.run]);
-    }
-
-    /// `agent-review sync --pr` against the registered responses.
-    fn run_sync(&self, setup: &Setup) -> Value {
-        setup.env.run(&["sync", "--pr", self.number()])
     }
 
     /// Accepts `call`, answering with the comment `id` it created.
@@ -292,19 +300,6 @@ pub trait FakeService {
     fn count(&self, env: &Env, call: Call) -> usize {
         count_calls(env, &self.call(call))
     }
-
-    /// The JSON bodies sent with `call`.
-    fn sent_to(&self, env: &Env, call: Call) -> Vec<Value> {
-        input_of(&env.forge_inputs(), &self.call(call))
-    }
-}
-
-/// Every service the scenario matrix runs against.
-pub fn all() -> Vec<Box<dyn FakeService>> {
-    vec![
-        Box::new(github::Github::new()),
-        Box::new(gitlab::Gitlab::new()),
-    ]
 }
 
 /// Every call to the fake was a read; the fake refuses unknown calls.

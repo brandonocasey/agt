@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use super::super::scenario::{
-    Setup, args, assert_never_posted, assert_record, input_of, marked, strs, thread,
+    Setup, args, assert_never_posted, assert_record, input_of, marked, sent, strs, thread,
 };
 use super::super::{Env, fixture};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
@@ -132,16 +132,11 @@ fn render(setup: &Setup, remote: &Remote) -> Vec<Value> {
                 }
                 item
             }
-            Item::RawThread(raw) | Item::RawGeneral(raw) => raw.clone(),
         })
         .collect()
 }
 
 impl FakeService for Gitlab {
-    fn name(&self) -> &'static str {
-        "gitlab"
-    }
-
     fn origin(&self) -> &'static str {
         ORIGIN
     }
@@ -233,10 +228,6 @@ impl FakeService for Gitlab {
         format!("gl-n{id}")
     }
 
-    fn alice_remote(&self) -> &'static str {
-        "d-o"
-    }
-
     fn before(&self, _setup: &Setup) -> Remote {
         let mut remote = Remote::new();
         remote.thread(
@@ -247,6 +238,38 @@ impl FakeService for Gitlab {
         );
         remote.general("d-g", Comment::new(4002, "alice", "Alice general text."));
         remote
+    }
+
+    fn land_findings(&self, setup: &Setup) -> (Remote, String) {
+        let env = &setup.env;
+        let (f1, f2) = (setup.finding(1), setup.finding(2));
+        self.link(setup);
+        self.lose(env, Call::PostInline);
+        env.fail(&["publish", "--pr", "3"], None);
+        let mut remote = Remote::new();
+        remote
+            .drafts
+            .push(json!({ "id": 77, "note": sent(env, &f1) }));
+        self.sync(setup, &remote);
+        env.respond(&strs(&self.call(Call::PublishDraft)), "");
+        self.lose(env, Call::PostThread);
+        env.fail(&["publish", "--pr", "3"], None);
+        let mut remote = Remote::new();
+        remote.thread(
+            "d-f1",
+            false,
+            3,
+            vec![Comment::new(5001, "me", "{{LAST_NOTE}}")],
+        );
+        remote.items.push(Item::General {
+            id: "d-f2".to_owned(),
+            discussion: true,
+            comments: vec![Comment::new(5002, "me", &sent(env, &f2))],
+        });
+        self.sync(setup, &remote);
+        self.restore(env, Call::PostThread);
+        env.run(&["sync", "--pr", "3"]);
+        (remote, "d-f2".to_owned())
     }
 
     fn stages(&self, setup: &Setup) -> [Remote; 3] {
@@ -334,8 +357,8 @@ impl FakeService for Gitlab {
         self.accept(env, Call::PostNote, 5020);
     }
 
-    fn assert_dry_reads(&self, env: &Env, before: usize) {
-        for call in &env.forge_calls()[before..] {
+    fn assert_dry_reads(&self, env: &Env, _before: usize) {
+        for call in env.forge_calls() {
             assert!(call.contains(" GET "), "{call}");
         }
     }

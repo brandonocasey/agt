@@ -1,4 +1,5 @@
 mod commands;
+mod matrix;
 mod publish;
 mod reviewed;
 mod support;

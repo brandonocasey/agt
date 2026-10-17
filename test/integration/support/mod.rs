@@ -6,9 +6,7 @@ use std::process::{Command, Output, Stdio};
 use assert_fs::TempDir;
 use serde_json::Value;
 
-#[allow(dead_code, reason = "the scenarios that use all of it follow")]
 pub mod forge;
-#[allow(dead_code, reason = "the scenarios that use all of it follow")]
 pub mod scenario;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agent-review");

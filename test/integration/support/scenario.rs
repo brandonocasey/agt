@@ -256,6 +256,20 @@ pub fn write_text<'a>(dry: &'a Value, field: &str, wanted: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no write with {wanted} in {dry}"))
 }
 
+/// The text of the write of a dry run whose `field` starts with `prefix`.
+pub fn write_starting<'a>(dry: &'a Value, field: &str, prefix: &str) -> &'a str {
+    dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|write| {
+            write["input"][field]
+                .as_str()
+                .filter(|text| text.starts_with(prefix))
+        })
+        .unwrap_or_else(|| panic!("no write starting {prefix} in {dry}"))
+}
+
 pub fn assert_never_posted(env: &Env) {
     for (call, input) in env.forge_inputs() {
         for text in NEVER_POSTED {
