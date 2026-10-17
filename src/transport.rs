@@ -382,22 +382,46 @@ pub fn glab_args(request: &Request) -> Vec<String> {
     args
 }
 
-/// The HTTP status a CLI reports in its error text: only the `(HTTP nnn)` suffix, as in
-/// `gh: Not Found (HTTP 404)` and `glab: 404 Project Not Found (HTTP 404)`. Other numbers in the
-/// text (a URL's `pulls/412/reviews`, a port) are not statuses.
+/// The HTTP status a CLI reports in its error text: the `(HTTP nnn)` suffix, as in
+/// `gh: Not Found (HTTP 404)` and `glab: 404 Project Not Found (HTTP 404)`, or a bare
+/// `HTTP nnn` that starts a line or directly follows the `gh: `/`glab: ` prefix. Other numbers
+/// in the text (a URL's `pulls/412/reviews`, a port) are not statuses.
 fn status_in(stderr: &str) -> Option<u16> {
-    let status = stderr.match_indices("(HTTP ").find_map(|(at, marker)| {
-        let rest = &stderr[at + marker.len()..];
-        let (digits, _) = rest.split_once(')')?;
-        let status: u16 = digits.parse().ok().filter(|_| digits.len() == 3)?;
+    let three = |digits: &str| -> Option<u16> {
+        let digits = digits.get(..3)?;
+        let status: u16 = digits.parse().ok()?;
         (400..600).contains(&status).then_some(status)
-    })?;
-    Some(as_seen_by_retries(status, stderr))
+    };
+    let suffix = stderr.match_indices("(HTTP ").find_map(|(at, marker)| {
+        let (digits, _) = stderr[at + marker.len()..].split_once(')')?;
+        (digits.len() == 3).then(|| three(digits)).flatten()
+    });
+    let bare = || {
+        stderr.lines().find_map(|line| {
+            let line = line.trim_start();
+            let line = ["gh: ", "glab: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .unwrap_or(line);
+            let digits = line.strip_prefix("HTTP ")?;
+            let after = digits.get(3..)?;
+            (!after.starts_with(|c: char| c.is_ascii_digit()))
+                .then(|| three(digits))
+                .flatten()
+        })
+    };
+    Some(as_seen_by_retries(suffix.or_else(bare)?, stderr))
 }
 
-/// GitHub answers a rate limit with 403, which is worth retrying later, unlike a real 403.
+/// GitHub answers a rate limit or abuse detection with 403, which is worth retrying later,
+/// unlike a real 403.
 pub(crate) fn as_seen_by_retries(status: u16, text: &str) -> u16 {
-    if status == 403 && text.to_ascii_lowercase().contains("rate limit") {
+    let text = text.to_ascii_lowercase();
+    if status == 403
+        && ["rate limit", "abuse detection", "secondary rate limit"]
+            .iter()
+            .any(|marker| text.contains(marker))
+    {
         429
     } else {
         status
@@ -512,7 +536,9 @@ mod tests {
             "dial tcp 140.82.112.5:443: connection reset",
             "glab: 404 Not Found",
             "gh: 403 Forbidden",
-            "HTTP 404: Not Found",
+            "gh: see https://x/HTTP 404 and :443",
+            "curl: HTTP 404 in the middle",
+            "gh: HTTP 4041",
         ] {
             assert_eq!(status_in(text), None, "{text}");
         }
@@ -521,6 +547,27 @@ mod tests {
             message: String::new(),
         };
         assert!(!eof.refused());
+    }
+
+    #[test]
+    fn bare_http_statuses_are_read_when_anchored() {
+        assert_eq!(status_in("gh: HTTP 404"), Some(404));
+        assert_eq!(status_in("glab: HTTP 422: Unprocessable"), Some(422));
+        assert_eq!(status_in("HTTP 404: Not Found"), Some(404));
+        assert_eq!(
+            status_in("note\nHTTP 403: Resource not accessible"),
+            Some(403)
+        );
+    }
+
+    #[test]
+    fn abuse_detection_is_transient() {
+        for text in [
+            "gh: You have triggered an abuse detection mechanism (HTTP 403)",
+            "gh: HTTP 403: You have exceeded a secondary rate limit",
+        ] {
+            assert_eq!(status_in(text), Some(429), "{text}");
+        }
     }
 
     #[test]
