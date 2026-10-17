@@ -162,6 +162,12 @@ pub struct Expect {
     approve: &'static str,
     approve_self_allowed: Option<bool>,
     edits_attributed: bool,
+    resolve: bool,
+    unresolve: bool,
+    general_resolvable: bool,
+    general_kind: &'static str,
+    notes_become_discussions: bool,
+    pagination: &'static str,
 }
 
 impl Expect {
@@ -174,6 +180,12 @@ impl Expect {
                 approve: "review",
                 approve_self_allowed: Some(false),
                 edits_attributed: true,
+                resolve: true,
+                unresolve: true,
+                general_resolvable: false,
+                general_kind: "general",
+                notes_become_discussions: false,
+                pagination: "graphql_cursor",
             },
             "gitlab" => Self {
                 inline: "draft_then_publish",
@@ -182,6 +194,12 @@ impl Expect {
                 approve: "call",
                 approve_self_allowed: None,
                 edits_attributed: false,
+                resolve: true,
+                unresolve: true,
+                general_resolvable: true,
+                general_kind: "discussion",
+                notes_become_discussions: true,
+                pagination: "cli_paginate",
             },
             other => panic!("no pinned expectations for {other}; add them here"),
         };
@@ -202,6 +220,12 @@ impl Expect {
             "approve": self.approve,
             "approve_self_allowed": self.approve_self_allowed,
             "edits_attributed": self.edits_attributed,
+            "resolve": self.resolve,
+            "unresolve": self.unresolve,
+            "general_resolvable": self.general_resolvable,
+            "general_kind": self.general_kind,
+            "notes_become_discussions": self.notes_become_discussions,
+            "pagination": self.pagination,
         });
         for (key, value) in pinned.as_object().unwrap() {
             assert_eq!(

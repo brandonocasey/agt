@@ -500,6 +500,8 @@ impl FakeService for Github {
     fn assert_counts_once(&self, env: &Env) {
         assert_eq!(self.count(env, Call::PostInline), 1);
         assert_eq!(self.count(env, Call::PostNote), 4);
+        assert_eq!(self.count(env, Call::Resolve("PRRT_f1")), 1);
+        assert_eq!(self.count(env, Call::Unresolve("PRRT_o")), 1);
     }
 
     fn assert_range(&self, dry: &Value, start: u32, end: u32, text: &str) {
