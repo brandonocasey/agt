@@ -23,6 +23,12 @@ use crate::store::model::{PostState, RemoteComment};
 /// How long after a create with no answer a push waits before sending it again.
 const LISTING_LAG_SECS: i64 = 120;
 
+/// Whether `now` is within the listing lag of `sent`, in either direction: a clock stepped back
+/// leaves a send time in the future, which must not defer the create for long.
+fn within_listing_lag(now: i64, sent: i64) -> bool {
+    (now - sent).abs() < LISTING_LAG_SECS
+}
+
 pub struct Options {
     pub dry_run: bool,
     pub force: bool,
@@ -368,7 +374,7 @@ impl Push<'_> {
         let Some(sent) = latest else {
             return Ok(false);
         };
-        Ok(clock::now_secs()? - sent < LISTING_LAG_SECS)
+        Ok(within_listing_lag(clock::now_secs()?, sent))
     }
 
     /// The host's copy of a create that was sent but never answered, found by its marker.
@@ -522,6 +528,16 @@ fn record_sent(base: &mut Fields, changes: &Changes) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_listing_lag_holds_in_both_directions_of_the_clock() {
+        use super::{LISTING_LAG_SECS, within_listing_lag};
+        assert!(within_listing_lag(1000, 1000));
+        assert!(within_listing_lag(1000 + LISTING_LAG_SECS - 1, 1000));
+        assert!(!within_listing_lag(1000 + LISTING_LAG_SECS, 1000));
+        assert!(within_listing_lag(1000, 1000 + LISTING_LAG_SECS - 1));
+        assert!(!within_listing_lag(1000, 1000 + LISTING_LAG_SECS + 1));
+    }
+
     use super::*;
     use crate::forge::issue::{IssueData, IssueFetched};
     use crate::store::issues::Category;
