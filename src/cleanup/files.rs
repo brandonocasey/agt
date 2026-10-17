@@ -20,6 +20,8 @@ const TMP_OVERRIDE: &str = "AGT_CLEANUP_TMP";
 /// One entry whose whole tree is older than the cutoff.
 pub struct Stale {
     pub path: PathBuf,
+    /// The directory scanned, which `remove` checks again from here down.
+    pub root: PathBuf,
     pub key: String,
     pub newest: i64,
     pub bytes: u64,
@@ -75,6 +77,32 @@ pub fn measure(path: &Path) -> io::Result<(i64, u64)> {
     Ok((newest, bytes))
 }
 
+/// A real directory, not a link, owned by this user. `/tmp/claude-<uid>` may be made by
+/// anyone, so every directory between a root and what is deleted must pass this.
+fn own_dir(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_dir() && meta.uid() == unsafe { libc::getuid() })
+}
+
+/// Whether `dir` and each directory from it down to `path`'s parent pass [`own_dir`].
+fn trusted(root: &Path, path: &Path) -> bool {
+    let Ok(below) = path.parent().unwrap_or(root).strip_prefix(root) else {
+        return false;
+    };
+    let mut dir = root.to_path_buf();
+    if !own_dir(&dir) {
+        return false;
+    }
+    for part in below.components() {
+        dir.push(part);
+        if !own_dir(&dir) {
+            return false;
+        }
+    }
+    true
+}
+
 fn children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut found: Vec<PathBuf> = match fs::read_dir(dir) {
         Ok(entries) => entries
@@ -87,8 +115,10 @@ fn children(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// Entries of `dirs` untouched for `days` days. `key` names an entry for the plan.
+/// Entries of `dirs` (each below `root`) untouched for `days` days. `key` names an entry for
+/// the plan. A directory that is a link or another user's is skipped with a warning.
 fn stale_in(
+    root: &Path,
     dirs: &[PathBuf],
     days: i64,
     now: i64,
@@ -97,6 +127,16 @@ fn stale_in(
 ) -> Vec<Stale> {
     let mut found = Vec::new();
     for dir in dirs {
+        if fs::symlink_metadata(dir).is_err() {
+            continue;
+        }
+        if !trusted(root, &dir.join("entry")) {
+            warnings.push(format!(
+                "{}: skipped, not a directory of this user (a link or another owner)",
+                dir.display()
+            ));
+            continue;
+        }
         let entries = match children(dir) {
             Ok(entries) => entries,
             Err(error) => {
@@ -111,6 +151,7 @@ fn stale_in(
             match measure(&path) {
                 Ok((newest, bytes)) if now - newest > days * DAY => found.push(Stale {
                     key: key(&path),
+                    root: root.to_path_buf(),
                     path,
                     newest,
                     bytes,
@@ -136,6 +177,7 @@ fn relative(root: &Path, path: &Path) -> String {
 pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
     let root = cache_root()?.join("agents").join("output");
     Ok(stale_in(
+        &root,
         std::slice::from_ref(&root),
         OUTPUT_DAYS,
         now,
@@ -148,6 +190,7 @@ pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
 pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
     let root = cache_root()?.join("agents").join("scratch");
     let mut found = stale_in(
+        &root,
         std::slice::from_ref(&root),
         SCRATCH_DAYS,
         now,
@@ -155,6 +198,16 @@ pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
         warnings,
     );
     for harness in harness_roots()? {
+        if fs::symlink_metadata(&harness).is_err() {
+            continue;
+        }
+        if !own_dir(&harness) {
+            warnings.push(format!(
+                "{}: skipped, not a directory of this user (a link or another owner)",
+                harness.display()
+            ));
+            continue;
+        }
         let slugs = match children(&harness) {
             Ok(slugs) => slugs,
             Err(error) => {
@@ -162,8 +215,13 @@ pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
                 continue;
             }
         };
-        let slugs: Vec<PathBuf> = slugs.into_iter().filter(|path| path.is_dir()).collect();
+        // Links among the slugs are not followed: a link is not a real directory here.
+        let slugs: Vec<PathBuf> = slugs
+            .into_iter()
+            .filter(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+            .collect();
         found.extend(stale_in(
+            &harness,
             &slugs,
             SCRATCH_DAYS,
             now,
@@ -182,9 +240,22 @@ pub fn reason(stale: &Stale, now: i64, days: i64) -> String {
     )
 }
 
-/// Deletes an entry if it is still untouched for `days` days. A harness session directory's
-/// parent is removed too once it is empty.
-pub fn remove(path: &Path, days: i64, now: i64, prune_parent: bool) -> Result<Removal> {
+/// Deletes an entry if it is still untouched for `days` days and every directory from `root`
+/// down to it is still this user's own. A harness session directory's parent is removed too
+/// once it is empty.
+pub fn remove(
+    root: &Path,
+    path: &Path,
+    days: i64,
+    now: i64,
+    prune_parent: bool,
+) -> Result<Removal> {
+    if !trusted(root, path) {
+        return Err(Error(format!(
+            "{}: not deleted, a directory above it is a link or another user's",
+            path.display()
+        )));
+    }
     let (newest, bytes) = match measure(path) {
         Ok(found) => found,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Removal::Kept),

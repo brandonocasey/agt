@@ -10,7 +10,7 @@ mod plan;
 mod procs;
 
 use clap::{Args, ValueEnum};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::Result;
@@ -110,9 +110,18 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
         if let Some(candidates) = &candidates {
             map.insert("manual".into(), manual::json(candidates));
+            // What was already deleted must still be reported, so a failed save only warns.
             if cli.yes {
-                let path = manual::save(candidates, now)?;
-                map.insert("manual_report".into(), json!(path));
+                match manual::save(candidates, now) {
+                    Ok(path) => {
+                        map.insert("manual_report".into(), json!(path));
+                    }
+                    Err(error) => {
+                        if let Some(Value::Array(warnings)) = map.get_mut("warnings") {
+                            warnings.push(json!(format!("manual report not saved: {error}")));
+                        }
+                    }
+                }
             }
         }
     }

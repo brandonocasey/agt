@@ -126,7 +126,11 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         Action::LocalRepo { dir, had_targets } => {
             Store::open(Namespace::Reviews)?.remove_local_repo(dir, now, *had_targets)
         }
-        Action::Files { days, harness } => super::files::remove(&item.path, *days, now, *harness),
+        Action::Files {
+            root,
+            days,
+            harness,
+        } => super::files::remove(root, &item.path, *days, now, *harness),
         // `run` signals processes on its own.
         Action::Process(_) => Ok(Removal::Kept),
     }

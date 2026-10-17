@@ -151,12 +151,16 @@ impl Prune {
     }
 
     fn run(&self, args: &[&str]) -> Value {
+        self.run_at(NOW, args)
+    }
+
+    fn run_at(&self, now: i64, args: &[&str]) -> Value {
         let output = self
             .env
             .command(BIN, &self.env.repo)
             .arg("cleanup")
             .args(args)
-            .env("AGT_NOW", NOW.to_string())
+            .env("AGT_NOW", now.to_string())
             .output()
             .unwrap();
         assert!(
@@ -950,6 +954,16 @@ fn a_local_repo_with_no_targets_is_listed_only_after_a_quiet_quarter() {
     assert!(!dir.exists());
 }
 
+/// 30 days after the real time, for tests that compare the clock with real process start
+/// times and git timestamps, where the fixed `NOW` would fail once the real date passes it.
+fn later() -> i64 {
+    let real = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    i64::try_from(real).unwrap() + 30 * DAY
+}
+
 /// Sets a path's modification time to `days` before `NOW`.
 fn age(path: &Path, days: i64) {
     let secs = u64::try_from(NOW - days * DAY).unwrap();
@@ -1040,7 +1054,7 @@ fn orphan_processes_are_signalled_only_when_named() {
             .command(BIN, &prune.env.repo)
             .arg("cleanup")
             .args(args)
-            .env("AGT_NOW", NOW.to_string())
+            .env("AGT_NOW", later().to_string())
             .env("AGT_CLEANUP_PID", &pid)
             .output()
             .unwrap();
@@ -1118,7 +1132,7 @@ fn a_live_session_keeps_its_tools() {
         .env
         .command(BIN, &prune.env.repo)
         .args(["cleanup", "--only", "processes"])
-        .env("AGT_NOW", NOW.to_string())
+        .env("AGT_NOW", later().to_string())
         .env("AGT_CLEANUP_PID", child.id().to_string())
         .output()
         .unwrap();
@@ -1164,14 +1178,14 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
         fs::create_dir_all(browsers.join(name)).unwrap();
     }
 
-    let report = prune.run(&["--only", "manual"]);
+    let report = prune.run_at(later(), &["--only", "manual"]);
     let manual = &report["manual"];
     let repo_path = repo.canonicalize().unwrap();
     assert_eq!(
         manual["branches"],
         json!([format!("git -C {} branch -d done", repo_path.display())])
     );
-    // Merged and clean; the clock is months past its last use. Its branch is checked out.
+    // Merged and clean; the clock is 30 days past its last use. Its branch is checked out.
     assert_eq!(
         manual["worktrees"],
         json!([format!(
@@ -1204,7 +1218,7 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     };
     assert_eq!(count(&prune), "");
 
-    let report = prune.run(&["--only", "manual", "--yes"]);
+    let report = prune.run_at(later(), &["--only", "manual", "--yes"]);
     let saved = PathBuf::from(report["manual_report"].as_str().unwrap());
     let text = fs::read_to_string(&saved).unwrap();
     assert!(text.contains("<!-- count: 5 -->"), "{text}");
@@ -1215,4 +1229,38 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     );
     assert!(releases.join("0.9.0").exists() && browsers.join("chromium-1100").exists());
     assert!(repo_path.join(".worktrees/busy").exists());
+}
+
+#[test]
+fn scratch_never_follows_a_link_out_of_the_harness_root() {
+    let prune = Prune::new();
+    let uid = unsafe { libc::getuid() };
+    // A victim directory with old files that a link could point the sweep at.
+    let victim = prune.env.path("victim");
+    old_file(&victim.join("precious/data"), 400);
+    age(&victim.join("precious"), 400);
+    old_file(&victim.join("notes.txt"), 400);
+    // `/tmp/claude-<uid>` itself made a link by someone else.
+    let tmp = prune.env.path("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    std::os::unix::fs::symlink(&victim, tmp.join(format!("claude-{uid}"))).unwrap();
+    // And a slug that is a link inside a real `~/.cache/claude-tmp/claude-<uid>`.
+    let harness = prune
+        .env
+        .path("home")
+        .join(format!(".cache/claude-tmp/claude-{uid}"));
+    fs::create_dir_all(&harness).unwrap();
+    std::os::unix::fs::symlink(&victim, harness.join("evil")).unwrap();
+
+    let report = prune.run(&["--only", "scratch", "--yes"]);
+    assert_eq!(keys(&report, "scratch"), Vec::<String>::new(), "{report}");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("not a directory of this user")),
+        "{report}"
+    );
+    assert!(victim.join("precious/data").exists() && victim.join("notes.txt").exists());
 }

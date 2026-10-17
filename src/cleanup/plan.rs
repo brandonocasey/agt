@@ -52,6 +52,7 @@ pub enum Action {
     Backup(Backup),
     /// A tree under the cache root, deleted while it is still `days` days old.
     Files {
+        root: PathBuf,
         days: i64,
         /// A harness session directory, whose emptied parent goes too.
         harness: bool,
@@ -378,6 +379,7 @@ impl Plan {
                 reason,
                 stale.bytes,
                 Action::Files {
+                    root: stale.root,
                     days: OUTPUT_DAYS,
                     harness: false,
                 },
@@ -399,6 +401,7 @@ impl Plan {
                 reason,
                 stale.bytes,
                 Action::Files {
+                    root: stale.root,
                     days: SCRATCH_DAYS,
                     harness: in_harness,
                 },
