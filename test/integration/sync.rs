@@ -518,6 +518,44 @@ fn gitlab_sync_does_not_claim_an_unsent_legacy_marker() {
 }
 
 #[test]
+fn hosts_file_names_the_service_of_an_unknown_host() {
+    let setup = reviewed_branch("git@gitlab.example.com:group/sub/proj.git");
+    let env = &setup.env;
+    let old = env.git(&["rev-parse", "HEAD~1"]);
+    gitlab_responses(&setup, &old);
+    let refused = env.fail(&["sync"], None);
+    assert!(
+        refused.contains("unsupported forge gitlab.example.com"),
+        "{refused}"
+    );
+    let dir = env.path("config/agent-review");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("hosts.json"),
+        r#"{"Gitlab.Example.com": {"service": "gitlab"}}"#,
+    )
+    .unwrap();
+    let probed = env.forge_calls().len();
+    let synced = env.run(&["sync"]);
+    assert_eq!(synced["target"], "gl-3");
+    for call in &env.forge_calls()[probed..] {
+        assert!(call.starts_with("gitlab.example.com\t"), "{call}");
+        assert!(!call.contains("auth status"), "{call}");
+    }
+}
+
+#[test]
+fn a_host_synced_before_is_remembered_without_asking_the_cli() {
+    let setup = reviewed_branch("git@gitlab.example.com:group/sub/proj.git");
+    let env = &setup.env;
+    let old = env.git(&["rev-parse", "HEAD~1"]);
+    gitlab_responses(&setup, &old);
+    env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
+    let again = env.run(&["sync"]);
+    assert_eq!(again["target"], "gl-3");
+}
+
+#[test]
 fn gitlab_self_hosted_sync() {
     let setup = reviewed_branch("git@gitlab.example.com:group/sub/proj.git");
     let env = &setup.env;

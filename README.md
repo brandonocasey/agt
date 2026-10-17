@@ -350,7 +350,11 @@ agent-review prune --all
 
 ## Sync
 
-- Forge: GitHub (`gh`, with `GH_HOST=<host>`) for `github.com` or a host
+- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agent-review/hosts.json`
+  (`{"git.example.com": {"service": "gitlab"}}`, `github` or `gitlab`); the
+  names below that need no lookup (`github.com`, `gitlab.com`); the forge this
+  repository last synced that host with; then the CLI checks below, which are
+  the slowest. GitHub (`gh`, with `GH_HOST=<host>`) for `github.com` or a host
   `gh auth status --hostname <host>` knows; GitLab (`glab`, with
   `GITLAB_HOST=<host>`) for `gitlab.com`, the host in `GITLAB_HOST`, glab's
   configured host (`glab config get host`, the global default only), or a host

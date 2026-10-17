@@ -1,5 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Adoption, Ctx, Scope, prune_dir};
@@ -79,7 +81,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     let Some((host, origin_repo)) = location else {
         return fail("sync needs a GitHub or GitLab origin remote, or --pr <url>");
     };
-    let forge = detect(&host)?;
+    let forge = detect(ctx, &host)?;
     let (service, login) = authenticate(forge, &host)?;
     let (repo, number) = match &pr_ref {
         Some(pr) => (origin_repo, pr.number),
@@ -105,25 +107,66 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     })
 }
 
-/// The forge of `host`, from the host name, the services' own configuration or their logins;
-/// never guessed.
-fn detect(host: &str) -> Result<Forge> {
+/// The forge of `host`, never guessed. In order: the hosts file
+/// (`$XDG_CONFIG_HOME/agent-review/hosts.json`, `{"<host>": {"service": "gitlab"}}`), hosts
+/// every service knows by name, the forge this repository last synced that host with, then
+/// each service's own configuration and logins, which are the slowest to ask.
+fn detect(ctx: &Ctx, host: &str) -> Result<Forge> {
+    let cached = ctx
+        .store
+        .load_account(&ctx.dir)?
+        .filter(|account| account.host == host)
+        .map(|account| account.forge);
+    pick(host, hosts_file(host)?, cached)
+}
+
+fn pick(host: &str, configured: Option<Forge>, cached: Option<Forge>) -> Result<Forge> {
     let by = |check: fn(&Kind) -> fn(&str) -> bool| {
         SERVICES
             .iter()
             .find(|kind| check(kind)(host))
             .map(|kind| kind.forge)
     };
-    by(|kind| kind.well_known)
+    configured
+        .or_else(|| by(|kind| kind.well_known))
+        .or(cached)
         .or_else(|| by(|kind| kind.configured))
         .or_else(|| by(|kind| kind.probe))
         .ok_or_else(|| {
             Error(format!(
                 "unsupported forge {host}: sync and publish need github.com or a host `gh auth \
-                 status` knows, or gitlab.com, GITLAB_HOST, glab's configured host or a host \
-                 `glab auth status` knows"
+                 status` knows, or gitlab.com, GITLAB_HOST, glab's configured host, a host \
+                 `glab auth status` knows, or an entry for it in hosts.json"
             ))
         })
+}
+
+#[derive(Deserialize)]
+struct HostEntry {
+    service: Forge,
+}
+
+/// The forge the hosts file names for `host`, if any.
+fn hosts_file(host: &str) -> Result<Option<Forge>> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        _ => match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            Some(home) => PathBuf::from(home).join(".config"),
+            None => return Ok(None),
+        },
+    };
+    let path = base.join("agent-review").join("hosts.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return fail(format!("read {}: {error}", path.display())),
+    };
+    let hosts: HashMap<String, HostEntry> = serde_json::from_str(&text)
+        .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
+    Ok(hosts
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(host))
+        .map(|(_, entry)| entry.service))
 }
 
 fn authenticate(forge: Forge, host: &str) -> Result<(Box<dyn Service>, String)> {
@@ -1047,6 +1090,24 @@ mod tests {
         assert_eq!(
             fixed_sha("Fixed in 9e8d7c6.\nRe: x").as_deref(),
             Some("9e8d7c6")
+        );
+    }
+
+    #[test]
+    fn hosts_are_detected_in_a_fixed_order() {
+        // The hosts file wins over a name every service knows, which wins over the cache.
+        let forge = |result: Result<Forge>| result.unwrap();
+        assert!(forge(pick("github.com", Some(Forge::Gitlab), None)) == Forge::Gitlab);
+        assert!(forge(pick("github.com", None, Some(Forge::Gitlab))) == Forge::Github);
+        assert!(forge(pick("gitlab.com", None, None)) == Forge::Gitlab);
+        // A cached host needs no probe of any CLI.
+        assert!(forge(pick("git.example.invalid", None, Some(Forge::Gitlab))) == Forge::Gitlab);
+        assert!(
+            forge(pick(
+                "git.example.invalid",
+                Some(Forge::Github),
+                Some(Forge::Gitlab)
+            )) == Forge::Github
         );
     }
 }
