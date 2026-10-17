@@ -975,6 +975,123 @@ fn assert_gl_payloads(setup: &Setup) {
 }
 
 #[test]
+fn concurrent_publish_posts_a_pending_comment_once() {
+    use std::fs::{self, OpenOptions, Permissions};
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let setup = reviewed("git@gitlab.com:me/proj.git");
+    let env = &setup.env;
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["comment", "--body", "Post once"]);
+    let endpoint = format!("{GL_MR}/discussions");
+    env.respond(
+        &strs(&gl_write("POST", &endpoint)),
+        r#"{"id":"d-h1","notes":[{"id":5001}]}"#,
+    );
+    gl_sync(
+        env,
+        &setup,
+        &[gl_general("d-h1", gl_note(5001, "me", "{{LAST_BODY}}"))],
+        &[],
+    );
+    env.reset_calls();
+
+    let wrapper = env.path("publish-forge.sh");
+    fs::write(&wrapper, r#"#!/bin/sh
+set -eu
+case "$*" in
+  'api -X GET --paginate projects/me%2Fproj/merge_requests/3/discussions?per_page=100')
+    if [ ! -f "$FAKE_FORGE_DIR/posted" ]; then
+      printf '[]\n'
+      exit 0
+    fi
+    ;;
+  'api -X POST projects/me%2Fproj/merge_requests/3/discussions -H Content-Type: application/json --input -')
+    printf '%s\n' "$$" >> "$FAKE_FORGE_DIR/arrivals"
+    IFS= read -r release < "$FAKE_FORGE_DIR/release"
+    "$FAKE_FORGE_REAL" "$@"
+    touch "$FAKE_FORGE_DIR/posted"
+    exit 0
+    ;;
+esac
+exec "$FAKE_FORGE_REAL" "$@"
+"#).unwrap();
+    fs::set_permissions(&wrapper, Permissions::from_mode(0o700)).unwrap();
+    let fifo = env.path("forge/release");
+    assert!(
+        env.command("mkfifo", &env.repo)
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut release = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fifo)
+        .unwrap();
+    let spawn = || {
+        env.command(crate::support::BIN, &env.repo)
+            .args(["--target", "gl-3", "publish", "--only", "h1"])
+            .env("AGENT_REVIEW_GLAB_BIN", &wrapper)
+            .env(
+                "FAKE_FORGE_REAL",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let wait_for = |check: &dyn Fn() -> bool, limit: Duration| {
+        let until = Instant::now() + limit;
+        while Instant::now() < until {
+            if check() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    };
+    let arrivals = || {
+        fs::read_to_string(env.path("forge/arrivals"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let first = spawn();
+    let first_ready = wait_for(&|| arrivals() >= 1, Duration::from_secs(5));
+    let second = spawn();
+    let authenticated = wait_for(
+        &|| count_calls(env, &args(&["api", "-X", "GET", "user"])) >= 2,
+        Duration::from_secs(5),
+    );
+    wait_for(&|| arrivals() >= 2, Duration::from_secs(1));
+    release.write_all(b"go\ngo\n").unwrap();
+    for child in [first, second] {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(
+        first_ready && authenticated,
+        "both publishers must reach the controlled race"
+    );
+    assert_eq!(count_calls(env, &gl_write("POST", &endpoint)), 1);
+    assert_eq!(
+        thread(&env.run(&["list"]), "h1")["comments"][0]["post"],
+        "posted"
+    );
+}
+
+#[test]
 fn gitlab_publish_posts_every_payload_once() {
     let setup = reviewed("git@gitlab.com:me/proj.git");
     let env = &setup.env;

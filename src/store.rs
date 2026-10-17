@@ -125,6 +125,13 @@ impl Store {
         Ok(found)
     }
 
+    /// Uses a separate lock so publishing can still take the target's store-update lock.
+    pub fn publish_lock(&self, dir: &Path, key: &str) -> Result<File> {
+        validate_key(key)?;
+        create_dir(dir)?;
+        lock(&dir.join(format!(".{key}.publish.lock")))
+    }
+
     /// Runs `change` on the target under its lock and writes the result atomically. A missing
     /// target starts from `init`.
     pub fn update<R>(

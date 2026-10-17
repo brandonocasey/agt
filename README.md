@@ -481,6 +481,8 @@ agent-review prune --all
   `status`. The verdict is `review-fixed` when the run has repair commits that
   no pass of it covers, else `reviewed` (committing a reviewed dirty tree is
   `reviewed`).
+- Concurrent `publish` commands for one repository and PR/MR run one at a time.
+  Each command syncs after waiting, so it does not repeat earlier writes.
 - Crash safety: each item is saved as `posting` with the attempt id and the
   exact body it sends (`sent`) before its write and gets its remote id right
   after. A rerun syncs first and matches

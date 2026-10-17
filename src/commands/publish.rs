@@ -150,6 +150,11 @@ pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, options: &Options) -> Result<
         return fail("--findings posts on someone else's PR/MR only what --only <id,...> names");
     }
     let connection = sync::connect(ctx, pr)?;
+    let _publish_lock = if dry_run {
+        None
+    } else {
+        Some(ctx.store.publish_lock(&ctx.dir, &connection.key)?)
+    };
     let plan = sync::plan(ctx, &connection)?;
     let author = plan.review.author.clone();
     if !not_own && author.as_deref() != Some(connection.login.as_str()) {
