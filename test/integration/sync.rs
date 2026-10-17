@@ -184,15 +184,15 @@ fn prompt_hides_other_authors_and_author_defaults_to_login() {
 fn github_fork_pr_found_in_parent() {
     let setup = Setup::synced_branch("https://github.com/me/repo.git");
     let env = &setup.env;
-    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
-    let pulls = |repo: &str| format!("repos/{repo}/pulls?head=me%3Afeat&state=all&per_page=20");
-    env.respond(&["api", "--method", "GET", &pulls("me/repo")], "[]");
+    github::login(env);
+    github::pulls(env, "me/repo", "[]");
     env.respond(
         &["api", "--method", "GET", "repos/me/repo"],
         r#"{"fork":true,"parent":{"full_name":"up/repo"}}"#,
     );
-    env.respond(
-        &["api", "--method", "GET", &pulls("up/repo")],
+    github::pulls(
+        env,
+        "up/repo",
         r#"[{"number":7,"state":"closed"},{"number":8,"state":"open"}]"#,
     );
     github::empty_pr(
@@ -216,7 +216,7 @@ fn github_fork_pr_found_in_parent() {
 fn prune_ninety_days_after_close() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
-    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
+    github::login(env);
     github::empty_pr(
         env,
         "me/repo",
@@ -396,16 +396,8 @@ fn sync_errors_without_forge_or_pr() {
     let error = env.fail(&["sync"], None);
     assert!(error.contains("origin remote"), "{error}");
     env.git(&["remote", "add", "origin", "git@github.com:me/repo.git"]);
-    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
-    env.respond(
-        &[
-            "api",
-            "--method",
-            "GET",
-            "repos/me/repo/pulls?head=me%3Afeat&state=all&per_page=20",
-        ],
-        "[]",
-    );
+    github::login(&env);
+    github::pulls(&env, "me/repo", "[]");
     env.respond(
         &["api", "--method", "GET", "repos/me/repo"],
         r#"{"fork":false}"#,

@@ -52,6 +52,11 @@ pub fn list(mr: &str, path: &str) -> Vec<String> {
     ])
 }
 
+/// Answers `glab api user` as `me`.
+pub fn login(env: &Env) {
+    env.respond(&["api", "-X", "GET", "user"], r#"{"username":"me"}"#);
+}
+
 pub fn note(id: u64, login: &str, body: &str) -> Value {
     json!({
         "id": id,
@@ -155,7 +160,7 @@ impl FakeService for Gitlab {
 
     fn sync_with(&self, setup: &Setup, call: Option<usize>, remote: &Remote) {
         let env = &setup.env;
-        env.respond(&["api", "-X", "GET", "user"], r#"{"username":"me"}"#);
+        login(env);
         let head = remote.head.as_deref().unwrap_or(&setup.head);
         let vars = [
             ("HOST", "gitlab.com"),
@@ -467,7 +472,7 @@ pub fn sync_fixtures(setup: &Setup, old: &str) {
         ("REPO", "group/sub/proj"),
         ("AUTHOR", "me"),
     ];
-    env.respond(&["api", "-X", "GET", "user"], r#"{"username":"me"}"#);
+    login(env);
     env.respond(
         &[
             "api",

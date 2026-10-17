@@ -201,16 +201,8 @@ fn closed_unrelated_pr_is_not_attached_or_pruned() {
         .as_str()
         .unwrap()
         .to_owned();
-    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
-    env.respond(
-        &[
-            "api",
-            "--method",
-            "GET",
-            "repos/me/repo/pulls?head=me%3Afeat&state=all&per_page=20",
-        ],
-        r#"[{"number":5,"state":"closed"}]"#,
-    );
+    github::login(&env);
+    github::pulls(&env, "me/repo", r#"[{"number":5,"state":"closed"}]"#);
     github::empty_pr(
         &env,
         "me/repo",

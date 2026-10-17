@@ -38,6 +38,24 @@ pub fn mutation(thread: &str, query: &str, body: bool) -> Vec<String> {
     list
 }
 
+/// Answers `gh api user` as `me`.
+pub fn login(env: &Env) {
+    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
+}
+
+/// Answers the lookup of the PRs of branch `feat` of `repo` with `body`.
+pub fn pulls(env: &Env, repo: &str, body: &str) {
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "GET",
+            &format!("repos/{repo}/pulls?head=me%3Afeat&state=all&per_page=20"),
+        ],
+        body,
+    );
+}
+
 /// The three GraphQL reads of a sync of PR `number` of `owner/name`.
 pub fn queries(owner: &str, name: &str, number: &str) -> Vec<Vec<String>> {
     ["PullRequest", "PullReviews", "PullComments"]
@@ -188,7 +206,7 @@ impl FakeService for Github {
 
     fn sync_with(&self, setup: &Setup, call: Option<usize>, remote: &Remote) {
         let env = &setup.env;
-        env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
+        login(env);
         let body = render(setup, remote);
         for query in queries("me", "repo", "42") {
             match call {
@@ -507,16 +525,8 @@ pub fn sync_fixtures(setup: &Setup) {
         ("REPO", "me/repo"),
         ("NUMBER", "42"),
     ];
-    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
-    env.respond(
-        &[
-            "api",
-            "--method",
-            "GET",
-            "repos/me/repo/pulls?head=me%3Afeat&state=all&per_page=20",
-        ],
-        r#"[{"number":42,"state":"open"}]"#,
-    );
+    login(env);
+    pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
     let pull = graphql("me", "repo", "42", "PullRequest");
     env.respond(&strs(&pull), &fixture("github/threads-1.json", &vars));
     env.respond(
