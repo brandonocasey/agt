@@ -19,6 +19,7 @@ pub const KIND: Kind = Kind {
     forge: Forge::Gitlab,
     key_prefix: "gl",
     url_marker: "/-/merge_requests/",
+    commit_marker: "/-/commit/",
     well_known: |host| host == "gitlab.com",
     configured: |host| {
         let named = |value: &str| bare_host(value) == host;
@@ -155,6 +156,14 @@ impl ReviewService for Gitlab {
         Request::rest(
             Method::Post,
             format!("{}/notes", base(subject)),
+            Some(json!({ "body": text })),
+        )
+    }
+
+    fn edit_note(&self, subject: ReviewSubject, id: &str, text: &str) -> Request {
+        Request::rest(
+            Method::Put,
+            format!("{}/notes/{}", base(subject), forge::encode(id)),
             Some(json!({ "body": text })),
         )
     }

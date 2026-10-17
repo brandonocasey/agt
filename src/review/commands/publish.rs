@@ -1,9 +1,10 @@
-//! `publish`: plan what to post ([`plan`]), render the text ([`render`]) and run the writes
-//! ([`exec`]).
+//! `publish`: plan what to post ([`plan`]), render the comments ([`render`]) and the summary
+//! ([`summary`]), and run the writes ([`exec`]).
 
 mod exec;
 mod plan;
 mod render;
+mod summary;
 
 use serde_json::{Value, json};
 

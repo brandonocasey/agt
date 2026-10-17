@@ -54,6 +54,26 @@ pub(super) fn run_writes(
                 posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": reason }));
                 continue;
             }
+            // The summary comment was deleted on the host: post it anew.
+            Err(error)
+                if error.status == Some(404)
+                    && let Item::Summary {
+                        runs,
+                        remote: Some(_),
+                    } = &write.item =>
+            {
+                let text = write.sent.first().cloned().flatten().unwrap_or_default();
+                let again = Write {
+                    item: Item::Summary {
+                        runs: runs.clone(),
+                        remote: None,
+                    },
+                    request: Some(connection.service.note(connection.subject(), &text)),
+                    sent: write.sent.clone(),
+                };
+                run_writes(ctx, connection, target, vec![again], attempt, posted)?;
+                continue;
+            }
             Err(error) => return Err(error.into()),
         };
         let remote = save(ctx, connection, target, &write.item, &response.body)?;
@@ -127,22 +147,28 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
         | Item::ApprovalReview { comment }
         | Item::Draft { comment }
         | Item::Reply { comment } => vec![comment.clone()],
-        Item::Record { run, head } => {
-            if let Some(run) = target
-                .runs
-                .iter_mut()
-                .find(|candidate| candidate.id == *run)
-            {
-                run.record = Some(RecordPost {
-                    delivery: {
-                        let mut delivery = Delivery::new(PostState::Posting);
-                        delivery.begin(attempt, texts.next().flatten());
-                        delivery
-                    },
-                    head: head.clone(),
-                    remote_id: None,
-                    url: None,
-                });
+        Item::Summary { runs, remote } => {
+            let text = texts.next().flatten();
+            for (run, head) in runs {
+                if let Some(run) = target
+                    .runs
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *run)
+                {
+                    let url = run
+                        .record
+                        .as_ref()
+                        .filter(|record| record.remote_id == *remote)
+                        .and_then(|record| record.url.clone());
+                    let mut delivery = Delivery::new(PostState::Posting);
+                    delivery.begin(attempt, text.clone());
+                    run.record = Some(RecordPost {
+                        delivery,
+                        head: head.clone(),
+                        remote_id: remote.clone(),
+                        url,
+                    });
+                }
             }
             return;
         }
@@ -248,20 +274,21 @@ pub(super) fn save(
             })?;
             Ok(None)
         }
-        Item::Record { run, .. } => {
+        Item::Summary { runs, .. } => {
             let (id, url) = service
                 .comment_created(review_url, response)
-                .ok_or_else(|| Error(format!("no comment id returned for the record of {run}")))?;
+                .ok_or_else(|| Error("no comment id returned for the summary".into()))?;
             change(ctx, target, |target| {
-                if let Some(record) = target
+                for run in target
                     .runs
                     .iter_mut()
-                    .find(|candidate| candidate.id == *run)
-                    .and_then(|run| run.record.as_mut())
+                    .filter(|run| runs.iter().any(|(id, _)| *id == run.id))
                 {
-                    record.delivery.post = PostState::Posted;
-                    record.remote_id = Some(id.clone());
-                    record.url = url;
+                    if let Some(record) = run.record.as_mut() {
+                        record.delivery.post = PostState::Posted;
+                        record.remote_id = Some(id.clone());
+                        record.url.clone_from(&url);
+                    }
                 }
                 Ok(())
             })?;

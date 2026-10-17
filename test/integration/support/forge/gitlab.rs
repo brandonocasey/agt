@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use super::super::scenario::{
-    Setup, args, assert_never_posted, assert_record, input_of, marked, sent, strs, thread,
+    Setup, args, assert_never_posted, assert_summary, input_of, marked, sent, strs, thread,
 };
 use super::super::{Env, fixture};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
@@ -403,14 +403,14 @@ impl FakeService for Gitlab {
             draft["note"]
                 .as_str()
                 .unwrap()
-                .starts_with("**bug (high):** In-diff text of f1.")
+                .starts_with("**🐛 bug (high):** In-diff text of f1.")
         );
         let general = input_of(&inputs, &self.call(Call::PostThread));
         assert!(
             general[0]["body"]
                 .as_str()
                 .unwrap()
-                .starts_with("**nit:** General text of f2.")
+                .starts_with("**✏️ nit:** General text of f2.")
         );
         assert_eq!(
             input_of(&inputs, &self.call(Call::Unresolve("d-o"))),
@@ -420,8 +420,8 @@ impl FakeService for Gitlab {
             input_of(&inputs, &self.call(Call::Resolve("d-f1"))),
             [json!({ "resolved": true })]
         );
-        let record = &input_of(&inputs, &self.call(Call::PostNote))[0];
-        assert_record(setup, record["body"].as_str().unwrap());
+        let summary = &input_of(&inputs, &self.call(Call::PostNote))[0];
+        assert_summary(setup, summary["body"].as_str().unwrap());
         assert_never_posted(env);
         let list = env.run(&["list"]);
         let f1 = thread(&list, &setup.finding(1));

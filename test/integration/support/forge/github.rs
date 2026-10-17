@@ -364,7 +364,7 @@ impl FakeService for Github {
             ),
         );
         let record = format!(
-            "<!-- review-record v2 id={run} head={head} reviews-at-head=1 open=1 -->\n<!-- agent-review id={run}/record -->",
+            "<!-- review-record v2 id={run} head={head} reviews-at-head=1 open=1 -->\n<!-- agent-review id=summary -->",
             run = setup.run,
             head = setup.head
         );
@@ -434,22 +434,35 @@ impl FakeService for Github {
             (&json!("a.txt"), &json!(3), &json!("RIGHT"))
         );
         let body = comment["body"].as_str().unwrap();
-        assert!(body.starts_with("**bug (high):** In-diff text of f1.\n\nm1 xhigh claude-code "));
+        assert!(body.starts_with(
+            "**🐛 bug (high):** In-diff text of f1.\n\n> <sub>m1 xhigh · Claude Code 2.1.296 · agent \
+             a0b5ad82</sub>\n"
+        ));
         assert!(body.contains(&format!(
-            "{}.c1p0.r1\n<!-- review-finding v1 id={f1} sha={} -->",
-            setup.run, setup.head
+            "</sub>\n<!-- review-finding v1 id={f1} sha={} -->",
+            setup.head
         )));
+        assert_eq!(
+            review["body"],
+            format!(
+                "**🔍 Agent review {}** of {}: 1 of 2 findings is inline here. The summary \
+                 comment lists both.\n<!-- agent-review id=review/{} -->",
+                setup.run,
+                &setup.head[..7],
+                setup.head
+            )
+        );
         assert!(body.ends_with(&format!(
             "<!-- agent-review id={f1}/c1 attempt=<attempt> -->"
         )));
         let outside = writes[1]["input"]["body"].as_str().unwrap();
-        assert!(outside.starts_with("**nit:** General text of f2."));
+        assert!(outside.starts_with("**✏️ nit:** General text of f2."));
         assert_eq!(writes[1]["call"], json!(post(COMMENTS)));
         assert!(writes[2]["input"]["body"].as_str().unwrap().starts_with(
-            "General note from me.\n\nme\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
+            "General note from me.\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
         ));
         assert_eq!(dry["skipped"][0]["item"], "h2");
-        super::super::scenario::assert_record(setup, writes[7]["input"]["body"].as_str().unwrap());
+        super::super::scenario::assert_summary(setup, writes[7]["input"]["body"].as_str().unwrap());
     }
 
     fn assert_posted(&self, setup: &Setup) {
@@ -459,11 +472,10 @@ impl FakeService for Github {
             .iter()
             .find(|(call, _)| call.contains("query=AddReply"))
             .unwrap();
-        assert!(
-            reply
-                .1
-                .starts_with("Fixed in the same commit.\n\nm2 high claude-code ")
-        );
+        assert!(reply.1.starts_with(
+            "> Fixed in the same commit. <sub>m2 high · Claude Code 2.1.300 · session \
+                 dcec84d5</sub>\n"
+        ));
         let answer = inputs
             .iter()
             .find(|(_, input)| input.contains("Thanks, done."))

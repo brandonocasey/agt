@@ -7,7 +7,8 @@ use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{
-    Setup, args, assert_never_posted, count_calls, ids, kinds, open_ids, sent, strs, thread,
+    PUBLISH, Setup, args, assert_never_posted, count_calls, ids, kinds, open_ids, sent, strs,
+    thread,
 };
 use crate::support::{Env, fixture, numbered};
 
@@ -80,16 +81,113 @@ fn github_crash_after_write_does_not_duplicate() {
     svc.restore(env, Call::PostNote);
     svc.accept(env, Call::PostNote, 604);
     let published = env.run(&["publish", "--pr", "42"]);
-    assert_eq!(kinds(&published, "posted"), ["record"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
     assert_eq!(svc.count(env, Call::PostInline), 1);
     assert_eq!(
         svc.count(env, Call::PostNote),
         2,
-        "f2 once, the record once"
+        "f2 once, the summary once"
     );
     let list = env.run(&["list"]);
     assert_eq!(thread(&list, &f2)["comments"][0]["remote"]["id"], "601");
     assert_never_posted(env);
+}
+
+/// The summary is one comment: the next run's publish edits it in place, and when the comment
+/// is gone from the PR the summary is posted anew.
+#[test]
+fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
+    // A run whose one pass finds nothing.
+    let quiet_run = |env: &Env| {
+        let run = env.run(&["run", "start"])["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        env.run_stdin(
+            &[
+                "pass",
+                "start",
+                "--run",
+                &run,
+                "--kind",
+                "full",
+                "--reviewers",
+                "-",
+            ],
+            PUBLISH.reviewers,
+        );
+        env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+        env.run(&["run", "end", "--run", &run]);
+        run
+    };
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--triage", "stale"]);
+    }
+    svc.link(&setup);
+    svc.accept(env, Call::PostNote, 604);
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    let remote_ids = |env: &Env| -> Vec<Value> {
+        env.run(&["status", "--full"])["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["record"]["remote_id"].clone())
+            .collect()
+    };
+
+    let patch = [
+        "api",
+        "--method",
+        "PATCH",
+        "repos/me/repo/issues/comments/604",
+        "--input",
+        "-",
+    ];
+    env.respond(
+        &patch,
+        r#"{"id":604,"html_url":"https://github.com/me/repo/pull/42#issuecomment-604"}"#,
+    );
+    let second = quiet_run(env);
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    assert_eq!(
+        svc.count(env, Call::PostNote),
+        1,
+        "edited, not posted again"
+    );
+    let inputs = env.forge_inputs();
+    let (_, edit) = inputs
+        .iter()
+        .rfind(|(call, _)| call.contains("PATCH"))
+        .unwrap();
+    let edit: Value = serde_json::from_str(edit).unwrap();
+    let edit = edit["body"].as_str().unwrap();
+    for run in [&setup.run, &second] {
+        assert!(
+            edit.contains(&format!("<!-- review-record v2 id={run} ")),
+            "{edit}"
+        );
+    }
+    assert!(edit.contains("last run "), "{edit}");
+    assert_eq!(remote_ids(env), [json!("604"), json!("604")]);
+    let again = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(
+        again["posted"],
+        json!([]),
+        "an unchanged summary is not edited"
+    );
+
+    env.fail_call_with(&patch, "gh: Not Found (HTTP 404)");
+    svc.accept(env, Call::PostNote, 605);
+    quiet_run(env);
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    assert_eq!(svc.count(env, Call::PostNote), 2);
+    assert_eq!(remote_ids(env), [json!("605"), json!("605"), json!("605")]);
 }
 
 #[test]
@@ -380,7 +478,7 @@ fn gitlab_crash_after_write_does_not_duplicate() {
     svc.sync(&setup, &remote);
     svc.accept(env, Call::PostNote, 5020);
     let published = env.run(&["publish", "--pr", "3"]);
-    assert_eq!(kinds(&published, "posted"), ["record"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
     assert_eq!(svc.count(env, Call::PostInline), 1);
     assert_eq!(svc.count(env, Call::PublishDraft), 1);
     assert_eq!(svc.count(env, Call::PostThread), 1);
