@@ -105,24 +105,36 @@ impl Store {
         }
     }
 
-    /// Copies the namespace to `backups/<namespace>-<timestamp>/` the first time this store is
-    /// about to overwrite a document written under an older schema version.
+    /// Copies the namespace to `backups/<namespace>-v<old version>-<timestamp>/` before the first
+    /// overwrite of a document written under an older schema version. One backup per namespace
+    /// and old version, across processes: a later run that finds one does not copy again.
     fn backup_before_migration(&self, path: &Path) -> Result<()> {
         if self.backed_up.load(Ordering::Acquire) {
             return Ok(());
         }
         let stored = read_document(path)?
             .and_then(|document| document.get("version").and_then(Value::as_u64));
-        if stored.is_none_or(|version| version >= u64::from(self.schema.version)) {
+        let Some(stored) = stored.filter(|version| *version < u64::from(self.schema.version))
+        else {
+            return Ok(());
+        };
+        let name = self.namespace.dir_name();
+        let prefix = format!("{name}-v{stored}-");
+        let done = fs::read_dir(&self.backups).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        });
+        if done {
+            self.backed_up.store(true, Ordering::Release);
             return Ok(());
         }
         let stamp = crate::core::clock::now()?.replace(':', "-");
-        let name = self.namespace.dir_name();
-        let mut target = self.backups.join(format!("{name}-{stamp}"));
+        let mut target = self.backups.join(format!("{prefix}{stamp}"));
         let mut attempt = 1;
         while target.exists() {
             attempt += 1;
-            target = self.backups.join(format!("{name}-{stamp}-{attempt}"));
+            target = self.backups.join(format!("{prefix}{stamp}-{attempt}"));
         }
         copy_tree(&self.root, &target)?;
         self.backed_up.store(true, Ordering::Release);
@@ -976,5 +988,36 @@ mod tests {
 
         write_target_named(&store, &dir);
         assert_eq!(fs::read_dir(&backups).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_later_process_finds_the_backup_of_that_version_and_skips_it() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = store.repo_dir("o/r").unwrap();
+        write_target_named(&store, &dir);
+        fs::write(
+            dir.join("old.json"),
+            fs::read_to_string(dir.join("k.json")).unwrap(),
+        )
+        .unwrap();
+        let backups = base.path().join("agents").join("backups");
+        let v2 = Schema {
+            version: 2,
+            migrations: &[|_| {}],
+        };
+        // Two processes, each with its own store, migrate different files from version 1.
+        for key in ["k", "old"] {
+            let mut next = Store::at(base.path(), Namespace::Reviews);
+            next.schema = v2;
+            next.update(&dir, key, NOW, || target(Vec::new()), |_| Ok(()))
+                .unwrap();
+        }
+        let made: Vec<String> = fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(made.len(), 1, "{made:?}");
+        assert!(made[0].starts_with("reviews-v1-"), "{made:?}");
     }
 }
