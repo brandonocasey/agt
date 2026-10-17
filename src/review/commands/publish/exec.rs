@@ -5,7 +5,7 @@ use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::markers::agent_id;
 use crate::review::commands::Ctx;
-use crate::review::commands::sync::Connection;
+use crate::review::commands::sync::{Connection, landed};
 use crate::store::model::{
     Approval, Comment, Delivery, PostState, RecordPost, RemoteComment, Target,
 };
@@ -155,11 +155,22 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
                     .iter_mut()
                     .find(|candidate| candidate.id == *run)
                 {
-                    let url = run
-                        .record
+                    let previous = run.record.take();
+                    let url = previous
                         .as_ref()
                         .filter(|record| record.remote_id == *remote)
                         .and_then(|record| record.url.clone());
+                    // What the host may still show stays trusted: the run's own record comment,
+                    // or the text this edit replaces.
+                    let mut earlier = Vec::new();
+                    for body in previous
+                        .into_iter()
+                        .flat_map(|record| record.earlier.into_iter().chain(record.delivery.sent))
+                    {
+                        if Some(&body) != text.as_ref() && !earlier.contains(&body) {
+                            earlier.push(body);
+                        }
+                    }
                     let mut delivery = Delivery::new(PostState::Posting);
                     delivery.begin(attempt, text.clone());
                     run.record = Some(RecordPost {
@@ -167,6 +178,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
                         head: head.clone(),
                         remote_id: remote.clone(),
                         url,
+                        earlier,
                     });
                 }
             }
@@ -285,9 +297,7 @@ pub(super) fn save(
                     .filter(|run| runs.iter().any(|(id, _)| *id == run.id))
                 {
                     if let Some(record) = run.record.as_mut() {
-                        record.delivery.post = PostState::Posted;
-                        record.remote_id = Some(id.clone());
-                        record.url.clone_from(&url);
+                        landed(record, id.clone(), url.clone());
                     }
                 }
                 Ok(())

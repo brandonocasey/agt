@@ -231,6 +231,11 @@ pub struct RecordPost {
     pub head: String,
     pub remote_id: Option<String>,
     pub url: Option<String>,
+    /// Earlier bodies that may still be on the host, which a service that shows no edits
+    /// trusts as it trusts `sent`: the run's own record comment that builds before the summary
+    /// posted, and the summary text an edit replaces until the edit lands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
