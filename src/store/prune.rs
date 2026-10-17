@@ -191,7 +191,7 @@ impl Store {
             return Ok(Removal::Kept);
         }
         let mut held = Vec::new();
-        let mut doomed = Vec::new();
+        let (mut documents, mut locks) = (Vec::new(), Vec::new());
         for target in &repo.targets {
             validate_key(&target.key)?;
             for suffix in ["lock", "publish.lock"] {
@@ -200,9 +200,9 @@ impl Store {
                     return Ok(Removal::Busy);
                 };
                 held.push(file);
-                doomed.push(lock_path);
+                locks.push(lock_path);
             }
-            doomed.push(dir.join(format!("{}.json", target.key)));
+            documents.push(dir.join(format!("{}.json", target.key)));
         }
         for path in &repo.stray_locks {
             match self.lock_stray(path)? {
@@ -210,9 +210,20 @@ impl Store {
                 StrayLock::Busy => return Ok(Removal::Busy),
                 StrayLock::Kept => return Ok(Removal::Kept),
             }
-            doomed.push(path.clone());
+            locks.push(path.clone());
         }
-        doomed.extend(repo.extras);
+        // Documents first, then locks, then cache files: the order `remove_with_lock` uses, so a
+        // reader never finds a lock-less document.
+        let doomed: Vec<PathBuf> = documents
+            .into_iter()
+            .chain(locks)
+            .chain(repo.extras)
+            .collect();
+        // A writer that started after the scan has no lock of ours to wait on; if it left
+        // anything we do not know, the repository is in use and nothing is deleted.
+        if !only_holds(dir, &doomed)? {
+            return Ok(Removal::Busy);
+        }
         let mut freed = 0;
         for path in &doomed {
             freed += fs::symlink_metadata(path).map_or(0, |meta| meta.len());
@@ -221,6 +232,7 @@ impl Store {
         match fs::remove_dir(dir) {
             Ok(()) => Ok(Removal::Removed(freed)),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(Removal::Kept),
+            Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => Ok(Removal::Busy),
             Err(error) => fail(format!("remove {}: {error}", dir.display())),
         }
     }
@@ -295,6 +307,22 @@ pub(super) enum StrayLock {
     Held(fs::File),
     Busy,
     Kept,
+}
+
+/// Whether every entry of `dir` is one of `paths`.
+fn only_holds(dir: &Path, paths: &[PathBuf]) -> Result<bool> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+        Err(error) => return fail(format!("read {}: {error}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
+        if !paths.contains(&entry.path()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Locks an opened lock file and checks that it is still the one at `path` and still stray. A
@@ -552,6 +580,17 @@ mod tests {
             Removal::Removed(_)
         ));
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_directory_holding_anything_unplanned_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let planned = vec![dir.path().join("a.json")];
+        assert!(only_holds(dir.path(), &planned).unwrap());
+        fs::write(dir.path().join("a.json"), "{}").unwrap();
+        assert!(only_holds(dir.path(), &planned).unwrap());
+        fs::write(dir.path().join("b.json"), "{}").unwrap();
+        assert!(!only_holds(dir.path(), &planned).unwrap());
     }
 
     #[test]
