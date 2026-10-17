@@ -161,6 +161,10 @@ pub struct DiffLine {
     pub new_line: Option<u32>,
     /// Index of the hunk in the diff: a multi-line comment must start and end in one hunk.
     pub hunk: u32,
+    /// Old and new line counters at this line, also for a line only on one side; GitLab's
+    /// line codes use them.
+    pub old_pos: u32,
+    pub new_pos: u32,
 }
 
 /// Finds `line` on `side` of `path` inside a hunk of a `git diff -U3 -M` text, so a review
@@ -216,6 +220,8 @@ pub fn diff_line(diff: &str, path: &str, side: Side, line: u32) -> Option<DiffLi
                 old_line,
                 new_line,
                 hunk,
+                old_pos: *old,
+                new_pos: *new,
             });
         }
         if old_line.is_some() {

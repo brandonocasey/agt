@@ -741,3 +741,49 @@ fn range_repair_clears_fix_commits_on_the_branch() {
         .unwrap();
     assert_eq!(fixed["match"], "repair", "{status}");
 }
+
+#[test]
+fn sha256_repository_reviews_and_tracks_commits() {
+    let env = Env::new();
+    std::fs::remove_dir_all(env.repo.join(".git")).unwrap();
+    env.git(&["init", "-q", "--object-format=sha256", "-b", "main"]);
+    env.write("a.txt", &numbered(10, &[]));
+    let main = env.commit_all("base");
+    assert_eq!(main.len(), 64, "a SHA-256 repository");
+    env.git(&["switch", "-q", "-c", "feat"]);
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let started = env.run_stdin(
+        &["run", "start", "--kind", "full", "--base", &main, "--reviewers", "-"],
+        r#"[{"model":"m","harness":"codex"}]"#,
+    );
+    let run = started["run"].as_str().unwrap().to_owned();
+    let ended = env.run_stdin(
+        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"[{"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"broken"}]"#,
+    );
+    let id = ended["added"][0].as_str().unwrap().to_owned();
+    env.write("a.txt", &numbered(10, &[(3, "fixed")]));
+    let fix = env.commit_all("fix");
+    let fixed = env.run(&["resolve", &id, "--fixed", &fix]);
+    assert_eq!(fixed["thread"]["resolution"], format!("fixed {fix}"));
+    let ended = env.run(&["run", "end", "--run", &run]);
+    assert_eq!(ended["status"]["reviewed"], true, "{ended}");
+    assert_eq!(ended["status"]["unreviewed_commits"], json!([]));
+
+    // A reworded commit keeps the reviewed state through its patch-id.
+    env.git(&["commit", "-q", "--amend", "-m", "fix, reworded"]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["unreviewed_commits"], json!([]), "{status}");
+
+    // A range target names 64-character ids.
+    let head = env.git(&["rev-parse", "HEAD"]);
+    let range = format!("{main}..{head}");
+    let started = env.run(&["--range", &range, "run", "start"]);
+    assert!(
+        started["target"].as_str().unwrap().contains(&head),
+        "{started}"
+    );
+    let shown = env.run(&["show", &id]);
+    assert_eq!(shown["thread"]["anchor"]["commit"].as_str().unwrap().len(), 64);
+}

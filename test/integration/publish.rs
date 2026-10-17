@@ -1860,3 +1860,36 @@ fn comments_outside_the_pr_diff_are_never_posted() {
         "{range}"
     );
 }
+
+#[test]
+fn gitlab_ranges_post_with_line_codes() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    let started = env.run_stdin(&["run", "start", "--kind", "full", "--reviewers", "-"], REVIEWER);
+    let run = started["run"].as_str().unwrap();
+    env.run_stdin(
+        &["pass", "end", "--run", run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"[{"type":"nit","path":"a.txt","start_line":2,"line":3,"scenario":"Range in one hunk."}]"#,
+    );
+    env.run(&["run", "end", "--run", run]);
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
+    let draft = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|write| {
+            write["input"]["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("Range in one hunk."))
+        })
+        .unwrap_or_else(|| panic!("{dry}"));
+    let range = &draft["input"]["position"]["line_range"];
+    assert_eq!(range["start"]["new_line"], 2, "{dry}");
+    assert_eq!(range["end"]["new_line"], 3);
+    assert_eq!(range["end"]["type"], "new");
+    // sha1("a.txt"), then the old and new line counters.
+    let code = range["end"]["line_code"].as_str().unwrap();
+    assert_eq!(code, "cfc7b4885384957ae445bc14914d4588f607651c_4_3", "{dry}");
+}

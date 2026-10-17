@@ -587,18 +587,47 @@ impl Planner<'_> {
         let head = &self.review.head_sha;
         let base = self.review.base_sha.as_deref()?;
         let start = self.review.start_sha.as_deref().unwrap_or(base);
-        let (path, line) = if anchor.side == Side::Old || commit == head {
-            (anchor.path.clone(), line)
+        let first = anchor
+            .start_line
+            .filter(|first| anchor.side == Side::New && *first < line);
+        let (path, line, first) = if anchor.side == Side::Old || commit == head {
+            (anchor.path.clone(), line, first)
         } else {
-            let diff = self.repo.diff_u0(commit, head).ok()?;
-            let location = anchors::locate(&anchors::parse(&diff), anchor);
+            let files = anchors::parse(&self.repo.diff_u0(commit, head).ok()?);
+            let location = anchors::locate(&files, anchor);
             if location.outdated {
                 return None;
             }
-            (location.path, location.line?)
+            // The range's first line maps to the head the same way, or the range is dropped.
+            let first = match first {
+                Some(first) => {
+                    let start = Anchor {
+                        line: Some(first),
+                        start_line: None,
+                        ..anchor.clone()
+                    };
+                    let mapped = anchors::locate(&files, &start);
+                    if mapped.outdated {
+                        return None;
+                    }
+                    Some(mapped.line?)
+                }
+                None => None,
+            };
+            (location.path, location.line?, first)
         };
         let diff = self.repo.diff_context(base, head).ok()?;
         let found = anchors::diff_line(&diff, &path, anchor.side, line)?;
+        let range = match first {
+            Some(first) => {
+                let start = anchors::diff_line(&diff, &path, Side::New, first)?;
+                if start.hunk != found.hunk {
+                    return None;
+                }
+                Some(json!({ "start": line_point(&start), "end": line_point(&found) }))
+            }
+            None => None,
+        };
         let mut position = json!({
             "position_type": "text",
             "base_sha": base,
@@ -612,6 +641,9 @@ impl Planner<'_> {
         }
         if let Some(old) = found.old_line {
             position["old_line"] = json!(old);
+        }
+        if let Some(range) = range {
+            position["line_range"] = range;
         }
         Some(Spot::Gitlab(position))
     }
@@ -848,6 +880,19 @@ fn imported(thread: &Thread) -> bool {
             .comments
             .first()
             .is_some_and(|first| first.id.starts_with("remote-"))
+}
+
+/// One end of a GitLab `line_range`: its line code is the SHA-1 of the path and the old and new
+/// line counters, as GitLab builds it.
+fn line_point(line: &anchors::DiffLine) -> Value {
+    let hash = sha1_smol::Sha1::from(line.new_path.as_bytes()).digest();
+    let kind = if line.old_line.is_none() { "new" } else { "old" };
+    json!({
+        "line_code": format!("{hash}_{}_{}", line.old_pos, line.new_pos),
+        "type": kind,
+        "old_line": line.old_line,
+        "new_line": line.new_line,
+    })
 }
 
 /// The posted text: a finding heading, the text, the signature and the markers.
