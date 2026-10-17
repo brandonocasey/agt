@@ -3,6 +3,7 @@
 mod args;
 pub mod cli;
 mod files;
+pub mod prune;
 mod records;
 mod sessions;
 mod text;

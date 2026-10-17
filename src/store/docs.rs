@@ -10,8 +10,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use super::prune::{Removal, remove_with_lock};
 use super::{
-    Store, create_dir, ctx, fail, lock, lost_field, persist_json, read_document, validate_key,
+    Store, create_dir, ctx, fail, lock, lost_field, persist_json, read_document, try_lock,
+    validate_key,
 };
 use crate::core::error::Result;
 
@@ -107,6 +109,29 @@ impl Store {
         self.backup_before_migration(&path)?;
         persist_json(dir, &path, &doc, || Ok(()))?;
         Ok(result)
+    }
+
+    /// Deletes the document when `remove` approves it, re-reading it under its lock first. Gives
+    /// up with [`Removal::Busy`] when another process holds the lock.
+    pub fn try_remove_doc_if<T: DeserializeOwned>(
+        &self,
+        dir: &Path,
+        name: &str,
+        remove: impl FnOnce(&T) -> bool,
+    ) -> Result<Removal> {
+        validate_key(name)?;
+        let lock_path = dir.join(format!(".{name}.lock"));
+        let Some(_lock) = try_lock(&lock_path)? else {
+            return Ok(Removal::Busy);
+        };
+        let path = dir.join(format!("{name}.json"));
+        let Some(document) = read_document(&path)? else {
+            return Ok(Removal::Kept);
+        };
+        if !remove(&self.parse_doc(&path, document)?) {
+            return Ok(Removal::Kept);
+        }
+        remove_with_lock(&path, &lock_path).map(Removal::Removed)
     }
 
     /// Moves the document `from` to `to`, replacing nothing: it fails when `to` exists.

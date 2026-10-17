@@ -25,7 +25,7 @@ pub fn pretty(value: &Value) -> Result<Output> {
 }
 
 /// `[a-z0-9][a-z0-9._-]{0,63}`
-fn is_id(id: &str) -> bool {
+pub(super) fn is_id(id: &str) -> bool {
     let mut bytes = id.bytes();
     bytes
         .next()
@@ -47,7 +47,7 @@ fn task_path(id: &str) -> Result<PathBuf> {
     Ok(files::root()?.join(format!("{id}.json")))
 }
 
-fn read_task(id: &str) -> Result<Value> {
+pub(super) fn read_task(id: &str) -> Result<Value> {
     let file = task_path(id)?;
     let missing = |error: &std::io::Error| error.kind() == ErrorKind::NotFound;
     let metadata = fs::symlink_metadata(&file).map_err(|error| {

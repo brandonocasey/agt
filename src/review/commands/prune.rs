@@ -6,8 +6,7 @@ use crate::core::clock;
 use crate::core::error::Result;
 use crate::store::Store;
 use crate::store::model::{ReviewState, Target};
-
-use super::PRUNE_AFTER_SECS;
+use crate::store::prune::PRUNE_AFTER_SECS;
 
 /// Age reference for pruning: when the PR/MR closed, else the last change.
 pub(super) fn last_change(target: &Target) -> Result<i64> {
@@ -24,16 +23,19 @@ pub(super) fn last_change(target: &Target) -> Result<i64> {
     })
 }
 
+/// Whether the target is old enough to drop at `now`.
+pub fn expired(target: &Target, now: i64) -> Result<bool> {
+    Ok(now - last_change(target)? >= PRUNE_AFTER_SECS)
+}
+
 pub(super) fn prune_dir(store: &Store, dir: &Path, now: i64, dry_run: bool) -> Result<Vec<Value>> {
     let mut pruned = Vec::new();
     for target in store.targets(dir)? {
-        if now - last_change(&target)? < PRUNE_AFTER_SECS {
+        if !expired(&target, now)? {
             continue;
         }
-        let removed = dry_run
-            || store.remove_if(dir, &target.key, |current| {
-                Ok(now - last_change(current)? >= PRUNE_AFTER_SECS)
-            })?;
+        let removed =
+            dry_run || store.remove_if(dir, &target.key, |current| expired(current, now))?;
         if removed {
             pruned.push(json!({
                 "repo": store.relative(dir),

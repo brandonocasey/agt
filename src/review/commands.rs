@@ -15,7 +15,7 @@ use crate::store::{Namespace, Store};
 mod approve;
 mod findings;
 mod input;
-mod prune;
+pub mod prune;
 mod publish;
 mod run;
 mod scope;
@@ -32,7 +32,6 @@ use self::status::{brief_status, status};
 use self::usage::UsageInput;
 use self::view::{list, show};
 
-const PRUNE_AFTER_SECS: i64 = 90 * 24 * 60 * 60;
 const MAX_TEXT: usize = 65_536;
 
 #[derive(Clone)]

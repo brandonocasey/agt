@@ -1,7 +1,8 @@
 mod docs;
 pub mod issues;
 pub mod model;
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+pub mod prune;
+use std::fs::{self, DirBuilder, File, OpenOptions, Permissions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -44,7 +45,9 @@ struct Schema {
 }
 
 impl Namespace {
-    fn dir_name(self) -> &'static str {
+    pub const ALL: [Self; 3] = [Self::Reviews, Self::Issues, Self::Tasks];
+
+    pub fn dir_name(self) -> &'static str {
         match self {
             Self::Reviews => "reviews",
             Self::Issues => "issues",
@@ -436,30 +439,57 @@ fn validate_key(key: &str) -> Result<()> {
 /// processes never hold locks on different inodes for the same target.
 fn lock(path: &Path) -> Result<File> {
     loop {
-        if let Ok(meta) = fs::symlink_metadata(path)
-            && !meta.file_type().is_file()
-        {
-            return fail(format!("{} must be a regular file", path.display()));
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)
-            .map_err(ctx(format!("open {}", path.display())))?;
+        let file = open_lock(path)?;
         file.lock()
             .map_err(ctx(format!("lock {}", path.display())))?;
-        let held = file
-            .metadata()
-            .map_err(ctx(format!("stat {}", path.display())))?;
-        match fs::symlink_metadata(path) {
-            Ok(meta) if meta.ino() == held.ino() && meta.dev() == held.dev() => return Ok(file),
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return fail(format!("stat {}: {error}", path.display())),
+        if is_current(&file, path)? {
+            return Ok(file);
         }
+    }
+}
+
+/// Like [`lock`], but gives up with `None` when another process holds the lock.
+fn try_lock(path: &Path) -> Result<Option<File>> {
+    loop {
+        let file = open_lock(path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Error(error)) => {
+                return fail(format!("lock {}: {error}", path.display()));
+            }
+        }
+        if is_current(&file, path)? {
+            return Ok(Some(file));
+        }
+    }
+}
+
+fn open_lock(path: &Path) -> Result<File> {
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && !meta.file_type().is_file()
+    {
+        return fail(format!("{} must be a regular file", path.display()));
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(ctx(format!("open {}", path.display())))
+}
+
+/// Whether `path` still names the file `held`, so a lock on it excludes every other holder.
+fn is_current(held: &File, path: &Path) -> Result<bool> {
+    let held = held
+        .metadata()
+        .map_err(ctx(format!("stat {}", path.display())))?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(meta.ino() == held.ino() && meta.dev() == held.dev()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => fail(format!("stat {}: {error}", path.display())),
     }
 }
 
