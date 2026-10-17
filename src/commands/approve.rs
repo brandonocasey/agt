@@ -70,9 +70,6 @@ pub(super) fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 
-/// Open review items: unresolved findings and threads still on the host. A general comment or
-/// review body counts only when it is ours: written here, or posted by `publish` (it carries an
-/// `agent-review` marker). Other people's, and my own unmarked ones, have no resolved state.
 /// Ids of the open threads that stop an approval of `target`.
 pub(super) fn blocking_threads(target: &Target) -> impl Iterator<Item = &str> {
     target
@@ -82,6 +79,9 @@ pub(super) fn blocking_threads(target: &Target) -> impl Iterator<Item = &str> {
         .map(|thread| thread.id.as_str())
 }
 
+/// Open review items: unresolved findings and threads still on the host. A general comment or
+/// review body counts only when it is ours: written here, or posted by `publish` (it carries an
+/// `agent-review` marker). Other people's, and my own unmarked ones, have no resolved state.
 pub(super) fn is_open(thread: &Thread) -> bool {
     let ours = thread
         .comments
