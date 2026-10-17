@@ -313,25 +313,34 @@ agt prune --yes            # delete
 
 Everything is kept 90 days (`retention_days`). The rules:
 
-- `reviews`: the review rule above, applied to every repository. `local/<name>-<hash>` repositories
-  are named after a hash of the git common directory and the store records no path, so
-  whether the directory still exists cannot be checked. Such a repository is listed
-  under `local_repos`, and its directory removed, only when every target in it has
-  expired.
+- `reviews`: the review rule above, applied to every repository, and skipped for a
+  target whose `.<key>.publish.lock` is held. agt records the absolute git common
+  directory of a `local/<name>-<hash>` repository in `<dir>/.repo.json`. A repository
+  whose recorded directory no longer exists is listed under `local_repos` at any age,
+  with all its targets. Without `.repo.json` (made by an older agt) the path cannot be
+  checked, so the repository is listed only when every target in it has expired. Either
+  way its directory may hold only targets, `.account.json`, `.repo.json` and stray
+  lock files; a subdirectory, link or any other file keeps it.
 - `issues`: a closed issue, 90 days after the later of its last local and host update,
-  and only with no queued change, unsent comment or create, conflict, failed send, note
-  or local-only comment. Open issues, `tracker.json` and anything holding such data stay.
+  and only with no queued change, unsent comment or create, conflict, failed send, note,
+  local-only comment, comment deleted on the host, or link to another issue, review,
+  task or branch or local PR link. An unreadable timestamp keeps the issue, and so does
+  a document with fields this agt does not know (with a warning). Open issues,
+  `tracker.json` and anything holding such data stay.
 - `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
   tasks stay, and so does the session index, a cache that `agt task index` rebuilds.
-- `locks`: `.<key>.lock` and `.<key>.publish.lock` files whose `<key>.json` is gone.
+- `locks`: `.<key>.lock` and `.<key>.publish.lock` files whose `<key>.json` is gone,
+  except an issue tracker's `.push.publish.lock` while `tracker.json` exists.
 - `backups`: `<namespace>-v<n>-<stamp>` directories that agt made before a schema
-  migration, 90 days after they were taken, except the newest of each namespace, and
+  migration, 90 days after they were taken, except the newest of each namespace (a
+  stamp in the future does not count as the newest), and
   unfinished `.<namespace>-v<n>-<stamp>.partial` copies (`partial_backups`). Other
   names in the same backups directory belong to other tools and are never touched.
 
 Each item is deleted under its own lock without waiting; one that another agt process
 holds is skipped. The output has `plan` (per category a list of `path`, `key`, `reason`
-and `bytes`), `totals` and `warnings`. With `--yes` it adds `deleted`, `skipped` (with
+and `bytes`), `totals` and `warnings`; a place that cannot be read is a warning and the
+rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 `why`) and `bytes_freed`. `agt review prune` still prunes only reviews.
 
 ## Reviewed, counting and pruning rules

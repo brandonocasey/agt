@@ -391,3 +391,321 @@ fn a_dry_run_deletes_nothing_and_only_limits_the_pass() {
     let only = prune.run(&["--only", "issues", "--only", "tasks"]);
     assert_eq!(only["totals"]["items"], 2);
 }
+
+fn len(path: &Path) -> u64 {
+    fs::symlink_metadata(path).unwrap().len()
+}
+
+fn local_issue_links(issue: &mut Value, field: &str) {
+    issue["links"][field] = json!(["x"]);
+}
+
+#[test]
+fn issues_with_local_only_data_are_kept() {
+    let prune = Prune::new();
+    let pr = |source: &str| {
+        json!({
+            "forge": "github", "repo": "o/r", "number": 9, "url": null, "branch": null,
+            "state": null, "source": source,
+        })
+    };
+    let comment = |edit: &dyn Fn(&mut Value)| {
+        let mut comment = json!({
+            "id": "c1", "author": {"kind": "human", "login": "a"}, "body": "b",
+            "created_at": ago(400), "post": "posted", "attempt": null, "sent": null,
+            "remote": {"id": "9", "url": null, "login": null, "is_me": false, "editor": null, "review_id": null}, "draft_id": null, "local": false, "deleted_remote": false,
+            "deleted_seen_at": null,
+        });
+        edit(&mut comment);
+        json!([comment])
+    };
+    let removable = prune.issue("1", 400, "closed", |issue| {
+        issue["links"]["prs"] = json!([pr("remote")]);
+        issue["comments"] = comment(&|_| {});
+    });
+    let mut kept = Vec::new();
+    for (i, field) in ["issues", "reviews", "tasks", "branches"]
+        .into_iter()
+        .enumerate()
+    {
+        kept.push(prune.issue(&format!("{}", 10 + i), 400, "closed", |issue| {
+            local_issue_links(issue, field);
+        }));
+    }
+    kept.push(prune.issue("20", 400, "closed", |issue| {
+        issue["links"]["prs"] = json!([pr("local")]);
+    }));
+    kept.push(prune.issue("21", 400, "closed", |issue| {
+        issue["comments"] = comment(&|c| c["deleted_remote"] = json!(true));
+    }));
+    kept.push(prune.issue("22", 400, "closed", |issue| {
+        issue["comments"] = comment(&|c| c["local"] = json!(true));
+    }));
+    kept.push(prune.issue("23", 400, "closed", |issue| {
+        issue["errors"] =
+            json!([{"what": "create", "message": "m", "refused": false, "at": ago(400)}]);
+    }));
+    kept.push(prune.issue("24", 400, "closed", |issue| {
+        issue["create"] = json!({"post": "pending", "attempt": null, "sent": null});
+    }));
+    let report = prune.run(&["--yes"]);
+    assert_eq!(report["warnings"], json!([]));
+    assert_eq!(keys(&report, "issues"), ["o/r#1"]);
+    assert!(!removable.exists());
+    for path in kept {
+        assert!(path.exists(), "{}", path.display());
+    }
+}
+
+#[test]
+fn issues_with_unreadable_or_future_timestamps_are_kept() {
+    let prune = Prune::new();
+    let bad_local = prune.issue("1", 400, "closed", |issue| {
+        issue["updated_at"] = json!("not a time");
+    });
+    let bad_remote = prune.issue("2", 400, "closed", |issue| {
+        issue["remote"]["updated_at"] = json!("garbage");
+    });
+    let future = prune.issue("3", -30, "closed", |_| {});
+    let report = prune.run(&["--yes"]);
+    assert_eq!(report["warnings"], json!([]));
+    assert_eq!(keys(&report, "issues"), Vec::<String>::new());
+    for path in [bad_local, bad_remote, future] {
+        assert!(path.exists(), "{}", path.display());
+    }
+}
+
+#[test]
+fn a_target_with_a_future_timestamp_is_kept() {
+    let prune = Prune::new();
+    let future = prune.target("github.com/o/a", "future", -30);
+    prune.run(&["--yes"]);
+    assert!(future.exists());
+}
+
+#[test]
+fn busy_issue_and_task_locks_skip_the_item() {
+    let prune = Prune::new();
+    let issue = prune.issue("1", 400, "closed", |_| {});
+    let lock = issue.with_file_name(".1.lock");
+    File::create(&lock).unwrap();
+    let guard = File::options().write(true).open(&lock).unwrap();
+    guard.lock().unwrap();
+    let task = prune.task("busy-task", "complete", 400);
+    let task_lock = prune.agents().join("tasks/.busy-task.lock");
+    fs::create_dir(&task_lock).unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(issue.exists() && task.exists());
+    let skipped = report["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert!(
+        skipped
+            .iter()
+            .all(|item| item["why"].as_str().unwrap().contains("locked"))
+    );
+    drop(guard);
+    fs::remove_dir(&task_lock).unwrap();
+    prune.run(&["--yes"]);
+    assert!(!issue.exists() && !task.exists());
+}
+
+#[test]
+fn a_held_publish_lock_skips_its_review() {
+    let prune = Prune::new();
+    let old = prune.target("github.com/o/a", "busy", 120);
+    let lock = old.with_file_name(".busy.publish.lock");
+    File::create(&lock).unwrap();
+    let guard = File::options().write(true).open(&lock).unwrap();
+    guard.lock().unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(old.exists());
+    assert!(
+        report["skipped"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("locked")
+    );
+    drop(guard);
+    let report = prune.run(&["--yes"]);
+    assert!(!old.exists());
+    assert!(!lock.exists());
+    assert_eq!(report["skipped"], json!([]));
+}
+
+#[test]
+fn the_issue_tracker_push_lock_is_kept() {
+    let prune = Prune::new();
+    let issue = prune.issue("1", 1, "open", |_| {});
+    let dir = issue.parent().unwrap();
+    fs::write(dir.join("tracker.json"), "{}").unwrap();
+    let push = dir.join(".push.publish.lock");
+    File::create(&push).unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(push.exists());
+    assert_eq!(report["plan"]["locks"], json!([]));
+    fs::remove_file(dir.join("tracker.json")).unwrap();
+    prune.run(&["--yes"]);
+    assert!(!push.exists());
+}
+
+#[test]
+fn a_local_repo_whose_recorded_path_is_gone_is_listed_at_any_age() {
+    let prune = Prune::new();
+    let alive = prune.env.path("alive");
+    fs::create_dir_all(&alive).unwrap();
+    let gone = prune.target("local/gone-aaaaaaaaaaaa", "fresh", 1);
+    let dir = gone.parent().unwrap().to_path_buf();
+    let missing = prune.env.path("missing/.git");
+    fs::write(
+        dir.join(".repo.json"),
+        json!({"common_dir": missing}).to_string(),
+    )
+    .unwrap();
+    fs::write(dir.join(".account.json"), "{}").unwrap();
+    let live = prune.target("local/live-bbbbbbbbbbbb", "fresh", 1);
+    fs::write(
+        live.with_file_name(".repo.json"),
+        json!({"common_dir": alive}).to_string(),
+    )
+    .unwrap();
+    let unrecorded = prune.target("local/unrecorded-cccccccccccc", "fresh", 1);
+    let report = prune.run(&[]);
+    assert_eq!(keys(&report, "local_repos"), ["local/gone-aaaaaaaaaaaa"]);
+    let reason = report["plan"]["local_repos"][0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("is gone") && reason.contains("missing"),
+        "{reason}"
+    );
+    // The fresh target is part of the repository item; nothing is double counted.
+    let expected = len(&gone) + len(&dir.join(".repo.json")) + len(&dir.join(".account.json"));
+    assert_eq!(report["totals"]["bytes"], expected);
+    let report = prune.run(&["--yes"]);
+    assert!(!dir.exists());
+    assert_eq!(report["bytes_freed"], expected);
+    assert!(live.exists() && unrecorded.exists());
+}
+
+#[test]
+fn agt_records_the_common_dir_of_a_local_repo() {
+    let prune = Prune {
+        env: Env::with_branch(),
+    };
+    prune.env.write("a.txt", "one\n");
+    prune.env.commit_all("change");
+    prune.env.run(&["run", "start"]);
+    let local = prune.env.state().join("local");
+    let dirs: Vec<_> = fs::read_dir(&local).unwrap().flatten().collect();
+    assert_eq!(dirs.len(), 1);
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(dirs[0].path().join(".repo.json")).unwrap()).unwrap();
+    let git = prune.env.repo.join(".git");
+    assert_eq!(recorded["common_dir"], git.to_string_lossy().as_ref());
+    let report = prune.run(&[]);
+    assert_eq!(report["plan"]["local_repos"], json!([]));
+    fs::rename(&git, prune.env.repo.join(".git-moved")).unwrap();
+    let report = prune.run(&[]);
+    assert_eq!(report["plan"]["local_repos"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_local_repo_with_other_files_or_links_is_never_planned() {
+    let prune = Prune::new();
+    let foreign = prune.target("local/foreign-aaaaaaaaaaaa", "t", 100);
+    fs::write(foreign.with_file_name("notes.txt"), "mine").unwrap();
+    let nested = prune.target("local/nested-bbbbbbbbbbbb", "t", 100);
+    fs::create_dir(nested.with_file_name("sub")).unwrap();
+    // A repository directory that is a link to outside the store.
+    let outside = prune.env.path("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let stranger = outside.join("t.json");
+    fs::copy(&foreign, &stranger).unwrap();
+    std::os::unix::fs::symlink(
+        &outside,
+        prune.agents().join("reviews/local/linked-cccccccccccc"),
+    )
+    .unwrap();
+    let report = prune.run(&["--yes"]);
+    assert_eq!(keys(&report, "local_repos"), Vec::<String>::new());
+    assert!(foreign.with_file_name("notes.txt").exists());
+    assert!(nested.with_file_name("sub").exists());
+    assert!(stranger.exists());
+}
+
+#[test]
+fn files_and_locks_that_are_links_are_not_followed() {
+    let prune = Prune::new();
+    let outside = prune.env.path("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let stranger = outside.join("t.json");
+    let lock_target = outside.join("lock");
+    fs::write(&lock_target, "x").unwrap();
+    let kept = prune.target("github.com/o/a", "real", 1);
+    let dir = kept.parent().unwrap();
+    std::os::unix::fs::symlink(&lock_target, dir.join(".dangling.lock")).unwrap();
+    let report = prune.run(&["--yes"]);
+    assert_eq!(report["plan"]["locks"], json!([]));
+    assert!(lock_target.exists());
+    // A target file that is a link is reported, not read through.
+    prune.target("github.com/o/b", "real", 200);
+    fs::write(&stranger, "{}").unwrap();
+    let linked = prune.agents().join("reviews/github.com/o/b/link.json");
+    std::os::unix::fs::symlink(&stranger, &linked).unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(stranger.exists() && linked.symlink_metadata().is_ok());
+    assert_eq!(report["warnings"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn local_repo_bytes_are_counted_once() {
+    let prune = Prune::new();
+    let target = prune.target("local/gone-aaaaaaaaaaaa", "t", 100);
+    let dir = target.parent().unwrap().to_path_buf();
+    let account = dir.join(".account.json");
+    fs::write(&account, "12345").unwrap();
+    let stray = dir.join(".other.lock");
+    fs::write(&stray, "123").unwrap();
+    let report = prune.run(&[]);
+    assert_eq!(report["plan"]["locks"], json!([]));
+    assert_eq!(report["plan"]["reviews"][0]["bytes"], len(&target));
+    assert_eq!(report["plan"]["local_repos"][0]["bytes"], 8);
+    let total = len(&target) + 8;
+    assert_eq!(report["totals"]["bytes"], total);
+    let report = prune.run(&["--yes"]);
+    assert_eq!(report["bytes_freed"], total);
+    assert!(!dir.exists());
+    // A lock alone, outside a listed repository, is its own item.
+    let live = prune.target("github.com/o/a", "live", 1);
+    let lone = live.with_file_name(".lone.lock");
+    fs::write(&lone, "1234").unwrap();
+    let report = prune.run(&["--only", "locks"]);
+    assert_eq!(report["totals"]["bytes"], 4);
+}
+
+#[test]
+fn an_unreadable_place_is_a_warning_and_the_rest_is_still_planned() {
+    let prune = Prune::new();
+    prune.target("github.com/o/a", "old", 120);
+    fs::write(
+        prune.agents().join("reviews/github.com/o/broken.json"),
+        "{ nope",
+    )
+    .unwrap();
+    prune.task("t1", "complete", 120);
+    let report = prune.run(&[]);
+    assert!(
+        !report["warnings"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
+    assert_eq!(keys(&report, "tasks"), ["t1"]);
+}
+
+#[test]
+fn a_backup_stamped_in_the_future_does_not_become_the_newest() {
+    let prune = Prune::new();
+    let oldest = prune.backup(&format!("reviews-v1-{}", stamp(200)));
+    let newest = prune.backup(&format!("reviews-v1-{}", stamp(150)));
+    let future = prune.backup(&format!("reviews-v1-{}", stamp(-30)));
+    prune.run(&["--yes", "--only", "backups"]);
+    assert!(!oldest.exists());
+    assert!(newest.exists() && future.exists());
+}

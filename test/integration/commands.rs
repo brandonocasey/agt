@@ -635,7 +635,10 @@ fn concurrent_writers_do_not_lose_updates() {
     let file = fs::read_dir(stored)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && !path.file_name().unwrap().to_string_lossy().starts_with('.')
+        })
         .unwrap();
     let target: serde_json::Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
     assert_eq!(target["revision"], writers + 1);
