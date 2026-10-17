@@ -524,6 +524,10 @@ fn record_counts_reviews_like_status(svc: Svc) {
     let dry = dry_run(&setup.env, svc, &[]);
     let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
     assert!(
+        !summary.contains("not posted"),
+        "the threads this publish posts show as posted: {summary}"
+    );
+    assert!(
         summary.starts_with(&format!(
             "**⚠️ Agent review: 2 open at {}.** 2 findings: 2 open.",
             &setup.head[..7]
