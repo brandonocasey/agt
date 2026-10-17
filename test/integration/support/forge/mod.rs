@@ -1,10 +1,10 @@
 //! A fake hosting service for scenarios. A [`FakeService`] speaks the scenario's language (a
-//! [`Remote`] PR, semantic [`Call`]s, an [`Expect`] derived from the service's capabilities)
+//! [`Remote`] PR, semantic [`Call`]s, an [`Expect`] pinning the service's capabilities by hand)
 //! and turns it into the exact argv and response bodies the fake `gh`/`glab` replays. One
 //! scenario function then runs against every service in [`all`].
 //!
-//! A new service adds `<service>.rs` here, a `test/fixtures/<service>/capabilities.json` and its
-//! fixtures, and one `#[test]` per scenario to the `matrix!` of `matrix.rs`.
+//! A new service adds `<service>.rs` here, pinned [`Expect`] facts, a
+//! `test/fixtures/<service>/capabilities.json` and its fixtures, and one `#[test]` per scenario to the `matrix!` of `matrix.rs`.
 
 use serde_json::Value;
 
@@ -151,30 +151,70 @@ pub enum Call<'a> {
     Approve,
 }
 
-/// What a scenario expects of a service, read from its `capabilities.json` contract fixture,
-/// which a unit test holds equal to the service's [`Capabilities`](crate::service).
-pub struct Expect(Value);
+/// What a scenario expects of a service. The facts are written out here by hand, not read from
+/// the `capabilities.json` contract fixture, because `UPDATE_GOLDEN=1` regenerates that fixture
+/// from the service's own capabilities and a flipped capability would then agree with itself.
+/// [`Expect::load`] still checks the fixture says the same, so the golden guards drift too.
+pub struct Expect {
+    inline: &'static str,
+    ranges: bool,
+    reply: &'static str,
+    approve: &'static str,
+    approve_self_allowed: Option<bool>,
+    edits_attributed: bool,
+}
 
 impl Expect {
     pub fn load(service: &str) -> Self {
+        let expect = match service {
+            "github" => Self {
+                inline: "review_batch",
+                ranges: true,
+                reply: "review_threads",
+                approve: "review",
+                approve_self_allowed: Some(false),
+                edits_attributed: true,
+            },
+            "gitlab" => Self {
+                inline: "draft_then_publish",
+                ranges: true,
+                reply: "all",
+                approve: "call",
+                approve_self_allowed: None,
+                edits_attributed: false,
+            },
+            other => panic!("no pinned expectations for {other}; add them here"),
+        };
+        expect.assert_matches_fixture(service);
+        expect
+    }
+
+    fn assert_matches_fixture(&self, service: &str) {
         let path = format!(
             "{}/test/fixtures/{service}/capabilities.json",
             env!("CARGO_MANIFEST_DIR")
         );
-        Self(serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap())
-    }
-
-    fn word(&self, key: &str) -> &str {
-        self.0[key].as_str().unwrap_or_else(|| panic!("{key}"))
-    }
-
-    fn flag(&self, key: &str) -> bool {
-        self.0[key].as_bool().unwrap_or_else(|| panic!("{key}"))
+        let golden: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let pinned = serde_json::json!({
+            "inline": self.inline,
+            "ranges": self.ranges,
+            "reply": self.reply,
+            "approve": self.approve,
+            "approve_self_allowed": self.approve_self_allowed,
+            "edits_attributed": self.edits_attributed,
+        });
+        for (key, value) in pinned.as_object().unwrap() {
+            assert_eq!(
+                &golden[key], value,
+                "{service} {key}: capabilities.json differs from the facts pinned in the test \
+                 support; if the capability really changed, change both on purpose"
+            );
+        }
     }
 
     /// The `kind`s of the writes that post one in-diff comment.
     pub fn inline(&self) -> Vec<&'static str> {
-        match self.word("inline") {
+        match self.inline {
             "review_batch" => vec!["review"],
             "draft_then_publish" => vec!["draft", "publish-draft"],
             other => panic!("{other}"),
@@ -182,30 +222,30 @@ impl Expect {
     }
 
     pub fn ranges(&self) -> bool {
-        self.flag("ranges")
+        self.ranges
     }
 
     /// A reply to a general finding is a native reply, not a general comment ending in `Re:`.
     pub fn replies_to_general_natively(&self) -> bool {
-        self.word("reply") == "all"
+        self.reply == "all"
     }
 
     /// The formal approval is a separate call next to a note.
     pub fn approves_by_call(&self) -> bool {
-        self.word("approve") == "call"
+        self.approve == "call"
     }
 
     /// The formal approval is a review, which its author may not give on their own PR.
     pub fn approves_by_review(&self) -> bool {
-        self.word("approve") == "review"
+        self.approve == "review"
     }
 
     pub fn self_approval_allowed(&self) -> bool {
-        self.0["approve_self_allowed"].as_bool().unwrap_or(false)
+        self.approve_self_allowed.unwrap_or(false)
     }
 
     pub fn edits_attributed(&self) -> bool {
-        self.flag("edits_attributed")
+        self.edits_attributed
     }
 }
 
