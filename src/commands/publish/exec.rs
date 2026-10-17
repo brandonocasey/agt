@@ -36,15 +36,19 @@ pub(super) fn run_writes(
         let response = match connection.service.send(request) {
             Ok(response) => response,
             // A host may refuse a repeat or ineligible approval; the comment still posts, and
-            // the refusal is reported instead of blocking every later write.
+            // the failure is reported instead of blocking every later write. Only a refusal
+            // the host stands by (see `TransportError::refused`) is kept, so a timeout or a
+            // server error leaves the approval to be sent again.
             Err(error) if matches!(write.item, Item::Approve { .. }) => {
                 let reason = error.to_string();
-                change(ctx, target, |target| {
-                    set_approval(target, &write.ids()[0], |approval| {
-                        approval.refused = Some(reason.clone());
-                    });
-                    Ok(())
-                })?;
+                if error.refused() {
+                    change(ctx, target, |target| {
+                        set_approval(target, &write.ids()[0], |approval| {
+                            approval.refused = Some(reason.clone());
+                        });
+                        Ok(())
+                    })?;
+                }
                 posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": reason }));
                 continue;
             }

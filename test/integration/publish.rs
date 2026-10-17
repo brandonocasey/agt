@@ -2242,7 +2242,7 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
     let notes = gl_write("POST", &format!("{GL_MR}/notes"));
     let discussions = gl_write("POST", &format!("{GL_MR}/discussions"));
     // GitLab refuses: already approved, or the author may not approve.
-    env.fail_call(&strs(&approve));
+    env.fail_call_with(&strs(&approve), "glab: 403 Forbidden");
     env.respond(&strs(&notes), r#"{"id":5020}"#);
     env.respond(&strs(&discussions), r#"{"id":"d-1","notes":[{"id":5003}]}"#);
     let out = env.run(&["publish", "--pr", "3"]);
@@ -2273,6 +2273,50 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
         count_calls(env, &approve),
         2,
         "an accepted approval is not sent again"
+    );
+}
+
+#[test]
+fn gitlab_approve_is_retried_after_a_transient_failure() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["approve", "--formal"]);
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let approve = gl_write("POST", &format!("{GL_MR}/approve"));
+    let notes = gl_write("POST", &format!("{GL_MR}/notes"));
+    let discussions = gl_write("POST", &format!("{GL_MR}/discussions"));
+    env.fail_call_with(&strs(&approve), "glab: 503 Service Unavailable");
+    env.respond(&strs(&notes), r#"{"id":5020}"#);
+    env.respond(&strs(&discussions), r#"{"id":"d-1","notes":[{"id":5003}]}"#);
+    let out = env.run(&["publish", "--pr", "3"]);
+    let failed = out["posted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "approve")
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(failed["error"].is_string(), "{out}");
+    env.pass_call(&strs(&approve));
+    env.respond(&strs(&approve), r#"{"approved":true}"#);
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(
+        count_calls(env, &approve),
+        2,
+        "a failure that is not a refusal is retried by the next publish"
+    );
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(
+        count_calls(env, &approve),
+        2,
+        "an accepted approval is not sent again"
+    );
+    assert_eq!(
+        count_calls(env, &notes),
+        2,
+        "the approval comment posted once"
     );
 }
 

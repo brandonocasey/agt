@@ -92,6 +92,12 @@ impl Env {
         fs::write(self.forge_file(args, "fail"), "").unwrap();
     }
 
+    /// Like [`Env::fail_call`], with the error text the tool prints, such as one naming an
+    /// HTTP status.
+    pub fn fail_call_with(&self, args: &[&str], stderr: &str) {
+        fs::write(self.forge_file(args, "fail"), stderr).unwrap();
+    }
+
     /// Undoes [`Env::fail_call`].
     pub fn pass_call(&self, args: &[&str]) {
         fs::remove_file(self.forge_file(args, "fail")).unwrap();

@@ -145,9 +145,12 @@ returns the same thread, and `--formal` upgrades a comment approval. `publish` p
 `approve --formal` also submits the host's approval: a GitHub `APPROVE` review,
 or GitLab's `approve` at that head. On your own GitHub PR, which GitHub refuses
 to approve, the comment still posts and `skipped` lists `<id>/formal`. A host
-refusal of the formal approval (already approved, not allowed, or a failed call)
-shows as an `error` under `posted` and blocks nothing; `approve --formal` again
-retries only the host's approval. An accepted approval is never sent again. An approval posts
+refusal of the formal approval (an HTTP 4xx: already approved, not allowed)
+shows as an `error` under `posted`, blocks nothing and is remembered, so
+`publish` does not send it again; `approve --formal` again retries only the host's
+approval. A failure that is not a refusal (a timeout, a 5xx, the tool failing)
+shows as an `error` too but is not remembered: the next `publish` sends the
+approval again. An accepted approval is never sent again. An approval posts
 only while the PR/MR head is the head it approved and no blocking finding is
 open, never counts as open, and goes to someone else's PR/MR with
 `publish --not-own --only <id>`.

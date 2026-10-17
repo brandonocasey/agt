@@ -37,7 +37,6 @@ impl Response {
 #[derive(Debug)]
 pub struct TransportError {
     /// The HTTP status when the host answered, else `None` (the tool or network failed).
-    #[allow(dead_code)]
     pub status: Option<u16>,
     pub message: String,
 }
@@ -52,7 +51,6 @@ impl TransportError {
 
     /// Whether the host answered with a refusal that repeating will not change (a 4xx other
     /// than a timeout or rate limit), as opposed to a failure worth retrying.
-    #[allow(dead_code)]
     pub fn refused(&self) -> bool {
         self.status.is_some_and(|status| {
             (400..500).contains(&status) && !matches!(status, 408 | 425 | 429)
