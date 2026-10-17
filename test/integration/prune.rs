@@ -619,7 +619,9 @@ fn a_local_repo_whose_path_is_gone_and_unseen_for_a_month_is_listed_at_any_age()
     assert_eq!(keys(&report, "local_repos"), ["local/gone-aaaaaaaaaaaa"]);
     let reason = report["plan"]["local_repos"][0]["reason"].as_str().unwrap();
     assert!(
-        reason.contains("is gone") && reason.contains("missing") && reason.contains("31 day(s) ago"),
+        reason.contains("is gone")
+            && reason.contains("missing")
+            && reason.contains("31 day(s) ago"),
         "{reason}"
     );
     // The fresh target is part of the repository item; nothing is double counted.
@@ -913,4 +915,36 @@ fn an_unreadable_repository_directory_is_a_warning_and_the_pass_goes_on() {
     );
     assert!(old.exists());
     assert!(plan["warnings"].is_array());
+}
+
+#[test]
+fn a_local_repo_with_no_targets_is_listed_only_after_a_quiet_quarter() {
+    let prune = Prune::new();
+    let alive = prune.env.path("alive");
+    fs::create_dir_all(&alive).unwrap();
+    let dir = prune.agents().join("reviews/local/empty-dddddddddddd");
+    fs::create_dir_all(&dir).unwrap();
+    let record = |days| {
+        fs::write(
+            dir.join(".repo.json"),
+            json!({"common_dir": alive, "last_seen": ago(days)}).to_string(),
+        )
+        .unwrap();
+    };
+    record(89);
+    assert_eq!(
+        keys(&prune.run(&["--yes"]), "local_repos"),
+        Vec::<String>::new()
+    );
+    assert!(dir.exists());
+    record(91);
+    let report = prune.run(&[]);
+    assert_eq!(keys(&report, "local_repos"), ["local/empty-dddddddddddd"]);
+    let reason = report["plan"]["local_repos"][0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("no targets left") && reason.contains("91 day(s) ago"),
+        "{reason}"
+    );
+    prune.run(&["--yes"]);
+    assert!(!dir.exists());
 }

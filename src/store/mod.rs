@@ -313,9 +313,7 @@ impl Store {
     /// warning instead of ending the search.
     pub fn repo_dirs_lenient(&self) -> (Vec<PathBuf>, Vec<String>) {
         let mut warnings = Vec::new();
-        let found = self
-            .find_repo_dirs(Some(&mut warnings))
-            .unwrap_or_default();
+        let found = self.find_repo_dirs(Some(&mut warnings)).unwrap_or_default();
         (found, warnings)
     }
 
@@ -1114,9 +1112,9 @@ mod tests {
         let dir = reviews.repo_dir("github.com/o/r").unwrap();
         write_target_named(&reviews, &dir);
         assert!(dir.starts_with(base.path().join("agents").join("reviews")));
-        assert_eq!(reviews.repo_dirs().unwrap(), vec![dir.clone()]);
-        assert!(issues.repo_dirs().unwrap().is_empty());
-        assert!(tasks.repo_dirs().unwrap().is_empty());
+        assert_eq!(reviews.repo_dirs_lenient().0, vec![dir.clone()]);
+        assert!(issues.repo_dirs_lenient().0.is_empty());
+        assert!(tasks.repo_dirs_lenient().0.is_empty());
         let issue_dir = issues.repo_dir("github.com/o/r").unwrap();
         assert!(issue_dir.starts_with(base.path().join("agents").join("issues")));
         assert!(issues.load(&issue_dir, "k").unwrap().is_none());

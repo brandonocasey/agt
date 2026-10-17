@@ -89,6 +89,8 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         Action::Task(task) => crate::task::prune::remove(task, now),
         Action::Lock { namespace, path } => Store::open(*namespace)?.remove_stray_lock(path),
         Action::Backup(backup) => Store::open(Namespace::Reviews)?.remove_backup(backup),
-        Action::LocalRepo { dir } => Store::open(Namespace::Reviews)?.remove_local_repo(dir, now),
+        Action::LocalRepo { dir, had_targets } => {
+            Store::open(Namespace::Reviews)?.remove_local_repo(dir, now, *had_targets)
+        }
     }
 }

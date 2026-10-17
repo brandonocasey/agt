@@ -321,7 +321,9 @@ Everything is kept 90 days (`retention_days`). The rules:
   targets, only when that directory no longer exists, agt last wrote there 30 or more days ago, and
   the directory is not below a mount root (`/Volumes`, `/media`, `/run/media`, `/mnt`), where
   it may only be unmounted. Otherwise, including a repository that was moved a moment ago, it is
-  listed only when every target in it has expired, and its reason says which rule applied. Either
+  listed only when every target in it has expired, and its reason says which rule applied. A
+  directory with no targets at all (only cache files) is listed once agt last wrote there 90
+  or more days ago. Either
   way its directory may hold only targets, `.account.json`, `.repo.json` and stray
   lock files; a subdirectory, link or any other file keeps it.
 - `issues`: a closed issue, 90 days after the later of its last local and host update,
@@ -344,7 +346,10 @@ Each item is deleted under its own lock without waiting; one that another agt pr
 holds is skipped. The output has `plan` (per category a list of `path`, `key`, `reason`
 and `bytes`), `totals` and `warnings`; a place that cannot be read is a warning and the
 rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
-`why`) and `bytes_freed`. `agt review prune` still prunes only reviews.
+`why`) and `bytes_freed`. `agt review prune` still prunes only reviews; its output has `pruned` and `skipped`
+(`repo`, `key`, `why`: a target that is locked by another agt, has fields this agt does not
+know, or cannot be read), and `agt review prune --all` adds `warnings` and goes on past a
+repository directory or file it cannot read.
 
 ## Reviewed, counting and pruning rules
 

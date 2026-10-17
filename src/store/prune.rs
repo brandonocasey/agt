@@ -235,7 +235,9 @@ impl Store {
         }
         extras.sort();
         stray_locks.sort();
+        let idle_secs = now - last_write(dir, &extras);
         Ok(Some(LocalRepo {
+            idle_secs,
             targets,
             extras,
             stray_locks,
@@ -291,10 +293,21 @@ impl Store {
     /// Deletes a `local/` repository directory: its targets when the repository is gone (else
     /// none may be left), then its cache files and stray locks. Every lock is taken before the
     /// first file goes, so a repository that is partly busy loses nothing.
-    pub fn remove_local_repo(&self, dir: &Path, now: i64) -> Result<Removal> {
+    ///
+    /// `had_targets` says the plan listed the directory because its targets had all expired, so
+    /// finding none left is the expected outcome. A directory that held none to begin with and is
+    /// not gone goes only once nothing has been written there for [`PRUNE_AFTER_SECS`].
+    pub fn remove_local_repo(&self, dir: &Path, now: i64, had_targets: bool) -> Result<Removal> {
         let Some(repo) = self.scan_local_repo(dir, now)? else {
             return Ok(Removal::Kept);
         };
+        if repo.targets.is_empty()
+            && !repo.presence.is_gone()
+            && !had_targets
+            && repo.idle_secs < PRUNE_AFTER_SECS
+        {
+            return Ok(Removal::Kept);
+        }
         if !repo.targets.is_empty() && !repo.presence.is_gone() {
             return Ok(Removal::Kept);
         }
@@ -407,6 +420,8 @@ pub struct LocalRepo {
     /// Lock files whose document is gone.
     pub stray_locks: Vec<PathBuf>,
     pub presence: Presence,
+    /// Seconds since agt last wrote in the directory: `last_seen`, else the newest cache file.
+    pub idle_secs: i64,
 }
 
 /// A stray lock file after trying to take its lock.
@@ -430,6 +445,23 @@ impl Drop for PublishLock<'_> {
             let _ = fs::remove_file(self.path);
         }
     }
+}
+
+/// When agt last wrote in `dir`, as `last_seen` in `.repo.json`, else the newest modification
+/// time of its cache files, else of the directory.
+fn last_write(dir: &Path, extras: &[PathBuf]) -> i64 {
+    let recorded = fs::read(dir.join(REPO_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|doc| {
+            doc["last_seen"]
+                .as_str()
+                .and_then(|seen| clock::parse(seen).ok())
+        });
+    recorded
+        .or_else(|| extras.iter().filter_map(|path| seen_by_mtime(path)).max())
+        .or_else(|| seen_by_mtime(dir))
+        .unwrap_or(0)
 }
 
 fn seen_by_mtime(path: &Path) -> Option<i64> {
@@ -718,7 +750,10 @@ mod tests {
         assert!(!scan.presence.is_gone());
         fs::write(dir.join("notes.txt"), "mine").unwrap();
         assert!(store.scan_local_repo(&dir, NOW).unwrap().is_none());
-        assert_eq!(store.remove_local_repo(&dir, NOW).unwrap(), Removal::Kept);
+        assert_eq!(
+            store.remove_local_repo(&dir, NOW, false).unwrap(),
+            Removal::Kept
+        );
         assert!(dir.join(".account.json").exists());
     }
 
@@ -736,11 +771,14 @@ mod tests {
             .open(dir.join(".b.lock"))
             .unwrap();
         held.lock().unwrap();
-        assert_eq!(store.remove_local_repo(&dir, NOW).unwrap(), Removal::Busy);
+        assert_eq!(
+            store.remove_local_repo(&dir, NOW, true).unwrap(),
+            Removal::Busy
+        );
         assert!(dir.join(".account.json").exists() && dir.join(".a.lock").exists());
         drop(held);
         assert!(matches!(
-            settled(|| store.remove_local_repo(&dir, NOW).unwrap()),
+            settled(|| store.remove_local_repo(&dir, NOW, true).unwrap()),
             Removal::Removed(_)
         ));
         assert!(!dir.exists());
@@ -880,9 +918,36 @@ mod tests {
         record(&store, &dir, "/nowhere/future/.git", Some(NOW + 40 * DAY));
         let presence = store.presence(&dir, NOW);
         assert!(!presence.is_gone());
-        assert!(presence.describe().contains(" 0 day(s) ago"), "{presence:?}");
-        store.record_repo(&dir, "/nowhere/future/.git", NOW).unwrap();
+        assert!(
+            presence.describe().contains(" 0 day(s) ago"),
+            "{presence:?}"
+        );
+        store
+            .record_repo(&dir, "/nowhere/future/.git", NOW)
+            .unwrap();
         let seen = store.recorded_repo(&dir).unwrap().unwrap().last_seen;
         assert_eq!(seen.as_deref(), Some(clock::format(NOW).as_str()));
+    }
+
+    #[test]
+    fn a_local_repo_with_no_targets_goes_only_once_idle_for_the_retention() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("local/x-1");
+        let alive = base.path().join("alive");
+        fs::create_dir_all(&alive).unwrap();
+        let common = alive.to_string_lossy().into_owned();
+        record(&store, &dir, &common, Some(NOW - 89 * DAY));
+        assert_eq!(
+            store.remove_local_repo(&dir, NOW, false).unwrap(),
+            Removal::Kept
+        );
+        assert!(dir.exists());
+        record(&store, &dir, &common, Some(NOW - 90 * DAY));
+        assert!(matches!(
+            store.remove_local_repo(&dir, NOW, false).unwrap(),
+            Removal::Removed(_)
+        ));
+        assert!(!dir.exists());
     }
 }

@@ -26,11 +26,24 @@ pub const CATEGORIES: [&str; 7] = [
 
 /// How to delete one planned item.
 pub enum Action {
-    Review { dir: PathBuf, key: String },
-    LocalRepo { dir: PathBuf },
-    Issue { dir: PathBuf, name: String },
+    Review {
+        dir: PathBuf,
+        key: String,
+    },
+    /// `had_targets`: the plan found targets, all expired, so none left at delete time is normal.
+    LocalRepo {
+        dir: PathBuf,
+        had_targets: bool,
+    },
+    Issue {
+        dir: PathBuf,
+        name: String,
+    },
     Task(Expired),
-    Lock { namespace: Namespace, path: PathBuf },
+    Lock {
+        namespace: Namespace,
+        path: PathBuf,
+    },
     Backup(Backup),
 }
 
@@ -146,6 +159,12 @@ impl Plan {
         let Some(repo) = store.scan_local_repo(&dir, now)? else {
             return Ok(());
         };
+        // With no targets at all there is nothing expired to wait for; the directory goes only
+        // when agt has not written in it for as long as a target is kept.
+        if repo.targets.is_empty() && !repo.presence.is_gone() && repo.idle_secs < PRUNE_AFTER_SECS
+        {
+            return Ok(());
+        }
         let mut bytes = 0;
         for target in &repo.targets {
             let path = dir.join(format!("{}.json", target.key));
@@ -170,6 +189,13 @@ impl Plan {
             .sum::<u64>();
         let reason = if repo.presence.is_gone() {
             repo.presence.describe()
+        } else if repo.targets.is_empty() {
+            format!(
+                "no targets left; only cache files, last written {} day(s) ago (over {} days); {}",
+                repo.idle_secs / 86_400,
+                PRUNE_AFTER_SECS / 86_400,
+                repo.presence.describe()
+            )
         } else {
             format!(
                 "{} target(s), all older than {} days (every target expired); {}",
@@ -185,7 +211,10 @@ impl Plan {
             name,
             reason,
             bytes,
-            Action::LocalRepo { dir },
+            Action::LocalRepo {
+                dir,
+                had_targets: !repo.targets.is_empty(),
+            },
         );
         Ok(())
     }
@@ -255,7 +284,7 @@ impl Plan {
             for path in self.attempt(store.root(), found).unwrap_or_default() {
                 // A local repository that is listed deletes its own stray locks.
                 let inside = self.items.iter().any(|item| {
-                    matches!(&item.action, Action::LocalRepo { dir } if path.parent() == Some(dir))
+                    matches!(&item.action, Action::LocalRepo { dir, .. } if path.parent() == Some(dir))
                 });
                 if inside {
                     continue;
