@@ -40,7 +40,14 @@ pub fn meta(first: &Value) -> Option<Meta> {
         let kind = subagent
             .as_str()
             .or_else(|| get(subagent, "other").as_str());
-        (text(payload, "id"), kind.unwrap_or("main"))
+        // A built-in one names its parent at the top level.
+        let parent = text(payload, "parent_thread_id");
+        let session = if kind.is_some() && !parent.is_empty() {
+            parent
+        } else {
+            text(payload, "id")
+        };
+        (session, kind.unwrap_or("main"))
     };
     Some(Meta {
         cwd: text(payload, "cwd").to_owned(),
@@ -60,7 +67,7 @@ pub fn project(cwd: &str) -> String {
 }
 
 static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^Process exited with code [1-9][0-9]*\s*$").expect("valid pattern")
+    Regex::new(r"(?m)^Process exited with code ([1-9][0-9]*)\s*$").expect("valid pattern")
 });
 
 static EXEC_COMMAND: LazyLock<Regex> =
@@ -149,10 +156,17 @@ fn output(payload: &Value) -> (Value, bool) {
         _ => String::new(),
     };
     let first = whole.lines().next().unwrap_or_default();
-    if let Some(exit) = EXIT_CODE.find(&whole) {
-        // Start at the exit line, past the chunk id and wall time, as Claude Code's
-        // "Exit code N" leads a failed command's result.
-        return (Value::String(whole[exit.start()..].to_owned()), true);
+    // The exit line sits in the header, before "Output:"; the command's own output may hold
+    // the same words.
+    let (header, body) = whole.split_once("\nOutput:").unwrap_or((&whole, ""));
+    if let Some(exit) = EXIT_CODE.captures(header) {
+        // Claude Code's form, so `errors` adds the first output line to the group and
+        // `denials` knows the command ran.
+        let body = body.trim_start_matches(['\r', '\n']);
+        return (
+            Value::String(format!("Exit code {}\n{body}", &exit[1])),
+            true,
+        );
     }
     let failed = first.starts_with("Script failed")
         || first.starts_with("aborted by user")

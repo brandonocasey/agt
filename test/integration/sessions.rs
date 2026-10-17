@@ -115,8 +115,23 @@ fn scratch_projects_are_skipped_and_counted() {
         err,
         "(skipped 1 scratch transcripts; --scratch includes them)\n"
     );
+    // Outside `--project`, it is not counted at all.
+    let mut other = bare(
+        &env,
+        &[
+            "cost",
+            "--since",
+            "2099-01-01",
+            "--project",
+            "repo",
+            "--root",
+        ],
+    );
+    other.arg(&root);
+    let (code, _, err) = run(other);
+    assert_eq!(code, Some(0));
+    assert_eq!(err, "");
 }
-
 #[test]
 fn default_roots_follow_linked_claude_profiles() {
     let env = Env::new();
@@ -175,10 +190,19 @@ fn codex_cache_misses_forks_exits_and_exec_prompts() {
     ));
     assert!(cost.contains("\n0000bbbb      1    1.0k"), "{cost}");
     let errors = stdout(sessions(&env, &["errors", "--root", "codex-cases"]));
+    // Claude Code's "Exit code N" form, with the first output line; an exit line inside the
+    // output of a command that exited 0 is not a failure.
+    assert!(errors.starts_with("1 total in 1 sessions"), "{errors}");
     assert!(
-        errors.contains("Bash: Process exited with code #  make check"),
+        errors.contains("Bash: Exit code # | boom  make check"),
         "{errors}"
     );
+    // A built-in subagent is grouped under its parent's session.
+    let agents = stdout(sessions(
+        &env,
+        &["cost", "--by", "session,agent", "--root", "codex-cases"],
+    ));
+    assert!(agents.contains("\n0000cccc  guardian"), "{agents}");
     assert_eq!(
         stdout(sessions(
             &env,

@@ -358,6 +358,8 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
             if kind.is_none()
                 && !scope.scratch
                 && SCRATCH.is_match(&parts[0])
+                && !outside(&parts[0])
+                && wanted(scope, Kind::Claude)
                 && codex::meta(&first_line(&path)).is_none()
             {
                 skipped += 1;

@@ -1,4 +1,6 @@
 {"timestamp": "2026-03-06T12:00:00.000Z", "type": "session_meta", "payload": {"id": "0199cccc-0000-7000-8000-00000000cccc", "cwd": "/repo/cases", "source": "exec"}}
 {"timestamp": "2026-03-06T12:00:00.000Z", "type": "turn_context", "payload": {"model": "gpt-test-1"}}
 {"timestamp": "2026-03-06T12:00:01.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "did you run the scripted prompt"}]}}
+{"timestamp": "2026-03-06T12:00:01.500Z", "type": "response_item", "payload": {"type": "function_call", "call_id": "e1", "name": "exec_command", "arguments": "{\"cmd\": \"tail run.log\"}"}}
+{"timestamp": "2026-03-06T12:00:01.600Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "e1", "output": "Chunk ID: 2\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\nProcess exited with code 1\n"}}
 {"timestamp": "2026-03-06T12:00:02.000Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 1}, "last_token_usage": {"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 1}}}}
