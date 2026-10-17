@@ -6,6 +6,7 @@ mod reviewed;
 mod support;
 mod sync;
 mod task;
+mod watch;
 
 use assert_cmd::Command;
 

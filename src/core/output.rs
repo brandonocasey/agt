@@ -7,6 +7,8 @@ use super::error::{Result, ctx};
 pub enum Output {
     Json(Value),
     Text(String),
+    /// Everything is already printed; exit with this status.
+    Exit(u8),
 }
 
 pub fn print(output: Output) -> Result<()> {
@@ -23,6 +25,7 @@ pub fn print(output: Output) -> Result<()> {
             text
         }
         Output::Text(text) => text,
+        Output::Exit(_) => return Ok(()),
     };
     std::io::stdout()
         .lock()

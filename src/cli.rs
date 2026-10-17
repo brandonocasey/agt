@@ -4,6 +4,7 @@ use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::review;
 use crate::task;
+use crate::watch;
 
 /// Tools for coding agents.
 #[derive(Parser)]
@@ -19,11 +20,14 @@ enum Command {
     Review(Box<review::cli::Cli>),
     /// Durable task records and session search.
     Task(task::cli::Cli),
+    /// Poll PR/MR checks until they finish, fail or change.
+    Watch(watch::Cli),
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
     match cli.command {
         Command::Review(args) => review::commands::run(*args),
         Command::Task(args) => task::cli::run(args),
+        Command::Watch(args) => watch::run(args),
     }
 }
