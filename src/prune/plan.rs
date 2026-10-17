@@ -91,8 +91,9 @@ impl Plan {
     /// nothing newer.
     pub fn reviews(&mut self, now: i64) -> Result<()> {
         let store = Store::open(Namespace::Reviews)?;
-        let found = store.repo_dirs();
-        for dir in self.attempt(store.root(), found).unwrap_or_default() {
+        let (dirs, warnings) = store.repo_dirs_lenient();
+        self.warnings.extend(warnings);
+        for dir in dirs {
             let result = self.review_dir(&store, &dir, now);
             self.attempt(&dir, result);
         }
@@ -113,7 +114,9 @@ impl Plan {
     }
 
     fn review_dir(&mut self, store: &Store, dir: &std::path::Path, now: i64) -> Result<()> {
-        for target in store.targets(dir)? {
+        let (targets, warnings) = store.targets_intact(dir)?;
+        self.warnings.extend(warnings);
+        for target in targets {
             if !expired(&target, now)? {
                 continue;
             }

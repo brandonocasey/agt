@@ -709,3 +709,41 @@ fn a_backup_stamped_in_the_future_does_not_become_the_newest() {
     assert!(!oldest.exists());
     assert!(newest.exists() && future.exists());
 }
+
+#[test]
+fn a_review_with_fields_this_agt_does_not_know_is_kept_with_a_warning() {
+    let prune = Prune::new();
+    let newer = prune.target("github.com/o/a", "newer", 200);
+    let mut document: Value = serde_json::from_slice(&fs::read(&newer).unwrap()).unwrap();
+    document["from_the_future"] = json!(true);
+    prune.write(&newer, &document);
+    let old = prune.target("github.com/o/a", "old", 200);
+    let report = prune.run(&["--yes"]);
+    assert_eq!(keys(&report, "reviews"), ["github.com/o/a/old"]);
+    let warnings = report["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("from_the_future")),
+        "{report}"
+    );
+    assert!(newer.exists() && !old.exists());
+}
+
+#[test]
+fn one_corrupt_file_does_not_stop_the_review_and_local_repo_passes() {
+    let prune = Prune::new();
+    let old = prune.target("github.com/o/a", "old", 200);
+    fs::write(old.with_file_name("corrupt.json"), "{ nope").unwrap();
+    let other = prune.target("github.com/o/b", "old", 200);
+    let broken_local = prune.target("local/broken-aaaaaaaaaaaa", "t", 200);
+    fs::write(broken_local.with_file_name("corrupt.json"), "{ nope").unwrap();
+    let local = prune.target("local/fine-bbbbbbbbbbbb", "t", 200);
+    let report = prune.run(&["--yes"]);
+    assert!(!old.exists() && !other.exists() && !local.exists());
+    assert!(broken_local.with_file_name("corrupt.json").exists());
+    assert!(
+        report["warnings"].as_array().unwrap().len() >= 2,
+        "{report}"
+    );
+}

@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::{
-    ACCOUNT_FILE, Namespace, REPO_FILE, Store, ctx, fail, is_current, read_target, try_lock,
+    ACCOUNT_FILE, Namespace, REPO_FILE, Store, ctx, fail, is_current, read_target_intact, try_lock,
     validate_key,
 };
 use crate::core::clock;
@@ -74,7 +74,8 @@ impl Store {
             unlink: created,
         };
         let path = dir.join(format!("{key}.json"));
-        let Some(target) = read_target(&path, self.schema)? else {
+        // A file with fields this agt does not know may be newer than it; it stays.
+        let Some(Ok(target)) = read_target_intact(&path, self.schema)? else {
             return Ok(Removal::Kept);
         };
         if !remove(&target)? {
@@ -164,7 +165,7 @@ impl Store {
                 return Ok(None);
             }
         }
-        let targets = self.targets(dir)?;
+        let (targets, _) = self.targets_intact(dir)?;
         if targets.len() != documents {
             return Ok(None);
         }
