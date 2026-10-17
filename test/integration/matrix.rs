@@ -147,7 +147,7 @@ fn publish_posts_every_payload_once(svc: Svc) {
             "reply",
             "resolve",
             "unresolve",
-            "record",
+            "summary",
         ],
     );
     assert_eq!(kinds(&dry, "writes"), every_write);
@@ -198,11 +198,7 @@ fn not_own_publish_posts_only_replies_and_resolves_on_others_threads(svc: Svc) {
     let dry = dry_run(env, svc, &["--not-own"]);
     assert_eq!(kinds(&dry, "writes"), ["reply", "resolve"], "{dry}");
     let skipped = skipped_items(&dry);
-    for item in [
-        setup.finding(1),
-        "h1".to_owned(),
-        format!("{}/record", setup.run),
-    ] {
+    for item in [setup.finding(1), "h1".to_owned(), "summary".to_owned()] {
         assert!(skipped.contains(&item), "{item}: {dry}");
     }
 }
@@ -298,7 +294,7 @@ fn publish_target_on_detached_head(svc: Svc) {
     let dry = env.run(&["--target", svc.target(), "publish", "--dry-run"]);
     assert_eq!(
         kinds(&dry, "writes"),
-        inline_then(svc, &["thread", "record"])
+        inline_then(svc, &["thread", "summary"])
     );
 }
 
@@ -323,10 +319,7 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     env.reset_calls();
     svc.sync_with(&setup, Some(1), &remote);
     svc.sync_with(&setup, Some(2), &remote);
-    let text = marked(
-        "Not fixed: needs a design change.\n\nme",
-        &format!("{f2}/c2"),
-    );
+    let text = marked("Not fixed: needs a design change.", &format!("{f2}/c2"));
     let answer = if native {
         text
     } else {
@@ -342,7 +335,7 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
         svc.accept_nth(env, Call::PostNote, 2, 604);
     }
     let published = publish(env, svc, &[]);
-    assert_eq!(kinds(&published, "posted"), ["reply", "record"]);
+    assert_eq!(kinds(&published, "posted"), ["reply", "summary"]);
     let inputs = env.forge_inputs();
     let (_, posted) = inputs
         .iter()
@@ -352,7 +345,7 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let posted = posted["body"].as_str().unwrap();
     assert!(
         posted.starts_with(&format!(
-            "Not fixed: needs a design change.\n\nme\n<!-- agent-review id={f2}/c2 attempt=at-"
+            "Not fixed: needs a design change.\n<!-- agent-review id={f2}/c2 attempt=at-"
         )),
         "{posted}"
     );
@@ -427,7 +420,7 @@ fn stale_unposted_findings_are_not_posted(svc: Svc) {
     svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
     assert_eq!(writes_for(&dry, &format!("{f2}/c1")), Vec::<String>::new());
-    assert_eq!(kinds(&dry, "writes"), inline_then(svc, &["record"]));
+    assert_eq!(kinds(&dry, "writes"), inline_then(svc, &["summary"]));
 }
 
 fn run_end_releases_locked_findings(svc: Svc) {
@@ -437,7 +430,7 @@ fn run_end_releases_locked_findings(svc: Svc) {
     let dry = dry_run(env, svc, &[]);
     assert_eq!(
         kinds(&dry, "writes"),
-        inline_then(svc, &["thread", "record"])
+        inline_then(svc, &["thread", "summary"])
     );
 }
 
@@ -529,16 +522,21 @@ fn record_counts_reviews_like_status(svc: Svc) {
     svc.link(&setup);
     assert_eq!(setup.env.run(&["status"])["reviews_at_head"], 1);
     let dry = dry_run(&setup.env, svc, &[]);
-    let record = write_starting(&dry, "body", "**Review ");
+    let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
     assert!(
-        record.starts_with(&format!(
-            "**Review {}:** reviewed at {}.",
-            setup.run,
+        summary.starts_with(&format!(
+            "**⚠️ Agent review: 2 open at {}.** 2 findings: 2 open.",
             &setup.head[..7]
         )),
-        "{record}"
+        "{summary}"
     );
-    assert!(record.contains("reviews-at-head=1 "), "{record}");
+    assert!(
+        summary.contains(&format!(
+            "<!-- review-record v2 id={} head={} reviews-at-head=1 ",
+            setup.run, setup.head
+        )),
+        "{summary}"
+    );
 }
 
 /// A host that shows no edits cannot vouch for a record, so only text this store sent counts.
@@ -682,7 +680,7 @@ fn not_own_findings_posts_findings_and_my_threads_but_no_record(svc: Svc) {
     );
     assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
     let skipped = dry["skipped"].to_string();
-    assert!(skipped.contains(&format!("{}/record", setup.run)), "{dry}");
+    assert!(skipped.contains("\"summary\""), "{dry}");
 }
 
 fn only_limits_publish_to_named_threads(svc: Svc) {
@@ -774,7 +772,7 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
     // A file the PR does not change gets a general comment naming the location.
     let general = write_text(&dry, "body", "A file the PR leaves alone.");
     assert!(
-        general.starts_with("`lib/b.txt:2`\n\n**nit:**"),
+        general.starts_with("`lib/b.txt:2`\n\n**✏️ nit:**"),
         "{general}"
     );
 }
@@ -933,14 +931,21 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record(svc: Svc) {
     let replies = thread["comments"].as_array().unwrap();
     assert_eq!(
         replies.last().unwrap()["body"],
-        "Rejected: Intended behavior."
+        "🚫 Rejected: Intended behavior."
     );
     let open = env.run(&["status"])["open_threads"].to_string();
     assert!(!open.contains(&f1), "{open}");
     svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
-    let record = write_starting(&dry, "body", "**Review ");
-    assert!(record.contains("0 fixed, 1 rejected, "), "{record}");
+    let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
+    assert!(
+        summary.contains("2 findings: 1 rejected, 1 open."),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("| 🚫 Rejected: Intended behavior |"),
+        "{summary}"
+    );
 }
 
 fn a_remote_unresolve_clears_the_fixed_outcome(svc: Svc) {
@@ -954,7 +959,24 @@ fn a_remote_unresolve_clears_the_fixed_outcome(svc: Svc) {
         .as_str()
         .unwrap_or_else(|| panic!("{list}"))
         .to_owned();
-    env.run(&["resolve", &f1, "--fixed", &setup.head]);
+    let fixed = env.run(&["resolve", &f1, "--fixed", &setup.head]);
+    let reply = fixed["thread"]["comments"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let subject = env.git(&["log", "-1", "--format=%s", &setup.head]);
+    assert!(
+        reply.starts_with(&format!(
+            "✅ Fixed in [{} {}](",
+            &setup.head[..7],
+            subject.trim()
+        )) && reply.ends_with(&format!("/commit/{}).", setup.head)),
+        "a fix reply links the commit once the PR is linked: {reply}"
+    );
     remote.set_resolved(&id, true);
     svc.sync(&setup, &remote);
     sync(env, svc);
@@ -968,6 +990,6 @@ fn a_remote_unresolve_clears_the_fixed_outcome(svc: Svc) {
     assert_eq!(synced["resolved"], false, "{synced}");
     assert_eq!(synced["resolution"], Value::Null, "{synced}");
     let dry = dry_run(env, svc, &[]);
-    let record = write_starting(&dry, "body", "**Review ");
-    assert!(record.contains(" 0 fixed, "), "{record}");
+    let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
+    assert!(summary.contains("2 findings: 2 open."), "{summary}");
 }

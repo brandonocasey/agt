@@ -88,14 +88,18 @@ agt review run start
 
 agt review pass start --run rv-7k2m --kind full --reviewers - <<'EOF'
 [{"model": "claude-opus-5-5", "effort": "xhigh", "harness": "claude-code",
-  "harness_version": "2.1.296", "starting_context": "fresh"}]
+  "harness_version": "2.1.296", "starting_context": "fresh",
+  "session": "a0b5ad828155531d2"}]
 EOF
 ```
 
 Reviewer ids are `r<n>`, assigned in order unless you pass `"id"`. Two ids are
 reserved: `manual` for the main session's own pass and `fix` for the fixer,
-whose replies feed the final record's `Fixed by:` line; give them model, effort,
-harness and version like any reviewer. A reviewer continued in a later pass
+who signs fix replies and shows as the main session in the summary; give them
+model, effort, harness and version like any reviewer. `"session"` is the
+harness's id for the reviewer, such as a subagent or session id; posted
+comments name its first 8 characters (`agent a0b5ad82`, or `session …` for
+`manual` and `fix`). A reviewer continued in a later pass
 keeps its id; give only `"id"` and `"starting_context"` and the rest is copied
 from its earlier pass. `--base <rev>` sets the start of the reviewed delta
 (default: the merge-base for a full pass, the previous pass's head otherwise). A
@@ -136,14 +140,14 @@ PR/MR, so resolve it with `--triage stale` instead. `run end` closes the run, re
 for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
 `HEAD` (on a range or commit target, its end or `--head <rev>`, which MUST
 descend from the end) as the run's `repaired_head` (commits after the last pass
-up to it are the run's `repair`), stores the reveal counts for the final record, and prunes
+up to it are the run's `repair`), stores the reveal counts for the summary, and prunes
 old targets of this repository. Its output ends with `status`: the brief
 `status` of that head, so no separate call is needed. `run end --usage <file|->`
 stores what the main session spent, as an array of `{"role": "fix", "tokens",
 "duration_ms", "tool_uses"}` (roles such as `fix`, `manual`, `main`). Its output's
 `spent` gives the run's wall time, the time inside passes (`reviewing_secs`) and
 outside them (`fixing_secs`), and the reported reviewer and main-session
-tokens; the final record carries the same as a `Time: ... Tokens: ...` line.
+tokens; the summary's steps show each run's time.
 
 `approve` records an approval of the head as a general thread, refused while a
 `bug`, `requirement` or `question` is open; approving the same head again
@@ -178,15 +182,16 @@ agt review comment --body "Why 3 retries?" --path src/net.rs --line 42
 agt review comment --body - --type question < note.md   # general comment
 agt review reply h1 --body "Matches the API limit."
 agt review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
-  --run rv-7k2m --pass c1p0 --reviewer fix --model claude-opus-5-5 --harness claude-code
+  --run rv-7k2m --pass c1p0 --reviewer fix --model claude-opus-5-5 --harness claude-code \
+  --session dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f
 agt review resolve h1 --resolution answered
 agt review resolve rv-7k2m.c1p0.r1.f1 --triage fixed --resolution "fixed 9e8d7c6"
 agt review resolve rv-7k2m.c1p0.r1.f2 --triage question     # held, stays open
 agt review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still loses data"
-# Fixed: triage, resolution and a "Fixed in <sha>." reply for each, in one write
+# Fixed: triage, resolution and a "✅ Fixed in <sha> <subject>." reply for each, in one write
 agt review resolve rv-7k2m.c1p0.r1.f1 rv-7k2m.c1p0.r2.f1 --fixed 9e8d7c6 \
   --run rv-7k2m --pass c1p1 --reviewer fix
-# A fix check disagrees: reopen with a "Not fixed: <reason>." reply
+# A fix check disagrees: reopen with a "❌ Not fixed: <reason>." reply
 agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   --run rv-7k2m --pass c1p1 --reviewer r1
 ```
@@ -197,8 +202,9 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   `--commit`, else `HEAD`, else the uncommitted work tree when it is dirty.
 - Author: `--author <login>` for a human, or agent flags `--model`,
   `--effort`, `--harness`, `--harness-version`, `--run`, `--pass`,
-  `--reviewer`. `--reviewer` with `--run` and `--pass` fills the rest from the
-  stored reviewer. With no author flags the author is the forge login that
+  `--reviewer`, `--session`. `--reviewer` with `--run` and `--pass` fills the
+  rest from the stored reviewer; `--session` is the harness's id for the agent,
+  such as the main session's. With no author flags the author is the forge login that
   `sync` last authenticated as for this repository, else git `user.name`,
   which the next `sync` (or `publish`) replaces with the forge login.
 - `reply --local` keeps the reply in the store only, such as the user's answer
@@ -211,10 +217,11 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   `question` marks it held. `--reopen` marks it unresolved. `resolve` takes
   several ids and changes them all in one write, or none when one is missing.
   `--fixed <sha>` means `--triage fixed --resolution "fixed <sha>"` plus a reply
-  `Fixed in <sha>.`; `--not-fixed <reason>` means `--reopen --resolution
-  "not fixed: <reason>"` plus a reply `Not fixed: <reason>.`; `--rejected
+  `✅ Fixed in [<sha> <subject>](<commit URL>).` (the link once the target is
+  linked to a PR/MR); `--not-fixed <reason>` means `--reopen --resolution
+  "not fixed: <reason>"` plus a reply `❌ Not fixed: <reason>.`; `--rejected
   <reason>` resolves a finding that will not be fixed, with `rejected: <reason>`
-  and a reply `Rejected: <reason>.`, and the final record counts it as
+  and a reply `🚫 Rejected: <reason>.`, and the summary counts it as
   `<n> rejected`. A finding rejected before it was ever posted is not posted, as
   with `stale`; another store that syncs the reply reads the rejection back. `--reply <text>`
   replaces that text, or adds a reply to any `resolve`; the author flags sign
@@ -346,8 +353,9 @@ agt review prune --all
 - A target is deleted 90 days after the later of its PR/MR's close or merge
   and its last change, or, with no closed PR/MR, 90 days after its last change. `sync`, `run end` and `prune`
   apply this to the current repository; `prune --all` to every repository.
-- Each trusted `review-record v2` comment whose `head` is the evaluated head
+- Each trusted `review-record v2` marker whose `head` is the evaluated head
   adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
+  A summary holds one marker per run; a run's newest marker counts.
   Records of this target's own runs, or of a run whose pass covers the head,
   are skipped; their passes already count.
 - A run's `repair` commits (after its last pass, up to `HEAD` at `run end`),
@@ -424,8 +432,9 @@ agt review prune --all
   Trusted records are stored under `records`; a trusted general comment ending
   in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`
   marker) answers that thread: it is added as a reply and, when the thread is
-  not resolvable, resolves it as `fixed <sha>` (a `Fixed in` answer) or
-  reopens it (any other answer).
+  not resolvable, resolves it as `fixed <sha>` (a `Fixed in` answer, also with
+  the sha as a link) or `rejected: <reason>` (a `Rejected:` answer), or reopens
+  it (any other answer).
 - A draft note with a marker for a local comment and its attempt id marks it
   `posting` with its `draft_id`, so a later publish publishes it; a `draft_id` whose draft is gone
   is cleared.
@@ -440,26 +449,31 @@ agt review prune --all
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
   threads imported from the host (other people's threads); our findings, local
-  threads and final records are listed under `skipped`. `--not-own --findings
+  threads and the summary are listed under `skipped`. `--not-own --findings
   --only <id,...>`, when the user asks for it, also posts the named surviving
   findings and local threads the user wrote, with their replies and resolves;
-  `--findings` without `--only` is refused, and final records never go to
+  `--findings` without `--only` is refused, and the summary never goes to
   someone else's PR/MR.
 - `--only <id>[,<id>...]` limits writes to those threads and their pending
-  replies and resolves; every other thread and all final records are listed
-  under `skipped`.
+  replies and resolves; every other thread and the summary are listed under
+  `skipped`.
   `publish` syncs first, then posts in this order: new threads, sync, replies,
-  resolves and reopens, final records, then a last sync to fill in ids.
+  resolves and reopens, the summary, then a last sync to fill in ids.
 - Posted: new surviving findings of ended passes (a locked pass's findings wait
   until a later `reveal` pass of the same cycle, or the run, has ended) and
-  local comment threads, new replies, resolve and reopen changes, and the final
-  record of each ended run not posted yet. Never posted: killed findings,
+  local comment threads, new replies, resolve and reopen changes, and the
+  summary when a run ended since it was posted or its text changed. Never posted: killed findings,
   findings resolved `stale` before they were posted, imported comments, local
   comments by another human author, and runs that ended before the target's
   `attached_at` (history from before the PR/MR) with their findings, replies,
   resolves and records (listed under `skipped`).
-- Every body ends with a signature (agent: `<model> <effort> <harness>
-  <run>.<pass>.<reviewer>`, plus ` post-reveal`; human: the login) and
+- A finding opens with its kind and an emoji: `**🐛 bug (high):**`,
+  `**❓ question:**`, `**📋 requirement:**`, `**✏️ nit:**`. An agent signs in a
+  grey quote under its text, `> <sub><model> <effort> · <harness> <version> ·
+  agent <id></sub>` (`session <id>` for the main session, plus ` · 🙈 blind
+  review` or ` · post-reveal`; a default effort is left out); a one-line agent
+  reply is all quote, `> ✅ Fixed in ... <sub>signature</sub>`. People sign
+  nothing. Every body ends with
   `<!-- agent-review id=<local id> attempt=<attempt> -->`, with one attempt id
   per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
@@ -483,18 +497,23 @@ agt review prune --all
   (line codes are the SHA-1 of the path plus the old and new line counters).
   General comments are discussions;
   replies are discussion notes; resolves are `PUT .../discussions/<id>`. The
-  final record is a plain note, so it never blocks merging.
+  summary is a plain note, so it never blocks merging.
 - In-diff means the line is in a hunk of `git diff -U3 -M` between the PR/MR
   base and the reviewed commit (GitHub) or MR head (GitLab, after mapping the
   line to it); when the commits are not local it is out of diff.
-- The final record follows the review skill: a header with cycles, found,
-  fixed, rejected (when any) and open counts, a `| Pass | Reviewed | Starting context | Reviewer |`
-  table, `Reveal:`, `Fixed by:` and `Time: ... Tokens: ...` lines when known, and
-  `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`.
+- The summary is one general comment per PR/MR: posted with the first ended
+  run, then edited in place (`PATCH .../issues/comments/<id>` on GitHub,
+  `PUT .../notes/<id>` on GitLab), and posted anew when the host no longer has
+  it. It opens with `**✅ Agent review: <O> open at <head>.**`, the outcome
+  counts and how many PR/MR commits a pass reviewed, then collapsed sections:
+  the findings (kind, where, raised in, outcome, and the text of each one not
+  posted inline), the commits and how each was reviewed, and the numbered steps
+  of every run with its time. A grey quoted table names each agent's model,
+  harness and id, above `Posted by agt <version>`. It ends with one
+  `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`
+  per run it covers and `<!-- agent-review id=summary attempt=<attempt> -->`.
   `N` counts the run's passes covering the repaired head by the same rules as
-  `status`. The verdict is `review-fixed` when the run has repair commits that
-  no pass of it covers, else `reviewed` (committing a reviewed dirty tree is
-  `reviewed`).
+  `status`. Each covered run's `record` names the summary comment.
 - Concurrent `publish` commands for one repository and PR/MR run one at a time.
   Each command syncs after waiting, so it does not repeat earlier writes.
 - Crash safety: each item is saved as `posting` with the attempt id and the
@@ -504,8 +523,8 @@ agt review prune --all
   a GitLab draft that was created but not published. A `posting` item that a
   sync finds neither as a note nor as a draft goes back to `pending` (keeping
   its attempt id), so it is retried or can be killed.
-- `--dry-run` syncs in memory and prints every payload, including the final
-  record; it writes nothing to the store, the repository or the forge.
+- `--dry-run` syncs in memory and prints every payload, including the
+  summary; it writes nothing to the store, the repository or the forge.
 
 ## Store
 
@@ -583,7 +602,7 @@ Target file:
       "repaired_head": "9e8d7c...",
       "repair": [{ "sha": "9e8d7c...", "patch_id": "bb22..." }],
       "reveal": null,
-      "record": { "post": "posted", "attempt": "at-x1y2", "sent": "**Review ...",
+      "record": { "post": "posted", "attempt": "at-x1y2", "sent": "**✅ Agent review: ...",
                   "head": "9e8d7c...", "remote_id": "2002",
                   "url": "https://github.com/...#issuecomment-2002" }
     }

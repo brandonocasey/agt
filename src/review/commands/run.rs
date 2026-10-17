@@ -117,6 +117,7 @@ pub(super) struct ReviewerInput {
     pub(super) harness: Option<String>,
     pub(super) harness_version: Option<String>,
     pub(super) starting_context: Option<String>,
+    pub(super) session: Option<String>,
 }
 
 pub(super) fn read_reviewers(source: Option<&Path>) -> Result<Vec<ReviewerInput>> {
@@ -189,6 +190,9 @@ pub(super) fn assign_reviewers(run: &Run, inputs: Vec<ReviewerInput>) -> Result<
                 .harness_version
                 .or_else(|| earlier.and_then(|reviewer| reviewer.harness_version.clone())),
             starting_context: input.starting_context.unwrap_or_else(|| "fresh".to_owned()),
+            session: input
+                .session
+                .or_else(|| earlier.and_then(|reviewer| reviewer.session.clone())),
             usage: None,
             id,
         });

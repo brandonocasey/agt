@@ -4,10 +4,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::forge;
 use crate::review::cli::{AuthorArgs, CommentArgs, ReplyArgs, ResolveArgs};
 use crate::store::model::{
-    Anchor, Author, Comment, FindingInfo, KilledFinding, PostState, Resolution, Severity, Side,
-    Target, Thread, ThreadType, Triage,
+    Anchor, Author, Comment, FindingInfo, KilledFinding, PostState, Resolution, Review, Severity,
+    Side, Target, Thread, ThreadType, Triage,
 };
 
 use super::input::{AnchorInput, build_anchor, limited, read_body, read_source};
@@ -68,7 +69,8 @@ pub(super) fn author(
         || args.harness_version.is_some()
         || args.run.is_some()
         || args.pass.is_some()
-        || args.reviewer.is_some();
+        || args.reviewer.is_some()
+        || args.session.is_some();
     if let Some(login) = &args.author {
         if agent {
             return fail("--author names a human; drop the agent flags");
@@ -115,6 +117,10 @@ pub(super) fn author(
         run: args.run.clone(),
         pass: args.pass.clone(),
         reviewer: args.reviewer.clone(),
+        session: args
+            .session
+            .clone()
+            .or_else(|| stored.and_then(|reviewer| reviewer.session.clone())),
     })
 }
 
@@ -315,6 +321,7 @@ pub(super) fn add_findings(
             run: Some(run_id.to_owned()),
             pass: Some(pass_id.to_owned()),
             reviewer: Some(reviewer_id.to_owned()),
+            session: reviewer.session.clone(),
         };
         let prefix = format!("{run_id}.{pass_id}.{reviewer_id}.f");
         let ids = target
@@ -488,6 +495,22 @@ pub(super) fn normalize_resolution(ctx: &Ctx, resolution: &str) -> Result<Resolu
     )
 }
 
+/// `✅ Fixed in [<sha> <subject>](<commit URL>).`; the link text alone before the target is
+/// linked to a PR/MR.
+fn fixed_reply(sha: &str, subject: &str, review: Option<&Review>) -> String {
+    let mut text = format!("{} ", &sha[..sha.len().min(7)]);
+    for char in subject.chars() {
+        if matches!(char, '\\' | '[' | ']') {
+            text.push('\\');
+        }
+        text.push(char);
+    }
+    match review.and_then(|review| forge::commit_url(review, sha)) {
+        Some(url) => format!("✅ Fixed in [{text}]({url})."),
+        None => format!("✅ Fixed in {text}."),
+    }
+}
+
 pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
     let scope = ctx.scope()?;
     if scope.existing.is_none() {
@@ -502,12 +525,16 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
                 None,
                 Some(format!("rejected: {reason}")),
                 false,
-                Some(format!("Rejected: {reason}.")),
+                Some(format!("🚫 Rejected: {reason}.")),
             )
         }
         (Some(sha), _) => {
             let sha = ctx.repo.commit(sha)?;
-            let reply = format!("Fixed in {}.", &sha[..sha.len().min(12)]);
+            let review = scope
+                .existing
+                .as_ref()
+                .and_then(|target| target.review.as_ref());
+            let reply = fixed_reply(&sha, &ctx.repo.subject(&sha)?, review);
             (
                 Some(Triage::Fixed),
                 Some(format!("fixed {sha}")),
@@ -521,7 +548,7 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
                 None,
                 Some(format!("not fixed: {reason}")),
                 true,
-                Some(format!("Not fixed: {reason}.")),
+                Some(format!("❌ Not fixed: {reason}.")),
             )
         }
         (None, None) => (args.triage, args.resolution.clone(), args.reopen, None),

@@ -1,5 +1,6 @@
 //! The hidden `<!-- ... -->` markers `publish` writes into posted bodies and `sync` reads back:
-//! the local id and attempt of a comment, the id and head of a finding, and the run record.
+//! the local id and attempt of a comment, the id and head of a finding, and the run records a
+//! summary holds.
 //! Writers and parsers live together so the format has one definition.
 
 const AGENT: &str = "<!-- agent-review id=";
@@ -9,6 +10,8 @@ const CLOSE: &str = "-->";
 /// Local id prefix of the body of a GitHub review that `publish` posts; sync skips those.
 const REVIEW_ID: &str = "review/";
 const RECORD_SUFFIX: &str = "/record";
+/// Local id of the one summary comment of a PR/MR, which holds the record of every run.
+pub const SUMMARY_ID: &str = "summary";
 
 /// The marker that ties a posted body to a local comment id and, once sent, its attempt.
 pub fn agent(id: &str, attempt: Option<&str>) -> String {
@@ -37,12 +40,7 @@ pub fn is_review_id(id: &str) -> bool {
     id.starts_with(REVIEW_ID)
 }
 
-/// The local id of the record comment of `run`.
-pub fn record_id(run: &str) -> String {
-    format!("{run}{RECORD_SUFFIX}")
-}
-
-/// The run of a record comment's local id.
+/// The run of the local id of a run's own record comment, which earlier builds posted.
 pub fn record_run(id: &str) -> Option<&str> {
     id.strip_suffix(RECORD_SUFFIX)
 }
@@ -93,19 +91,26 @@ pub struct RecordMarker {
     pub open: Option<u32>,
 }
 
-pub fn parse_record(body: &str) -> Option<RecordMarker> {
-    let inner = body.split_once(RECORD)?.1.split_once(CLOSE)?.0;
-    let field = |name: &str| {
-        inner
-            .split_whitespace()
-            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
-    };
-    Some(RecordMarker {
-        run: field("id")?.to_owned(),
-        head: field("head")?.to_owned(),
-        reviews_at_head: field("reviews-at-head")?.parse().ok()?,
-        open: field("open").and_then(|open| open.parse().ok()),
-    })
+/// Every `review-record` marker of `body`: one in a run's own record, one per run in a
+/// summary.
+pub fn parse_records(body: &str) -> Vec<RecordMarker> {
+    body.split(RECORD)
+        .skip(1)
+        .filter_map(|rest| {
+            let inner = rest.split_once(CLOSE)?.0;
+            let field = |name: &str| {
+                inner
+                    .split_whitespace()
+                    .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+            };
+            Some(RecordMarker {
+                run: field("id")?.to_owned(),
+                head: field("head")?.to_owned(),
+                reviews_at_head: field("reviews-at-head")?.parse().ok()?,
+                open: field("open").and_then(|open| open.parse().ok()),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -139,7 +144,6 @@ mod tests {
             "<!-- review-record v2 id=rv-7k2m head=abc reviews-at-head=2 open=1 -->"
         );
         assert_eq!(review_id("abc"), "review/abc");
-        assert_eq!(record_id("rv-7k2m"), "rv-7k2m/record");
     }
 
     #[test]
@@ -152,16 +156,25 @@ mod tests {
         assert_eq!(finding_id(&body).as_deref(), Some("rv-1.c1p0.r1.f1"));
         assert_eq!(agent_id(&body).as_deref(), Some("rv-1.c1p0.r1.f1/c1"));
         assert_eq!(agent_attempt(&body), Some("at-9"));
-        let marker = parse_record(&record("rv-7k2m", "abc", 2, 1)).unwrap();
-        assert_eq!(
-            (
-                marker.run.as_str(),
-                marker.head.as_str(),
-                marker.reviews_at_head,
-                marker.open
-            ),
-            ("rv-7k2m", "abc", 2, Some(1))
+        let summary = format!(
+            "text\n{}\n{}\n{}",
+            record("rv-7k2m", "abc", 2, 1),
+            record("rv-9x", "def", 0, 0),
+            agent(SUMMARY_ID, Some("at-9"))
         );
+        let markers: Vec<_> = parse_records(&summary)
+            .into_iter()
+            .map(|marker| (marker.run, marker.head, marker.reviews_at_head, marker.open))
+            .collect();
+        assert_eq!(
+            markers,
+            [
+                ("rv-7k2m".to_owned(), "abc".to_owned(), 2, Some(1)),
+                ("rv-9x".to_owned(), "def".to_owned(), 0, Some(0)),
+            ]
+        );
+        assert_eq!(agent_id(&summary).as_deref(), Some(SUMMARY_ID));
+        assert!(parse_records("no marker").is_empty());
         assert_eq!(record_run("rv-7k2m/record"), Some("rv-7k2m"));
         assert!(is_review_id(&review_id("abc")));
         assert_eq!(

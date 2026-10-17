@@ -571,17 +571,19 @@ impl<'a> Trust<'a> {
     }
 }
 
-fn parse_record(comment: &CommentData) -> Option<ImportedRecord> {
-    let marker = markers::parse_record(&comment.body)?;
-    Some(ImportedRecord {
-        run: marker.run,
-        head: marker.head,
-        reviews_at_head: marker.reviews_at_head,
-        open: marker.open,
-        comment_id: comment.id.clone(),
-        url: comment.url.clone(),
-        created_at: comment.created_at.clone(),
-    })
+fn parse_records(comment: &CommentData) -> Vec<ImportedRecord> {
+    markers::parse_records(&comment.body)
+        .into_iter()
+        .map(|marker| ImportedRecord {
+            run: marker.run,
+            head: marker.head,
+            reviews_at_head: marker.reviews_at_head,
+            open: marker.open,
+            comment_id: comment.id.clone(),
+            url: comment.url.clone(),
+            created_at: comment.created_at.clone(),
+        })
+        .collect()
 }
 
 /// The thread id a general comment answers: a `Fixed in ... Re: <id>` comment, or any
@@ -593,31 +595,53 @@ fn answered_id(body: &str, marked: bool) -> Option<String> {
     ((marked || before.contains("Fixed in")) && !id.is_empty()).then(|| id.to_owned())
 }
 
-/// The reason of a marked `Rejected: <reason>.` reply.
+/// The first line of an outcome reply without the quote mark and emoji that lead it:
+/// `> ✅ Fixed in ...` reads `Fixed in ...`.
+fn outcome_line(body: &str) -> &str {
+    let line = body.lines().next().unwrap_or_default().trim_start();
+    let line = line.strip_prefix('>').unwrap_or(line);
+    line.trim_start_matches(|char: char| !char.is_ascii_alphanumeric())
+}
+
+/// The reason of a marked `> 🚫 Rejected: <reason>. <sub>signature</sub>` reply, or of the
+/// plain `Rejected: <reason>.` earlier versions posted.
 fn rejected_reason(body: &str) -> Option<String> {
     agent_id(body)?;
-    let reason = body
-        .lines()
-        .next()?
-        .strip_prefix("Rejected: ")?
+    let rest = outcome_line(body).strip_prefix("Rejected: ")?;
+    let reason = rest
+        .split_once(" <sub>")
+        .map_or(rest, |(reason, _)| reason)
         .trim()
         .trim_end_matches('.');
     (!reason.is_empty()).then(|| reason.to_owned())
 }
 
+/// The commit of a `Fixed in <sha>` reply, also when the sha opens a link:
+/// `Fixed in [<sha> <subject>](<url>)`.
 fn fixed_sha(body: &str) -> Option<String> {
     let rest = body.split_once("Fixed in ")?.1;
-    let sha = rest.split_whitespace().next()?.trim_end_matches(['.', ',']);
+    let sha = rest
+        .split_whitespace()
+        .next()?
+        .trim_start_matches('[')
+        .split(']')
+        .next()?
+        .trim_end_matches(['.', ',']);
     (!sha.is_empty()).then(|| sha.to_owned())
 }
 
-/// Type and severity from a `**bug (medium):**` heading.
+/// Type and severity from a `**🐛 bug (medium):**` heading, after the location line that opens
+/// a finding on a file outside the diff.
 fn finding_kind(body: &str) -> (ThreadType, Option<Severity>) {
+    let body = body.trim_start();
+    let body = match body.split_once('\n') {
+        Some((first, rest)) if first.starts_with('`') => rest.trim_start(),
+        _ => body,
+    };
     let heading = body
-        .trim_start()
         .strip_prefix("**")
         .and_then(|rest| rest.split_once(":**"))
-        .map(|(heading, _)| heading);
+        .map(|(heading, _)| heading.trim_start_matches(|char: char| !char.is_ascii_alphanumeric()));
     let Some(heading) = heading else {
         return (ThreadType::Comment, None);
     };
@@ -827,32 +851,46 @@ fn claim_git_names(target: &mut Target, login: &str) {
     }
 }
 
-/// Stores a verified record comment and marks our run's record posted when it is that run's
-/// write; false when the comment is no record.
+/// Stores the records of a verified record or summary comment and marks our runs' records
+/// posted when it is their write; false when the comment holds no record.
 fn take_record(
     runs: &mut [Run],
     records: &mut Vec<ImportedRecord>,
     comment: &CommentData,
     trust: &Trust,
 ) -> bool {
-    let Some(record) = parse_record(comment) else {
+    let found = parse_records(comment);
+    if found.is_empty() {
         return false;
-    };
-    let own = trust.own_id(comment);
-    if let Some(run_id) = own.as_deref().and_then(markers::record_run)
-        && let Some(run) = runs.iter_mut().find(|run| run.id == run_id)
-        && let Some(post) = &mut run.record
-        && (post.remote_id.as_deref() == Some(comment.id.as_str())
-            || (post.remote_id.is_none()
-                && post.delivery.is_posting()
-                && post.delivery.is_attempt(agent_attempt(&comment.body))))
-    {
-        post.delivery.post = PostState::Posted;
-        post.remote_id = Some(comment.id.clone());
-        post.url.clone_from(&comment.url);
     }
-    records.retain(|known| known.comment_id != record.comment_id);
-    records.push(record);
+    let own = trust.own_id(comment);
+    // A run's own record names the run in its id; the summary holds every run it lists.
+    let claimed: Vec<&str> = match own.as_deref() {
+        Some(markers::SUMMARY_ID) => found.iter().map(|record| record.run.as_str()).collect(),
+        Some(id) => markers::record_run(id).into_iter().collect(),
+        None => Vec::new(),
+    };
+    for run in runs
+        .iter_mut()
+        .filter(|run| claimed.contains(&run.id.as_str()))
+    {
+        if let Some(post) = &mut run.record
+            && (post.remote_id.as_deref() == Some(comment.id.as_str())
+                || (post.remote_id.is_none()
+                    && post.delivery.is_posting()
+                    && post.delivery.is_attempt(agent_attempt(&comment.body))))
+        {
+            post.delivery.post = PostState::Posted;
+            post.remote_id = Some(comment.id.clone());
+            post.url.clone_from(&comment.url);
+        }
+    }
+    // One record per run: a later comment, such as the summary after a run's own record,
+    // replaces an earlier one.
+    records.retain(|known| {
+        known.comment_id != comment.id && !found.iter().any(|record| record.run == known.run)
+    });
+    records.extend(found);
     true
 }
 
@@ -1125,7 +1163,10 @@ mod tests {
             editor: None,
             review_id: None,
         };
-        let record = parse_record(&comment).unwrap();
+        let records = parse_records(&comment);
+        let [record] = records.as_slice() else {
+            panic!("one record expected");
+        };
         assert_eq!(
             (record.run.as_str(), record.reviews_at_head, record.open),
             ("rv-7k2m", 2, Some(1))
@@ -1142,6 +1183,33 @@ mod tests {
         assert_eq!(
             fixed_sha("Fixed in 9e8d7c6.\nRe: x").as_deref(),
             Some("9e8d7c6")
+        );
+    }
+
+    #[test]
+    fn parses_the_emoji_format() {
+        let located = "`docs/a.md:3`\n\n**🐛 bug (high):** x\n\n> <sub>m1 xhigh · codex-cli</sub>";
+        assert!(matches!(
+            finding_kind(located),
+            (ThreadType::Bug, Some(Severity::High))
+        ));
+        assert!(matches!(
+            finding_kind("**❓ question:** why?"),
+            (ThreadType::Question, None)
+        ));
+        let fixed = "> ✅ Fixed in [9e8d7c6 fix(a): b \\[c\\]](https://h/o/r/commit/9e8d7c6). \
+                     <sub>m · Claude Code · session 6f1d2b9a</sub>\n\
+                     <!-- agent-review id=h1/c2 attempt=at-1 -->";
+        assert_eq!(fixed_sha(fixed).as_deref(), Some("9e8d7c6"));
+        let rejected = "> 🚫 Rejected: capped at 64 KiB. <sub>m · Claude Code · session 6f1d2b9a</sub>\n\
+                        <!-- agent-review id=h1/c2 attempt=at-1 -->";
+        assert_eq!(
+            rejected_reason(rejected).as_deref(),
+            Some("capped at 64 KiB")
+        );
+        assert_eq!(
+            rejected_reason("Rejected: by design.\n<!-- agent-review id=h1/c2 -->").as_deref(),
+            Some("by design")
         );
     }
 

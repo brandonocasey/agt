@@ -161,6 +161,13 @@ impl Repo {
         .ok_or_else(|| Error(format!("unknown commit: {rev}")))
     }
 
+    /// The first line of the message of `commit`.
+    pub fn subject(&self, commit: &str) -> Result<String> {
+        let spec = format!("{commit}^{{commit}}");
+        self.git(&["log", "-1", "--format=%s", "--end-of-options", &spec, "--"])
+            .map(|text| text.trim_end().to_owned())
+    }
+
     pub fn parent(&self, commit: &str) -> Result<Option<String>> {
         let spec = format!("{commit}^1");
         self.git_opt(&[

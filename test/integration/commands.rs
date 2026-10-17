@@ -1241,7 +1241,7 @@ fn batched_review_records_in_few_calls() {
     let reply = &shown["thread"]["comments"][1];
     assert_eq!(
         reply["body"],
-        format!("Fixed in {}.", &fix[..12]),
+        format!("✅ Fixed in {} fix.", &fix[..7]),
         "{shown}"
     );
     assert_eq!(reply["author"]["reviewer"], "fix");
@@ -1266,7 +1266,7 @@ fn batched_review_records_in_few_calls() {
     );
     assert_eq!(
         reopened["thread"]["comments"][2]["body"],
-        "Not fixed: still off by one."
+        "❌ Not fixed: still off by one."
     );
     env.run_stdin(
         &[

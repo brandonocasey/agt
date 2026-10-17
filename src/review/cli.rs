@@ -209,9 +209,13 @@ pub struct AuthorArgs {
     /// Pass the agent author belongs to.
     #[arg(long)]
     pub pass: Option<String>,
-    /// Reviewer id; fills model, effort and harness from the stored pass.
+    /// Reviewer id; fills model, effort, harness and session from the stored pass.
     #[arg(long)]
     pub reviewer: Option<String>,
+    /// The harness's id for the agent author, such as the main session's id; posted comments
+    /// name its first 8 characters.
+    #[arg(long)]
+    pub session: Option<String>,
 }
 
 #[derive(Args)]
@@ -269,15 +273,15 @@ pub struct ResolveArgs {
     #[arg(long, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
     pub reopen: bool,
     /// Fixed in this commit: triage `fixed`, resolution `fixed <sha>`, and a reply
-    /// "Fixed in <sha>." unless `--reply` gives other text.
+    /// "✅ Fixed in <sha> <subject>." linking the commit unless `--reply` gives other text.
     #[arg(long, value_name = "SHA", conflicts_with = "not_fixed")]
     pub fixed: Option<String>,
     /// A fix check found it not fixed: reopen with `not fixed: <reason>` and a reply
-    /// "Not fixed: <reason>." unless `--reply` gives other text.
+    /// "❌ Not fixed: <reason>." unless `--reply` gives other text.
     #[arg(long, value_name = "REASON", conflicts_with = "rejected")]
     pub not_fixed: Option<String>,
     /// Not to be fixed (wrong, or not worth it): resolve with `rejected: <reason>` and a
-    /// reply "Rejected: <reason>." unless `--reply` gives other text.
+    /// reply "🚫 Rejected: <reason>." unless `--reply` gives other text.
     #[arg(long, value_name = "REASON", conflicts_with = "fixed")]
     pub rejected: Option<String>,
     /// Also add this reply to each thread, or `-` for stdin.

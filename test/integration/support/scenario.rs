@@ -14,7 +14,7 @@ pub struct Review {
 
 /// An in-diff finding (f1), an out-of-diff one (f2, line 9) and a killed one (f3).
 pub const PUBLISH: Review = Review {
-    reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296"}]"#,
+    reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296","session":"a0b5ad828155531d2"}]"#,
     findings: r#"[
   {"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"In-diff text of f1."},
   {"type":"nit","scenario":"General text of f2."},
@@ -316,6 +316,8 @@ pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
         "c1p0",
         "--reviewer",
         "fix",
+        "--session",
+        "dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f",
     ]);
     env.run(&[
         "resolve",
@@ -330,29 +332,42 @@ pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
     env.run(&["run", "end", "--run", &setup.run]);
 }
 
-/// The review record text a publish of `setup` sends.
-pub fn assert_record(setup: &Setup, record: &str) {
+/// The summary text a publish of `setup` sends.
+pub fn assert_summary(setup: &Setup, summary: &str) {
     let short = &setup.head[..7];
-    assert!(
-        record.starts_with(&format!(
-            "**Review {}:** reviewed at {short}. 1 cycles, 2 found, 1 fixed, 1 open.\n",
+    let expected = [
+        format!("**⚠️ Agent review: 1 open at {short}.** 2 findings: 1 fixed, 1 open."),
+        "<details><summary>📝 2 findings: 1 fixed, 1 open</summary>".to_owned(),
+        format!("| ✅ Fixed in {short} |"),
+        format!(
+            "1. 🔍 Reviewer agent a0b5ad82 read the whole branch at {short} and found 2 issues"
+        ),
+        format!("2. 🛠️ Main session dcec84d5 fixed 1, in {short}."),
+        "3. ⚠️ 1 still open.".to_owned(),
+        format!(
+            "> | 🔍 Reviewer r1, {} | m1 xhigh | Claude Code 2.1.296 | agent a0b5ad828155531d2 |",
             setup.run
-        )),
-        "{record}"
-    );
-    assert!(record.contains(&format!(
-        "| c1p0 full | {short} | fresh | r1 m1 xhigh · Claude Code 2.1.296 |"
-    )));
-    assert!(record.contains("Fixed by: m2 high · Claude Code 2.1.300\n"));
-    assert!(!record.contains("Reveal:"));
-    assert!(record.contains(&format!(
-        "<!-- review-record v2 id={} head={} reviews-at-head=1 open=1 -->",
-        setup.run, setup.head
-    )));
-    let marker = format!("<!-- agent-review id={}/record attempt=", setup.run);
+        ),
+        "> | 🛠️ Main session: fixes, replies | m2 high | Claude Code 2.1.300 | session \
+         dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f |"
+            .to_owned(),
+        format!("> <sub>Posted by agt {}.", env!("CARGO_PKG_VERSION")),
+        format!(
+            "<!-- review-record v2 id={} head={} reviews-at-head=1 open=1 -->",
+            setup.run, setup.head
+        ),
+    ];
+    for text in expected {
+        assert!(summary.contains(&text), "{text} missing from {summary}");
+    }
+    assert!(summary.starts_with("**⚠️ Agent review: "), "{summary}");
     assert!(
-        record.rsplit_once('\n').unwrap().1.starts_with(&marker),
-        "{record}"
+        summary
+            .rsplit_once('\n')
+            .unwrap()
+            .1
+            .starts_with("<!-- agent-review id=summary attempt="),
+        "{summary}"
     );
-    assert!(record.ends_with(" -->"), "{record}");
+    assert!(summary.ends_with(" -->"), "{summary}");
 }

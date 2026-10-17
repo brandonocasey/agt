@@ -1,13 +1,14 @@
 use serde_json::{Value, json};
 
-use super::render::{body, location, record_body, record_head, short};
+use super::render::{body, location, record_head, review_body, short};
+use super::summary::{Covered, summary_body};
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::markers;
 use crate::forge::service::{
     ApproveCap, Capabilities, Inline, Placement, Position, Request, ReviewService,
 };
-use crate::git::Repo;
+use crate::git::{CommitInfo, Repo};
 use crate::review::commands::Ctx;
 use crate::review::commands::approve::blocking_threads;
 use crate::review::commands::status::run_reviews_at;
@@ -50,9 +51,11 @@ pub(super) enum Item {
         thread: String,
         resolved: bool,
     },
-    Record {
-        run: String,
-        head: String,
+    /// The PR/MR's one summary comment, created once and then edited in place: `runs` are
+    /// the runs it covers with the heads their records name, `remote` the comment it edits.
+    Summary {
+        runs: Vec<(String, String)>,
+        remote: Option<String>,
     },
     /// The host's approval of the PR/MR head, sent before the approval comment.
     Approve {
@@ -78,7 +81,7 @@ impl Write {
             Item::Reply { .. } => "reply",
             Item::Resolve { resolved: true, .. } => "resolve",
             Item::Resolve { .. } => "unresolve",
-            Item::Record { .. } => "record",
+            Item::Summary { .. } => "summary",
             Item::Approve { .. } => "approve",
         }
     }
@@ -92,7 +95,7 @@ impl Write {
             | Item::PublishDraft { comment, .. }
             | Item::Reply { comment } => vec![comment.clone()],
             Item::Resolve { thread, .. } | Item::Approve { thread } => vec![thread.clone()],
-            Item::Record { run, .. } => vec![markers::record_id(run)],
+            Item::Summary { .. } => vec![markers::SUMMARY_ID.to_owned()],
         }
     }
 
@@ -169,7 +172,7 @@ pub(super) fn allowed(author: &Author, login: &str) -> bool {
 #[derive(Clone)]
 pub(super) enum Skip {
     NotNamed,
-    /// `--only` names threads, so final records are held.
+    /// `--only` names threads, so the summary is held.
     OnlyThreads,
     /// The PR/MR is someone else's (`--not-own`).
     Foreign {
@@ -224,7 +227,7 @@ impl std::fmt::Display for Skip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotNamed => write!(f, "not named by --only"),
-            Self::OnlyThreads => write!(f, "--only posts named threads, not final records"),
+            Self::OnlyThreads => write!(f, "--only posts named threads, not the summary"),
             Self::Foreign {
                 whose,
                 held: Held::Threads,
@@ -236,7 +239,7 @@ impl std::fmt::Display for Skip {
             Self::Foreign {
                 whose,
                 held: Held::Records,
-            } => write!(f, "{whose}: final records are never posted there"),
+            } => write!(f, "{whose}: the summary is never posted there"),
             Self::PassOpen { run, pass } => write!(f, "pass {run}.{pass} has not ended"),
             Self::PassLocked { run, pass, cycle } => write!(
                 f,
@@ -470,10 +473,15 @@ impl<'a> Planner<'a> {
                  ids,
                  comments,
              }| {
-                let summary = format!(
-                    "Review findings.\n{}",
-                    markers::agent(&markers::review_id(&commit), None)
-                );
+                let threads: Vec<&Thread> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        target.threads.iter().find(|thread| {
+                            thread.comments.first().is_some_and(|first| first.id == *id)
+                        })
+                    })
+                    .collect();
+                let summary = review_body(target, &commit, &threads);
                 let request = self.service().review_batch(
                     self.connection.subject(),
                     &commit,
@@ -880,19 +888,20 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// The final record of each ended run not posted yet, and the records held back.
+    /// The summary comment when it is due: a run ended since it was posted, or its text
+    /// changed. It is posted once, then edited in place.
     pub(super) fn records(&self, target: &Target) -> Result<(Vec<Write>, Vec<Skipped>)> {
-        let due: Vec<&Run> = target
+        let runs: Vec<&Run> = target
             .runs
             .iter()
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
-            .filter(|run| {
-                run.record
-                    .as_ref()
-                    .is_none_or(|record| record.delivery.post != PostState::Posted)
-            })
             .collect();
+        let unposted = runs.iter().any(|run| {
+            run.record
+                .as_ref()
+                .is_none_or(|record| record.delivery.post != PostState::Posted)
+        });
         let reason = self
             .foreign()
             .map(|whose| Skip::Foreign {
@@ -901,30 +910,69 @@ impl<'a> Planner<'a> {
             })
             .or_else(|| (!self.only.is_empty()).then_some(Skip::OnlyThreads));
         if let Some(reason) = reason {
-            let held = due
-                .iter()
-                .map(|run| Skipped::new(&markers::record_id(&run.id), reason.clone()))
+            let held = unposted
+                .then(|| Skipped::new(markers::SUMMARY_ID, reason))
+                .into_iter()
                 .collect();
             return Ok((Vec::new(), held));
         }
-        let writes = due
-            .into_iter()
+        if runs.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let covered = runs
+            .iter()
             .map(|run| {
                 let head = record_head(run);
                 let at_head = run_reviews_at(self.ctx, target, &run.id, &head)?;
-                let text = record_body(target, run, &head, at_head, self.attempt);
-                let request = self.service().note(self.connection.subject(), &text);
-                Ok(self.write(
-                    Item::Record {
-                        run: run.id.clone(),
-                        head,
-                    },
-                    request,
-                    &text,
-                ))
+                Ok(Covered { run, head, at_head })
             })
-            .collect::<Result<_>>()?;
-        Ok((writes, Vec::new()))
+            .collect::<Result<Vec<_>>>()?;
+        let commits = self.pr_commits();
+        let render = |attempt: &str| summary_body(target, &covered, commits.as_deref(), attempt);
+        // The posted summary: the comment the latest run's record landed in, when it is one.
+        let posted = runs
+            .iter()
+            .rev()
+            .filter_map(|run| run.record.as_ref())
+            .find(|record| {
+                record.remote_id.is_some()
+                    && record
+                        .delivery
+                        .sent
+                        .as_deref()
+                        .and_then(markers::agent_id)
+                        .is_some_and(|id| id == markers::SUMMARY_ID)
+            });
+        if let Some(record) = posted.filter(|_| !unposted) {
+            // Rendered with the attempt id it was sent with, unchanged text needs no edit.
+            let last = record.delivery.attempt.as_deref().map(render);
+            if last.as_deref().map(str::trim) == record.delivery.sent.as_deref().map(str::trim) {
+                return Ok((Vec::new(), Vec::new()));
+            }
+        }
+        let text = render(self.attempt);
+        let remote = posted.and_then(|record| record.remote_id.clone());
+        let subject = self.connection.subject();
+        let request = match &remote {
+            Some(id) => self.service().edit_note(subject, id, &text),
+            None => self.service().note(subject, &text),
+        };
+        let runs = covered
+            .iter()
+            .map(|covered| (covered.run.id.clone(), covered.head.clone()))
+            .collect();
+        Ok((
+            vec![self.write(Item::Summary { runs, remote }, request, &text)],
+            Vec::new(),
+        ))
+    }
+
+    /// The PR/MR's commits, oldest first, when git can list them.
+    fn pr_commits(&self) -> Option<Vec<CommitInfo>> {
+        let head = &self.review.head_sha;
+        let base = self.review.base_sha.as_deref()?;
+        let base = self.repo.merge_base(base, head).ok().flatten()?;
+        self.repo.commits(Some(&base), head).ok()
     }
 
     /// Why a thread of ours is held: not named by `--only`, or on someone else's PR/MR
@@ -981,7 +1029,7 @@ mod tests {
         };
         assert_eq!(
             foreign(Held::Records).to_string(),
-            "https://h/pull/1 is authored by bob: final records are never posted there"
+            "https://h/pull/1 is authored by bob: the summary is never posted there"
         );
         assert_eq!(
             foreign(Held::Threads).to_string(),

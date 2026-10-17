@@ -286,6 +286,8 @@ pub trait ReviewService: Service {
     fn thread(&self, subject: ReviewSubject, text: &str) -> Request;
     /// A general comment that does not block merging.
     fn note(&self, subject: ReviewSubject, text: &str) -> Request;
+    /// New text for the posted general comment `id`, such as the summary.
+    fn edit_note(&self, subject: ReviewSubject, id: &str, text: &str) -> Request;
     /// A native reply; only for kinds [`Capabilities::replies_natively`] accepts.
     fn reply(&self, subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request;
     /// Only for threads of a service with `caps().resolve`; `resolved == false` reopens.
@@ -334,6 +336,8 @@ pub struct Kind {
     pub key_prefix: &'static str,
     /// Path segment of a PR/MR URL between the repository and the number.
     pub url_marker: &'static str,
+    /// Path segment of a commit URL between the repository and the sha.
+    pub commit_marker: &'static str,
     /// Hosts known without asking anything.
     pub well_known: fn(&str) -> bool,
     /// The service's own configuration names this host.

@@ -35,6 +35,7 @@ pub const KIND: Kind = Kind {
     forge: Forge::Github,
     key_prefix: "gh",
     url_marker: "/pull/",
+    commit_marker: "/commit/",
     well_known: |host| host == "github.com",
     configured: |_| false,
     probe: |host| {
@@ -170,6 +171,14 @@ impl ReviewService for Github {
         Request::rest(
             Method::Post,
             comments_path(subject),
+            Some(json!({ "body": text })),
+        )
+    }
+
+    fn edit_note(&self, subject: ReviewSubject, id: &str, text: &str) -> Request {
+        Request::rest(
+            Method::Patch,
+            format!("{}/issues/comments/{}", base(subject), forge::encode(id)),
             Some(json!({ "body": text })),
         )
     }

@@ -280,6 +280,9 @@ pub struct Reviewer {
     pub harness: String,
     pub harness_version: Option<String>,
     pub starting_context: String,
+    /// The harness's id for this reviewer: a subagent id or a session id. Signs its findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// What the reviewer spent on this pass, from `pass end --findings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
@@ -718,6 +721,10 @@ pub enum Author {
         run: Option<String>,
         pass: Option<String>,
         reviewer: Option<String>,
+        /// The harness's id for the agent: a reviewer's subagent or session id, or the main
+        /// session's. Absent in stores written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
 }
 

@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::core::error::{Error, Result};
 use crate::forge::service::SERVICES;
-use crate::store::model::{RemoteThread, ReviewState};
+use crate::store::model::{RemoteThread, Review, ReviewState};
 
 /// A `--pr` argument: a number, or a PR/MR URL that also names the host and repository.
 pub struct PrRef {
@@ -48,6 +48,13 @@ pub fn parse_pr(arg: &str) -> Result<PrRef> {
         number,
         location: Some((host.to_ascii_lowercase(), repo.trim_matches('/').to_owned())),
     })
+}
+
+/// The web page of `sha` in the repository of the PR/MR `review`.
+pub fn commit_url(review: &Review, sha: &str) -> Option<String> {
+    let kind = service::kind(review.forge);
+    let (repo, _) = review.url.rsplit_once(kind.url_marker)?;
+    Some(format!("{repo}{}{sha}", kind.commit_marker))
 }
 
 /// Percent-encodes `text` for a URL path segment, keeping `~` as RFC 3986 does.
