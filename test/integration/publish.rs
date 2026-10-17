@@ -190,6 +190,57 @@ fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
     assert_eq!(remote_ids(env), [json!("605"), json!("605"), json!("605")]);
 }
 
+/// The text the summary was last sent with.
+fn summary_sent(env: &Env) -> String {
+    env.run(&["status", "--full"])["runs"][0]["record"]["sent"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// While the host still shows the old summary, the failed edit stays due and goes out again.
+#[test]
+fn a_failed_summary_edit_is_sent_again() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--triage", "stale"]);
+    }
+    svc.link(&setup);
+    svc.accept(env, Call::PostNote, 604);
+    env.run(&["publish", "--pr", "42"]);
+    let first = summary_sent(env);
+    // One more commit changes the summary text.
+    env.write("c.txt", "c\n");
+    let head = env.commit_all("more");
+    let mut remote = Remote::new().head(head);
+    remote.general("c604", Comment::new(604, "me", &first));
+    svc.sync(&setup, &remote);
+    let patch = [
+        "api",
+        "--method",
+        "PATCH",
+        "repos/me/repo/issues/comments/604",
+        "--input",
+        "-",
+    ];
+    env.fail_call_with(&patch, "gh: Server Error (HTTP 502)");
+    env.fail(&["publish", "--pr", "42"], None);
+    assert_ne!(summary_sent(env), first);
+
+    env.pass_call(&patch);
+    env.respond(
+        &patch,
+        r#"{"id":604,"html_url":"https://github.com/me/repo/pull/42#issuecomment-604"}"#,
+    );
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    let record = &env.run(&["status", "--full"])["runs"][0]["record"];
+    assert_eq!(record["post"], "posted", "{record}");
+    assert_eq!(record.get("earlier"), None, "{record}");
+}
+
 #[test]
 fn concurrent_publish_posts_a_pending_comment_once() {
     use std::fs::{self, OpenOptions, Permissions};
@@ -435,6 +486,101 @@ fn own_github_upgrade_to_formal_is_reported() {
 }
 
 // GitLab
+
+/// GitLab shows no edits, so a summary whose edit failed still shows text this store sent:
+/// it is not imported as a thread, and the edit goes out again.
+#[test]
+fn gitlab_a_failed_summary_edit_keeps_the_summary_trusted() {
+    let svc = Gitlab::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--triage", "stale"]);
+    }
+    svc.link(&setup);
+    svc.accept(env, Call::PostNote, 6002);
+    env.run(&["publish", "--pr", "3"]);
+    let first = summary_sent(env);
+    env.write("c.txt", "c\n");
+    let head = env.commit_all("more");
+    let mut remote = Remote::new().head(head.clone());
+    remote.general("d-s", Comment::new(6002, "me", &first));
+    svc.sync(&setup, &remote);
+    let put = gitlab::write("PUT", &format!("{}/notes/6002", gitlab::MR));
+    let put = strs(&put);
+    env.fail_call_with(&put, "glab: 502 Bad Gateway (HTTP 502)");
+    env.fail(&["publish", "--pr", "3"], None);
+    env.run(&["sync", "--pr", "3"]);
+    assert!(!ids(&env.run(&["list"])).contains(&"gl-n6002".to_owned()));
+
+    // The fake host does not apply edits, so it lists the note again once it is edited.
+    env.pass_call(&put);
+    env.respond(&put, r#"{"id":6002}"#);
+    svc.sync(&setup, &Remote::new().head(head.clone()));
+    let published = env.run(&["publish", "--pr", "3"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    assert_eq!(
+        svc.count(env, Call::PostNote),
+        1,
+        "edited, not posted again"
+    );
+    let mut remote = Remote::new().head(head);
+    remote.general("d-s", Comment::new(6002, "me", &summary_sent(env)));
+    svc.sync(&setup, &remote);
+    let synced = env.run(&["sync", "--pr", "3"]);
+    assert_eq!(synced["records"], 1, "{synced}");
+    assert!(open_ids(&env.run(&["status"])).is_empty());
+}
+
+/// A run's own record comment from before the summary stays trusted once the summary holds
+/// the run.
+#[test]
+fn gitlab_a_record_from_before_the_summary_stays_trusted() {
+    let svc = Gitlab::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--triage", "stale"]);
+    }
+    svc.link(&setup);
+    // The record an earlier build posted as note 6001.
+    let old = format!(
+        "**Review {run}:** reviewed at {short}. 1 cycles, 2 found, 0 fixed, 0 open.\n\
+         <!-- review-record v2 id={run} head={head} reviews-at-head=1 open=0 -->\n\
+         <!-- agent-review id={run}/record attempt=at-old -->",
+        run = setup.run,
+        head = setup.head,
+        short = &setup.head[..7]
+    );
+    let mut files = vec![env.state()];
+    let file = std::iter::from_fn(|| {
+        while let Some(path) = files.pop() {
+            if path.is_dir() {
+                files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            } else if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("\"runs\"")) {
+                return Some(path);
+            }
+        }
+        None
+    })
+    .next()
+    .unwrap();
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    doc["runs"][0]["record"] = json!({
+        "post": "posted", "attempt": "at-old", "sent": old, "head": setup.head,
+        "remote_id": "6001", "url": null
+    });
+    std::fs::write(&file, doc.to_string()).unwrap();
+    let mut remote = Remote::new();
+    remote.general("d-r", Comment::new(6001, "me", &old));
+    svc.sync(&setup, &remote);
+    svc.accept(env, Call::PostNote, 6002);
+    let published = env.run(&["publish", "--pr", "3"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    let synced = env.run(&["sync", "--pr", "3"]);
+    assert_eq!(synced["records"], 1, "{synced}");
+    assert!(!ids(&env.run(&["list"])).contains(&"gl-n6001".to_owned()));
+}
 
 /// A draft created without its id saved is published, not created again; a discussion
 /// posted without its id saved is matched, not posted again.

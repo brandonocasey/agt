@@ -15,9 +15,9 @@ use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
 use crate::git::{Repo, split_remote};
 use crate::store::Account;
 use crate::store::model::{
-    Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RemoteComment,
-    RemoteKind, Resolution, Review, ReviewState, Run, Severity, Side, Target, TargetKind, Thread,
-    ThreadType,
+    Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RecordPost,
+    RemoteComment, RemoteKind, Resolution, Review, ReviewState, Run, Severity, Side, Target,
+    TargetKind, Thread, ThreadType,
 };
 
 use crate::forge::markers::{self, agent_attempt, agent_id};
@@ -513,7 +513,9 @@ impl<'a> Trust<'a> {
         let records = target
             .runs
             .iter()
-            .filter_map(|run| run.record.as_ref()?.delivery.sent.as_deref());
+            .filter_map(|run| run.record.as_ref())
+            .flat_map(|record| record.delivery.sent.iter().chain(&record.earlier))
+            .map(String::as_str);
         let killed = target
             .runs
             .iter()
@@ -874,15 +876,15 @@ fn take_record(
         .iter_mut()
         .filter(|run| claimed.contains(&run.id.as_str()))
     {
+        // While an edit of the comment is out, the host shows the old text until the edit's
+        // attempt appears.
         if let Some(post) = &mut run.record
             && (post.remote_id.as_deref() == Some(comment.id.as_str())
-                || (post.remote_id.is_none()
-                    && post.delivery.is_posting()
-                    && post.delivery.is_attempt(agent_attempt(&comment.body))))
+                || (post.remote_id.is_none() && post.delivery.is_posting()))
+            && (!post.delivery.is_posting()
+                || post.delivery.is_attempt(agent_attempt(&comment.body)))
         {
-            post.delivery.post = PostState::Posted;
-            post.remote_id = Some(comment.id.clone());
-            post.url.clone_from(&comment.url);
+            landed(post, comment.id.clone(), comment.url.clone());
         }
     }
     // One record per run: a later comment, such as the summary after a run's own record,
@@ -892,6 +894,17 @@ fn take_record(
     });
     records.extend(found);
     true
+}
+
+/// Marks a run's record landed in comment `id`. The summary texts it replaced are gone from
+/// the host; a run's own record comment from before the summary stays.
+pub(crate) fn landed(record: &mut RecordPost, id: String, url: Option<String>) {
+    record.delivery.post = PostState::Posted;
+    record.remote_id = Some(id);
+    record.url = url;
+    record
+        .earlier
+        .retain(|body| agent_id(body).as_deref() != Some(markers::SUMMARY_ID));
 }
 
 /// Marks threads and comments the host no longer returns. They are kept, never dropped.
