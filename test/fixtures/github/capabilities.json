@@ -1,14 +1,14 @@
 {
-  "pagination": "graphql_cursor",
-  "inline": "review_batch",
-  "ranges": true,
-  "reply": "review_threads",
-  "resolve": true,
-  "unresolve": true,
-  "general_kind": "general",
-  "general_resolvable": false,
   "approve": "review",
   "approve_self_allowed": false,
   "edits_attributed": true,
-  "notes_become_discussions": false
+  "general_kind": "general",
+  "general_resolvable": false,
+  "inline": "review_batch",
+  "notes_become_discussions": false,
+  "pagination": "graphql_cursor",
+  "ranges": true,
+  "reply": "review_threads",
+  "resolve": true,
+  "unresolve": true
 }

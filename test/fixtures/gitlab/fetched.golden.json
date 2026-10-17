@@ -1,0 +1,149 @@
+{
+  "drafts": [
+    {
+      "body": "**bug (low):** Draft of the second finding.\n<!-- review-finding v1 id=rv-test.c1p0.r1.f2 sha=1111111111111111111111111111111111111111 -->",
+      "id": "77"
+    }
+  ],
+  "pr": {
+    "author": "me",
+    "base_sha": "2222222222222222222222222222222222222222",
+    "closed_at": null,
+    "head_branch": "feat",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "repo": "group/sub/proj",
+    "start_sha": "2222222222222222222222222222222222222222",
+    "state": "open",
+    "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3"
+  },
+  "threads": [
+    {
+      "comments": [
+        {
+          "body": "Bot finding on line 3.",
+          "created_at": "2026-10-13T13:40:28Z",
+          "editor": null,
+          "id": "4005224826",
+          "login": "dj-bot",
+          "review_id": null,
+          "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4005224826"
+        }
+      ],
+      "position_head": "3333333333333333333333333333333333333333",
+      "remote": {
+        "commit": "3333333333333333333333333333333333333333",
+        "id": "0c94200c744bc890ec2494edf9a2adaec3bc6415",
+        "kind": "discussion",
+        "line": 3,
+        "old_line": null,
+        "old_path": "a.txt",
+        "original_line": 3,
+        "original_start_line": null,
+        "outdated": null,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4005224826"
+      },
+      "resolved": true
+    },
+    {
+      "comments": [
+        {
+          "body": "**bug (high):** Posted finding text.\n\nm1 xhigh codex rv-test.c1p0.r1\n<!-- review-finding v1 id=rv-test.c1p0.r1.f1 sha=1111111111111111111111111111111111111111 -->",
+          "created_at": "2026-10-13T14:00:00Z",
+          "editor": null,
+          "id": "4005300001",
+          "login": "me",
+          "review_id": null,
+          "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4005300001"
+        }
+      ],
+      "position_head": "1111111111111111111111111111111111111111",
+      "remote": {
+        "commit": "1111111111111111111111111111111111111111",
+        "id": "aa4f06793a2cb5e35dc2d9eaf702a3d4f4a87096",
+        "kind": "discussion",
+        "line": 3,
+        "old_line": null,
+        "old_path": "a.txt",
+        "original_line": 3,
+        "original_start_line": null,
+        "outdated": null,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4005300001"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Alice leaves a general note.",
+          "created_at": "2026-10-14T07:00:00Z",
+          "editor": null,
+          "id": "4007000001",
+          "login": "alice",
+          "review_id": null,
+          "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4007000001"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "kind": "general",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": null,
+        "side": null,
+        "start_line": null,
+        "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4007000001"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Bob on an unchanged line.",
+          "created_at": "2026-10-14T10:00:00Z",
+          "editor": null,
+          "id": "4007000002",
+          "login": "bob",
+          "review_id": null,
+          "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4007000002"
+        }
+      ],
+      "position_head": "3333333333333333333333333333333333333333",
+      "remote": {
+        "commit": "3333333333333333333333333333333333333333",
+        "id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
+        "kind": "discussion",
+        "line": 8,
+        "old_line": 8,
+        "old_path": "a.txt",
+        "original_line": 8,
+        "original_start_line": null,
+        "outdated": null,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://gitlab.example.com/group/sub/proj/-/merge_requests/3#note_4007000002"
+      },
+      "resolved": false
+    }
+  ]
+}

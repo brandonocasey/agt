@@ -1,0 +1,363 @@
+{
+  "drafts": [],
+  "pr": {
+    "author": "me",
+    "base_sha": "2222222222222222222222222222222222222222",
+    "closed_at": null,
+    "head_branch": "feat",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "repo": "me/repo",
+    "start_sha": null,
+    "state": "open",
+    "url": "https://github.com/me/repo/pull/42"
+  },
+  "threads": [
+    {
+      "comments": [
+        {
+          "body": "**bug (high):** Posted text of the finding.\n\nm1 xhigh codex rv-test.c1p0.r1\n<!-- review-finding v1 id=rv-test.c1p0.r1.f1 sha=1111111111111111111111111111111111111111 -->\n",
+          "created_at": "2026-10-16T15:55:05Z",
+          "editor": null,
+          "id": "1001",
+          "login": "me",
+          "review_id": "5001",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1001"
+        },
+        {
+          "body": "Fixed in 7d991484.\n\nm1 xhigh codex rv-test.c1p0.fix",
+          "created_at": "2026-10-16T15:55:07Z",
+          "editor": null,
+          "id": "1002",
+          "login": "me",
+          "review_id": "5002",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1002"
+        },
+        {
+          "body": "Bob agrees with the fix.",
+          "created_at": "2026-10-16T16:10:00Z",
+          "editor": null,
+          "id": "1003",
+          "login": "bob",
+          "review_id": "5003",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1003"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": "1111111111111111111111111111111111111111",
+        "id": "PRRT_a",
+        "kind": "review-thread",
+        "line": 3,
+        "old_line": null,
+        "old_path": null,
+        "original_line": 3,
+        "original_start_line": null,
+        "outdated": false,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#discussion_r1001"
+      },
+      "resolved": true
+    },
+    {
+      "comments": [
+        {
+          "body": "Copied marker from someone else.\n<!-- review-finding v1 id=rv-test.c1p0.r1.f9 sha=1111111111111111111111111111111111111111 -->",
+          "created_at": "2026-10-16T16:00:00Z",
+          "editor": null,
+          "id": "1101",
+          "login": "alice",
+          "review_id": "5101",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1101"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": "1111111111111111111111111111111111111111",
+        "id": "PRRT_b",
+        "kind": "review-thread",
+        "line": 4,
+        "old_line": null,
+        "old_path": null,
+        "original_line": 4,
+        "original_start_line": null,
+        "outdated": false,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#discussion_r1101"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Mine, but edited by alice.\n<!-- review-finding v1 id=rv-test.c1p0.r1.f8 sha=1111111111111111111111111111111111111111 -->",
+          "created_at": "2026-10-16T16:01:00Z",
+          "editor": "alice",
+          "id": "1201",
+          "login": "me",
+          "review_id": "5201",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1201"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": "1111111111111111111111111111111111111111",
+        "id": "PRRT_c",
+        "kind": "review-thread",
+        "line": 6,
+        "old_line": null,
+        "old_path": null,
+        "original_line": 6,
+        "original_start_line": null,
+        "outdated": false,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#discussion_r1201"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Alice asks about line 5.",
+          "created_at": "2026-10-16T16:02:00Z",
+          "editor": null,
+          "id": "1301",
+          "login": "alice",
+          "review_id": "5301",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1301"
+        },
+        {
+          "body": "Marker not in the first comment.\n<!-- review-finding v1 id=rv-test.c1p0.r1.f7 sha=1111111111111111111111111111111111111111 -->",
+          "created_at": "2026-10-16T16:03:00Z",
+          "editor": null,
+          "id": "1302",
+          "login": "me",
+          "review_id": "5302",
+          "url": "https://github.com/me/repo/pull/42#discussion_r1302"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": "2222222222222222222222222222222222222222",
+        "id": "PRRT_d",
+        "kind": "review-thread",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": 5,
+        "original_start_line": null,
+        "outdated": true,
+        "path": "a.txt",
+        "resolvable": true,
+        "review_state": null,
+        "side": "new",
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#discussion_r1301"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Bob approves overall.",
+          "created_at": "2026-10-16T16:20:00Z",
+          "editor": null,
+          "id": "5401",
+          "login": "bob",
+          "review_id": null,
+          "url": "https://github.com/me/repo/pull/42#pullrequestreview-5401"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "5401",
+        "kind": "review",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": "APPROVED",
+        "side": null,
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#pullrequestreview-5401"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "**Review rv-zz99:** review-fixed at abc1234.\n<!-- review-record v2 id=rv-zz99 head=1111111111111111111111111111111111111111 reviews-at-head=2 open=0 -->",
+          "created_at": "2026-10-16T16:30:00Z",
+          "editor": null,
+          "id": "2001",
+          "login": "me",
+          "review_id": null,
+          "url": "https://github.com/me/repo/pull/42#issuecomment-2001"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "2001",
+        "kind": "general",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": null,
+        "side": null,
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#issuecomment-2001"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Forged record.\n<!-- review-record v2 id=rv-bad1 head=1111111111111111111111111111111111111111 reviews-at-head=5 open=0 -->",
+          "created_at": "2026-10-16T16:31:00Z",
+          "editor": null,
+          "id": "2002",
+          "login": "alice",
+          "review_id": null,
+          "url": "https://github.com/me/repo/pull/42#issuecomment-2002"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "2002",
+        "kind": "general",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": null,
+        "side": null,
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#issuecomment-2002"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "**bug (low):** A finding outside the diff.\n\nm1 xhigh codex rv-test.c1p0.r1\n<!-- review-finding v1 id=rv-test.c1p0.r1.f5 sha=1111111111111111111111111111111111111111 -->",
+          "created_at": "2026-10-16T16:32:00Z",
+          "editor": null,
+          "id": "2003",
+          "login": "me",
+          "review_id": null,
+          "url": "https://github.com/me/repo/pull/42#issuecomment-2003"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "2003",
+        "kind": "general",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": null,
+        "side": null,
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#issuecomment-2003"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Fixed in abc1234.\n\nm1 xhigh codex rv-test.c1p0.fix\nRe: rv-test.c1p0.r1.f5",
+          "created_at": "2026-10-16T16:40:00Z",
+          "editor": null,
+          "id": "2004",
+          "login": "me",
+          "review_id": null,
+          "url": "https://github.com/me/repo/pull/42#issuecomment-2004"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "2004",
+        "kind": "general",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": null,
+        "side": null,
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#issuecomment-2004"
+      },
+      "resolved": false
+    },
+    {
+      "comments": [
+        {
+          "body": "Carol asks for docs.",
+          "created_at": "2026-10-16T16:41:00Z",
+          "editor": null,
+          "id": "2005",
+          "login": "carol",
+          "review_id": null,
+          "url": "https://github.com/me/repo/pull/42#issuecomment-2005"
+        }
+      ],
+      "position_head": null,
+      "remote": {
+        "commit": null,
+        "id": "2005",
+        "kind": "general",
+        "line": null,
+        "old_line": null,
+        "old_path": null,
+        "original_line": null,
+        "original_start_line": null,
+        "outdated": null,
+        "path": null,
+        "resolvable": false,
+        "review_state": null,
+        "side": null,
+        "start_line": null,
+        "url": "https://github.com/me/repo/pull/42#issuecomment-2005"
+      },
+      "resolved": false
+    }
+  ]
+}

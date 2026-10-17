@@ -1,0 +1,121 @@
+{
+  "approve": {
+    "args": [
+      "api",
+      "-X",
+      "POST",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/approve",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "sha": "c"
+    }
+  },
+  "draft": {
+    "args": [
+      "api",
+      "-X",
+      "POST",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/draft_notes",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "note": "text",
+      "position": {
+        "new_line": 3,
+        "new_path": "a.txt",
+        "position_type": "text"
+      }
+    }
+  },
+  "note": {
+    "args": [
+      "api",
+      "-X",
+      "POST",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/notes",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "publish_draft": {
+    "args": [
+      "api",
+      "-X",
+      "PUT",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/draft_notes/77/publish"
+    ],
+    "body": null
+  },
+  "reply": {
+    "args": [
+      "api",
+      "-X",
+      "POST",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/discussions/d-f1/notes",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "resolve": {
+    "args": [
+      "api",
+      "-X",
+      "PUT",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/discussions/d-f1",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "resolved": true
+    }
+  },
+  "thread": {
+    "args": [
+      "api",
+      "-X",
+      "POST",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/discussions",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "unresolve": {
+    "args": [
+      "api",
+      "-X",
+      "PUT",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/discussions/d-f1",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "resolved": false
+    }
+  }
+}

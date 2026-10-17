@@ -2,6 +2,8 @@ mod anchors;
 mod cli;
 mod clock;
 mod commands;
+#[cfg(test)]
+mod contract;
 mod error;
 mod forge;
 mod git;

@@ -1,14 +1,14 @@
 {
-  "pagination": "cli_paginate",
-  "inline": "draft_then_publish",
-  "ranges": true,
-  "reply": "all",
-  "resolve": true,
-  "unresolve": true,
-  "general_kind": "discussion",
-  "general_resolvable": true,
   "approve": "call",
   "approve_self_allowed": null,
   "edits_attributed": false,
-  "notes_become_discussions": true
+  "general_kind": "discussion",
+  "general_resolvable": true,
+  "inline": "draft_then_publish",
+  "notes_become_discussions": true,
+  "pagination": "cli_paginate",
+  "ranges": true,
+  "reply": "all",
+  "resolve": true,
+  "unresolve": true
 }

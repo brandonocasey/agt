@@ -1,0 +1,101 @@
+{
+  "approve": {
+    "args": [
+      "api",
+      "--method",
+      "POST",
+      "repos/me/repo/pulls/42/reviews",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "ok",
+      "commit_id": "c",
+      "event": "APPROVE"
+    }
+  },
+  "note": {
+    "args": [
+      "api",
+      "--method",
+      "POST",
+      "repos/me/repo/issues/42/comments",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "reply": {
+    "args": [
+      "api",
+      "graphql",
+      "-f",
+      "threadId=PRRT_f1",
+      "-f",
+      "body=text",
+      "-f",
+      "query=mutation AddReply($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{databaseId url}}}"
+    ],
+    "body": null
+  },
+  "resolve": {
+    "args": [
+      "api",
+      "graphql",
+      "-f",
+      "threadId=PRRT_f1",
+      "-f",
+      "query=mutation ResolveThread($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}"
+    ],
+    "body": null
+  },
+  "review_batch": {
+    "args": [
+      "api",
+      "--method",
+      "POST",
+      "repos/me/repo/pulls/42/reviews",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "summary",
+      "comments": [
+        {
+          "body": "text",
+          "line": 3,
+          "path": "a.txt",
+          "side": "RIGHT"
+        }
+      ],
+      "commit_id": "c",
+      "event": "COMMENT"
+    }
+  },
+  "thread": {
+    "args": [
+      "api",
+      "--method",
+      "POST",
+      "repos/me/repo/issues/42/comments",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "unresolve": {
+    "args": [
+      "api",
+      "graphql",
+      "-f",
+      "threadId=PRRT_f1",
+      "-f",
+      "query=mutation UnresolveThread($threadId:ID!){unresolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}"
+    ],
+    "body": null
+  }
+}

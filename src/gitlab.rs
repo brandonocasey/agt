@@ -451,3 +451,110 @@ fn fetch(glab: &dyn Transport, project: &str, iid: u64) -> Result<Fetched> {
         drafts,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::contract::{self, Replay};
+    use crate::transport::glab_args;
+
+    const VARS: [(&str, &str); 7] = [
+        ("RUN", "rv-test"),
+        ("HEAD", "1111111111111111111111111111111111111111"),
+        ("BASE", "2222222222222222222222222222222222222222"),
+        ("OLD", "3333333333333333333333333333333333333333"),
+        ("HOST", "gitlab.example.com"),
+        ("REPO", "group/sub/proj"),
+        ("AUTHOR", "me"),
+    ];
+    const MR: &str = "projects/group%2Fsub%2Fproj/merge_requests/3";
+
+    fn gitlab() -> Gitlab {
+        let list = |name: &str| format!("{MR}/{name}?per_page=100");
+        let replay = Replay::new(glab_args)
+            .answer(
+                &["api", "-X", "GET", MR],
+                contract::fixture("gitlab/mr.json", &VARS),
+            )
+            .answer(
+                &["api", "-X", "GET", "--paginate", &list("discussions")],
+                contract::fixture("gitlab/discussions.json", &VARS),
+            )
+            .answer(
+                &["api", "-X", "GET", "--paginate", &list("draft_notes")],
+                contract::fixture("gitlab/drafts.json", &VARS),
+            );
+        Gitlab::new(Box::new(replay))
+    }
+
+    fn subject() -> Subject<'static> {
+        Subject {
+            repo: "group/sub/proj",
+            number: 3,
+        }
+    }
+
+    #[test]
+    fn capabilities_match_the_contract() {
+        contract::golden("gitlab/capabilities.json", &contract::capabilities(&CAPS));
+    }
+
+    /// System notes dropped, individual notes general, positions kept with their head, and a
+    /// draft note, as the contract fixtures hold them.
+    #[test]
+    fn fetch_reads_the_contract_fixtures() {
+        let fetched = gitlab().fetch(subject()).unwrap();
+        contract::golden("gitlab/fetched.golden.json", &contract::dump(&fetched));
+    }
+
+    #[test]
+    fn requests_render_to_the_canonical_argv() {
+        let gitlab = gitlab();
+        let thread = RemoteThread::new(RemoteKind::Discussion, "d-f1".to_owned(), true);
+        let position = Position {
+            commit: "c".to_owned(),
+            data: json!({ "position_type": "text", "new_path": "a.txt", "new_line": 3 }),
+        };
+        let all = [
+            ("draft", gitlab.draft(subject(), "text", &position)),
+            ("publish_draft", gitlab.publish_draft(subject(), "77")),
+            ("thread", gitlab.thread(subject(), "text")),
+            ("note", gitlab.note(subject(), "text")),
+            ("reply", gitlab.reply(subject(), &thread, "text")),
+            ("resolve", gitlab.resolve(subject(), &thread, true)),
+            ("unresolve", gitlab.resolve(subject(), &thread, false)),
+            ("approve", gitlab.approve(subject(), "c", Some("ok"))),
+        ];
+        contract::golden(
+            "gitlab/requests.golden.json",
+            &contract::requests(glab_args, &all),
+        );
+    }
+
+    #[test]
+    fn responses_to_writes_name_the_comment_they_created() {
+        let gitlab = gitlab();
+        let created = |response: Value| gitlab.comment_created(Some("https://h/mr/3"), &response);
+        assert_eq!(
+            created(json!({ "id": "d-f2", "notes": [{ "id": 5002 }] })),
+            Some((
+                "5002".to_owned(),
+                Some("https://h/mr/3#note_5002".to_owned())
+            ))
+        );
+        assert_eq!(
+            created(json!({ "id": 5020 })),
+            Some((
+                "5020".to_owned(),
+                Some("https://h/mr/3#note_5020".to_owned())
+            ))
+        );
+        assert_eq!(created(json!({})), None);
+        assert_eq!(
+            gitlab.draft_created(&json!({ "id": 77 })),
+            Some("77".to_owned())
+        );
+    }
+}

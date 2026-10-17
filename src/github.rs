@@ -540,3 +540,145 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         drafts: Vec::new(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::contract::{self, Replay};
+    use crate::transport::gh_args;
+
+    const VARS: [(&str, &str); 5] = [
+        ("RUN", "rv-test"),
+        ("HEAD", "1111111111111111111111111111111111111111"),
+        ("BASE", "2222222222222222222222222222222222222222"),
+        ("REPO", "me/repo"),
+        ("NUMBER", "42"),
+    ];
+
+    fn query(name: &str, extra: &[&str]) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "api",
+            "graphql",
+            "-f",
+            "owner=me",
+            "-f",
+            "name=repo",
+            "-F",
+            "number=42",
+            "-f",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        args.push(format!("query={name}"));
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        args
+    }
+
+    fn answer(replay: Replay, args: Vec<String>, fixture: &str) -> Replay {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        replay.answer(&args, contract::fixture(fixture, &VARS))
+    }
+
+    fn github() -> Github {
+        let replay = Replay::new(gh_args);
+        let replay = answer(replay, query("PullRequest", &[]), "github/threads-1.json");
+        let replay = answer(
+            replay,
+            query("PullRequest", &["-f", "cursor=t-2"]),
+            "github/threads-2.json",
+        );
+        let replay = replay.answer(
+            &[
+                "api",
+                "graphql",
+                "-f",
+                "id=PRRT_a",
+                "-f",
+                "query=ThreadComments",
+                "-f",
+                "cursor=c-a1",
+            ],
+            contract::fixture("github/thread-comments.json", &VARS),
+        );
+        let replay = answer(replay, query("PullReviews", &[]), "github/reviews.json");
+        let replay = answer(replay, query("PullComments", &[]), "github/comments-1.json");
+        let replay = answer(
+            replay,
+            query("PullComments", &["-f", "cursor=ic-2"]),
+            "github/comments-2.json",
+        );
+        Github::new(Box::new(replay))
+    }
+
+    fn subject() -> Subject<'static> {
+        Subject {
+            repo: "me/repo",
+            number: 42,
+        }
+    }
+
+    #[test]
+    fn capabilities_match_the_contract() {
+        contract::golden("github/capabilities.json", &contract::capabilities(&CAPS));
+    }
+
+    /// Two pages of threads, an inner page of comments, reviews (pending and empty ones
+    /// dropped) and two pages of general comments, as the contract fixtures hold them.
+    #[test]
+    fn fetch_reads_the_contract_fixtures() {
+        let fetched = github().fetch(subject()).unwrap();
+        contract::golden("github/fetched.golden.json", &contract::dump(&fetched));
+    }
+
+    #[test]
+    fn requests_render_to_the_canonical_argv() {
+        let github = github();
+        let thread = RemoteThread::new(RemoteKind::ReviewThread, "PRRT_f1".to_owned(), true);
+        let position = Position {
+            commit: "c".to_owned(),
+            data: json!({ "path": "a.txt", "line": 3, "side": "RIGHT" }),
+        };
+        let all = [
+            (
+                "review_batch",
+                github.review_batch(subject(), "c", "summary", &[(position, "text".to_owned())]),
+            ),
+            ("thread", github.thread(subject(), "text")),
+            ("note", github.note(subject(), "text")),
+            ("reply", github.reply(subject(), &thread, "text")),
+            ("resolve", github.resolve(subject(), &thread, true)),
+            ("unresolve", github.resolve(subject(), &thread, false)),
+            ("approve", github.approve(subject(), "c", Some("ok"))),
+        ];
+        contract::golden(
+            "github/requests.golden.json",
+            &contract::requests(gh_args, &all),
+        );
+    }
+
+    #[test]
+    fn responses_to_writes_name_the_comment_they_created() {
+        let github = github();
+        let created = |response: Value| github.comment_created(None, &response);
+        assert_eq!(
+            created(json!({ "id": 604, "html_url": "https://h/pull/42#c604" })),
+            Some(("604".to_owned(), Some("https://h/pull/42#c604".to_owned())))
+        );
+        assert_eq!(
+            created(
+                json!({ "data": { "addPullRequestReviewThreadReply": { "comment": {
+                "databaseId": 801,
+                "url": "https://h/pull/42#discussion_r801",
+            } } } })
+            ),
+            Some((
+                "801".to_owned(),
+                Some("https://h/pull/42#discussion_r801".to_owned())
+            ))
+        );
+        assert_eq!(created(json!({})), None);
+        assert_eq!(github.draft_created(&json!({ "id": 7 })), None);
+    }
+}
