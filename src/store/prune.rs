@@ -463,6 +463,19 @@ mod tests {
     }
 
     #[test]
+    fn a_target_that_no_longer_qualifies_is_kept_and_leaves_no_lock_behind() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("repo");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            store.try_remove_if(&dir, "missing", |_| Ok(true)).unwrap(),
+            Removal::Kept
+        );
+        assert!(!dir.join(".missing.publish.lock").exists());
+    }
+
+    #[test]
     fn a_held_publish_lock_blocks_removing_its_target() {
         let base = tempfile::tempdir().unwrap();
         let store = Store::at(base.path(), Namespace::Reviews);
@@ -535,9 +548,16 @@ mod tests {
         let here = base.path().to_string_lossy().into_owned();
         store.record_repo(&dir, &here).unwrap();
         assert!(!store.scan_local_repo(&dir).unwrap().unwrap().gone);
-        let missing = base.path().join("moved/.git").to_string_lossy().into_owned();
+        let missing = base
+            .path()
+            .join("moved/.git")
+            .to_string_lossy()
+            .into_owned();
         store.record_repo(&dir, &missing).unwrap();
-        assert_eq!(store.recorded_repo(&dir).unwrap().unwrap().common_dir, missing);
+        assert_eq!(
+            store.recorded_repo(&dir).unwrap().unwrap().common_dir,
+            missing
+        );
         assert!(store.scan_local_repo(&dir).unwrap().unwrap().gone);
     }
 }

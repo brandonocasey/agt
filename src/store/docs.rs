@@ -307,10 +307,14 @@ mod tests {
         assert_eq!(docs, [note("y")]);
         assert_eq!(unknown.len(), 1);
         assert!(unknown[0].contains("field extra"), "{unknown:?}");
-        let kept = store.try_remove_doc_if::<Note>(&dir, "1", |_| true).unwrap();
+        let kept = store
+            .try_remove_doc_if::<Note>(&dir, "1", |_| true)
+            .unwrap();
         assert_eq!(kept, Removal::Kept);
         assert!(dir.join("1.json").exists());
-        let gone = store.try_remove_doc_if::<Note>(&dir, "2", |_| true).unwrap();
+        let gone = store
+            .try_remove_doc_if::<Note>(&dir, "2", |_| true)
+            .unwrap();
         assert!(matches!(gone, Removal::Removed(_)));
         assert!(!dir.join("2.json").exists());
     }

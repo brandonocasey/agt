@@ -50,8 +50,9 @@ pub struct Plan {
     pub warnings: Vec<String>,
 }
 
+/// A file's own size; a link counts as the link, never what it points at.
 fn size(path: &std::path::Path) -> u64 {
-    fs::metadata(path).map_or(0, |meta| meta.len())
+    fs::symlink_metadata(path).map_or(0, |meta| meta.len())
 }
 
 impl Plan {
@@ -74,9 +75,15 @@ impl Plan {
         });
     }
 
-    fn attempt(&mut self, place: &std::path::Path, result: Result<()>) {
-        if let Err(error) = result {
-            self.warnings.push(format!("{}: {error}", place.display()));
+    /// The value, or `None` after recording a warning, so one unreadable place does not stop
+    /// the rest of the pass.
+    fn attempt<T>(&mut self, place: &std::path::Path, result: Result<T>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.warnings.push(format!("{}: {error}", place.display()));
+                None
+            }
         }
     }
 
@@ -84,7 +91,8 @@ impl Plan {
     /// nothing newer.
     pub fn reviews(&mut self, now: i64) -> Result<()> {
         let store = Store::open(Namespace::Reviews)?;
-        for dir in store.repo_dirs()? {
+        let found = store.repo_dirs();
+        for dir in self.attempt(store.root(), found).unwrap_or_default() {
             let result = self.review_dir(&store, &dir, now);
             self.attempt(&dir, result);
         }
@@ -97,7 +105,7 @@ impl Plan {
                 .collect();
             dirs.sort();
             for dir in dirs {
-                let result = self.local_repo(&store, dir.clone(), now);
+                let result = self.local_repo(&store, dir.clone());
                 self.attempt(&dir, result);
             }
         }
@@ -125,40 +133,59 @@ impl Plan {
         Ok(())
     }
 
-    /// `local/<name>-<hash>` is named after a hash of the git common dir, and nothing in the
-    /// store records the path, so whether it still exists cannot be checked. A repository is
-    /// listed only when every target in it has expired, which is all that can be said.
-    fn local_repo(&mut self, store: &Store, dir: PathBuf, now: i64) -> Result<()> {
-        let targets = store.targets(&dir)?;
-        let mut leftovers = 0;
-        for entry in fs::read_dir(&dir)
-            .map_err(crate::core::error::ctx("read repo dir"))?
-            .flatten()
-        {
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+    /// `local/<name>-<hash>` is named after a hash of the git common dir. With a `.repo.json`
+    /// that records the path, the repository is listed when the path no longer exists,
+    /// whatever its age. Without one, the path cannot be checked, so it is listed only when
+    /// every target in it is already planned as expired. Only target files, cache files and
+    /// stray locks may be in it; anything else keeps it. The same check runs again when
+    /// deleting, so the plan lists nothing the deletion would skip.
+    fn local_repo(&mut self, store: &Store, dir: PathBuf) -> Result<()> {
+        let Some(repo) = store.scan_local_repo(&dir)? else {
+            return Ok(());
+        };
+        let mut bytes = 0;
+        for target in &repo.targets {
+            let path = dir.join(format!("{}.json", target.key));
+            // Expired targets are items of their own, with their own bytes.
+            let planned = self
+                .items
+                .iter()
+                .any(|item| item.category == "reviews" && item.path == path);
+            if planned {
+                continue;
+            }
+            if !repo.gone {
                 return Ok(());
             }
-            leftovers += size(&entry.path());
+            bytes += size(&path);
         }
-        for target in &targets {
-            if !expired(target, now)? {
-                return Ok(());
-            }
-        }
+        bytes += repo
+            .extras
+            .iter()
+            .chain(&repo.stray_locks)
+            .map(|path| size(path))
+            .sum::<u64>();
+        let reason = if repo.gone {
+            let common = store
+                .recorded_repo(&dir)?
+                .map(|recorded| recorded.common_dir)
+                .unwrap_or_default();
+            format!("local repository is gone: {common} no longer exists")
+        } else {
+            format!(
+                "local repository with no recorded path, so its existence cannot be checked; {} target(s), all older than {} days",
+                repo.targets.len(),
+                PRUNE_AFTER_SECS / 86_400
+            )
+        };
         let name = store.relative(&dir);
         self.add(
             "local_repos",
             dir.clone(),
             name,
-            format!(
-                "local repository: its git common dir cannot be checked because the store keeps only a hash of it; {} target(s), all older than {} days",
-                targets.len(),
-                PRUNE_AFTER_SECS / 86_400
-            ),
-            leftovers,
-            Action::LocalRepo {
-                dir,
-            },
+            reason,
+            bytes,
+            Action::LocalRepo { dir },
         );
         Ok(())
     }
@@ -166,9 +193,12 @@ impl Plan {
     /// Closed issues with nothing local to lose, past the issue rule.
     pub fn issues(&mut self, now: i64) -> Result<()> {
         let store = Store::open(Namespace::Issues)?;
-        for dir in store.child_dirs()? {
+        let found = store.child_dirs();
+        for dir in self.attempt(store.root(), found).unwrap_or_default() {
             let result = (|| {
-                for issue in store.docs::<Issue>(&dir, &[TRACKER_FILE])? {
+                let (issues, unknown) = store.docs_intact::<Issue>(&dir, &[TRACKER_FILE])?;
+                self.warnings.extend(unknown);
+                for issue in issues {
                     if !prunable(&issue, now) {
                         continue;
                     }
@@ -200,7 +230,9 @@ impl Plan {
 
     /// Complete tasks last updated 90 days ago. The session index is a cache and is left alone.
     pub fn tasks(&mut self, now: i64) -> Result<()> {
-        for task in expired_tasks(now)? {
+        let found = expired_tasks(now);
+        let root = PathBuf::from("tasks");
+        for task in self.attempt(&root, found).unwrap_or_default() {
             let reason = format!("status complete, last updated {}", task.updated_at);
             self.add(
                 "tasks",
@@ -219,7 +251,15 @@ impl Plan {
     pub fn locks(&mut self) -> Result<()> {
         for namespace in [Namespace::Reviews, Namespace::Issues] {
             let store = Store::open(namespace)?;
-            for path in store.stray_locks()? {
+            let found = store.stray_locks();
+            for path in self.attempt(store.root(), found).unwrap_or_default() {
+                // A local repository that is listed deletes its own stray locks.
+                let inside = self.items.iter().any(|item| {
+                    matches!(&item.action, Action::LocalRepo { dir } if path.parent() == Some(dir))
+                });
+                if inside {
+                    continue;
+                }
                 self.add(
                     "locks",
                     path.clone(),
@@ -240,11 +280,15 @@ impl Plan {
     /// newest of each namespace. Other tools' backups in the same directory are never listed.
     pub fn backups(&mut self, now: i64) -> Result<()> {
         let store = Store::open(Namespace::Reviews)?;
-        let all = store.agt_backups()?;
+        let found = store.agt_backups();
+        let all = self.attempt(store.root(), found).unwrap_or_default();
         for namespace in Namespace::ALL {
             let newest = all
                 .iter()
-                .filter(|backup| backup.namespace == namespace && !backup.partial)
+                // A stamp in the future is a clock error; it must not shield every older backup.
+                .filter(|backup| {
+                    backup.namespace == namespace && !backup.partial && backup.taken.0 <= now
+                })
                 .max_by_key(|backup| (backup.taken, backup.path.clone()))
                 .map(|backup| backup.path.clone());
             for backup in all.iter().filter(|backup| backup.namespace == namespace) {

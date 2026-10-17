@@ -1,8 +1,5 @@
 //! Deleting a plan, item by item, each under its own lock.
 
-use std::fs;
-use std::io::ErrorKind;
-
 use serde_json::{Map, Value, json};
 
 use super::plan::{Action, Item, Plan};
@@ -92,42 +89,6 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         Action::Task(task) => crate::task::prune::remove(task, now),
         Action::Lock { namespace, path } => Store::open(*namespace)?.remove_stray_lock(path),
         Action::Backup(backup) => Store::open(Namespace::Reviews)?.remove_backup(backup),
-        Action::LocalRepo { dir } => remove_local_repo(dir),
-    }
-}
-
-/// Removes a `local/` repository directory once its targets are gone, with the account cache and
-/// stray locks left in it. Anything else in it keeps the directory.
-fn remove_local_repo(dir: &std::path::Path) -> Result<Removal> {
-    let store = Store::open(Namespace::Reviews)?;
-    if !store.targets(dir)?.is_empty() {
-        return Ok(Removal::Kept);
-    }
-    let mut freed = 0;
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Removal::Kept),
-        Err(error) => return crate::core::error::fail(format!("read {}: {error}", dir.display())),
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == ".account.json" {
-            freed += entry.metadata().map_or(0, |meta| meta.len());
-            fs::remove_file(entry.path()).map_err(crate::core::error::ctx(format!(
-                "remove {}",
-                entry.path().display()
-            )))?;
-        } else {
-            match store.remove_stray_lock(&entry.path())? {
-                Removal::Removed(bytes) => freed += bytes,
-                Removal::Busy => return Ok(Removal::Busy),
-                Removal::Kept => return Ok(Removal::Kept),
-            }
-        }
-    }
-    match fs::remove_dir(dir) {
-        Ok(()) => Ok(Removal::Removed(freed)),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Removal::Kept),
-        Err(error) => crate::core::error::fail(format!("remove {}: {error}", dir.display())),
+        Action::LocalRepo { dir } => Store::open(Namespace::Reviews)?.remove_local_repo(dir),
     }
 }
