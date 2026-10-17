@@ -106,7 +106,7 @@ impl Plan {
                 .collect();
             dirs.sort();
             for dir in dirs {
-                let result = self.local_repo(&store, dir.clone());
+                let result = self.local_repo(&store, dir.clone(), now);
                 self.attempt(&dir, result);
             }
         }
@@ -136,14 +136,14 @@ impl Plan {
         Ok(())
     }
 
-    /// `local/<name>-<hash>` is named after a hash of the git common dir. With a `.repo.json`
-    /// that records the path, the repository is listed when the path no longer exists,
-    /// whatever its age. Without one, the path cannot be checked, so it is listed only when
-    /// every target in it is already planned as expired. Only target files, cache files and
+    /// `local/<name>-<hash>` is named after a hash of the git common dir. A `.repo.json`
+    /// that records the path lists the repository whatever its age once the path is missing,
+    /// unseen for 30 days and not below a mount root (see `Store::presence`). Otherwise it is
+    /// listed only when every target in it is already planned as expired. Only target files, cache files and
     /// stray locks may be in it; anything else keeps it. The same check runs again when
     /// deleting, so the plan lists nothing the deletion would skip.
-    fn local_repo(&mut self, store: &Store, dir: PathBuf) -> Result<()> {
-        let Some(repo) = store.scan_local_repo(&dir)? else {
+    fn local_repo(&mut self, store: &Store, dir: PathBuf, now: i64) -> Result<()> {
+        let Some(repo) = store.scan_local_repo(&dir, now)? else {
             return Ok(());
         };
         let mut bytes = 0;
@@ -157,7 +157,7 @@ impl Plan {
             if planned {
                 continue;
             }
-            if !repo.gone {
+            if !repo.presence.is_gone() {
                 return Ok(());
             }
             bytes += size(&path);
@@ -168,17 +168,14 @@ impl Plan {
             .chain(&repo.stray_locks)
             .map(|path| size(path))
             .sum::<u64>();
-        let reason = if repo.gone {
-            let common = store
-                .recorded_repo(&dir)?
-                .map(|recorded| recorded.common_dir)
-                .unwrap_or_default();
-            format!("local repository is gone: {common} no longer exists")
+        let reason = if repo.presence.is_gone() {
+            repo.presence.describe()
         } else {
             format!(
-                "local repository with no recorded path, so its existence cannot be checked; {} target(s), all older than {} days",
+                "{} target(s), all older than {} days (every target expired); {}",
                 repo.targets.len(),
-                PRUNE_AFTER_SECS / 86_400
+                PRUNE_AFTER_SECS / 86_400,
+                repo.presence.describe()
             )
         };
         let name = store.relative(&dir);

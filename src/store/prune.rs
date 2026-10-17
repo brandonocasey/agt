@@ -16,6 +16,70 @@ use crate::store::model::Target;
 /// How long a finished thing is kept before `prune` drops it.
 pub const PRUNE_AFTER_SECS: i64 = 90 * 24 * 60 * 60;
 
+/// How long a recorded repository must have gone unseen, with its path missing, to be gone.
+pub const GONE_AFTER_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Directories under which removable or network volumes appear. A path missing below one may
+/// only be unmounted, so it never marks a repository gone.
+const MOUNT_ROOTS: [&str; 4] = ["/Volumes", "/media", "/run/media", "/mnt"];
+
+/// What `.repo.json` says about the repository behind a `local/` directory.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Presence {
+    NoRecord,
+    Unreadable(String),
+    /// The recorded path exists.
+    Alive(String),
+    /// The path is missing but agt ran there recently: the repository was probably moved.
+    Missing {
+        common_dir: String,
+        unseen_secs: i64,
+    },
+    /// The path is missing below a mount root: the volume may only be unmounted.
+    Unmounted(String),
+    /// The path is missing and agt has not run there for [`GONE_AFTER_SECS`].
+    Gone {
+        common_dir: String,
+        unseen_secs: i64,
+    },
+}
+
+impl Presence {
+    /// Whether the repository's targets may go at any age.
+    pub fn is_gone(&self) -> bool {
+        matches!(self, Self::Gone { .. })
+    }
+
+    /// Why the repository is, or is not, treated as gone, naming the rule that decided.
+    pub fn describe(&self) -> String {
+        let days = |secs: &i64| secs / 86_400;
+        match self {
+            Self::NoRecord => "no recorded path, so its existence cannot be checked".into(),
+            Self::Unreadable(why) => format!("its path record is unreadable ({why})"),
+            Self::Alive(path) => format!("its repository still exists at {path}"),
+            Self::Missing {
+                common_dir,
+                unseen_secs,
+            } => format!(
+                "{common_dir} is missing but agt ran there {} day(s) ago, under the {} days that mark a repository gone, so it may have moved",
+                days(unseen_secs),
+                GONE_AFTER_SECS / 86_400
+            ),
+            Self::Unmounted(path) => {
+                format!("{path} is missing below a mount root, so its volume may only be unmounted")
+            }
+            Self::Gone {
+                common_dir,
+                unseen_secs,
+            } => format!(
+                "local repository is gone: {common_dir} no longer exists and agt last ran there {} days ago (path missing and unseen for {}+ days)",
+                days(unseen_secs),
+                GONE_AFTER_SECS / 86_400
+            ),
+        }
+    }
+}
+
 /// The outcome of one guarded deletion.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Removal {
@@ -137,7 +201,7 @@ impl Store {
 
     /// What a `local/` repository directory holds, or `None` when it holds anything `prune` may
     /// not delete: a subdirectory, a link, or a file that is not a target, cache or lock.
-    pub fn scan_local_repo(&self, dir: &Path) -> Result<Option<LocalRepo>> {
+    pub fn scan_local_repo(&self, dir: &Path, now: i64) -> Result<Option<LocalRepo>> {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -171,29 +235,67 @@ impl Store {
         }
         extras.sort();
         stray_locks.sort();
-        let gone = match self.recorded_repo(dir) {
-            Ok(Some(repo)) => {
-                let common = Path::new(&repo.common_dir);
-                common.is_absolute() && matches!(common.try_exists(), Ok(false))
-            }
-            _ => false,
-        };
         Ok(Some(LocalRepo {
             targets,
             extras,
             stray_locks,
-            gone,
+            presence: self.presence(dir, now),
         }))
+    }
+
+    /// Whether the repository recorded in `dir` still exists, as of `now`.
+    pub fn presence(&self, dir: &Path, now: i64) -> Presence {
+        let repo = match self.recorded_repo(dir) {
+            Ok(Some(repo)) => repo,
+            Ok(None) => return Presence::NoRecord,
+            Err(error) => return Presence::Unreadable(error.to_string()),
+        };
+        let common = Path::new(&repo.common_dir);
+        if !common.is_absolute() {
+            return Presence::Unreadable(format!("{} is not an absolute path", repo.common_dir));
+        }
+        match common.try_exists() {
+            Ok(true) => return Presence::Alive(repo.common_dir),
+            Ok(false) => {}
+            Err(error) => return Presence::Unreadable(format!("{}: {error}", repo.common_dir)),
+        }
+        if MOUNT_ROOTS.iter().any(|root| {
+            common
+                .strip_prefix(root)
+                .is_ok_and(|rest| rest.components().next().is_some())
+        }) {
+            return Presence::Unmounted(repo.common_dir);
+        }
+        // A record from before `last_seen` existed was last written when it was made.
+        let seen = match repo.last_seen.as_deref() {
+            Some(seen) => clock::parse(seen).ok(),
+            None => seen_by_mtime(&dir.join(REPO_FILE)),
+        };
+        let Some(seen) = seen else {
+            return Presence::Unreadable("no usable last-seen time".into());
+        };
+        let unseen_secs = now - seen;
+        if unseen_secs >= GONE_AFTER_SECS {
+            Presence::Gone {
+                common_dir: repo.common_dir,
+                unseen_secs,
+            }
+        } else {
+            Presence::Missing {
+                common_dir: repo.common_dir,
+                unseen_secs,
+            }
+        }
     }
 
     /// Deletes a `local/` repository directory: its targets when the repository is gone (else
     /// none may be left), then its cache files and stray locks. Every lock is taken before the
     /// first file goes, so a repository that is partly busy loses nothing.
-    pub fn remove_local_repo(&self, dir: &Path) -> Result<Removal> {
-        let Some(repo) = self.scan_local_repo(dir)? else {
+    pub fn remove_local_repo(&self, dir: &Path, now: i64) -> Result<Removal> {
+        let Some(repo) = self.scan_local_repo(dir, now)? else {
             return Ok(Removal::Kept);
         };
-        if !repo.targets.is_empty() && !repo.gone {
+        if !repo.targets.is_empty() && !repo.presence.is_gone() {
             return Ok(Removal::Kept);
         }
         let mut held = Vec::new();
@@ -304,8 +406,7 @@ pub struct LocalRepo {
     pub extras: Vec<PathBuf>,
     /// Lock files whose document is gone.
     pub stray_locks: Vec<PathBuf>,
-    /// The recorded git common dir no longer exists.
-    pub gone: bool,
+    pub presence: Presence,
 }
 
 /// A stray lock file after trying to take its lock.
@@ -329,6 +430,12 @@ impl Drop for PublishLock<'_> {
             let _ = fs::remove_file(self.path);
         }
     }
+}
+
+fn seen_by_mtime(path: &Path) -> Option<i64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_secs()).ok()
 }
 
 /// Whether every entry of `dir` is one of `paths`.
@@ -591,12 +698,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(".account.json"), "{}").unwrap();
         fs::write(dir.join(".gone.lock"), "").unwrap();
-        let scan = store.scan_local_repo(&dir).unwrap().unwrap();
+        let scan = store.scan_local_repo(&dir, NOW).unwrap().unwrap();
         assert_eq!((scan.extras.len(), scan.stray_locks.len()), (1, 1));
-        assert!(!scan.gone);
+        assert!(!scan.presence.is_gone());
         fs::write(dir.join("notes.txt"), "mine").unwrap();
-        assert!(store.scan_local_repo(&dir).unwrap().is_none());
-        assert_eq!(store.remove_local_repo(&dir).unwrap(), Removal::Kept);
+        assert!(store.scan_local_repo(&dir, NOW).unwrap().is_none());
+        assert_eq!(store.remove_local_repo(&dir, NOW).unwrap(), Removal::Kept);
         assert!(dir.join(".account.json").exists());
     }
 
@@ -614,11 +721,11 @@ mod tests {
             .open(dir.join(".b.lock"))
             .unwrap();
         held.lock().unwrap();
-        assert_eq!(store.remove_local_repo(&dir).unwrap(), Removal::Busy);
+        assert_eq!(store.remove_local_repo(&dir, NOW).unwrap(), Removal::Busy);
         assert!(dir.join(".account.json").exists() && dir.join(".a.lock").exists());
         drop(held);
         assert!(matches!(
-            settled(|| store.remove_local_repo(&dir).unwrap()),
+            settled(|| store.remove_local_repo(&dir, NOW).unwrap()),
             Removal::Removed(_)
         ));
         assert!(!dir.exists());
@@ -635,24 +742,118 @@ mod tests {
         assert!(!only_holds(dir.path(), &planned).unwrap());
     }
 
-    #[test]
-    fn a_recorded_common_dir_that_is_missing_marks_the_repo_gone() {
+    const NOW: i64 = 1_800_000_000;
+    const DAY: i64 = 86_400;
+
+    fn record(store: &Store, dir: &Path, common_dir: &str, last_seen: Option<i64>) {
+        let seen = last_seen.map_or(String::new(), |seen| {
+            format!(r#","last_seen":"{}""#, clock::format(seen))
+        });
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join(REPO_FILE),
+            format!(r#"{{"common_dir":"{common_dir}"{seen}}}"#),
+        )
+        .unwrap();
+        assert!(store.recorded_repo(dir).unwrap().is_some());
+    }
+
+    fn presence_of(common_dir: &str, last_seen: Option<i64>) -> Presence {
         let base = tempfile::tempdir().unwrap();
         let store = Store::at(base.path(), Namespace::Reviews);
         let dir = base.path().join("local/x-1");
-        let here = base.path().to_string_lossy().into_owned();
-        store.record_repo(&dir, &here).unwrap();
-        assert!(!store.scan_local_repo(&dir).unwrap().unwrap().gone);
-        let missing = base
-            .path()
-            .join("moved/.git")
-            .to_string_lossy()
-            .into_owned();
-        store.record_repo(&dir, &missing).unwrap();
+        record(&store, &dir, common_dir, last_seen);
+        store.presence(&dir, NOW)
+    }
+
+    #[test]
+    fn a_repo_that_moved_seconds_ago_is_not_gone() {
+        let presence = presence_of("/nowhere/moved/.git", Some(NOW - 5));
+        assert!(matches!(presence, Presence::Missing { .. }), "{presence:?}");
+        assert!(!presence.is_gone());
+        let almost = presence_of("/nowhere/moved/.git", Some(NOW - 30 * DAY + 1));
+        assert!(!almost.is_gone());
+    }
+
+    #[test]
+    fn a_missing_repo_unseen_for_a_month_is_gone() {
+        let presence = presence_of("/nowhere/old/.git", Some(NOW - 31 * DAY));
+        assert!(presence.is_gone(), "{presence:?}");
+        assert!(presence.describe().contains("31 days ago"));
+        assert!(presence_of("/nowhere/old/.git", Some(NOW - 30 * DAY)).is_gone());
+    }
+
+    #[test]
+    fn a_missing_path_under_a_mount_root_is_never_gone() {
+        for path in [
+            "/Volumes/Work/r/.git",
+            "/media/me/Work/r/.git",
+            "/run/media/me/Work/r/.git",
+            "/mnt/work/r/.git",
+        ] {
+            let presence = presence_of(path, Some(NOW - 400 * DAY));
+            assert!(matches!(presence, Presence::Unmounted(_)), "{path}");
+        }
+        // Only below the root: a sibling that merely shares the prefix is an ordinary path.
+        assert!(presence_of("/Volumesx/r/.git", Some(NOW - 400 * DAY)).is_gone());
+    }
+
+    #[test]
+    fn a_record_without_last_seen_counts_from_its_modification_time() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("local/x-1");
+        record(&store, &dir, "/nowhere/old/.git", None);
+        // Written just now.
+        assert!(matches!(
+            store.presence(&dir, clock::now_secs().unwrap()),
+            Presence::Missing { .. }
+        ));
+        let file = fs::File::options()
+            .write(true)
+            .open(dir.join(REPO_FILE))
+            .unwrap();
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+        file.set_modified(then).unwrap();
+        assert!(store.presence(&dir, clock::now_secs().unwrap()).is_gone());
+    }
+
+    #[test]
+    fn an_existing_unrecorded_or_unreadable_record_says_which() {
+        let here = tempfile::tempdir().unwrap();
+        let alive = presence_of(here.path().to_str().unwrap(), Some(NOW - 400 * DAY));
+        assert!(matches!(alive, Presence::Alive(_)));
+        assert!(!alive.is_gone());
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("local/x-1");
+        assert_eq!(store.presence(&dir, NOW), Presence::NoRecord);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(REPO_FILE), "{ nope").unwrap();
+        assert!(matches!(store.presence(&dir, NOW), Presence::Unreadable(_)));
+        assert_ne!(alive.describe(), Presence::NoRecord.describe());
+    }
+
+    #[test]
+    fn last_seen_is_refreshed_at_most_once_a_day() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("local/x-1");
+        let seen = || store.recorded_repo(&dir).unwrap().unwrap().last_seen;
+        store.record_repo(&dir, "/r/.git", NOW).unwrap();
+        assert_eq!(seen().as_deref(), Some(clock::format(NOW).as_str()));
+        store.record_repo(&dir, "/r/.git", NOW + DAY - 1).unwrap();
+        assert_eq!(seen().as_deref(), Some(clock::format(NOW).as_str()));
+        store.record_repo(&dir, "/r/.git", NOW + DAY).unwrap();
+        assert_eq!(seen().as_deref(), Some(clock::format(NOW + DAY).as_str()));
+        // A record without `last_seen` is upgraded at once, and a new path replaces the old.
+        record(&store, &dir, "/r/.git", None);
+        store.record_repo(&dir, "/r/.git", NOW).unwrap();
+        assert!(seen().is_some());
+        store.record_repo(&dir, "/s/.git", NOW).unwrap();
         assert_eq!(
             store.recorded_repo(&dir).unwrap().unwrap().common_dir,
-            missing
+            "/s/.git"
         );
-        assert!(store.scan_local_repo(&dir).unwrap().unwrap().gone);
     }
 }

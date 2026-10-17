@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::clock;
 use crate::store::model::{Forge, Target, VERSION};
 
 const MAX_KEY: usize = 200;
@@ -21,11 +22,17 @@ const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 const REPO_FILE: &str = ".repo.json";
 
-/// Where a `local/` repository lives, so `prune` can tell it is gone. Older agt ignores the
-/// file, which is why this is not a field of the target.
+/// How long `last_seen` in `.repo.json` may go without a refresh.
+const SEEN_REFRESH_SECS: i64 = 24 * 60 * 60;
+
+/// Where a `local/` repository lives and when agt last ran in it, so `prune` can tell it is
+/// gone. Older agt ignores the file, which is why this is not a field of the target.
 #[derive(Serialize, Deserialize)]
 pub struct RepoFile {
     pub common_dir: String,
+    /// RFC 3339. Absent in files written before it existed; their modification time stands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
 }
 
 /// The forge login `sync` authenticated as, cached per repository for author defaults.
@@ -458,18 +465,25 @@ impl Store {
         persist_json(dir, &dir.join(ACCOUNT_FILE), account, || Ok(()))
     }
 
-    /// Writes the repository's absolute git common dir beside its targets unless it is already
-    /// recorded.
-    pub fn record_repo(&self, dir: &Path, common_dir: &str) -> Result<()> {
+    /// Writes the repository's absolute git common dir and `now` beside its targets. A record
+    /// that names the same directory and was refreshed within a day is left alone, so most
+    /// commands write nothing.
+    pub fn record_repo(&self, dir: &Path, common_dir: &str, now: i64) -> Result<()> {
         let path = dir.join(REPO_FILE);
         if let Ok(Some(known)) = read_json::<RepoFile>(&path)
             && known.common_dir == common_dir
+            && let Some(seen) = known
+                .last_seen
+                .as_deref()
+                .and_then(|seen| clock::parse(seen).ok())
+            && now - seen < SEEN_REFRESH_SECS
         {
             return Ok(());
         }
         create_dir(dir)?;
         let file = RepoFile {
             common_dir: common_dir.to_owned(),
+            last_seen: Some(clock::format(now)),
         };
         persist_json(dir, &path, &file, || Ok(()))
     }

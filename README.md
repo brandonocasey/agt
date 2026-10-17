@@ -315,10 +315,13 @@ Everything is kept 90 days (`retention_days`). The rules:
 
 - `reviews`: the review rule above, applied to every repository, and skipped for a
   target whose `.<key>.publish.lock` is held. agt records the absolute git common
-  directory of a `local/<name>-<hash>` repository in `<dir>/.repo.json`. A repository
-  whose recorded directory no longer exists is listed under `local_repos` at any age,
-  with all its targets. Without `.repo.json` (made by an older agt) the path cannot be
-  checked, so the repository is listed only when every target in it has expired. Either
+  directory of a `local/<name>-<hash>` repository in `<dir>/.repo.json`, with `last_seen`
+  (refreshed by commands that write, at most once a day; a record without it counts from the
+  file's modification time). A repository is listed under `local_repos` at any age, with all its
+  targets, only when that directory no longer exists, agt has not run there for 30 days, and
+  the directory is not below a mount root (`/Volumes`, `/media`, `/run/media`, `/mnt`), where
+  it may only be unmounted. Otherwise, including a repository that was moved a moment ago, it is
+  listed only when every target in it has expired, and its reason says which rule applied. Either
   way its directory may hold only targets, `.account.json`, `.repo.json` and stray
   lock files; a subdirectory, link or any other file keeps it.
 - `issues`: a closed issue, 90 days after the later of its last local and host update,

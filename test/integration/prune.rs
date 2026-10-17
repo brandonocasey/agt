@@ -549,7 +549,7 @@ fn the_issue_tracker_push_lock_is_kept() {
 }
 
 #[test]
-fn a_local_repo_whose_recorded_path_is_gone_is_listed_at_any_age() {
+fn a_local_repo_whose_path_is_gone_and_unseen_for_a_month_is_listed_at_any_age() {
     let prune = Prune::new();
     let alive = prune.env.path("alive");
     fs::create_dir_all(&alive).unwrap();
@@ -558,10 +558,24 @@ fn a_local_repo_whose_recorded_path_is_gone_is_listed_at_any_age() {
     let missing = prune.env.path("missing/.git");
     fs::write(
         dir.join(".repo.json"),
-        json!({"common_dir": missing}).to_string(),
+        json!({"common_dir": missing, "last_seen": ago(31)}).to_string(),
     )
     .unwrap();
     fs::write(dir.join(".account.json"), "{}").unwrap();
+    // Missing too, but agt ran there a day ago (a moved repository), or the path is on a
+    // volume that may be unmounted: both stay.
+    let moved = prune.target("local/moved-dddddddddddd", "fresh", 1);
+    fs::write(
+        moved.with_file_name(".repo.json"),
+        json!({"common_dir": prune.env.path("moved/.git"), "last_seen": ago(1)}).to_string(),
+    )
+    .unwrap();
+    let mounted = prune.target("local/mounted-eeeeeeeeeeee", "fresh", 1);
+    fs::write(
+        mounted.with_file_name(".repo.json"),
+        json!({"common_dir": "/Volumes/nowhere/r/.git", "last_seen": ago(400)}).to_string(),
+    )
+    .unwrap();
     let live = prune.target("local/live-bbbbbbbbbbbb", "fresh", 1);
     fs::write(
         live.with_file_name(".repo.json"),
@@ -573,7 +587,7 @@ fn a_local_repo_whose_recorded_path_is_gone_is_listed_at_any_age() {
     assert_eq!(keys(&report, "local_repos"), ["local/gone-aaaaaaaaaaaa"]);
     let reason = report["plan"]["local_repos"][0]["reason"].as_str().unwrap();
     assert!(
-        reason.contains("is gone") && reason.contains("missing"),
+        reason.contains("is gone") && reason.contains("missing") && reason.contains("31 days ago"),
         "{reason}"
     );
     // The fresh target is part of the repository item; nothing is double counted.
@@ -582,7 +596,7 @@ fn a_local_repo_whose_recorded_path_is_gone_is_listed_at_any_age() {
     let report = prune.run(&["--yes"]);
     assert!(!dir.exists());
     assert_eq!(report["bytes_freed"], expected);
-    assert!(live.exists() && unrecorded.exists());
+    assert!(live.exists() && unrecorded.exists() && moved.exists() && mounted.exists());
 }
 
 #[test]
@@ -602,7 +616,18 @@ fn agt_records_the_common_dir_of_a_local_repo() {
     assert_eq!(recorded["common_dir"], git.to_string_lossy().as_ref());
     let report = prune.run(&[]);
     assert_eq!(report["plan"]["local_repos"], json!([]));
+    assert!(recorded["last_seen"].is_string());
     fs::rename(&git, prune.env.repo.join(".git-moved")).unwrap();
+    let file = dirs[0].path().join(".repo.json");
+    let seen = |days| {
+        let mut record = recorded.clone();
+        record["last_seen"] = json!(ago(days));
+        fs::write(&file, record.to_string()).unwrap();
+    };
+    seen(0);
+    let report = prune.run(&[]);
+    assert_eq!(report["plan"]["local_repos"], json!([]));
+    seen(31);
     let report = prune.run(&[]);
     assert_eq!(report["plan"]["local_repos"].as_array().unwrap().len(), 1);
 }

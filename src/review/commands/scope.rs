@@ -64,8 +64,9 @@ impl Ctx {
         let repo_key = repo.repo_key()?;
         let dir = store.repo_dir(&repo_key)?;
         if !read_only && repo_key.starts_with("local/") {
-            // `prune` checks this path to tell a repository that is gone.
-            store.record_repo(&dir, &repo.common_dir()?)?;
+            // `prune` checks this path, and how long ago agt last ran here, to tell a repository
+            // that is gone.
+            store.record_repo(&dir, &repo.common_dir()?, clock::now_secs()?)?;
         }
         Ok(Self {
             repo,
