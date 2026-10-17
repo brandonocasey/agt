@@ -1840,8 +1840,9 @@ fn comments_outside_the_pr_diff_are_never_posted() {
         ]"#,
     );
     let (outside, range) = (&ended["added"][0], &ended["added"][1]);
-    env.run(&["run", "end", "--run", run]);
+    // Link the PR before the run ends, so the run counts for it.
     link(&setup);
+    env.run(&["run", "end", "--run", run]);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     let skipped = dry["skipped"].as_array().unwrap();
     assert!(
