@@ -631,26 +631,20 @@ mod tests {
                 .open(&path)
                 .unwrap()
         };
-        // Wait until a fresh open can lock the old file, so the replaced file is the only reason
-        // for the later `Kept` rather than a lock a forked child still holds.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match lock_stray_file(open(), &path).unwrap() {
-                StrayLock::Held(_) => break,
-                _ => assert!(
-                    std::time::Instant::now() < deadline,
-                    "the lock file never became lockable"
-                ),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
         let stale = open();
         fs::remove_file(&path).unwrap();
         fs::write(&path, "").unwrap();
-        assert!(matches!(
-            lock_stray_file(stale, &path).unwrap(),
-            StrayLock::Kept
-        ));
+        // A child forked by another test can still hold the old file's lock for a moment, which
+        // reads as `Busy`; wait for an answer about the replacement.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let kept = loop {
+            let outcome = lock_stray_file(stale.try_clone().unwrap(), &path).unwrap();
+            if !matches!(outcome, StrayLock::Busy) || std::time::Instant::now() > deadline {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(matches!(kept, StrayLock::Kept));
         assert!(path.exists());
     }
 
