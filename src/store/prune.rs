@@ -563,6 +563,18 @@ mod tests {
         }
     }
 
+    /// Like [`settled`] for a removal of `k` that is expected to end in `Ok(Kept)` or an error.
+    fn try_remove_settled(store: &Store, dir: &Path) -> Result<Removal> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let result = store.try_remove_if(dir, "k", |_| Ok(true));
+            if !matches!(result, Ok(Removal::Busy)) || std::time::Instant::now() > deadline {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn only_the_exact_backup_names_parse() {
         let (namespace, (taken, attempt)) =
@@ -619,10 +631,19 @@ mod tests {
                 .open(&path)
                 .unwrap()
         };
-        assert!(matches!(
-            lock_stray_file(open(), &path).unwrap(),
-            StrayLock::Held(_)
-        ));
+        // Wait until a fresh open can lock the old file, so the replaced file is the only reason
+        // for the later `Kept` rather than a lock a forked child still holds.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match lock_stray_file(open(), &path).unwrap() {
+                StrayLock::Held(_) => break,
+                _ => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the lock file never became lockable"
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let stale = open();
         fs::remove_file(&path).unwrap();
         fs::write(&path, "").unwrap();
@@ -653,16 +674,16 @@ mod tests {
         let dir = base.path().join("repo");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("k.json"), "not json").unwrap();
-        assert!(store.try_remove_if(&dir, "k", |_| Ok(true)).is_err());
+        assert!(try_remove_settled(&store, &dir).is_err());
         assert!(!dir.join(".k.publish.lock").exists());
         // A lock file that was already there and whose target stays is not ours to delete.
         let live = base.path().join("live");
         fs::create_dir_all(&live).unwrap();
         fs::write(live.join(".k.publish.lock"), "").unwrap();
-        assert!(store.try_remove_if(&live, "k", |_| Ok(true)).is_ok());
+        assert!(try_remove_settled(&store, &live).is_ok());
         let present = live.join(".k.publish.lock");
         fs::write(live.join("k.json"), "not json").unwrap();
-        assert!(store.try_remove_if(&live, "k", |_| Ok(true)).is_err());
+        assert!(try_remove_settled(&store, &live).is_err());
         assert!(present.exists());
     }
 

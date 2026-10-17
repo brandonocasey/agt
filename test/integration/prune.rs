@@ -117,6 +117,21 @@ impl Prune {
         path
     }
 
+    /// Runs until nothing is skipped as locked, for a lock the test just released: a lock is an
+    /// open file description, and a thread that forks a child (other tests spawn `agt`) hands it
+    /// to the child until the child's `exec` closes it, so a released lock can stay held briefly.
+    fn run_settled(&self, args: &[&str]) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let report = self.run(args);
+            let skipped = report["skipped"].as_array().is_some_and(|s| !s.is_empty());
+            if !skipped || std::time::Instant::now() > deadline {
+                return report;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn run(&self, args: &[&str]) -> Value {
         let output = self
             .env
@@ -333,7 +348,7 @@ fn a_backup_in_progress_is_skipped() {
     assert!(partial.exists());
     assert_eq!(report["skipped"].as_array().unwrap().len(), 1);
     drop(guard);
-    prune.run(&["--yes"]);
+    prune.run_settled(&["--yes"]);
     assert!(!partial.exists());
 }
 
@@ -505,7 +520,7 @@ fn busy_issue_and_task_locks_skip_the_item() {
     );
     drop(guard);
     fs::remove_dir(&task_lock).unwrap();
-    prune.run(&["--yes"]);
+    prune.run_settled(&["--yes"]);
     assert!(!issue.exists() && !task.exists());
 }
 
@@ -526,7 +541,7 @@ fn a_held_publish_lock_skips_its_review() {
             .contains("locked")
     );
     drop(guard);
-    let report = prune.run(&["--yes"]);
+    let report = prune.run_settled(&["--yes"]);
     assert!(!old.exists());
     assert!(!lock.exists());
     assert_eq!(report["skipped"], json!([]));
