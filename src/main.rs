@@ -9,6 +9,7 @@ mod github;
 mod gitlab;
 mod markers;
 mod model;
+mod service;
 mod store;
 
 use std::io::{IsTerminal, Write};

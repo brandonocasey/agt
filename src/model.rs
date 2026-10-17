@@ -52,16 +52,6 @@ pub enum Forge {
     Gitlab,
 }
 
-impl Forge {
-    /// Prefix of the keys and imported ids of this service's targets: `gh-42`, `gl-7`.
-    pub fn key_prefix(self) -> &'static str {
-        match self {
-            Self::Github => "gh",
-            Self::Gitlab => "gl",
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewState {

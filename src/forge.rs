@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result, ctx, fail};
 use crate::model::{RemoteThread, ReviewState};
+use crate::service::SERVICES;
 
 /// Runs `gh` or `glab` and parses their JSON output. The read methods (`json`, `items`, `text`)
 /// take only read requests (`--method GET` / `-X GET` REST calls and GraphQL queries, never
@@ -153,9 +154,9 @@ pub fn parse_pr(arg: &str) -> Result<PrRef> {
     let invalid = || Error(format!("--pr must be a number or a PR/MR URL: {arg}"));
     let (_, rest) = arg.split_once("://").ok_or_else(invalid)?;
     let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
-    let (repo, number) = path
-        .split_once("/-/merge_requests/")
-        .or_else(|| path.split_once("/pull/"))
+    let (repo, number) = SERVICES
+        .iter()
+        .find_map(|kind| path.split_once(kind.url_marker))
         .ok_or_else(invalid)?;
     let number = number
         .split(['/', '#', '?'])

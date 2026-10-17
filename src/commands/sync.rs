@@ -6,15 +6,14 @@ use super::{Adoption, Ctx, Scope, prune_dir};
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
-use crate::forge::{self, Client, CommentData, Fetched, ThreadData};
+use crate::forge::{self, CommentData, Fetched, ThreadData};
 use crate::git::{Repo, split_remote};
-use crate::github;
-use crate::gitlab;
 use crate::model::{
     Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RemoteComment,
     RemoteKind, Resolution, Review, ReviewState, Severity, Side, Target, TargetKind, Thread,
     ThreadType,
 };
+use crate::service::{self, Capabilities, Kind, SERVICES, Service, Subject};
 use crate::store::Account;
 
 use crate::markers::{self, agent_attempt, agent_id};
@@ -29,15 +28,27 @@ struct Summary {
     drafts: usize,
 }
 
-/// The forge, authenticated login and PR/MR a `sync` or `publish` works on.
+/// The service, authenticated login and PR/MR a `sync` or `publish` works on.
 pub(super) struct Connection {
-    pub forge: Forge,
+    pub service: Box<dyn Service>,
     pub host: String,
-    pub client: Client,
     pub login: String,
     pub repo: String,
     pub number: u64,
     pub key: String,
+}
+
+impl Connection {
+    pub fn forge(&self) -> Forge {
+        self.service.forge()
+    }
+
+    pub fn subject(&self) -> Subject<'_> {
+        Subject {
+            repo: &self.repo,
+            number: self.number,
+        }
+    }
 }
 
 pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
@@ -49,12 +60,11 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
             .and_then(|target| target.review)
     {
         // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`.
-        let (client, login) = authenticate(review.forge, &review.host)?;
+        let (service, login) = authenticate(review.forge, &review.host)?;
         return Ok(Connection {
             key: pr_key(review.forge, review.number),
-            forge: review.forge,
+            service,
             host: review.host,
-            client,
             login,
             repo: review.repo,
             number: review.number,
@@ -70,7 +80,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
         return fail("sync needs a GitHub or GitLab origin remote, or --pr <url>");
     };
     let forge = detect(&host)?;
-    let (client, login) = authenticate(forge, &host)?;
+    let (service, login) = authenticate(forge, &host)?;
     let (repo, number) = match &pr_ref {
         Some(pr) => (origin_repo, pr.number),
         None => {
@@ -78,11 +88,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
                 .repo
                 .current_branch()?
                 .ok_or_else(|| Error("HEAD is detached; pass --pr <number|url>".into()))?;
-            let found = match forge {
-                Forge::Github => github::find_pr(&client, &origin_repo, &branch)?,
-                Forge::Gitlab => gitlab::find_mr(&client, &origin_repo, &branch)?,
-            };
-            found.ok_or_else(|| {
+            service.find_review(&origin_repo, &branch)?.ok_or_else(|| {
                 Error(format!(
                     "no PR/MR found for branch {branch} in {origin_repo}"
                 ))
@@ -91,73 +97,43 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     };
     Ok(Connection {
         key: pr_key(forge, number),
-        forge,
+        service,
         host,
-        client,
         login,
         repo,
         number,
     })
 }
 
-/// The forge of `host`, from the host name or the gh/glab configuration and logins; never
-/// guessed.
+/// The forge of `host`, from the host name, the services' own configuration or their logins;
+/// never guessed.
 fn detect(host: &str) -> Result<Forge> {
-    if host == "github.com" {
-        return Ok(Forge::Github);
-    }
-    let named = |value: &str| bare_host(value) == host;
-    if host == "gitlab.com"
-        || std::env::var("GITLAB_HOST").is_ok_and(|value| named(&value))
-        || Client::glab_configured()
-            .text(&["config", "get", "host"])
-            .is_some_and(|value| named(&value))
-    {
-        return Ok(Forge::Gitlab);
-    }
-    let known = |client: Client| {
-        client
-            .text(&["auth", "status", "--hostname", host])
-            .is_some()
+    let by = |check: fn(&Kind) -> fn(&str) -> bool| {
+        SERVICES
+            .iter()
+            .find(|kind| check(kind)(host))
+            .map(|kind| kind.forge)
     };
-    if known(Client::gh(host)) {
-        return Ok(Forge::Github);
-    }
-    // `glab config get host` names only the global default, not every host glab is logged in to.
-    if known(Client::glab(host)) {
-        return Ok(Forge::Gitlab);
-    }
-    fail(format!(
-        "unsupported forge {host}: sync and publish need github.com or a host `gh auth status` \
-         knows, or gitlab.com, GITLAB_HOST, glab's configured host or a host `glab auth status` \
-         knows"
-    ))
+    by(|kind| kind.well_known)
+        .or_else(|| by(|kind| kind.configured))
+        .or_else(|| by(|kind| kind.probe))
+        .ok_or_else(|| {
+            Error(format!(
+                "unsupported forge {host}: sync and publish need github.com or a host `gh auth \
+                 status` knows, or gitlab.com, GITLAB_HOST, glab's configured host or a host \
+                 `glab auth status` knows"
+            ))
+        })
 }
 
-/// The lowercase host of a `GITLAB_HOST`-style value, which may be a URL.
-fn bare_host(value: &str) -> String {
-    let value = value.split_once("://").map_or(value, |(_, rest)| rest);
-    value
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-}
-
-fn authenticate(forge: Forge, host: &str) -> Result<(Client, String)> {
-    let client = match forge {
-        Forge::Github => Client::gh(host),
-        Forge::Gitlab => Client::glab(host),
-    };
-    let login = match forge {
-        Forge::Github => github::login(&client)?,
-        Forge::Gitlab => gitlab::login(&client)?,
-    };
-    Ok((client, login))
+fn authenticate(forge: Forge, host: &str) -> Result<(Box<dyn Service>, String)> {
+    let service = (service::kind(forge).connect)(host);
+    let login = service.login()?;
+    Ok((service, login))
 }
 
 fn pr_key(forge: Forge, number: u64) -> String {
-    format!("{}-{number}", forge.key_prefix())
+    format!("{}-{number}", service::kind(forge).key_prefix)
 }
 
 /// Everything fetched and computed before the lock: the target to merge into and the merge
@@ -171,10 +147,7 @@ pub(super) struct Plan {
 }
 
 pub(super) fn plan(ctx: &Ctx, connection: &Connection) -> Result<Plan> {
-    let mut fetched = match connection.forge {
-        Forge::Github => github::fetch(&connection.client, &connection.repo, connection.number)?,
-        Forge::Gitlab => gitlab::fetch(&connection.client, &connection.repo, connection.number)?,
-    };
+    let mut fetched = connection.service.fetch(connection.subject())?;
     mark_outdated(&ctx.repo, &mut fetched);
     let branch = ctx.repo.current_branch()?;
     let (scope, local) = sync_scope(ctx, &connection.key, &fetched, branch.as_deref())?;
@@ -185,7 +158,7 @@ pub(super) fn plan(ctx: &Ctx, connection: &Connection) -> Result<Plan> {
     };
     let now = clock::now()?;
     let review = Review {
-        forge: connection.forge,
+        forge: connection.forge(),
         host: connection.host.clone(),
         repo: fetched.pr.repo.clone(),
         number: connection.number,
@@ -231,7 +204,7 @@ impl Plan {
             target,
             self.fetched,
             &connection.login,
-            connection.forge,
+            connection.service.as_ref(),
             &self.now,
         );
         let recorded = self
@@ -300,7 +273,7 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
     ctx.store.save_account(
         &ctx.dir,
         &Account {
-            forge: connection.forge,
+            forge: connection.forge(),
             host: connection.host.clone(),
             login: connection.login.clone(),
         },
@@ -471,12 +444,13 @@ fn trusted(comment: &CommentData, login: &str) -> bool {
 /// text this store sent is trusted.
 struct Trust<'a> {
     login: &'a str,
-    forge: Forge,
+    caps: &'a Capabilities,
+    service: &'a dyn Service,
     sent: HashSet<String>,
 }
 
 impl<'a> Trust<'a> {
-    fn new(target: &Target, login: &'a str, forge: Forge) -> Self {
+    fn new(target: &Target, login: &'a str, service: &'a dyn Service) -> Self {
         let comments = target
             .threads
             .iter()
@@ -488,7 +462,8 @@ impl<'a> Trust<'a> {
             .filter_map(|run| run.record.as_ref()?.sent.as_deref());
         Self {
             login,
-            forge,
+            caps: service.caps(),
+            service,
             sent: comments
                 .chain(records)
                 .map(|text| text.trim().to_owned())
@@ -497,14 +472,13 @@ impl<'a> Trust<'a> {
     }
 
     fn sent_text(&self, local: Option<&str>, comment: &CommentData) -> bool {
-        self.forge == Forge::Github
-            || local.is_some_and(|local| local.trim() == comment.body.trim())
+        self.caps.edits_attributed || local.is_some_and(|local| local.trim() == comment.body.trim())
     }
 
     /// A trusted comment, on GitLab only with a body this store sent.
     fn verified(&self, comment: &CommentData) -> bool {
         trusted(comment, self.login)
-            && (self.forge == Forge::Github || self.sent.contains(comment.body.trim()))
+            && (self.caps.edits_attributed || self.sent.contains(comment.body.trim()))
     }
 
     /// The agent-review id of a verified comment.
@@ -629,22 +603,22 @@ fn imported_comment(comment: CommentData, login: &str) -> Comment {
     )
 }
 
-fn imported_id(forge: Forge, data: &ThreadData) -> String {
+fn imported_id(service: &dyn Service, data: &ThreadData) -> String {
     let first = data
         .comments
         .first()
         .map_or(data.info.id.as_str(), |comment| comment.id.as_str());
-    let prefix = forge.key_prefix();
-    match (forge, data.info.kind) {
-        (Forge::Github, RemoteKind::ReviewThread) => format!("{prefix}-t{first}"),
-        (Forge::Github, RemoteKind::Review) => format!("{prefix}-r{first}"),
-        (Forge::Github, _) => format!("{prefix}-c{first}"),
-        (Forge::Gitlab, _) => format!("{prefix}-n{first}"),
-    }
+    service.imported_id(data.info.kind, first)
 }
 
-fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: &str) -> Summary {
-    let trust = Trust::new(target, login, forge);
+fn merge(
+    target: &mut Target,
+    fetched: Fetched,
+    login: &str,
+    service: &dyn Service,
+    now: &str,
+) -> Summary {
+    let trust = Trust::new(target, login, service);
     let mut summary = Summary::default();
     let mut answers = Vec::new();
     let seen_threads: Vec<String> = fetched
@@ -825,7 +799,7 @@ fn flag_deleted(target: &mut Target, threads: &[String], comments: &[String], no
 }
 
 fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summary: &mut Summary) {
-    let (login, forge) = (trust.login, trust.forge);
+    let login = trust.login;
     let marker = data
         .comments
         .first()
@@ -835,7 +809,8 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
         thread.remote.as_ref().is_some_and(|remote| {
             // A GitLab note that gets a reply turns from general into a discussion with the
             // same id; GitHub ids of different kinds come from separate sequences.
-            remote.id == data.info.id && (remote.kind == data.info.kind || forge == Forge::Gitlab)
+            remote.id == data.info.id
+                && (remote.kind == data.info.kind || trust.caps.notes_become_discussions)
         })
     });
     let by_agent = || {
@@ -888,7 +863,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
     let id = match marker {
         Some(marker) if !taken(&marker) => marker,
         _ => {
-            let base = imported_id(forge, &data);
+            let base = imported_id(trust.service, &data);
             let mut id = base.clone();
             let mut number = 1;
             while taken(&id) {

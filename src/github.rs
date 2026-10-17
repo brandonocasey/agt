@@ -1,9 +1,16 @@
 use serde_json::Value;
 
+use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
 use crate::forge::{self, Client, CommentData, Fetched, PrInfo, ThreadData};
-use crate::model::{RemoteKind, RemoteThread, ReviewState, Side};
+use crate::git::Repo;
+use crate::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
+use crate::service::{
+    ApproveCap, Capabilities, Endpoint, Inline, Kind, Method, Placement, Position, Posted,
+    ReplyCap, Request, Service, Subject, Var,
+};
+use serde_json::json;
 
 const COMMENT_FIELDS: &str = "databaseId url body createdAt author{login} editor{login} originalCommit{oid} pullRequestReview{databaseId}";
 
@@ -11,6 +18,288 @@ fn pull_query(name: &str, selection: &str) -> String {
     format!(
         "query {name}($owner:String!,$name:String!,$number:Int!,$cursor:String){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{selection}}}}}}}"
     )
+}
+
+const REPLY_MUTATION: &str = "mutation AddReply($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{databaseId url}}}";
+const RESOLVE_MUTATION: &str = "mutation ResolveThread($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
+const UNRESOLVE_MUTATION: &str = "mutation UnresolveThread($threadId:ID!){unresolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
+
+pub const KIND: Kind = Kind {
+    forge: Forge::Github,
+    key_prefix: "gh",
+    url_marker: "/pull/",
+    well_known: |host| host == "github.com",
+    configured: |_| false,
+    probe: |host| {
+        Client::gh(host)
+            .text(&["auth", "status", "--hostname", host])
+            .is_some()
+    },
+    connect: |host| {
+        Box::new(Github {
+            client: Client::gh(host),
+        })
+    },
+};
+
+const CAPS: Capabilities = Capabilities {
+    inline: Inline::ReviewBatch,
+    ranges: true,
+    reply: ReplyCap::ReviewThreads,
+    resolve: true,
+    unresolve: true,
+    general_kind: RemoteKind::General,
+    general_resolvable: false,
+    approve: ApproveCap::Review {
+        self_allowed: false,
+    },
+    edits_attributed: true,
+    notes_become_discussions: false,
+};
+
+pub struct Github {
+    client: Client,
+}
+
+fn base(subject: Subject) -> String {
+    format!("repos/{}", subject.repo)
+}
+
+fn comments_path(subject: Subject) -> String {
+    format!("{}/issues/{}/comments", base(subject), subject.number)
+}
+
+fn reviews_path(subject: Subject) -> String {
+    format!("{}/pulls/{}/reviews", base(subject), subject.number)
+}
+
+impl Service for Github {
+    fn forge(&self) -> Forge {
+        Forge::Github
+    }
+
+    fn name(&self) -> &'static str {
+        "GitHub"
+    }
+
+    fn caps(&self) -> &Capabilities {
+        &CAPS
+    }
+
+    fn login(&self) -> Result<String> {
+        login(&self.client)
+    }
+
+    fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
+        find_pr(&self.client, origin, branch)
+    }
+
+    fn fetch(&self, subject: Subject) -> Result<Fetched> {
+        fetch(&self.client, subject.repo, subject.number)
+    }
+
+    fn imported_id(&self, kind: RemoteKind, first: &str) -> String {
+        match kind {
+            RemoteKind::ReviewThread => format!("gh-t{first}"),
+            RemoteKind::Review => format!("gh-r{first}"),
+            _ => format!("gh-c{first}"),
+        }
+    }
+
+    fn render(&self, request: &Request) -> Vec<String> {
+        render(request)
+    }
+
+    fn send(&self, request: &Request) -> Result<Value> {
+        let args = render(request);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.client.send(&args, request.body.as_ref())
+    }
+
+    fn place(
+        &self,
+        repo: &Repo,
+        review: &Review,
+        anchor: &Anchor,
+        commit: &str,
+        line: u32,
+    ) -> Option<Placement> {
+        place(repo, review, anchor, commit, line)
+    }
+
+    fn review_batch(
+        &self,
+        subject: Subject,
+        commit: &str,
+        summary: &str,
+        comments: &[(Position, String)],
+    ) -> Request {
+        let comments: Vec<Value> = comments
+            .iter()
+            .map(|(position, body)| {
+                let mut comment = position.data.clone();
+                comment["body"] = json!(body);
+                comment
+            })
+            .collect();
+        Request::rest(
+            Method::Post,
+            reviews_path(subject),
+            Some(json!({
+                "commit_id": commit,
+                "event": "COMMENT",
+                "body": summary,
+                "comments": comments,
+            })),
+        )
+    }
+
+    fn thread(&self, subject: Subject, text: &str) -> Request {
+        self.note(subject, text)
+    }
+
+    fn note(&self, subject: Subject, text: &str) -> Request {
+        Request::rest(
+            Method::Post,
+            comments_path(subject),
+            Some(json!({ "body": text })),
+        )
+    }
+
+    fn reply(&self, _subject: Subject, remote: &RemoteThread, text: &str) -> Request {
+        Request::graphql(vec![
+            Var::text("threadId", remote.id.clone()),
+            Var::text("body", text),
+            Var::text("query", REPLY_MUTATION),
+        ])
+    }
+
+    fn resolve(&self, _subject: Subject, remote: &RemoteThread, resolved: bool) -> Request {
+        let mutation = if resolved {
+            RESOLVE_MUTATION
+        } else {
+            UNRESOLVE_MUTATION
+        };
+        Request::graphql(vec![
+            Var::text("threadId", remote.id.clone()),
+            Var::text("query", mutation),
+        ])
+    }
+
+    fn approve(&self, subject: Subject, head: &str, comment: Option<&str>) -> Request {
+        let mut body = json!({ "commit_id": head, "event": "APPROVE" });
+        if let Some(comment) = comment {
+            body["body"] = json!(comment);
+        }
+        Request::rest(Method::Post, reviews_path(subject), Some(body))
+    }
+
+    fn comment_created(
+        &self,
+        _review_url: Option<&str>,
+        response: &Value,
+    ) -> Option<(String, Option<String>)> {
+        const REPLY: &str = "/data/addPullRequestReviewThreadReply/comment";
+        match forge::id(response, &format!("{REPLY}/databaseId")) {
+            Some(id) => Some((id, forge::text(response, &format!("{REPLY}/url")))),
+            None => Some((
+                forge::id(response, "/id")?,
+                forge::text(response, "/html_url"),
+            )),
+        }
+    }
+
+    fn draft_created(&self, _response: &Value) -> Option<String> {
+        None
+    }
+
+    fn review_posted(&self, subject: Subject, response: &Value) -> Result<(String, Vec<Posted>)> {
+        let review = forge::id(response, "/id")
+            .ok_or_else(|| Error("GitHub returned no review id".into()))?;
+        let path = format!("{}/{review}/comments", reviews_path(subject));
+        let listed = self.client.json(&["api", "--method", "GET", &path])?;
+        let posted = listed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some(Posted {
+                    id: forge::id(item, "/id")?,
+                    url: forge::text(item, "/html_url"),
+                    body: item["body"].as_str()?.to_owned(),
+                })
+            })
+            .collect();
+        Ok((review, posted))
+    }
+}
+
+/// The `gh` arguments of a request.
+fn render(request: &Request) -> Vec<String> {
+    let mut args = vec!["api".to_owned()];
+    match &request.endpoint {
+        Endpoint::Rest(path) => {
+            args.extend(["--method".to_owned(), request.method.as_str().to_owned()]);
+            args.push(path.clone());
+            if request.body.is_some() {
+                args.extend(["--input".to_owned(), "-".to_owned()]);
+            }
+        }
+        Endpoint::Graphql(vars) => {
+            args.push("graphql".to_owned());
+            for var in vars {
+                args.push(if var.typed { "-F" } else { "-f" }.to_owned());
+                args.push(format!("{}={}", var.name, var.value));
+            }
+        }
+    }
+    args
+}
+
+/// The place of a comment in the PR diff: both ends on one hunk for a range, as GitHub
+/// requires, and the commit it reviewed.
+fn place(
+    repo: &Repo,
+    review: &Review,
+    anchor: &Anchor,
+    commit: &str,
+    line: u32,
+) -> Option<Placement> {
+    let base = review.base_sha.as_deref()?;
+    if !repo.is_ancestor(commit, &review.head_sha).ok()? {
+        return None;
+    }
+    let merge_base = repo.merge_base(base, commit).ok()??;
+    let diff = repo.diff_context(&merge_base, commit).ok()?;
+    let found = anchors::diff_line(&diff, &anchor.path, anchor.side, line)?;
+    let (line, side) = match found.new_line {
+        Some(new) => (new, "RIGHT"),
+        None => (found.old_line?, "LEFT"),
+    };
+    let start_line = match anchor.start_line.filter(|start| *start < line) {
+        Some(start) => {
+            let first = anchors::diff_line(&diff, &anchor.path, Side::New, start)?;
+            if side != "RIGHT" || first.hunk != found.hunk {
+                return None;
+            }
+            first.new_line
+        }
+        None => None,
+    };
+    let path = if side == "LEFT" {
+        found.old_path
+    } else {
+        found.new_path
+    };
+    let mut data = json!({ "path": path, "line": line, "side": side });
+    if let Some(start) = start_line {
+        data["start_line"] = json!(start);
+        data["start_side"] = json!(side);
+    }
+    Some(Placement::InDiff(Position {
+        commit: commit.to_owned(),
+        data,
+    }))
 }
 
 pub fn login(gh: &Client) -> Result<String> {

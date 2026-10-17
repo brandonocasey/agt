@@ -7,31 +7,32 @@ use super::{Ctx, author_label, blocking_threads, is_open, random_id, run_reviews
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
-use crate::forge;
 use crate::git::Repo;
 use crate::markers::{self, agent_id};
 use crate::model::{
-    Anchor, Approval, Author, Comment, Forge, Pass, PassKind, PostState, RecordPost, RemoteComment,
+    Anchor, Approval, Author, Comment, Pass, PassKind, PostState, RecordPost, RemoteComment,
     RemoteKind, RemoteThread, Resolution, Review, Run, Side, Target, Thread,
 };
+use crate::service::{ApproveCap, Capabilities, Inline, Placement, Position, Request, Service};
 
-/// Stands for the id of the draft created by the write before; filled in when it returns.
+/// Stands for the id of the draft a dry run has not created yet.
 const NEW_DRAFT: &str = "<draft id>";
-const REPLY_MUTATION: &str = "mutation AddReply($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{databaseId url}}}";
-const RESOLVE_MUTATION: &str = "mutation ResolveThread($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
-const UNRESOLVE_MUTATION: &str = "mutation UnresolveThread($threadId:ID!){unresolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
 
 /// What one write call posts, which says how to mark and save it.
 enum Item {
-    /// A GitHub review holding the in-diff comments of one reviewed commit.
+    /// A review holding the in-diff comments of one reviewed commit.
     Review {
         comments: Vec<String>,
     },
-    /// A thread's first comment as a general comment (GitHub) or discussion (GitLab).
+    /// A thread's first comment as a general comment or discussion.
     Thread {
         comment: String,
     },
-    /// A GitLab draft note, published right after it is created.
+    /// An approval posted as a review that carries its comment, which approves the head.
+    ApprovalReview {
+        comment: String,
+    },
+    /// A draft note, published right after it is created.
     Draft {
         comment: String,
     },
@@ -50,7 +51,7 @@ enum Item {
         run: String,
         head: String,
     },
-    /// GitLab's approval of the MR head, sent before the approval comment.
+    /// The host's approval of the PR/MR head, sent before the approval comment.
     Approve {
         thread: String,
     },
@@ -58,15 +59,17 @@ enum Item {
 
 struct Write {
     item: Item,
-    args: Vec<String>,
-    body: Option<Value>,
+    /// `None` for a change that is only recorded locally.
+    request: Option<Request>,
+    /// The text each item of the write sends, in the order of its ids.
+    sent: Vec<Option<String>>,
 }
 
 impl Write {
     fn kind(&self) -> &'static str {
         match &self.item {
             Item::Review { .. } => "review",
-            Item::Thread { .. } => "thread",
+            Item::Thread { .. } | Item::ApprovalReview { .. } => "thread",
             Item::Draft { .. } => "draft",
             Item::PublishDraft { .. } => "publish-draft",
             Item::Reply { .. } => "reply",
@@ -81,6 +84,7 @@ impl Write {
         match &self.item {
             Item::Review { comments } => comments.clone(),
             Item::Thread { comment }
+            | Item::ApprovalReview { comment }
             | Item::Draft { comment }
             | Item::PublishDraft { comment, .. }
             | Item::Reply { comment } => vec![comment.clone()],
@@ -89,27 +93,44 @@ impl Write {
         }
     }
 
-    fn view(&self) -> Value {
-        json!({
-            "kind": self.kind(),
-            "items": self.ids(),
-            "call": self.args,
-            "input": self.body,
-        })
+    /// The dry-run entries: a draft is followed by the call that publishes it.
+    fn views(&self, connection: &Connection) -> Vec<Value> {
+        let service = &connection.service;
+        let call = |request: Option<&Request>| {
+            json!({
+                "kind": self.kind(),
+                "items": self.ids(),
+                "call": request.map(|request| service.render(request)).unwrap_or_default(),
+                "input": request.and_then(|request| request.body.as_ref()),
+            })
+        };
+        let mut views = vec![call(self.request.as_ref())];
+        if let Item::Draft { comment } = &self.item {
+            let publish = service.publish_draft(connection.subject(), NEW_DRAFT);
+            let write = Write {
+                item: Item::PublishDraft {
+                    comment: comment.clone(),
+                    draft: NEW_DRAFT.to_owned(),
+                },
+                request: Some(publish),
+                sent: vec![None],
+            };
+            views.extend(write.views(connection));
+        }
+        views
     }
+}
+
+/// The in-diff comments of one reviewed commit, posted as one review.
+struct Batch {
+    commit: String,
+    ids: Vec<String>,
+    comments: Vec<(Position, String)>,
 }
 
 /// Where a comment goes on the host.
 enum Spot {
-    Github {
-        commit: String,
-        path: String,
-        line: u32,
-        side: &'static str,
-        /// First line of a multi-line comment, in the same hunk and on the same side.
-        start_line: Option<u32>,
-    },
-    Gitlab(Value),
+    InDiff(Position),
     /// No anchor: a general comment.
     General,
     /// A file the PR/MR does not change: a general comment naming the location.
@@ -236,7 +257,7 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options
     // Treat the threads above as posted so their replies and resolves show too.
     for (id, kind) in expected {
         if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
-            thread.remote = Some(placeholder(&id, kind, connection.forge));
+            thread.remote = Some(placeholder(&id, kind, connection.service.caps()));
             if let Some(first) = thread.comments.first_mut() {
                 first.post = PostState::Posted;
             }
@@ -249,7 +270,7 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options
         .iter()
         .chain(&replies)
         .chain(&records)
-        .map(Write::view)
+        .flat_map(|write| write.views(connection))
         .collect();
     let skipped: Vec<Value> = skipped.into_iter().chain(more).chain(held).collect();
     Ok(json!({
@@ -260,11 +281,11 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options
     }))
 }
 
-fn placeholder(id: &str, kind: RemoteKind, forge: Forge) -> RemoteThread {
+fn placeholder(id: &str, kind: RemoteKind, caps: &Capabilities) -> RemoteThread {
     RemoteThread::new(
         kind,
         format!("<remote id of {id}>"),
-        kind != RemoteKind::General || forge == Forge::Gitlab,
+        kind != RemoteKind::General || caps.general_resolvable,
     )
 }
 
@@ -285,49 +306,30 @@ fn short(sha: &str) -> &str {
 }
 
 impl Planner<'_> {
-    fn base_path(&self) -> String {
-        match self.connection.forge {
-            Forge::Github => format!("repos/{}", self.connection.repo),
-            Forge::Gitlab => format!(
-                "projects/{}/merge_requests/{}",
-                forge::encode(&self.connection.repo),
-                self.connection.number
-            ),
+    fn service(&self) -> &dyn Service {
+        self.connection.service.as_ref()
+    }
+
+    fn caps(&self) -> &Capabilities {
+        self.connection.service.caps()
+    }
+
+    fn write(&self, item: Item, request: Request, text: &str) -> Write {
+        Write {
+            item,
+            request: Some(request),
+            sent: vec![Some(text.to_owned())],
         }
     }
 
-    fn post(&self, path: &str) -> Vec<String> {
-        let mut args = match self.connection.forge {
-            Forge::Github => vec!["api", "--method", "POST"],
-            Forge::Gitlab => vec!["api", "-X", "POST"],
-        };
-        args.push(path);
-        if self.connection.forge == Forge::Gitlab {
-            args.extend(["-H", "Content-Type: application/json"]);
-        }
-        args.extend(["--input", "-"]);
-        args.into_iter().map(str::to_owned).collect()
-    }
-
-    fn general(&self) -> Vec<String> {
-        match self.connection.forge {
-            Forge::Github => self.post(&format!(
-                "{}/issues/{}/comments",
-                self.base_path(),
-                self.connection.number
-            )),
-            Forge::Gitlab => self.post(&format!("{}/discussions", self.base_path())),
-        }
-    }
-
-    /// New threads: one GitHub review per reviewed commit for in-diff comments, else general
-    /// comments; GitLab draft notes, published one by one, else discussions. Also returns the
+    /// New threads: in-diff comments as the service takes them (one review per reviewed commit,
+    /// or a draft note each, published one by one), else general comments. Also returns the
     /// remote kind each thread gets.
     fn threads(&self, target: &Target) -> (Vec<Write>, Vec<Value>, Vec<(String, RemoteKind)>) {
         let mut writes = Vec::new();
         let mut skipped = Vec::new();
         let mut expected = Vec::new();
-        let mut reviews: Vec<(String, Vec<String>, Vec<Value>)> = Vec::new();
+        let mut reviews: Vec<Batch> = Vec::new();
         for thread in &target.threads {
             let Some(first) = thread.comments.first() else {
                 continue;
@@ -384,40 +386,39 @@ impl Planner<'_> {
                 .as_ref()
                 .map_or(Spot::General, |anchor| self.spot(anchor));
             match spot {
-                Spot::Github {
-                    commit,
-                    path,
-                    line,
-                    side,
-                    start_line,
-                } => {
-                    let body = body(target, thread, first, None, self.attempt);
-                    let mut comment =
-                        json!({ "path": path, "line": line, "side": side, "body": body });
-                    if let Some(start) = start_line {
-                        comment["start_line"] = json!(start);
-                        comment["start_side"] = json!(side);
-                    }
-                    match reviews.iter_mut().find(|(sha, ..)| *sha == commit) {
-                        Some((_, ids, comments)) => {
-                            ids.push(first.id.clone());
-                            comments.push(comment);
+                Spot::InDiff(position) => {
+                    let text = body(target, thread, first, None, self.attempt);
+                    match self.caps().inline {
+                        Inline::ReviewBatch => {
+                            let commit = position.commit.clone();
+                            let comment = (position, text);
+                            match reviews.iter_mut().find(|batch| batch.commit == commit) {
+                                Some(batch) => {
+                                    batch.ids.push(first.id.clone());
+                                    batch.comments.push(comment);
+                                }
+                                None => reviews.push(Batch {
+                                    commit,
+                                    ids: vec![first.id.clone()],
+                                    comments: vec![comment],
+                                }),
+                            }
+                            expected.push((thread.id.clone(), RemoteKind::ReviewThread));
                         }
-                        None => reviews.push((commit, vec![first.id.clone()], vec![comment])),
+                        Inline::DraftThenPublish => {
+                            let request =
+                                self.service()
+                                    .draft(self.connection.subject(), &text, &position);
+                            writes.push(self.write(
+                                Item::Draft {
+                                    comment: first.id.clone(),
+                                },
+                                request,
+                                &text,
+                            ));
+                            expected.push((thread.id.clone(), RemoteKind::Discussion));
+                        }
                     }
-                    expected.push((thread.id.clone(), RemoteKind::ReviewThread));
-                }
-                Spot::Gitlab(position) => {
-                    let note = body(target, thread, first, None, self.attempt);
-                    writes.push(Write {
-                        item: Item::Draft {
-                            comment: first.id.clone(),
-                        },
-                        args: self.post(&format!("{}/draft_notes", self.base_path())),
-                        body: Some(json!({ "note": note, "position": position })),
-                    });
-                    writes.push(self.publish_draft(&first.id, NEW_DRAFT));
-                    expected.push((thread.id.clone(), RemoteKind::Discussion));
                 }
                 Spot::Outside => {
                     skipped.push(skip(
@@ -431,39 +432,41 @@ impl Planner<'_> {
                         _ => None,
                     };
                     let text = body(target, thread, first, location, self.attempt);
-                    writes.push(Write {
-                        item: Item::Thread {
+                    let request = self.service().thread(self.connection.subject(), &text);
+                    writes.push(self.write(
+                        Item::Thread {
                             comment: first.id.clone(),
                         },
-                        args: self.general(),
-                        body: Some(json!({ "body": text })),
-                    });
-                    let kind = match self.connection.forge {
-                        Forge::Github => RemoteKind::General,
-                        Forge::Gitlab => RemoteKind::Discussion,
-                    };
-                    expected.push((thread.id.clone(), kind));
+                        request,
+                        &text,
+                    ));
+                    expected.push((thread.id.clone(), self.caps().general_kind));
                 }
             }
         }
-        let path = format!(
-            "{}/pulls/{}/reviews",
-            self.base_path(),
-            self.connection.number
-        );
-        let reviews = reviews.into_iter().map(|(commit, ids, comments)| Write {
-            item: Item::Review { comments: ids },
-            args: self.post(&path),
-            body: Some(json!({
-                "commit_id": commit,
-                "event": "COMMENT",
-                "body": format!(
+        let reviews = reviews.into_iter().map(
+            |Batch {
+                 commit,
+                 ids,
+                 comments,
+             }| {
+                let summary = format!(
                     "Review findings.\n{}",
                     markers::agent(&markers::review_id(&commit), None)
-                ),
-                "comments": comments,
-            })),
-        });
+                );
+                let request = self.service().review_batch(
+                    self.connection.subject(),
+                    &commit,
+                    &summary,
+                    &comments,
+                );
+                Write {
+                    item: Item::Review { comments: ids },
+                    request: Some(request),
+                    sent: comments.into_iter().map(|(_, text)| Some(text)).collect(),
+                }
+            },
+        );
         let writes = reviews.chain(writes).collect();
         (writes, skipped, expected)
     }
@@ -481,58 +484,59 @@ impl Planner<'_> {
         self.approvable(approval, target)?;
         let head = &self.review.head_sha;
         let text = body(target, thread, first, None, self.attempt);
-        // A note, not a discussion: GitLab discussions are resolvable and can block merging.
-        let comment = |args: Vec<String>| Write {
-            item: Item::Thread {
-                comment: first.id.clone(),
-            },
-            args,
-            body: Some(json!({ "body": text })),
+        let subject = self.connection.subject();
+        // A note, not a thread: some hosts make threads resolvable, so they can block merging.
+        let note = || {
+            self.write(
+                Item::Thread {
+                    comment: first.id.clone(),
+                },
+                self.service().note(subject, &text),
+                &text,
+            )
         };
-        let note = || self.post(&format!("{}/notes", self.base_path()));
         let own = self.foreign().is_none();
-        match (approval.formal, self.connection.forge) {
-            (true, Forge::Github) if !own => {
-                let path = format!(
-                    "{}/pulls/{}/reviews",
-                    self.base_path(),
-                    self.connection.number
-                );
-                Ok((
-                    vec![Write {
-                        item: Item::Thread {
-                            comment: first.id.clone(),
-                        },
-                        args: self.post(&path),
-                        body: Some(json!({ "commit_id": head, "event": "APPROVE", "body": text })),
-                    }],
-                    RemoteKind::Review,
-                    None,
-                ))
-            }
-            (formal, Forge::Github) => Ok((
-                vec![comment(self.general())],
-                RemoteKind::General,
-                formal.then(|| {
-                    "GitHub does not let the author approve their own PR; posted as a comment"
-                        .to_owned()
-                }),
-            )),
-            (true, Forge::Gitlab) if !approval.approved && approval.refused.is_none() => Ok((
-                vec![
-                    Write {
-                        item: Item::Approve {
-                            thread: thread.id.clone(),
-                        },
-                        args: self.post(&format!("{}/approve", self.base_path())),
-                        body: Some(json!({ "sha": head })),
+        match self.caps().approve {
+            ApproveCap::Review { self_allowed } if approval.formal && (self_allowed || !own) => {
+                let request = self.service().approve(subject, head, Some(&text));
+                let write = self.write(
+                    Item::ApprovalReview {
+                        comment: first.id.clone(),
                     },
-                    comment(note()),
-                ],
-                RemoteKind::General,
-                None,
-            )),
-            (_, Forge::Gitlab) => Ok((vec![comment(note())], RemoteKind::General, None)),
+                    request,
+                    &text,
+                );
+                Ok((vec![write], RemoteKind::Review, None))
+            }
+            ApproveCap::Review { .. } => {
+                let reason = approval.formal.then(|| {
+                    format!(
+                        "{} does not let the author approve their own PR; posted as a comment",
+                        self.service().name()
+                    )
+                });
+                Ok((vec![note()], RemoteKind::General, reason))
+            }
+            ApproveCap::Call
+                if approval.formal && !approval.approved && approval.refused.is_none() =>
+            {
+                let approve = Write {
+                    item: Item::Approve {
+                        thread: thread.id.clone(),
+                    },
+                    request: Some(self.service().approve(subject, head, None)),
+                    sent: vec![None],
+                };
+                Ok((vec![approve, note()], RemoteKind::General, None))
+            }
+            ApproveCap::None if approval.formal => {
+                let reason = format!(
+                    "{} has no formal approval; posted as a comment",
+                    self.service().name()
+                );
+                Ok((vec![note()], RemoteKind::General, Some(reason)))
+            }
+            ApproveCap::Call | ApproveCap::None => Ok((vec![note()], RemoteKind::General, None)),
         }
     }
 
@@ -546,7 +550,7 @@ impl Planner<'_> {
         if !approval.formal || approval.approved || approval.refused.is_some() {
             return None;
         }
-        // Posted as the APPROVE review itself, as when its response was lost and sync
+        // Posted as the approving review itself, as when its response was lost and sync
         // claimed it.
         if thread
             .remote
@@ -557,36 +561,35 @@ impl Planner<'_> {
             return None;
         }
         let own = self.foreign().is_none();
-        if own && self.connection.forge == Forge::Github {
-            return Some(Err(
-                "GitHub does not let the author approve their own PR".to_owned()
-            ));
+        let caps = self.caps();
+        if caps.approve == ApproveCap::None {
+            return None;
+        }
+        if own
+            && caps.approve
+                == (ApproveCap::Review {
+                    self_allowed: false,
+                })
+        {
+            return Some(Err(format!(
+                "{} does not let the author approve their own PR",
+                self.service().name()
+            )));
         }
         if let Err(reason) = self.approvable(approval, target) {
             return Some(Err(reason));
         }
-        let head = &self.review.head_sha;
-        let write = match self.connection.forge {
-            Forge::Github => Write {
-                item: Item::Approve {
-                    thread: thread.id.clone(),
-                },
-                args: self.post(&format!(
-                    "{}/pulls/{}/reviews",
-                    self.base_path(),
-                    self.connection.number
-                )),
-                body: Some(json!({ "commit_id": head, "event": "APPROVE" })),
+        Some(Ok(Write {
+            item: Item::Approve {
+                thread: thread.id.clone(),
             },
-            Forge::Gitlab => Write {
-                item: Item::Approve {
-                    thread: thread.id.clone(),
-                },
-                args: self.post(&format!("{}/approve", self.base_path())),
-                body: Some(json!({ "sha": head })),
-            },
-        };
-        Some(Ok(write))
+            request: Some(self.service().approve(
+                self.connection.subject(),
+                &self.review.head_sha,
+                None,
+            )),
+            sent: vec![None],
+        }))
     }
 
     /// Whether an approval may go out now: at the head it approved, with no blocking finding.
@@ -688,14 +691,16 @@ impl Planner<'_> {
     }
 
     fn publish_draft(&self, comment: &str, draft: &str) -> Write {
-        let path = format!("{}/draft_notes/{draft}/publish", self.base_path());
         Write {
             item: Item::PublishDraft {
                 comment: comment.to_owned(),
                 draft: draft.to_owned(),
             },
-            args: ["api", "-X", "PUT", &path].map(str::to_owned).to_vec(),
-            body: None,
+            request: Some(
+                self.service()
+                    .publish_draft(self.connection.subject(), draft),
+            ),
+            sent: vec![None],
         }
     }
 
@@ -707,15 +712,26 @@ impl Planner<'_> {
             Side::New => anchor.line,
             Side::Old => anchor.old_line,
         };
-        let spot = match (&anchor.commit, wanted) {
-            (Some(commit), Some(line)) => match self.connection.forge {
-                Forge::Github => self.github_spot(anchor, commit, line),
-                Forge::Gitlab => self.gitlab_spot(anchor, commit, line),
-            },
+        let single;
+        let anchor = if self.caps().ranges {
+            anchor
+        } else {
+            single = Anchor {
+                start_line: None,
+                ..anchor.clone()
+            };
+            &single
+        };
+        let placed = match (&anchor.commit, wanted) {
+            (Some(commit), Some(line)) => {
+                self.service()
+                    .place(self.repo, self.review, anchor, commit, line)
+            }
             _ => None,
         };
-        match spot {
-            Some(spot) => spot,
+        match placed {
+            Some(Placement::InDiff(position)) => Spot::InDiff(position),
+            Some(Placement::OtherFile) => Spot::OtherFile(location(anchor)),
             None if wanted.is_none() || !self.in_pr_diff(&anchor.path) => {
                 Spot::OtherFile(location(anchor))
             }
@@ -737,112 +753,6 @@ impl Planner<'_> {
             diff.map(|diff| anchors::parse(&diff)).unwrap_or_default()
         });
         files.is_empty() || files.iter().any(|file| file.touches(path))
-    }
-
-    fn github_spot(&self, anchor: &Anchor, commit: &str, line: u32) -> Option<Spot> {
-        let base = self.review.base_sha.as_deref()?;
-        if !self.repo.is_ancestor(commit, &self.review.head_sha).ok()? {
-            return None;
-        }
-        let merge_base = self.repo.merge_base(base, commit).ok()??;
-        let diff = self.repo.diff_context(&merge_base, commit).ok()?;
-        let found = anchors::diff_line(&diff, &anchor.path, anchor.side, line)?;
-        let (line, side) = match found.new_line {
-            Some(new) => (new, "RIGHT"),
-            None => (found.old_line?, "LEFT"),
-        };
-        // A range posts only as one multi-line comment: both ends on the new side of one
-        // hunk, as GitHub requires.
-        let start_line = match anchor.start_line.filter(|start| *start < line) {
-            Some(start) => {
-                let first = anchors::diff_line(&diff, &anchor.path, Side::New, start)?;
-                if side != "RIGHT" || first.hunk != found.hunk {
-                    return None;
-                }
-                first.new_line
-            }
-            None => None,
-        };
-        let path = if side == "LEFT" {
-            found.old_path
-        } else {
-            found.new_path
-        };
-        Some(Spot::Github {
-            commit: commit.to_owned(),
-            path,
-            line,
-            side,
-            start_line,
-        })
-    }
-
-    /// GitLab positions are against the latest MR diff, so a line is first mapped to its head.
-    fn gitlab_spot(&self, anchor: &Anchor, commit: &str, line: u32) -> Option<Spot> {
-        let head = &self.review.head_sha;
-        let base = self.review.base_sha.as_deref()?;
-        let start = self.review.start_sha.as_deref().unwrap_or(base);
-        let first = anchor
-            .start_line
-            .filter(|first| anchor.side == Side::New && *first < line);
-        let (path, line, first) = if anchor.side == Side::Old || commit == head {
-            (anchor.path.clone(), line, first)
-        } else {
-            let files = anchors::parse(&self.repo.diff_u0(commit, head).ok()?);
-            let location = anchors::locate(&files, anchor);
-            // Changed since review, as by a fix: the latest MR diff no longer has these lines,
-            // so a general comment names where they were.
-            if location.outdated {
-                return Some(Spot::OtherFile(self::location(anchor)));
-            }
-            // The range's first line maps to the head the same way, or the range is dropped.
-            let first = match first {
-                Some(first) => {
-                    let start = Anchor {
-                        line: Some(first),
-                        start_line: None,
-                        ..anchor.clone()
-                    };
-                    let mapped = anchors::locate(&files, &start);
-                    if mapped.outdated {
-                        return Some(Spot::OtherFile(self::location(anchor)));
-                    }
-                    Some(mapped.line?)
-                }
-                None => None,
-            };
-            (location.path, location.line?, first)
-        };
-        let diff = self.repo.diff_context(base, head).ok()?;
-        let found = anchors::diff_line(&diff, &path, anchor.side, line)?;
-        let range = match first {
-            Some(first) => {
-                let start = anchors::diff_line(&diff, &path, Side::New, first)?;
-                if start.hunk != found.hunk {
-                    return None;
-                }
-                Some(json!({ "start": line_point(&start), "end": line_point(&found) }))
-            }
-            None => None,
-        };
-        let mut position = json!({
-            "position_type": "text",
-            "base_sha": base,
-            "start_sha": start,
-            "head_sha": head,
-            "old_path": found.old_path,
-            "new_path": found.new_path,
-        });
-        if let Some(new) = found.new_line {
-            position["new_line"] = json!(new);
-        }
-        if let Some(old) = found.old_line {
-            position["old_line"] = json!(old);
-        }
-        if let Some(range) = range {
-            position["line_range"] = range;
-        }
-        Some(Spot::Gitlab(position))
     }
 
     /// Unposted comments on posted threads, then resolve and reopen changes.
@@ -910,97 +820,35 @@ impl Planner<'_> {
         let item = Item::Reply {
             comment: comment.id.clone(),
         };
-        match self.connection.forge {
-            Forge::Github if remote.kind == RemoteKind::ReviewThread => Write {
-                item,
-                args: [
-                    "api".to_owned(),
-                    "graphql".to_owned(),
-                    "-f".to_owned(),
-                    format!("threadId={}", remote.id),
-                    "-f".to_owned(),
-                    format!("body={text}"),
-                    "-f".to_owned(),
-                    format!("query={REPLY_MUTATION}"),
-                ]
-                .to_vec(),
-                body: None,
-            },
-            // A general comment has no replies: answer with a new one naming the thread.
-            Forge::Github => Write {
-                item,
-                args: self.general(),
-                body: Some(json!({ "body": format!("{text}\nRe: {}", thread.id) })),
-            },
-            Forge::Gitlab => Write {
-                item,
-                args: self.post(&format!(
-                    "{}/discussions/{}/notes",
-                    self.base_path(),
-                    remote.id
-                )),
-                body: Some(json!({ "body": text })),
-            },
+        let subject = self.connection.subject();
+        if self.caps().replies_natively(remote.kind) {
+            return self.write(item, self.service().reply(subject, remote, &text), &text);
         }
+        // Such a thread has no replies: answer with a new comment naming it.
+        let text = format!("{text}\nRe: {}", thread.id);
+        self.write(item, self.service().note(subject, &text), &text)
     }
 
-    /// GitHub general comments cannot be resolved; their resolve is only cleared locally.
+    /// A thread the host cannot resolve, or cannot resolve in that direction, is only cleared
+    /// locally.
     fn resolve(&self, thread: &str, remote: &RemoteThread, resolved: bool) -> Write {
-        let item = Item::Resolve {
-            thread: thread.to_owned(),
-            resolved,
-        };
-        if !remote.resolvable {
-            return Write {
-                item,
-                args: Vec::new(),
-                body: None,
-            };
-        }
-        match self.connection.forge {
-            Forge::Github => {
-                let mutation = if resolved {
-                    RESOLVE_MUTATION
-                } else {
-                    UNRESOLVE_MUTATION
-                };
-                Write {
-                    item,
-                    args: [
-                        "api".to_owned(),
-                        "graphql".to_owned(),
-                        "-f".to_owned(),
-                        format!("threadId={}", remote.id),
-                        "-f".to_owned(),
-                        format!("query={mutation}"),
-                    ]
-                    .to_vec(),
-                    body: None,
-                }
-            }
-            Forge::Gitlab => {
-                let path = format!("{}/discussions/{}", self.base_path(), remote.id);
-                let mut args = self.post(&path);
-                args[2] = "PUT".to_owned();
-                Write {
-                    item,
-                    args,
-                    body: Some(json!({ "resolved": resolved })),
-                }
-            }
+        let caps = self.caps();
+        let local = !remote.resolvable || !caps.resolve || (!resolved && !caps.unresolve);
+        Write {
+            item: Item::Resolve {
+                thread: thread.to_owned(),
+                resolved,
+            },
+            request: (!local).then(|| {
+                self.service()
+                    .resolve(self.connection.subject(), remote, resolved)
+            }),
+            sent: vec![None],
         }
     }
 
     /// The final record of each ended run not posted yet, and the records held back.
     fn records(&self, target: &Target) -> Result<(Vec<Write>, Vec<Value>)> {
-        let path = match self.connection.forge {
-            Forge::Github => format!(
-                "{}/issues/{}/comments",
-                self.base_path(),
-                self.connection.number
-            ),
-            Forge::Gitlab => format!("{}/notes", self.base_path()),
-        };
         let due: Vec<&Run> = target
             .runs
             .iter()
@@ -1030,14 +878,15 @@ impl Planner<'_> {
             .into_iter()
             .map(|run| {
                 let (head, text) = record_body(self.ctx, target, run, self.attempt)?;
-                Ok(Write {
-                    item: Item::Record {
+                let request = self.service().note(self.connection.subject(), &text);
+                Ok(self.write(
+                    Item::Record {
                         run: run.id.clone(),
                         head,
                     },
-                    args: self.post(&path),
-                    body: Some(json!({ "body": text })),
-                })
+                    request,
+                    &text,
+                ))
             })
             .collect::<Result<_>>()?;
         Ok((writes, Vec::new()))
@@ -1125,23 +974,6 @@ fn spend_line(spent: &Value) -> Option<String> {
         let _ = write!(line, "Tokens: {}.", tokens.join(", "));
     }
     (!line.is_empty()).then_some(line)
-}
-
-/// One end of a GitLab `line_range`: its line code is the SHA-1 of the path and the old and new
-/// line counters, as GitLab builds it.
-fn line_point(line: &anchors::DiffLine) -> Value {
-    let hash = sha1_smol::Sha1::from(line.new_path.as_bytes()).digest();
-    let kind = if line.old_line.is_none() {
-        "new"
-    } else {
-        "old"
-    };
-    json!({
-        "line_code": format!("{hash}_{}_{}", line.old_pos, line.new_pos),
-        "type": kind,
-        "old_line": line.old_line,
-        "new_line": line.new_line,
-    })
 }
 
 /// `path:line`, `path (old):line`, or the path of a whole-file finding.
@@ -1380,17 +1212,8 @@ fn run_writes(
     attempt: &str,
     posted: &mut Vec<Value>,
 ) -> Result<()> {
-    let mut created: Option<String> = None;
-    for mut write in writes {
-        if let (Item::PublishDraft { draft, .. }, Some(id)) = (&mut write.item, &created)
-            && draft == NEW_DRAFT
-        {
-            id.clone_into(draft);
-            for arg in &mut write.args {
-                *arg = arg.replace(NEW_DRAFT, id);
-            }
-        }
-        if write.args.is_empty() {
+    for write in writes {
+        let Some(request) = &write.request else {
             if let Item::Resolve { thread, .. } = &write.item {
                 change(ctx, target, |target| {
                     clear_pending(target, thread);
@@ -1399,16 +1222,15 @@ fn run_writes(
             }
             posted.push(json!({ "kind": write.kind(), "items": write.ids(), "local_only": true }));
             continue;
-        }
+        };
         change(ctx, target, |target| {
             mark(target, &write, attempt);
             Ok(())
         })?;
-        let args: Vec<&str> = write.args.iter().map(String::as_str).collect();
-        let response = match connection.client.send(&args, write.body.as_ref()) {
+        let response = match connection.service.send(request) {
             Ok(response) => response,
-            // GitLab refuses a repeat or ineligible approval; the comment still posts, and the
-            // refusal is reported instead of blocking every later write.
+            // A host may refuse a repeat or ineligible approval; the comment still posts, and
+            // the refusal is reported instead of blocking every later write.
             Err(error) if matches!(write.item, Item::Approve { .. }) => {
                 let reason = error.to_string();
                 change(ctx, target, |target| {
@@ -1423,20 +1245,29 @@ fn run_writes(
             Err(error) => return Err(error),
         };
         let remote = save(ctx, connection, target, &write.item, &response)?;
-        // A GitHub `APPROVE` review posted as the approval thread itself.
-        if let (Item::Thread { comment }, Some(body)) = (&write.item, &write.body)
-            && body["event"] == "APPROVE"
-        {
+        if let Item::ApprovalReview { comment } = &write.item {
             let thread = comment.split('/').next().unwrap_or_default().to_owned();
             change(ctx, target, |target| {
                 set_approval(target, &thread, |approval| approval.approved = true);
                 Ok(())
             })?;
         }
-        if matches!(write.item, Item::Draft { .. }) {
-            created.clone_from(&remote);
-        }
         posted.push(json!({ "kind": write.kind(), "items": write.ids(), "remote_id": remote }));
+        if let (Item::Draft { comment }, Some(draft)) = (&write.item, remote) {
+            let publish = Write {
+                item: Item::PublishDraft {
+                    comment: comment.clone(),
+                    draft: draft.clone(),
+                },
+                request: Some(
+                    connection
+                        .service
+                        .publish_draft(connection.subject(), &draft),
+                ),
+                sent: vec![None],
+            };
+            run_writes(ctx, connection, target, vec![publish], attempt, posted)?;
+        }
     }
     Ok(())
 }
@@ -1472,39 +1303,14 @@ fn clear_pending(target: &mut Target, id: &str) {
     }
 }
 
-/// The text each item of a write sends, in the order of its ids.
-fn sent(write: &Write) -> Vec<Option<String>> {
-    let text = |value: &Value| value.as_str().map(str::to_owned);
-    match (&write.item, &write.body) {
-        (Item::Review { .. }, Some(body)) => body["comments"]
-            .as_array()
-            .map(|comments| {
-                comments
-                    .iter()
-                    .map(|comment| text(&comment["body"]))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        (Item::Draft { .. }, Some(body)) => vec![text(&body["note"])],
-        (_, Some(body)) => vec![text(&body["body"])],
-        // A GraphQL reply carries its text as a `body=` argument.
-        (_, None) => vec![
-            write
-                .args
-                .iter()
-                .find_map(|arg| arg.strip_prefix("body="))
-                .map(str::to_owned),
-        ],
-    }
-}
-
 fn mark(target: &mut Target, write: &Write, attempt: &str) {
-    let mut texts = sent(write).into_iter();
+    let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
         Item::Review { comments } => comments.clone(),
-        Item::Thread { comment } | Item::Draft { comment } | Item::Reply { comment } => {
-            vec![comment.clone()]
-        }
+        Item::Thread { comment }
+        | Item::ApprovalReview { comment }
+        | Item::Draft { comment }
+        | Item::Reply { comment } => vec![comment.clone()],
         Item::Record { run, head } => {
             if let Some(run) = target
                 .runs
@@ -1554,30 +1360,16 @@ fn save(
     response: &Value,
 ) -> Result<Option<String>> {
     let login = connection.login.as_str();
-    let note_url = |id: &str| {
-        target
-            .review
-            .as_ref()
-            .map(|review| format!("{}#note_{id}", review.url))
-    };
+    let service = &connection.service;
+    let review_url = target.review.as_ref().map(|review| review.url.as_str());
     match item {
         Item::Review { comments } => {
-            let review = forge::id(response, "/id")
-                .ok_or_else(|| Error("GitHub returned no review id".into()))?;
-            let path = format!(
-                "repos/{}/pulls/{}/reviews/{review}/comments",
-                connection.repo, connection.number
-            );
-            let listed = connection.client.json(&["api", "--method", "GET", &path])?;
+            let (review, listed) = service.review_posted(connection.subject(), response)?;
             let found: Vec<(String, RemoteComment)> = listed
-                .as_array()
                 .into_iter()
-                .flatten()
                 .filter_map(|item| {
-                    let local = agent_id(item["body"].as_str()?)?;
-                    let id = forge::id(item, "/id")?;
-                    let url = forge::text(item, "/html_url");
-                    Some((local, own(id, url, login, Some(review.clone()))))
+                    let local = agent_id(&item.body)?;
+                    Some((local, own(item.id, item.url, login, Some(review.clone()))))
                 })
                 .filter(|(local, _)| comments.contains(local))
                 .collect();
@@ -1592,32 +1384,10 @@ fn save(
             })?;
             Ok(Some(review))
         }
-        Item::Thread { comment } | Item::Reply { comment } => {
-            let (id, url) = match connection.forge {
-                Forge::Github => match forge::id(
-                    response,
-                    "/data/addPullRequestReviewThreadReply/comment/databaseId",
-                ) {
-                    Some(id) => (
-                        Some(id),
-                        forge::text(
-                            response,
-                            "/data/addPullRequestReviewThreadReply/comment/url",
-                        ),
-                    ),
-                    None => (
-                        forge::id(response, "/id"),
-                        forge::text(response, "/html_url"),
-                    ),
-                },
-                Forge::Gitlab => {
-                    let id =
-                        forge::id(response, "/notes/0/id").or_else(|| forge::id(response, "/id"));
-                    let url = id.as_deref().and_then(note_url);
-                    (id, url)
-                }
-            };
-            let id = id.ok_or_else(|| Error(format!("no comment id returned for {comment}")))?;
+        Item::Thread { comment } | Item::ApprovalReview { comment } | Item::Reply { comment } => {
+            let (id, url) = service
+                .comment_created(review_url, response)
+                .ok_or_else(|| Error(format!("no comment id returned for {comment}")))?;
             change(ctx, target, |target| {
                 if let Some(local) = comment_mut(target, comment) {
                     local.post = PostState::Posted;
@@ -1628,8 +1398,12 @@ fn save(
             Ok(Some(id))
         }
         Item::Draft { comment } => {
-            let draft = forge::id(response, "/id")
-                .ok_or_else(|| Error(format!("GitLab returned no draft id for {comment}")))?;
+            let draft = service.draft_created(response).ok_or_else(|| {
+                Error(format!(
+                    "{} returned no draft id for {comment}",
+                    service.name()
+                ))
+            })?;
             change(ctx, target, |target| {
                 if let Some(local) = comment_mut(target, comment) {
                     local.draft_id = Some(draft.clone());
@@ -1654,12 +1428,9 @@ fn save(
             Ok(None)
         }
         Item::Record { run, .. } => {
-            let id = forge::id(response, "/id")
+            let (id, url) = service
+                .comment_created(review_url, response)
                 .ok_or_else(|| Error(format!("no comment id returned for the record of {run}")))?;
-            let url = match connection.forge {
-                Forge::Github => forge::text(response, "/html_url"),
-                Forge::Gitlab => note_url(&id),
-            };
             change(ctx, target, |target| {
                 if let Some(record) = target
                     .runs
