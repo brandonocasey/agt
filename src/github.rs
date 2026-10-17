@@ -626,6 +626,24 @@ mod tests {
     }
 
     #[test]
+    fn a_service_without_native_replies_replies_to_nothing_natively() {
+        let none = Capabilities {
+            reply: ReplyCap::None,
+            ..CAPS
+        };
+        for kind in [
+            RemoteKind::ReviewThread,
+            RemoteKind::Review,
+            RemoteKind::General,
+            RemoteKind::Discussion,
+        ] {
+            assert!(!none.replies_natively(kind));
+        }
+        assert!(CAPS.replies_natively(RemoteKind::ReviewThread));
+        assert!(!CAPS.replies_natively(RemoteKind::General));
+    }
+
+    #[test]
     fn capabilities_match_the_contract() {
         contract::golden("github/capabilities.json", &contract::capabilities(&CAPS));
     }

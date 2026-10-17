@@ -1,6 +1,5 @@
 //! HTTP with a token, for services that have no CLI. Not used by GitHub or GitLab; it is the
 //! seam a service without one connects through.
-#![allow(dead_code, reason = "a seam for services without a CLI")]
 
 use std::ffi::OsString;
 use std::fmt;
@@ -18,6 +17,10 @@ pub enum Auth {
     /// An environment variable.
     Env(String),
     /// What `git credential fill` knows for the host, so the login of `git push` is reused.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "no service uses it yet; a unit test builds it")
+    )]
     GitCredential,
     /// The first line a command prints (`pass show x`, `op read ...`), run without a shell.
     Command(Vec<String>),
@@ -34,12 +37,17 @@ impl fmt::Debug for Secret {
 
 impl Auth {
     fn token(&self, host: &str) -> Result<Secret> {
+        self.token_with(host, &[])
+    }
+
+    /// [`Auth::token`] with extra environment for `git credential fill`.
+    fn token_with(&self, host: &str, git_env: &[(&str, &str)]) -> Result<Secret> {
         match self {
             Self::Env(var) => match std::env::var(var) {
                 Ok(token) if !token.is_empty() => Ok(Secret(token)),
                 _ => fail(format!("{var} is not set")),
             },
-            Self::GitCredential => credential_fill(host, &[]),
+            Self::GitCredential => credential_fill(host, git_env),
             Self::Command(argv) => {
                 let (program, args) = argv
                     .split_first()
@@ -445,6 +453,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(secret.0, "tok-123");
+    }
+
+    #[test]
+    fn the_git_credential_auth_asks_git_for_the_host() {
+        let secret = Auth::GitCredential
+            .token_with(
+                "git.example.com",
+                &[
+                    ("GIT_CONFIG_COUNT", "1"),
+                    ("GIT_CONFIG_KEY_0", "credential.helper"),
+                    (
+                        "GIT_CONFIG_VALUE_0",
+                        "!f() { echo username=u; echo password=from-git; }; f",
+                    ),
+                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                    ("GIT_CONFIG_SYSTEM", "/dev/null"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(secret.0, "from-git");
     }
 
     #[test]

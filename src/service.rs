@@ -108,13 +108,22 @@ pub enum Pagination {
     /// The CLI joins the pages (`--paginate`).
     CliPaginate,
     /// A `Link: <url>; rel="next"` header.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for services without a CLI"))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "no service uses it yet; the pager tests build it")
+    )]
     LinkHeader,
     /// A JSON pointer to the next page's URL in the body.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for services without a CLI"))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "no service uses it yet; the pager tests build it")
+    )]
     NextUrlInBody(&'static str),
     /// A response header holding the token for the next page.
-    #[cfg_attr(not(test), allow(dead_code, reason = "for services without a CLI"))]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "no service uses it yet; the pager tests build it")
+    )]
     ContinuationHeader(&'static str),
 }
 
@@ -133,7 +142,13 @@ pub enum Inline {
 pub enum ReplyCap {
     All,
     ReviewThreads,
-    #[allow(dead_code, reason = "for a service with no native replies")]
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "no service lacks native replies yet; a unit test builds it"
+        )
+    )]
     None,
 }
 

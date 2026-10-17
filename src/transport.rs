@@ -16,7 +16,10 @@ use crate::service::{Endpoint, Pagination, Request, Var};
 pub struct Response {
     #[cfg_attr(
         not(test),
-        allow(dead_code, reason = "read by the token transport's pagers")
+        allow(
+            dead_code,
+            reason = "set by every transport but read by no caller yet; tests assert it"
+        )
     )]
     pub status: u16,
     /// Lowercase names. Empty for a CLI, which prints no headers.
@@ -401,6 +404,13 @@ pub(crate) fn as_seen_by_retries(status: u16, text: &str) -> u16 {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the seam for a service without a CLI; no service uses it yet, tests do"
+    )
+)]
 mod token;
 
 #[cfg(test)]
