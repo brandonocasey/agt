@@ -284,11 +284,12 @@ impl Repo {
         // Keep the index's mtime on the copy: git trusts cached stat data only for entries
         // older than the index file, so a newer copy would hide files changed in the same
         // second as the last `git add` (racy git). macOS copies keep it; Linux copies do not.
+        // Read the time before copying: if git replaces the index meanwhile, an older time
+        // only makes git recheck more files.
+        let modified = fs::metadata(&index).and_then(|meta| meta.modified());
         match fs::copy(&index, &temp_index) {
             Ok(_) => {
-                let modified = fs::metadata(&index)
-                    .and_then(|meta| meta.modified())
-                    .map_err(ctx(format!("read git index time {index}")))?;
+                let modified = modified.map_err(ctx(format!("read git index time {index}")))?;
                 fs::File::options()
                     .write(true)
                     .open(&temp_index)
