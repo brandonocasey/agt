@@ -1140,7 +1140,14 @@ fn batched_review_records_in_few_calls() {
     let reviewers = r#"[{"model":"a","harness":"codex"},{"model":"b","harness":"claude-code"}]"#;
     let started = env.run_stdin(
         &[
-            "run", "start", "--kind", "full", "--base", &main, "--reviewers", "-",
+            "run",
+            "start",
+            "--kind",
+            "full",
+            "--base",
+            &main,
+            "--reviewers",
+            "-",
         ],
         reviewers,
     );
@@ -1156,7 +1163,16 @@ fn batched_review_records_in_few_calls() {
     ]"#;
     let ended = env.run_stdin(
         &[
-            "pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1",
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+            "--reviewer",
+            "r1",
         ],
         findings,
     );
@@ -1175,25 +1191,53 @@ fn batched_review_records_in_few_calls() {
     let fix = env.commit_all("fix");
     env.run_stdin(
         &[
-            "pass", "start", "--run", &run, "--kind", "fix-check", "--reviewers", "-",
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "fix-check",
+            "--reviewers",
+            "-",
         ],
         r#"[{"id":"r2"},{"id":"fix","model":"m","harness":"claude-code"}]"#,
     );
     let fixed = env.run(&[
-        "resolve", &f1, &f2, "--fixed", &fix, "--run", &run, "--pass", "c1p1", "--reviewer",
+        "resolve",
+        &f1,
+        &f2,
+        "--fixed",
+        &fix,
+        "--run",
+        &run,
+        "--pass",
+        "c1p1",
+        "--reviewer",
         "fix",
     ]);
     assert_eq!(fixed["threads"][0]["resolved"], true, "{fixed}");
     assert_eq!(fixed["threads"][1]["resolution"], format!("fixed {fix}"));
     let shown = env.run(&["show", &f1]);
     let reply = &shown["thread"]["comments"][1];
-    assert_eq!(reply["body"], format!("Fixed in {}.", &fix[..12]), "{shown}");
+    assert_eq!(
+        reply["body"],
+        format!("Fixed in {}.", &fix[..12]),
+        "{shown}"
+    );
     assert_eq!(reply["author"]["reviewer"], "fix");
 
     // The fix check finds one still broken.
     let reopened = env.run(&[
-        "resolve", &f2, "--not-fixed", "still off by one", "--run", &run, "--pass", "c1p1",
-        "--reviewer", "r2",
+        "resolve",
+        &f2,
+        "--not-fixed",
+        "still off by one",
+        "--run",
+        &run,
+        "--pass",
+        "c1p1",
+        "--reviewer",
+        "r2",
     ]);
     assert_eq!(reopened["thread"]["resolved"], false, "{reopened}");
     assert_eq!(
@@ -1205,7 +1249,16 @@ fn batched_review_records_in_few_calls() {
         "Not fixed: still off by one."
     );
     env.run_stdin(
-        &["pass", "end", "--run", &run, "--pass", "c1p1", "--findings", "-"],
+        &[
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p1",
+            "--findings",
+            "-",
+        ],
         "[]",
     );
 
@@ -1219,21 +1272,37 @@ fn batched_review_records_in_few_calls() {
 fn wrong_ids_name_the_valid_ones() {
     let env = Env::with_branch();
     let run = env.review("full");
-    let error = env.fail(
-        &["pass", "end", "--run", &run, "--pass", "1"],
-        None,
-    );
+    let error = env.fail(&["pass", "end", "--run", &run, "--pass", "1"], None);
     assert!(error.contains("its passes: c1p0"), "{error}");
     let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
     assert!(error.contains("open runs: none"), "{error}");
-    let run = env.run(&["run", "start"])["run"].as_str().unwrap().to_owned();
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     env.run_stdin(
-        &["pass", "start", "--run", &run, "--kind", "full", "--reviewers", "-"],
+        &[
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "full",
+            "--reviewers",
+            "-",
+        ],
         REVIEWER,
     );
     let error = env.fail(
         &[
-            "finding", "add", "--run", &run, "--pass", "c1p0", "--reviewer", "reviewer-1",
+            "finding",
+            "add",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--reviewer",
+            "reviewer-1",
         ],
         Some(FINDINGS),
     );
@@ -1267,7 +1336,14 @@ fn run_id_finds_its_range_target() {
     let range = format!("{main}..{a}");
     let started = env.run_stdin(
         &[
-            "--range", &range, "run", "start", "--kind", "full", "--reviewers", "-",
+            "--range",
+            &range,
+            "run",
+            "start",
+            "--kind",
+            "full",
+            "--reviewers",
+            "-",
         ],
         REVIEWER,
     );
@@ -1275,7 +1351,18 @@ fn run_id_finds_its_range_target() {
     let key = started["target"].clone();
     // No --range from here on: the run id names the target.
     let ended = env.run_stdin(
-        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        &[
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+            "--reviewer",
+            "r1",
+        ],
         r#"[{"type":"bug","severity":"low","path":"a.txt","line":3,"scenario":"x"}]"#,
     );
     assert_eq!(ended["target"], key, "{ended}");
@@ -1295,9 +1382,21 @@ fn run_lookup_never_picks_another_branch_target() {
     env.git(&["switch", "-q", "main"]);
     env.write("a.txt", &numbered(10, &[(3, "three")]));
     env.commit_all("on main");
-    let run = env.run(&["run", "start"])["run"].as_str().unwrap().to_owned();
+    let run = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     env.run_stdin(
-        &["pass", "start", "--run", &run, "--kind", "full", "--reviewers", "-"],
+        &[
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "full",
+            "--reviewers",
+            "-",
+        ],
         REVIEWER,
     );
     env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
@@ -1316,7 +1415,10 @@ fn run_lookup_never_picks_another_branch_target() {
 fn failed_first_pass_leaves_no_run() {
     let env = Env::with_branch();
     env.fail(&["run", "start", "--kind", "fix-check"], None);
-    env.fail(&["run", "start", "--kind", "full", "--reviewers", "-"], Some("not json"));
+    env.fail(
+        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        Some("not json"),
+    );
     let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
     assert!(error.contains("open runs: none"), "{error}");
 }
@@ -1332,7 +1434,18 @@ fn pass_end_lists_ids_in_input_order() {
     );
     let run = started["run"].as_str().unwrap().to_owned();
     let ended = env.run_stdin(
-        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        &[
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+            "--reviewer",
+            "r1",
+        ],
         r#"[
             {"type":"bug","severity":"low","scenario":"A"},
             {"reviewer":"manual","type":"bug","severity":"low","scenario":"B"},
@@ -1342,7 +1455,11 @@ fn pass_end_lists_ids_in_input_order() {
     let p = format!("{run}.c1p0");
     assert_eq!(
         ended["added"],
-        serde_json::json!([format!("{p}.r1.f1"), format!("{p}.manual.f1"), format!("{p}.r1.f2")]),
+        serde_json::json!([
+            format!("{p}.r1.f1"),
+            format!("{p}.manual.f1"),
+            format!("{p}.r1.f2")
+        ]),
         "{ended}"
     );
 }
@@ -1371,9 +1488,21 @@ fn usage_and_time_are_recorded() {
     assert!(spent["total_secs"].is_i64());
     assert_eq!(spent["roles"][0]["role"], "fix");
     let pass = env.run(&["show", &format!("{run}.c1p0")]);
-    assert_eq!(pass["pass"]["reviewers"][0]["usage"]["tool_uses"], 9, "{pass}");
+    assert_eq!(
+        pass["pass"]["reviewers"][0]["usage"]["tool_uses"], 9,
+        "{pass}"
+    );
     let error = env.fail(
-        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-"],
+        &[
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+        ],
         Some(r#"{"findings": [], "usage": [], "extra": 1}"#),
     );
     assert!(error.contains("unknown field extra"), "{error}");

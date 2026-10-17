@@ -439,8 +439,10 @@ agent-review prune --all
   `<!-- agent-review id=<local id> attempt=<attempt> -->`, with one attempt id
   per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
-- A thread anchored to lines posts only where those lines sit in the PR/MR
-  diff; otherwise it is listed under `skipped` and never posted elsewhere. A
+- A thread anchored to lines of a file the PR/MR changes posts only where those
+  lines sit in its diff; otherwise it is listed under `skipped`. A thread on a
+  file the PR/MR does not change, or on a whole file, posts as a general comment
+  whose first line names its location. A
   line range (`start_line`..`line`) posts only as one multi-line comment, with
   both ends on the new side of one hunk. Threads without an anchor post as
   general comments.

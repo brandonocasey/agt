@@ -1618,7 +1618,10 @@ fn gitlab_records_need_a_body_this_store_sent() {
         synced["records"], 0,
         "GitLab shows no edits, so only sent text is trusted"
     );
-    assert_eq!(env.run(&["status", "--full"])["imported_records"], json!([]));
+    assert_eq!(
+        env.run(&["status", "--full"])["imported_records"],
+        json!([])
+    );
 }
 
 #[test]
@@ -1827,16 +1830,31 @@ fn only_limits_publish_to_named_threads() {
 }
 
 #[test]
-fn comments_outside_the_pr_diff_are_never_posted() {
+fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file() {
     let setup = reviewed(GH);
     let env = &setup.env;
-    let started = env.run_stdin(&["run", "start", "--kind", "full", "--reviewers", "-"], REVIEWER);
+    let started = env.run_stdin(
+        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        REVIEWER,
+    );
     let run = started["run"].as_str().unwrap();
     let ended = env.run_stdin(
-        &["pass", "end", "--run", run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        &[
+            "pass",
+            "end",
+            "--run",
+            run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+            "--reviewer",
+            "r1",
+        ],
         r#"[
             {"type":"nit","path":"a.txt","line":9,"scenario":"Out of the diff."},
-            {"type":"nit","path":"a.txt","start_line":1,"line":3,"scenario":"Range in one hunk."}
+            {"type":"nit","path":"a.txt","start_line":1,"line":3,"scenario":"Range in one hunk."},
+            {"type":"nit","path":"lib/b.txt","line":2,"scenario":"A file the PR leaves alone."}
         ]"#,
     );
     let (outside, range) = (&ended["added"][0], &ended["added"][1]);
@@ -1847,18 +1865,41 @@ fn comments_outside_the_pr_diff_are_never_posted() {
     let skipped = dry["skipped"].as_array().unwrap();
     assert!(
         skipped.iter().any(|item| &item["item"] == outside
-            && item["reason"].as_str().unwrap().contains("not in the PR/MR diff")),
+            && item["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not in the PR/MR diff")),
         "{dry}"
     );
     let comments = dry["writes"][0]["input"]["comments"].as_array().unwrap();
     let multi = comments
         .iter()
-        .find(|comment| comment["body"].as_str().unwrap().contains("Range in one hunk."))
+        .find(|comment| {
+            comment["body"]
+                .as_str()
+                .unwrap()
+                .contains("Range in one hunk.")
+        })
         .unwrap_or_else(|| panic!("{dry}"));
     assert_eq!(
         (&multi["start_line"], &multi["line"], &multi["start_side"]),
         (&json!(1), &json!(3), &json!("RIGHT")),
         "{range}"
+    );
+    // A file the PR does not change gets a general comment naming the location.
+    let general = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|write| {
+            write["input"]["body"]
+                .as_str()
+                .filter(|body| body.contains("A file the PR leaves alone."))
+        })
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert!(
+        general.starts_with("`lib/b.txt:2`\n\n**nit:**"),
+        "{general}"
     );
 }
 
@@ -1866,7 +1907,10 @@ fn comments_outside_the_pr_diff_are_never_posted() {
 fn gitlab_ranges_post_with_line_codes() {
     let setup = reviewed(GL);
     let env = &setup.env;
-    let started = env.run_stdin(&["run", "start", "--kind", "full", "--reviewers", "-"], REVIEWER);
+    let started = env.run_stdin(
+        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        REVIEWER,
+    );
     let run = started["run"].as_str().unwrap();
     env.run_stdin(
         &["pass", "end", "--run", run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
@@ -1892,7 +1936,10 @@ fn gitlab_ranges_post_with_line_codes() {
     assert_eq!(range["end"]["type"], "new");
     // sha1("a.txt"), then the old and new line counters.
     let code = range["end"]["line_code"].as_str().unwrap();
-    assert_eq!(code, "cfc7b4885384957ae445bc14914d4588f607651c_4_3", "{dry}");
+    assert_eq!(
+        code, "cfc7b4885384957ae445bc14914d4588f607651c_4_3",
+        "{dry}"
+    );
 }
 
 #[test]
@@ -1901,12 +1948,18 @@ fn approvals_post_a_comment_unless_formal() {
     let env = &setup.env;
     let f1 = setup.finding(1);
     let error = env.fail(&["approve"], None);
-    assert!(error.contains(&format!("open findings block approval: {f1}")), "{error}");
+    assert!(
+        error.contains(&format!("open findings block approval: {f1}")),
+        "{error}"
+    );
     env.run(&["resolve", &f1, "--triage", "stale"]);
     let approved = env.run(&["approve"]);
     let id = approved["thread"]["id"].as_str().unwrap().to_owned();
     let open = env.run(&["status"])["open_threads"].to_string();
-    assert!(!open.contains(&format!("\"{id}\"")), "an approval is never open: {open}");
+    assert!(
+        !open.contains(&format!("\"{id}\"")),
+        "an approval is never open: {open}"
+    );
     let formal = env.run(&["approve", "--formal"])["thread"]["id"]
         .as_str()
         .unwrap()
@@ -1921,11 +1974,17 @@ fn approvals_post_a_comment_unless_formal() {
         .unwrap_or_else(|| panic!("{dry}"));
     assert_eq!(comment["call"], json!(post(GH_COMMENTS)));
     let text = comment["input"]["body"].as_str().unwrap();
-    assert!(text.starts_with(&format!("Approved at {}.", &setup.head[..12])), "{text}");
+    assert!(
+        text.starts_with(&format!("Approved at {}.", &setup.head[..12])),
+        "{text}"
+    );
     let skipped = dry["skipped"].as_array().unwrap();
     assert!(
         skipped.iter().any(|item| item["item"] == formal.as_str()
-            && item["reason"].as_str().unwrap().contains("approve their own PR")),
+            && item["reason"]
+                .as_str()
+                .unwrap()
+                .contains("approve their own PR")),
         "{dry}"
     );
 }
@@ -1943,7 +2002,15 @@ fn formal_approval_on_someone_elses_pr() {
     pr.author = "alice";
     gh_sync(env, None, &pr.render(&setup));
     env.run(&["sync", "--pr", "42"]);
-    let dry = env.run(&["publish", "--pr", "42", "--not-own", "--only", &id, "--dry-run"]);
+    let dry = env.run(&[
+        "publish",
+        "--pr",
+        "42",
+        "--not-own",
+        "--only",
+        &id,
+        "--dry-run",
+    ]);
     let writes = dry["writes"].as_array().unwrap();
     assert_eq!(writes.len(), 1, "{dry}");
     assert_eq!(writes[0]["input"]["event"], "APPROVE");
@@ -1961,11 +2028,18 @@ fn gitlab_formal_approval_approves_then_comments() {
     env.run(&["run", "end", "--run", &setup.run]);
     let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
     let kinds = kinds(&dry, "writes");
-    let at = kinds.iter().position(|kind| kind == "approve").unwrap_or_else(|| panic!("{dry}"));
+    let at = kinds
+        .iter()
+        .position(|kind| kind == "approve")
+        .unwrap_or_else(|| panic!("{dry}"));
     assert_eq!(kinds[at + 1], "thread");
     let approve = &dry["writes"][at];
     assert_eq!(approve["input"]["sha"], setup.head.as_str());
-    assert!(approve["call"].to_string().contains("merge_requests/3/approve"));
+    assert!(
+        approve["call"]
+            .to_string()
+            .contains("merge_requests/3/approve")
+    );
 }
 
 #[test]
@@ -1973,15 +2047,25 @@ fn approval_of_an_old_head_is_not_posted() {
     let setup = reviewed(GH);
     let env = &setup.env;
     env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
-    let id = env.run(&["approve"])["thread"]["id"].as_str().unwrap().to_owned();
+    let id = env.run(&["approve"])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let mut pr = GhPr::new();
     pr.head = Some(env.git(&["rev-parse", "main"]));
     gh_sync(env, None, &pr.render(&setup));
     env.run(&["sync", "--pr", "42"]);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert!(
-        dry["skipped"].as_array().unwrap().iter().any(|item| item["item"] == id.as_str()
-            && item["reason"].as_str().unwrap().contains("PR/MR head is now")),
+        dry["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["item"] == id.as_str()
+                && item["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("PR/MR head is now")),
         "{dry}"
     );
 }

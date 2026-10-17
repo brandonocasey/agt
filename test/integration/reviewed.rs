@@ -570,7 +570,15 @@ fn range_review_of_the_branch_head_counts_and_names_its_run() {
     );
     let added = env.run_stdin(
         &[
-            "--range", &range, "finding", "add", "--run", &run, "--pass", "c1p0", "--reviewer",
+            "--range",
+            &range,
+            "finding",
+            "add",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--reviewer",
             "r1",
         ],
         r#"{"type":"bug","severity":"high","path":"a.txt","line":2,"scenario":"broken"}"#,
@@ -585,7 +593,10 @@ fn range_review_of_the_branch_head_counts_and_names_its_run() {
     assert_eq!(status["covered_by"][0]["target"], key, "{status}");
     assert_eq!(status["covered_by"][0]["run"], run, "{status}");
     // The covering target's open finding shows too, so a count never hides it.
-    assert_eq!(status["open_threads"][0]["id"], added["added"][0], "{status}");
+    assert_eq!(
+        status["open_threads"][0]["id"], added["added"][0],
+        "{status}"
+    );
     assert_eq!(status["open_threads"][0]["target"], key, "{status}");
     assert_eq!(status["open_threads"][0]["held"], false, "{status}");
 
@@ -618,7 +629,11 @@ fn run_left_in_two_target_files_counts_once() {
     .unwrap();
     let status = env.run(&["status"]);
     assert_eq!(status["reviews_at_head"], 1, "{status}");
-    assert_eq!(status["covered_by"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(
+        status["covered_by"].as_array().unwrap().len(),
+        1,
+        "{status}"
+    );
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -626,7 +641,11 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         .unwrap()
         .flat_map(|entry| {
             let path = entry.unwrap().path();
-            if path.is_dir() { walk(&path) } else { vec![path] }
+            if path.is_dir() {
+                walk(&path)
+            } else {
+                vec![path]
+            }
         })
         .collect()
 }
@@ -754,12 +773,32 @@ fn sha256_repository_reviews_and_tracks_commits() {
     env.write("a.txt", &numbered(10, &[(3, "three")]));
     env.commit_all("change");
     let started = env.run_stdin(
-        &["run", "start", "--kind", "full", "--base", &main, "--reviewers", "-"],
+        &[
+            "run",
+            "start",
+            "--kind",
+            "full",
+            "--base",
+            &main,
+            "--reviewers",
+            "-",
+        ],
         r#"[{"model":"m","harness":"codex"}]"#,
     );
     let run = started["run"].as_str().unwrap().to_owned();
     let ended = env.run_stdin(
-        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        &[
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+            "--reviewer",
+            "r1",
+        ],
         r#"[{"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"broken"}]"#,
     );
     let id = ended["added"][0].as_str().unwrap().to_owned();
@@ -785,5 +824,8 @@ fn sha256_repository_reviews_and_tracks_commits() {
         "{started}"
     );
     let shown = env.run(&["show", &id]);
-    assert_eq!(shown["thread"]["anchor"]["commit"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        shown["thread"]["anchor"]["commit"].as_str().unwrap().len(),
+        64
+    );
 }

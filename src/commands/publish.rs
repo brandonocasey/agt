@@ -113,7 +113,9 @@ enum Spot {
     Gitlab(Value),
     /// No anchor: a general comment.
     General,
-    /// Anchored, but not placeable in the PR/MR diff; never posted elsewhere.
+    /// A file the PR/MR does not change: a general comment naming the location.
+    OtherFile(String),
+    /// Lines of a changed file that are not placeable in the PR/MR diff; never posted.
     Outside,
 }
 
@@ -128,6 +130,8 @@ struct Planner<'a> {
     repo: &'a Repo,
     connection: &'a Connection,
     review: &'a Review,
+    /// The PR/MR diff's files, read once when a comment does not fit the diff.
+    pr_files: std::cell::OnceCell<Vec<anchors::FileDiff>>,
 }
 
 /// `publish` flags.
@@ -215,6 +219,7 @@ fn planner<'a>(
         repo: &ctx.repo,
         connection,
         review,
+        pr_files: std::cell::OnceCell::new(),
     })
 }
 
@@ -411,8 +416,12 @@ impl Planner<'_> {
                         "its lines are not in the PR/MR diff of the reviewed range".to_owned(),
                     ));
                 }
-                Spot::General => {
-                    let text = body(target, thread, first, None, self.attempt);
+                Spot::General | Spot::OtherFile(_) => {
+                    let location = match &spot {
+                        Spot::OtherFile(location) => Some(location.as_str()),
+                        _ => None,
+                    };
+                    let text = body(target, thread, first, location, self.attempt);
                     writes.push(Write {
                         item: Item::Thread {
                             comment: first.id.clone(),
@@ -623,24 +632,44 @@ impl Planner<'_> {
         }
     }
 
-    /// The place of an anchored comment in the PR/MR diff; outside when the commits are not
-    /// here or the line is in no hunk.
+    /// The place of an anchored comment in the PR/MR diff. A file the PR/MR does not change,
+    /// or a finding on a whole file, gets a general comment; lines of a changed file that fit
+    /// no hunk are outside.
     fn spot(&self, anchor: &Anchor) -> Spot {
-        let Some(commit) = &anchor.commit else {
-            return Spot::Outside;
-        };
         let wanted = match anchor.side {
             Side::New => anchor.line,
             Side::Old => anchor.old_line,
         };
-        let Some(line) = wanted else {
-            return Spot::Outside;
+        let spot = match (&anchor.commit, wanted) {
+            (Some(commit), Some(line)) => match self.connection.forge {
+                Forge::Github => self.github_spot(anchor, commit, line),
+                Forge::Gitlab => self.gitlab_spot(anchor, commit, line),
+            },
+            _ => None,
         };
-        let spot = match self.connection.forge {
-            Forge::Github => self.github_spot(anchor, commit, line),
-            Forge::Gitlab => self.gitlab_spot(anchor, commit, line),
-        };
-        spot.unwrap_or(Spot::Outside)
+        match spot {
+            Some(spot) => spot,
+            None if wanted.is_none() || !self.in_pr_diff(&anchor.path) => {
+                Spot::OtherFile(location(anchor))
+            }
+            None => Spot::Outside,
+        }
+    }
+
+    /// Whether the PR/MR diff changes this file; unknown counts as changed, so nothing
+    /// unplaceable is posted.
+    fn in_pr_diff(&self, path: &str) -> bool {
+        let files = self.pr_files.get_or_init(|| {
+            let head = &self.review.head_sha;
+            let diff = self
+                .review
+                .base_sha
+                .as_deref()
+                .and_then(|base| self.repo.merge_base(base, head).ok().flatten())
+                .and_then(|base| self.repo.diff_u0(&base, head).ok());
+            diff.map(|diff| anchors::parse(&diff)).unwrap_or_default()
+        });
+        files.is_empty() || files.iter().any(|file| file.touches(path))
     }
 
     fn github_spot(&self, anchor: &Anchor, commit: &str, line: u32) -> Option<Spot> {
@@ -983,8 +1012,16 @@ fn imported(thread: &Thread) -> bool {
 
 /// `Time: 14m (reviewing 9m, fixing 5m). Tokens: reviewers 120k, main session 80k.`
 fn spend_line(spent: &Value) -> Option<String> {
-    let minutes = |key: &str| spent[key].as_i64().map(|secs| format!("{}m", (secs + 30) / 60));
-    let thousands = |key: &str| spent[key].as_u64().map(|tokens| format!("{}k", (tokens + 500) / 1000));
+    let minutes = |key: &str| {
+        spent[key]
+            .as_i64()
+            .map(|secs| format!("{}m", (secs + 30) / 60))
+    };
+    let thousands = |key: &str| {
+        spent[key]
+            .as_u64()
+            .map(|tokens| format!("{}k", (tokens + 500) / 1000))
+    };
     let mut line = String::new();
     if let Some(total) = minutes("total_secs") {
         let _ = write!(line, "Time: {total}");
@@ -993,10 +1030,13 @@ fn spend_line(spent: &Value) -> Option<String> {
         }
         line.push('.');
     }
-    let tokens: Vec<String> = [("reviewers", "reviewer_tokens"), ("main session", "main_tokens")]
-        .iter()
-        .filter_map(|(label, key)| thousands(key).map(|value| format!("{label} {value}")))
-        .collect();
+    let tokens: Vec<String> = [
+        ("reviewers", "reviewer_tokens"),
+        ("main session", "main_tokens"),
+    ]
+    .iter()
+    .filter_map(|(label, key)| thousands(key).map(|value| format!("{label} {value}")))
+    .collect();
     if !tokens.is_empty() {
         if !line.is_empty() {
             line.push(' ');
@@ -1010,13 +1050,26 @@ fn spend_line(spent: &Value) -> Option<String> {
 /// line counters, as GitLab builds it.
 fn line_point(line: &anchors::DiffLine) -> Value {
     let hash = sha1_smol::Sha1::from(line.new_path.as_bytes()).digest();
-    let kind = if line.old_line.is_none() { "new" } else { "old" };
+    let kind = if line.old_line.is_none() {
+        "new"
+    } else {
+        "old"
+    };
     json!({
         "line_code": format!("{hash}_{}_{}", line.old_pos, line.new_pos),
         "type": kind,
         "old_line": line.old_line,
         "new_line": line.new_line,
     })
+}
+
+/// `path:line`, `path (old):line`, or the path of a whole-file finding.
+fn location(anchor: &Anchor) -> String {
+    match (anchor.side, anchor.line, anchor.old_line) {
+        (Side::New, Some(line), _) => format!("{}:{line}", anchor.path),
+        (Side::Old, _, Some(line)) => format!("{} (old):{line}", anchor.path),
+        _ => anchor.path.clone(),
+    }
 }
 
 /// The posted text: a finding heading, the text, the signature and the markers.
@@ -1507,6 +1560,20 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locations_name_the_side() {
+        let anchor = Anchor {
+            path: "a.txt".into(),
+            line: None,
+            old_line: Some(4),
+            side: Side::Old,
+            start_line: None,
+            commit: None,
+            tree: String::new(),
+        };
+        assert_eq!(location(&anchor), "a.txt (old):4");
+    }
 
     #[test]
     fn short_names() {

@@ -8,16 +8,16 @@ use serde_json::{Value, json};
 
 use crate::anchors::{self, FileDiff, Location};
 use crate::cli::{
-    ApproveArgs, AuthorArgs, Cli, Command, CommentArgs, FindingAction, Format, ListArgs, PassAction, ReplyArgs,
-    ResolveArgs, RunAction,
+    ApproveArgs, AuthorArgs, Cli, Command, CommentArgs, FindingAction, Format, ListArgs,
+    PassAction, ReplyArgs, ResolveArgs, RunAction,
 };
 use crate::clock;
 use crate::error::{Error, Result, ctx, fail};
 use crate::git::{CommitInfo, LogEntry, Repo};
 use crate::model::{
-    Anchor, Approval, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
-    PassKind, PostState, Reveal, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind,
-    RoleUsage, Thread, ThreadType, Triage, Usage, VERSION,
+    Anchor, Approval, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding,
+    Pass, PassKind, PostState, Reveal, ReviewState, Reviewer, RoleUsage, Run, Severity, Side,
+    Target, TargetKind, Thread, ThreadType, Triage, Usage, VERSION,
 };
 use crate::store::Store;
 
@@ -725,7 +725,11 @@ fn run_missing(target: &Target, id: &str) -> Error {
     Error(format!(
         "run {id} not found in target {}; open runs: {}",
         target.key,
-        if open.is_empty() { "none".to_owned() } else { open.join(", ") }
+        if open.is_empty() {
+            "none".to_owned()
+        } else {
+            open.join(", ")
+        }
     ))
 }
 
@@ -735,7 +739,11 @@ fn pass_missing(run: &Run, pass: &str) -> Error {
     Error(format!(
         "pass {}.{pass} not found; its passes: {}",
         run.id,
-        if known.is_empty() { "none".to_owned() } else { known.join(", ") }
+        if known.is_empty() {
+            "none".to_owned()
+        } else {
+            known.join(", ")
+        }
     ))
 }
 
@@ -1495,7 +1503,11 @@ fn pass_end(
             .reviewer
             .take()
             .or_else(|| reviewer.map(str::to_owned))
-            .ok_or_else(|| Error(format!("finding {index}: no reviewer; add one or --reviewer")))?;
+            .ok_or_else(|| {
+                Error(format!(
+                    "finding {index}: no reviewer; add one or --reviewer"
+                ))
+            })?;
         is_killed.push(finding.reason.is_some());
         match groups.iter_mut().find(|(known, _, _)| *known == id) {
             Some((_, indexes, group)) => {
@@ -1511,12 +1523,18 @@ fn pass_end(
             let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
             let (mut new, mut dead) = (new.into_iter(), dead.into_iter());
             for index in indexes {
-                let next = if is_killed[index] { dead.next() } else { new.next() };
+                let next = if is_killed[index] {
+                    dead.next()
+                } else {
+                    new.next()
+                };
                 ids[index] = next.unwrap_or_default();
             }
         }
-        let (killed, added): (Vec<_>, Vec<_>) =
-            ids.into_iter().enumerate().partition(|(index, _)| is_killed[*index]);
+        let (killed, added): (Vec<_>, Vec<_>) = ids
+            .into_iter()
+            .enumerate()
+            .partition(|(index, _)| is_killed[*index]);
         let added: Vec<String> = added.into_iter().map(|(_, id)| id).collect();
         let killed: Vec<String> = killed.into_iter().map(|(_, id)| id).collect();
         let major = major_found(target, run_id, pass_id);
@@ -1529,7 +1547,12 @@ fn pass_end(
                 .reviewers
                 .iter_mut()
                 .find(|reviewer| reviewer.id == spent.reviewer)
-                .ok_or_else(|| Error(format!("usage: reviewer {} is not in pass {pass_id}", spent.reviewer)))?;
+                .ok_or_else(|| {
+                    Error(format!(
+                        "usage: reviewer {} is not in pass {pass_id}",
+                        spent.reviewer
+                    ))
+                })?;
             reviewer.usage = Some(spent.usage());
         }
         pass.ended_at = Some(now.to_owned());
@@ -1603,12 +1626,19 @@ fn read_source(source: &Path, what: &str) -> Result<String> {
 
 /// `pass end --findings` input: a findings array, or `{"findings": [...], "usage": [...]}`.
 fn read_pass_input(source: &Path) -> Result<(Vec<FindingInput>, Vec<UsageInput>)> {
-    let value: Value =
-        serde_json::from_str(&read_source(source, "findings")?).map_err(ctx("parse findings JSON"))?;
+    let value: Value = serde_json::from_str(&read_source(source, "findings")?)
+        .map_err(ctx("parse findings JSON"))?;
     match value {
-        Value::Object(mut fields) if fields.contains_key("findings") || fields.contains_key("usage") => {
-            if let Some(other) = fields.keys().find(|key| *key != "findings" && *key != "usage") {
-                return fail(format!("unknown field {other}; expected findings and usage"));
+        Value::Object(mut fields)
+            if fields.contains_key("findings") || fields.contains_key("usage") =>
+        {
+            if let Some(other) = fields
+                .keys()
+                .find(|key| *key != "findings" && *key != "usage")
+            {
+                return fail(format!(
+                    "unknown field {other}; expected findings and usage"
+                ));
             }
             let findings = parse_findings(fields.remove("findings").unwrap_or(json!([])), true)?;
             let usage = serde_json::from_value(fields.remove("usage").unwrap_or(json!([])))
@@ -1621,8 +1651,8 @@ fn read_pass_input(source: &Path) -> Result<(Vec<FindingInput>, Vec<UsageInput>)
 
 /// Findings from `source` (`-` for stdin); `allow_empty` accepts `[]` (a clean pass).
 fn read_findings(source: &Path, allow_empty: bool) -> Result<Vec<FindingInput>> {
-    let value: Value =
-        serde_json::from_str(&read_source(source, "findings")?).map_err(ctx("parse findings JSON"))?;
+    let value: Value = serde_json::from_str(&read_source(source, "findings")?)
+        .map_err(ctx("parse findings JSON"))?;
     parse_findings(value, allow_empty)
 }
 
@@ -1673,10 +1703,12 @@ fn next_number(ids: impl Iterator<Item = String>, prefix: &str) -> u32 {
 fn finding_add(ctx: &Ctx, run_id: &str, pass_id: &str, reviewer_id: &str) -> Result<Value> {
     let scope = ctx.scope()?;
     let findings = read_findings(Path::new("-"), false)?;
-    if let Some(index) = findings
-        .iter()
-        .position(|finding| finding.reviewer.as_deref().is_some_and(|id| id != reviewer_id))
-    {
+    if let Some(index) = findings.iter().position(|finding| {
+        finding
+            .reviewer
+            .as_deref()
+            .is_some_and(|id| id != reviewer_id)
+    }) {
         return fail(format!(
             "finding {index}: its reviewer differs from --reviewer {reviewer_id}"
         ));
@@ -1959,7 +1991,12 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
         (Some(sha), _) => {
             let sha = ctx.repo.commit(sha)?;
             let reply = format!("Fixed in {}.", &sha[..sha.len().min(12)]);
-            (Some(Triage::Fixed), Some(format!("fixed {sha}")), false, Some(reply))
+            (
+                Some(Triage::Fixed),
+                Some(format!("fixed {sha}")),
+                false,
+                Some(reply),
+            )
         }
         (None, Some(reason)) => {
             let reason = reason.trim().trim_end_matches('.');
@@ -2004,8 +2041,13 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
         for id in &args.ids {
             let thread = find_thread_mut(target, id)?;
             if let (Some(body), Some(author)) = (&reply, &author) {
-                let comment =
-                    local_comment(&thread.id, &thread.comments, author.clone(), body.clone(), now);
+                let comment = local_comment(
+                    &thread.id,
+                    &thread.comments,
+                    author.clone(),
+                    body.clone(),
+                    now,
+                );
                 thread.comments.push(comment);
             }
             if triage.is_some() {
@@ -2480,17 +2522,11 @@ fn run_reviews_at(ctx: &Ctx, target: &Target, run: &str, head: &str) -> Result<u
     }
     let commits = ctx.repo.commits(base.as_deref(), head)?;
     let tree = ctx.repo.tree_of(head)?;
-    let covered: Vec<_> = head_coverage(
-        &ctx.repo,
-        &[target],
-        base.as_deref(),
-        head,
-        &tree,
-        &commits,
-    )?
-    .into_iter()
-    .filter(|covered| covered.run == run)
-    .collect();
+    let covered: Vec<_> =
+        head_coverage(&ctx.repo, &[target], base.as_deref(), head, &tree, &commits)?
+            .into_iter()
+            .filter(|covered| covered.run == run)
+            .collect();
     Ok(count(&covered))
 }
 

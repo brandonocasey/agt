@@ -6,6 +6,13 @@ pub struct FileDiff {
     hunks: Vec<Hunk>,
 }
 
+impl FileDiff {
+    /// Whether the diff changes this path, on either side of a rename.
+    pub fn touches(&self, path: &str) -> bool {
+        self.old.as_deref() == Some(path) || self.new.as_deref() == Some(path)
+    }
+}
+
 struct Hunk {
     old_start: u32,
     old_len: u32,
