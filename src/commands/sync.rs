@@ -8,11 +8,11 @@ use super::{Adoption, Ctx, Scope, prune_dir};
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
-use crate::forge::{self, CommentData, Fetched, ThreadData};
+use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
 use crate::git::{Repo, split_remote};
 use crate::model::{
     Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RemoteComment,
-    RemoteKind, Resolution, Review, ReviewState, Severity, Side, Target, TargetKind, Thread,
+    RemoteKind, Resolution, Review, ReviewState, Run, Severity, Side, Target, TargetKind, Thread,
     ThreadType,
 };
 use crate::service::{self, Capabilities, Kind, SERVICES, Service, Subject};
@@ -490,10 +490,12 @@ struct Trust<'a> {
     caps: &'a Capabilities,
     service: &'a dyn Service,
     sent: HashSet<String>,
+    killed: HashSet<String>,
 }
 
 impl<'a> Trust<'a> {
-    fn new(target: &Target, login: &'a str, service: &'a dyn Service) -> Self {
+    /// The context of merging into `target`: its sent texts and killed finding ids.
+    fn for_target(target: &Target, login: &'a str, service: &'a dyn Service) -> Self {
         let comments = target
             .threads
             .iter()
@@ -503,14 +505,30 @@ impl<'a> Trust<'a> {
             .runs
             .iter()
             .filter_map(|run| run.record.as_ref()?.delivery.sent.as_deref());
+        let killed = target
+            .runs
+            .iter()
+            .flat_map(|run| &run.passes)
+            .flat_map(|pass| &pass.killed)
+            .map(|killed| killed.id.clone())
+            .collect();
+        Self::new(login, service, comments.chain(records), killed)
+    }
+
+    /// `sent` are the texts this store posted; `killed` the ids of findings that no longer
+    /// have a thread but may not be reused.
+    fn new<'t>(
+        login: &'a str,
+        service: &'a dyn Service,
+        sent: impl Iterator<Item = &'t str>,
+        killed: HashSet<String>,
+    ) -> Self {
         Self {
             login,
             caps: service.caps(),
             service,
-            sent: comments
-                .chain(records)
-                .map(|text| text.trim().to_owned())
-                .collect(),
+            sent: sent.map(|text| text.trim().to_owned()).collect(),
+            killed,
         }
     }
 
@@ -660,24 +678,51 @@ fn merge(
     service: &dyn Service,
     now: &str,
 ) -> Summary {
-    let trust = Trust::new(target, login, service);
-    let mut summary = Summary::default();
-    let mut answers = Vec::new();
-    let seen_threads: Vec<String> = fetched
-        .threads
-        .iter()
-        .map(|data| data.info.id.clone())
-        .collect();
-    let seen_comments: Vec<String> = fetched
-        .threads
-        .iter()
-        .flat_map(|data| data.comments.iter().map(|comment| comment.id.clone()))
-        .collect();
+    let trust = Trust::for_target(target, login, service);
     // Records are read again from the comments the host still returns.
+    let seen = seen_comments(&fetched.threads);
     target
         .records
-        .retain(|record| !seen_comments.contains(&record.comment_id));
-    for data in fetched.threads {
+        .retain(|record| !seen.contains(&record.comment_id));
+    let Target {
+        threads,
+        runs,
+        records,
+        ..
+    } = target;
+    merge_threads(
+        threads,
+        fetched.threads,
+        fetched.drafts,
+        &trust,
+        now,
+        &mut |comment, trust| take_record(runs, records, comment, trust),
+    )
+}
+
+fn seen_comments(threads: &[ThreadData]) -> Vec<String> {
+    threads
+        .iter()
+        .flat_map(|data| data.comments.iter().map(|comment| comment.id.clone()))
+        .collect()
+}
+
+/// Merges the host's threads and drafts into `threads`. `take_record` claims a verified
+/// general comment as a run record, which only a review has; the rest needs nothing from the
+/// subject, so issue threads merge the same way.
+fn merge_threads(
+    threads: &mut Vec<Thread>,
+    fetched: Vec<ThreadData>,
+    drafts: Vec<Draft>,
+    trust: &Trust,
+    now: &str,
+    take_record: &mut dyn FnMut(&CommentData, &Trust) -> bool,
+) -> Summary {
+    let mut summary = Summary::default();
+    let mut answers = Vec::new();
+    let seen_threads: Vec<String> = fetched.iter().map(|data| data.info.id.clone()).collect();
+    let seen_comments = seen_comments(&fetched);
+    for data in fetched {
         if let [comment] = data.comments.as_slice()
             && trust.verified(comment)
         {
@@ -688,7 +733,7 @@ fn merge(
                 continue;
             }
             if data.info.kind == RemoteKind::General {
-                if take_record(target, comment, &trust) {
+                if take_record(comment, trust) {
                     summary.records += 1;
                     continue;
                 }
@@ -698,22 +743,21 @@ fn merge(
                 }
             }
         }
-        import(target, data, &trust, now, &mut summary);
+        import(threads, data, trust, now, &mut summary);
     }
     for (id, data) in answers {
-        match target.threads.iter_mut().find(|thread| thread.id == id) {
+        match threads.iter_mut().find(|thread| thread.id == id) {
             Some(thread) => {
-                answer(thread, data, &trust, now);
+                answer(thread, data, trust, now);
                 summary.answered += 1;
             }
-            None => import(target, data, &trust, now, &mut summary),
+            None => import(threads, data, trust, now, &mut summary),
         }
     }
     // A draft that is gone was published or deleted, and a write that left no marker on the
     // host did not land or was rejected: unless a note matched above or a draft below, it goes
     // back to pending, to post again or for `finding kill`. The attempt id stays.
-    for comment in target
-        .threads
+    for comment in threads
         .iter_mut()
         .flat_map(|thread| thread.comments.iter_mut())
         .filter(|comment| comment.remote.is_none())
@@ -721,7 +765,7 @@ fn merge(
         if comment
             .draft_id
             .as_ref()
-            .is_some_and(|id| !fetched.drafts.iter().any(|draft| &draft.id == id))
+            .is_some_and(|id| !drafts.iter().any(|draft| &draft.id == id))
         {
             comment.draft_id = None;
         }
@@ -729,16 +773,14 @@ fn merge(
             comment.delivery.post = PostState::Pending;
         }
     }
-    for draft in fetched.drafts {
+    for draft in drafts {
         let attempt = agent_attempt(&draft.body);
         let comment = match (agent_id(&draft.body), markers::finding_id(&draft.body)) {
-            (Some(local), _) => target
-                .threads
+            (Some(local), _) => threads
                 .iter_mut()
                 .flat_map(|thread| thread.comments.iter_mut())
                 .find(|comment| comment.id == local && comment.delivery.is_attempt(attempt)),
-            (None, Some(id)) => target
-                .threads
+            (None, Some(id)) => threads
                 .iter_mut()
                 .find(|thread| thread.id == id)
                 .and_then(|thread| thread.comments.first_mut()),
@@ -752,7 +794,7 @@ fn merge(
             summary.drafts += 1;
         }
     }
-    summary.deleted = flag_deleted(target, &seen_threads, &seen_comments, now);
+    summary.deleted = flag_deleted(threads, &seen_threads, &seen_comments, now);
     summary
 }
 
@@ -778,13 +820,18 @@ fn claim_git_names(target: &mut Target, login: &str) {
 
 /// Stores a verified record comment and marks our run's record posted when it is that run's
 /// write; false when the comment is no record.
-fn take_record(target: &mut Target, comment: &CommentData, trust: &Trust) -> bool {
+fn take_record(
+    runs: &mut [Run],
+    records: &mut Vec<ImportedRecord>,
+    comment: &CommentData,
+    trust: &Trust,
+) -> bool {
     let Some(record) = parse_record(comment) else {
         return false;
     };
     let own = trust.own_id(comment);
     if let Some(run_id) = own.as_deref().and_then(markers::record_run)
-        && let Some(run) = target.runs.iter_mut().find(|run| run.id == run_id)
+        && let Some(run) = runs.iter_mut().find(|run| run.id == run_id)
         && let Some(post) = &mut run.record
         && (post.remote_id.as_deref() == Some(comment.id.as_str())
             || (post.remote_id.is_none()
@@ -795,19 +842,22 @@ fn take_record(target: &mut Target, comment: &CommentData, trust: &Trust) -> boo
         post.remote_id = Some(comment.id.clone());
         post.url.clone_from(&comment.url);
     }
-    target
-        .records
-        .retain(|known| known.comment_id != record.comment_id);
-    target.records.push(record);
+    records.retain(|known| known.comment_id != record.comment_id);
+    records.push(record);
     true
 }
 
 /// Marks threads and comments the host no longer returns. They are kept, never dropped.
-fn flag_deleted(target: &mut Target, threads: &[String], comments: &[String], now: &str) -> usize {
+fn flag_deleted(
+    threads: &mut [Thread],
+    seen_threads: &[String],
+    comments: &[String],
+    now: &str,
+) -> usize {
     let mut flagged = 0;
-    for thread in &mut target.threads {
+    for thread in threads {
         if let Some(remote) = &thread.remote {
-            let gone = !threads.contains(&remote.id);
+            let gone = !seen_threads.contains(&remote.id);
             if gone && !thread.deleted_remote {
                 thread.deleted_seen_at = Some(now.to_owned());
                 flagged += 1;
@@ -835,14 +885,20 @@ fn flag_deleted(target: &mut Target, threads: &[String], comments: &[String], no
     flagged
 }
 
-fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summary: &mut Summary) {
+fn import(
+    threads: &mut Vec<Thread>,
+    data: ThreadData,
+    trust: &Trust,
+    now: &str,
+    summary: &mut Summary,
+) {
     let login = trust.login;
     let marker = data
         .comments
         .first()
         .filter(|first| trust.verified(first))
         .and_then(|first| markers::finding_id(&first.body));
-    let by_remote = target.threads.iter().position(|thread| {
+    let by_remote = threads.iter().position(|thread| {
         thread.remote.as_ref().is_some_and(|remote| {
             // A GitLab note that gets a reply turns from general into a discussion with the
             // same id; GitHub ids of different kinds come from separate sequences.
@@ -852,7 +908,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
     });
     let by_agent = || {
         let incoming = data.comments.first()?;
-        target.threads.iter().position(|thread| {
+        threads.iter().position(|thread| {
             thread.comments.first().is_some_and(|first| {
                 // `publish` saves the remote ids of a review's comments before their
                 // threads are known.
@@ -869,7 +925,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
     };
     let by_marker = || {
         let marker = marker.as_deref()?;
-        target.threads.iter().position(|thread| {
+        threads.iter().position(|thread| {
             thread.id == marker
                 && thread
                     .remote
@@ -878,25 +934,12 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
         })
     };
     if let Some(index) = by_remote.or_else(by_agent).or_else(by_marker) {
-        update(
-            &mut target.threads[index],
-            data,
-            marker.is_some(),
-            trust,
-            now,
-        );
+        update(&mut threads[index], data, marker.is_some(), trust, now);
         summary.updated += 1;
         return;
     }
-    let taken = |id: &str| {
-        target.threads.iter().any(|thread| thread.id == id)
-            || target
-                .runs
-                .iter()
-                .flat_map(|run| &run.passes)
-                .flat_map(|pass| &pass.killed)
-                .any(|killed| killed.id == id)
-    };
+    let taken =
+        |id: &str| threads.iter().any(|thread| thread.id == id) || trust.killed.contains(id);
     let id = match marker {
         Some(marker) if !taken(&marker) => marker,
         _ => {
@@ -925,7 +968,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
         .into_iter()
         .map(|comment| imported_comment(comment, login))
         .collect();
-    target.threads.push(Thread {
+    threads.push(Thread {
         finding: finding_info(&id),
         severity,
         resolved: data.info.resolvable && data.resolved,
