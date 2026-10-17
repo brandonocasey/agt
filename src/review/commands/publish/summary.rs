@@ -23,6 +23,8 @@ const CELL: usize = 90;
 const MAX_COMMITS: usize = 100;
 /// Longest text shown for a finding that was not posted inline.
 const MAX_NOTE: usize = 2000;
+/// Longest summary, markers included: GitHub takes at most 65,536 characters.
+const MAX_BODY: usize = 65_000;
 
 /// A run the summary covers, with the head and count its record marker names.
 pub(super) struct Covered<'a> {
@@ -121,6 +123,7 @@ pub(super) fn summary_body(
     }
     steps(&mut text, covered, commits.unwrap_or_default(), &findings);
     agents(&mut text, covered, &findings);
+    let mut marks = String::new();
     for covered in covered.iter().rev() {
         let open = findings
             .iter()
@@ -133,17 +136,55 @@ pub(super) fn summary_body(
             })
             .count();
         let _ = write!(
-            text,
+            marks,
             "\n{}",
             markers::record(&covered.run.id, &covered.head, covered.at_head, open)
         );
     }
     let _ = write!(
-        text,
+        marks,
         "\n{}",
         markers::agent(markers::SUMMARY_ID, Some(attempt))
     );
+    fit(&mut text, MAX_BODY.saturating_sub(marks.chars().count()));
+    text.push_str(&marks);
     text
+}
+
+/// Cuts `text` at a line to at most `max` characters, closing the code block and sections the
+/// cut leaves open.
+fn fit(text: &mut String, max: usize) {
+    const CUT: &str = "\n✂️ The rest is cut to fit the host's size limit.";
+    if text.chars().count() <= max {
+        return;
+    }
+    // Room for the closing lines and the notice.
+    let room = max.saturating_sub(1000);
+    let mut kept = String::new();
+    let mut length = 0;
+    let mut fenced = false;
+    let mut open = 0usize;
+    for line in text.lines() {
+        length += line.chars().count() + 1;
+        if length > room {
+            break;
+        }
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        open += line.matches("<details>").count();
+        open = open.saturating_sub(line.matches("</details>").count());
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    if fenced {
+        kept.push_str("```\n");
+    }
+    for _ in 0..open {
+        kept.push_str("\n</details>\n");
+    }
+    kept.push_str(CUT);
+    *text = kept;
 }
 
 /// The collapsed findings table, then the text of each finding that was not posted inline.
@@ -692,5 +733,25 @@ mod tests {
         assert_eq!(count(1, "commit"), "1 commit");
         assert_eq!(count(3, "commit"), "3 commits");
         assert_eq!(capitalize("reviewer agent x"), "Reviewer agent x");
+    }
+
+    #[test]
+    fn a_long_summary_is_cut_and_closed() {
+        let mut short = "Short.".to_owned();
+        fit(&mut short, 100);
+        assert_eq!(short, "Short.");
+        let mut text = "Head.\n\n<details><summary>Notes</summary>\n\n```\n".to_owned();
+        for line in 0..5000 {
+            let _ = writeln!(text, "line {line} of a long note");
+        }
+        text.push_str("```\n\n</details>");
+        fit(&mut text, 10_000);
+        assert!(text.chars().count() <= 10_000);
+        assert!(text.starts_with("Head.\n"));
+        assert!(
+            text.ends_with("```\n\n</details>\n\n✂️ The rest is cut to fit the host's size limit."),
+            "{}",
+            &text[text.len() - 100..]
+        );
     }
 }
