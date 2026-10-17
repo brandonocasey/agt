@@ -75,7 +75,7 @@ impl Env {
             .env("AGT_GLAB_BIN", FAKE_FORGE)
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
             .env_remove("GITLAB_HOST")
-            .env_remove("AGENT_REVIEW_NOW");
+            .env_remove("AGT_NOW");
         command
     }
 

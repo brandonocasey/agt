@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::Env;
 
-/// `AGENT_REVIEW_NOW` of every issue command: 2026-10-17T12:00:00Z.
+/// `AGT_NOW` of every issue command: 2026-10-17T12:00:00Z.
 pub const NOW: i64 = 1_792_238_400;
 /// The first sync lists from 90 days before [`NOW`].
 pub const FIRST_SINCE: &str = "2026-07-19T12%3A00%3A00Z";
@@ -31,7 +31,7 @@ impl Env {
         command
             .arg("issue")
             .args(args)
-            .env("AGENT_REVIEW_NOW", NOW.to_string())
+            .env("AGT_NOW", NOW.to_string())
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -42,7 +42,7 @@ impl Env {
     }
 
     pub fn issue_at(&self, now: i64, args: &[&str]) -> Value {
-        let output = self.issue_exec(args, "", &[("AGENT_REVIEW_NOW", &now.to_string())]);
+        let output = self.issue_exec(args, "", &[("AGT_NOW", &now.to_string())]);
         assert!(
             output.status.success(),
             "agt issue {args:?} failed: {}",

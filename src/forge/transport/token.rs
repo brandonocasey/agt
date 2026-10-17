@@ -120,7 +120,7 @@ impl TokenTransport {
             ));
         }
         Ok(Self {
-            program: std::env::var_os("AGENT_REVIEW_CURL_BIN").unwrap_or_else(|| "curl".into()),
+            program: std::env::var_os("AGT_CURL_BIN").unwrap_or_else(|| "curl".into()),
             base_url: base_url.trim_end_matches('/').to_owned(),
             host: host.to_owned(),
             auth,
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn an_unset_token_variable_is_an_error() {
-        let error = Auth::Env("AGENT_REVIEW_SURELY_UNSET_TOKEN".into())
+        let error = Auth::Env("AGT_SURELY_UNSET_TOKEN".into())
             .token("h")
             .unwrap_err();
         assert!(error.to_string().contains("is not set"));

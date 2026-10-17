@@ -56,7 +56,7 @@ fn the_agt_override_names_win_over_the_old_ones() {
     let output = env
         .agt(&env.repo)
         .args(["sync", "--pr", "1"])
-        .env("AGENT_REVIEW_GH_BIN", crate::support::FAKE_FORGE)
+        .env("AGT_GH_BIN", crate::support::FAKE_FORGE)
         .env("AGT_GH_BIN", "/nonexistent/gh")
         .output()
         .unwrap();
@@ -113,7 +113,7 @@ fn the_pre_0_5_override_names_still_work() {
         .agt(&env.repo)
         .args(["sync", "--pr", "1"])
         .env_remove("AGT_GH_BIN")
-        .env("AGENT_REVIEW_GH_BIN", "/nonexistent/gh")
+        .env("AGT_GH_BIN", "/nonexistent/gh")
         .output()
         .unwrap();
     assert!(!output.status.success());

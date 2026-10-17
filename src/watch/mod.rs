@@ -59,14 +59,12 @@ fn install_handlers() {
 }
 
 fn tool(platform: Platform) -> OsString {
-    let (name, legacy, default) = match platform {
-        Platform::Gitlab => ("AGT_GLAB_BIN", "AGENT_WATCH_GLAB_BIN", "glab"),
-        Platform::Github => ("AGT_GH_BIN", "AGENT_WATCH_GH_BIN", "gh"),
+    let (name, default) = match platform {
+        Platform::Gitlab => ("AGT_GLAB_BIN", "glab"),
+        Platform::Github => ("AGT_GH_BIN", "gh"),
     };
-    [name, legacy]
-        .iter()
-        .filter_map(std::env::var_os)
-        .find(|value| !value.is_empty())
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default.into())
 }
 

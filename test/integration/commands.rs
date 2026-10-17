@@ -678,17 +678,13 @@ fn prune_by_age() {
     let soon = (now + 89 * day).to_string();
     let later = (now + 91 * day).to_string();
 
-    let kept = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &soon)]);
+    let kept = env.run_with(&["prune"], None, &[("AGT_NOW", &soon)]);
     assert_eq!(kept["pruned"], serde_json::json!([]));
-    let dry = env.run_with(
-        &["prune", "--dry-run"],
-        None,
-        &[("AGENT_REVIEW_NOW", &later)],
-    );
+    let dry = env.run_with(&["prune", "--dry-run"], None, &[("AGT_NOW", &later)]);
     assert_eq!(dry["pruned"].as_array().unwrap().len(), 1);
     assert_eq!(env.run(&["list"])["threads"].as_array().unwrap().len(), 1);
 
-    let pruned = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &later)]);
+    let pruned = env.run_with(&["prune"], None, &[("AGT_NOW", &later)]);
     assert_eq!(pruned["pruned"].as_array().unwrap().len(), 1);
     assert_eq!(env.run(&["list"])["threads"], serde_json::json!([]));
 
@@ -696,7 +692,7 @@ fn prune_by_age() {
     let output = env
         .agt(&env.path("home"))
         .args(["prune", "--all"])
-        .env("AGENT_REVIEW_NOW", &later)
+        .env("AGT_NOW", &later)
         .output()
         .unwrap();
     assert!(
@@ -712,7 +708,7 @@ fn prune_by_age() {
     env.git(&["switch", "-q", "-c", "other"]);
     env.write("b.txt", "b\n");
     env.commit_all("other");
-    let later_env = [("AGENT_REVIEW_NOW", later.as_str())];
+    let later_env = [("AGT_NOW", later.as_str())];
     let run = env.run_with(&["run", "start"], None, &later_env)["run"]
         .as_str()
         .unwrap()

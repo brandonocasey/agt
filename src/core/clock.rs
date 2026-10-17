@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::error::{Error, Result, fail};
 
 // Test-only override so age pruning can be checked without waiting 90 days.
-const NOW_OVERRIDE: &str = "AGENT_REVIEW_NOW";
+const NOW_OVERRIDE: &str = "AGT_NOW";
 
 pub fn now_secs() -> Result<i64> {
     if let Some(value) = std::env::var_os(NOW_OVERRIDE) {

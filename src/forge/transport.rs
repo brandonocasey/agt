@@ -159,18 +159,15 @@ pub struct Cli {
     env: Vec<(&'static str, String)>,
 }
 
-/// The program for a forge tool: the `AGT_*` override, else the pre-0.5 `AGENT_REVIEW_*` name,
-/// else the tool on `PATH`.
-fn tool_program(name: &str, legacy: &str, default: &str) -> std::ffi::OsString {
-    std::env::var_os(name)
-        .or_else(|| std::env::var_os(legacy))
-        .unwrap_or_else(|| default.into())
+/// The program for a forge tool: the `AGT_*` override, else the tool on `PATH`.
+fn tool_program(name: &str, default: &str) -> std::ffi::OsString {
+    std::env::var_os(name).unwrap_or_else(|| default.into())
 }
 
 impl Cli {
     pub fn gh(host: &str) -> Self {
         Self {
-            program: tool_program("AGT_GH_BIN", "AGENT_REVIEW_GH_BIN", "gh"),
+            program: tool_program("AGT_GH_BIN", "gh"),
             name: "gh",
             env: vec![("GH_HOST", host.to_owned())],
         }
@@ -186,7 +183,7 @@ impl Cli {
     /// glab on the host its own configuration names.
     pub fn glab_configured() -> Self {
         Self {
-            program: tool_program("AGT_GLAB_BIN", "AGENT_REVIEW_GLAB_BIN", "glab"),
+            program: tool_program("AGT_GLAB_BIN", "glab"),
             name: "glab",
             env: Vec::new(),
         }

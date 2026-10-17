@@ -723,8 +723,7 @@ event per line: `initial` and `change` per target when its state first appears o
 `final` event with every result. Defaults: 3600 seconds, a 15 second interval doubling up to 120
 seconds. Exit status: 0 all checks passed or the PR merged, 2 a target needs action (failed or
 cancelled checks, a changed head, a closed PR, a query error), 124 deadline, 64 usage, 130 or 143
-after SIGINT or SIGTERM. `AGT_GH_BIN` and `AGT_GLAB_BIN` (or `AGENT_WATCH_GH_BIN` and
-`AGENT_WATCH_GLAB_BIN`) replace the tools.
+after SIGINT or SIGTERM. `AGT_GH_BIN` and `AGT_GLAB_BIN` replace the tools.
 
 ## CI
 
@@ -818,9 +817,9 @@ failure does not make `push` exit non-zero: it is listed under `failed`. A creat
 
 ## Testing
 
-`AGT_GH_BIN` and `AGT_GLAB_BIN` (or the pre-0.5 `AGENT_REVIEW_GH_BIN` and `AGENT_REVIEW_GLAB_BIN`) replace the `gh` and `glab`
+`AGT_GH_BIN` and `AGT_GLAB_BIN` replace the `gh` and `glab`
 executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
-canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt watch`, and `test/fixtures/ci/*.json` hold the responses and the gl-ci output for `agt ci`. `AGENT_REVIEW_NOW=<unix seconds>` replaces the current time. It exists only so
+canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt watch`, and `test/fixtures/ci/*.json` hold the responses and the gl-ci output for `agt ci`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning; do not set it otherwise. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`. See `AGENTS.md` for the checks.

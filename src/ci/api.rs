@@ -71,10 +71,7 @@ pub struct Gitlab {
 impl Gitlab {
     pub fn connect(project: Option<&str>, host: Option<&str>) -> Result<Self> {
         let mut gitlab = Self {
-            program: [("AGT_GLAB_BIN"), ("AGENT_REVIEW_GLAB_BIN")]
-                .iter()
-                .find_map(std::env::var_os)
-                .unwrap_or_else(|| "glab".into()),
+            program: std::env::var_os("AGT_GLAB_BIN").unwrap_or_else(|| "glab".into()),
             host: host.map(str::to_owned),
             base: String::new(),
             path: String::new(),

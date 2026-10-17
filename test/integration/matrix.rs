@@ -626,7 +626,7 @@ fn runs_ended_before_the_pr_are_never_published(svc: Svc) {
     env.run_with(
         &["sync", "--pr", svc.number()],
         None,
-        &[("AGENT_REVIEW_NOW", &later.to_string())],
+        &[("AGT_NOW", &later.to_string())],
     );
     let dry = dry_run(env, svc, &[]);
     assert_eq!(dry["writes"], json!([]), "{dry}");

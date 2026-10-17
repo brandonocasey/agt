@@ -229,18 +229,14 @@ fn prune_ninety_days_after_close() {
     let closed: u64 = 1_767_225_600;
     let day = 86_400;
     let at = |days: u64| (closed + days * day).to_string();
-    let synced = env.run_with(
-        &["sync", "--pr", "5"],
-        None,
-        &[("AGENT_REVIEW_NOW", &at(59))],
-    );
+    let synced = env.run_with(&["sync", "--pr", "5"], None, &[("AGT_NOW", &at(59))]);
     assert_eq!(synced["review"]["state"], "merged");
     assert_eq!(synced["review"]["closed_at"], "2026-01-01T00:00:00Z");
 
     // The sync on day 59 is the later change, so the 90 days count from it.
-    let kept = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &at(59 + 89))]);
+    let kept = env.run_with(&["prune"], None, &[("AGT_NOW", &at(59 + 89))]);
     assert_eq!(kept["pruned"], json!([]));
-    let pruned = env.run_with(&["prune"], None, &[("AGENT_REVIEW_NOW", &at(59 + 91))]);
+    let pruned = env.run_with(&["prune"], None, &[("AGT_NOW", &at(59 + 91))]);
     assert_eq!(
         pruned["pruned"][0]["target"], "gh-5",
         "91 days after the last change"

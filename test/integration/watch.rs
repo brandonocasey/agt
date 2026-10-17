@@ -89,8 +89,8 @@ impl Scenario {
             .env("HOME", &self.dir)
             .env_remove("AGT_GH_BIN")
             .env_remove("AGT_GLAB_BIN")
-            .env("AGENT_WATCH_GH_BIN", FAKE)
-            .env("AGENT_WATCH_GLAB_BIN", FAKE)
+            .env("AGT_GH_BIN", FAKE)
+            .env("AGT_GLAB_BIN", FAKE)
             .env("FAKE_STEPS_DIR", &self.dir)
             .env("GITLAB_HOST", "");
         for (key, value) in env {
@@ -367,7 +367,7 @@ fn a_missing_tool_is_a_query_error() {
         &[],
         "owner/repo#42@abc123",
         &[],
-        &[("AGENT_WATCH_GH_BIN", "/nonexistent/gh")],
+        &[("AGT_GH_BIN", "/nonexistent/gh")],
     );
     assert_eq!(outcome.status, 2, "{}", outcome.stderr);
     assert_eq!(outcome.events[0]["reason"], "query_error");

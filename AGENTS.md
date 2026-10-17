@@ -41,6 +41,6 @@ source), so bump that pin, and the minimum version in the review skill's
   in `test/fixtures/`; unit tests stay in `#[cfg(test)]` modules.
 - Tests MUST use a temporary `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git
   repository, and fake `gh`/`glab` through `AGT_GH_BIN` and
-  `AGT_GLAB_BIN` (the pre-0.5 `AGENT_REVIEW_*` names still work). They never touch real state or call a real forge.
+  `AGT_GLAB_BIN`. They never touch real state or call a real forge.
 - Build output goes to `dist/target` (see `.cargo/config.toml`).
 - Git, `gh` and `glab` run as subprocesses so behavior matches the command line.
