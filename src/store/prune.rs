@@ -392,6 +392,20 @@ fn tree_size(path: &Path) -> u64 {
 mod tests {
     use super::*;
 
+    /// Retries while `attempt` reports [`Removal::Busy`] for a few seconds. A lock is an open file
+    /// description, and a thread that forks a child (other tests run `git`) hands it to the child
+    /// until the child's `exec` closes it, so a lock released here can stay held for a moment.
+    fn settled(mut attempt: impl FnMut() -> Removal) -> Removal {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let removal = attempt();
+            if removal != Removal::Busy || std::time::Instant::now() > deadline {
+                return removal;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn only_the_exact_backup_names_parse() {
         let (namespace, (taken, attempt)) =
@@ -493,7 +507,7 @@ mod tests {
         assert_eq!(busy, Removal::Busy);
         assert!(dir.join("k.json").exists());
         drop(publish);
-        let gone = store.try_remove_if(&dir, "k", |_| Ok(true)).unwrap();
+        let gone = settled(|| store.try_remove_if(&dir, "k", |_| Ok(true)).unwrap());
         assert!(matches!(gone, Removal::Removed(_)));
         assert!(!dir.join(".k.publish.lock").exists());
         assert!(!dir.join(".k.lock").exists());
@@ -534,7 +548,7 @@ mod tests {
         assert!(dir.join(".account.json").exists() && dir.join(".a.lock").exists());
         drop(held);
         assert!(matches!(
-            store.remove_local_repo(&dir).unwrap(),
+            settled(|| store.remove_local_repo(&dir).unwrap()),
             Removal::Removed(_)
         ));
         assert!(!dir.exists());
