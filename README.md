@@ -686,6 +686,27 @@ Line numbers refer to the pass's reviewed state: its head commit, or its tree
 for uncommitted work. The output lists the new ids under `added` and
 `killed`.
 
+## Tasks and session search
+
+`agt task` is the port of the `agent-task` tool (a Node script in the dotfiles) and takes
+the same arguments, prints the same JSON and exits with the same codes; only the usage text
+and the error prefix (`agt: error:`) say `agt`. Commands: `create`, `list`, `show`, `update`,
+`check`, `index`, `resolve`, `search`; `agt task --help` lists them.
+
+- Task records are one pretty-printed JSON file each in
+  `$XDG_STATE_HOME/agents/tasks/<id>.json` (mode 0600, directory 0700), guarded by a
+  `.<id>.lock` directory and a `revision` that every write must name. This is the Node
+  tool's format (record `version` 1), so both tools read and update the same files.
+- `index`, `resolve` and `search` keep a private index of Codex and Claude transcripts in
+  `agents/tasks/session-index/index.json` (version 4, also the Node tool's format). It is
+  updated incrementally; a `--rebuild`, a rewritten file or another index version scans again.
+  Environment: `AGENT_TASK_MAX_FILES` and `AGENT_TASK_BYTE_LIMIT` set default limits.
+- `search` prints the coverage report as one JSON line on stderr.
+
+The integration tests run the Node script too when it is available (set
+`AGT_LEGACY_AGENT_TASK` to its path, or keep the chezmoi source in its usual place; they skip
+without it) to check that each tool reads what the other wrote.
+
 ## Testing
 
 `AGT_GH_BIN` and `AGT_GLAB_BIN` (or the pre-0.5 `AGENT_REVIEW_GH_BIN` and `AGENT_REVIEW_GLAB_BIN`) replace the `gh` and `glab`

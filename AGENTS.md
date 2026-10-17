@@ -23,8 +23,8 @@ mise run test
 persisted `model`), `src/git.rs` and `src/forge` (services, transports, anchors,
 markers) are foundations. `src/review` is a domain module. Foundations never
 import a domain module and domain modules never import each other;
-`test/integration/agt.rs` scans `src/` and fails on the offending line. Add new
-domains (`issue`, `watch`, `ci`, `task`) as sibling modules.
+`test/integration/agt.rs` scans `src/` and fails on the offending line. `src/task` is the `agt task` domain (records and the session index in `agents/tasks`, the
+Node `agent-task` format). Add new domains (`issue`, `watch`, `ci`) as sibling modules.
 
 ## Release
 
