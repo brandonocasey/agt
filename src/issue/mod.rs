@@ -4,6 +4,7 @@
 mod cli;
 mod local;
 mod merge;
+pub mod prune;
 mod push;
 mod refs;
 mod sync;

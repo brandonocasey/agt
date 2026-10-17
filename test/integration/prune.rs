@@ -1,0 +1,393 @@
+//! `agt prune`: every rule deletes what it should and keeps its near miss. The clock is the
+//! `AGT_NOW` override, so no test waits.
+
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+
+use serde_json::{Value, json};
+
+use crate::support::Env;
+
+const BIN: &str = env!("CARGO_BIN_EXE_agt");
+const DAY: i64 = 86_400;
+/// 2027-01-01T00:00:00Z.
+const NOW: i64 = 1_798_761_600;
+
+/// `NOW` minus `days`, as an RFC 3339 timestamp.
+fn ago(days: i64) -> String {
+    iso(NOW - days * DAY)
+}
+
+fn iso(secs: i64) -> String {
+    let (days, rest) = (secs.div_euclid(DAY), secs.rem_euclid(DAY));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+struct Prune {
+    env: Env,
+}
+
+impl Prune {
+    fn new() -> Self {
+        Self { env: Env::new() }
+    }
+
+    fn agents(&self) -> PathBuf {
+        self.env.path("state").join("agents")
+    }
+
+    fn write(&self, path: &Path, value: &Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
+    fn target(&self, repo: &str, key: &str, age: i64) -> PathBuf {
+        let path = self
+            .agents()
+            .join("reviews")
+            .join(repo)
+            .join(format!("{key}.json"));
+        self.write(
+            &path,
+            &json!({
+                "version": 1, "revision": 1, "key": key, "repo": repo, "kind": "branch",
+                "branch": key, "branch_birth": null, "base": null, "head": null,
+                "created_at": ago(age), "updated_at": ago(age), "review": null,
+                "runs": [], "records": [], "threads": [],
+            }),
+        );
+        path
+    }
+
+    fn issue(&self, name: &str, age: i64, state: &str, edit: impl FnOnce(&mut Value)) -> PathBuf {
+        let fields = json!({
+            "title": "t", "body": "b", "state": state, "reason": null,
+            "labels": [], "assignees": [],
+        });
+        let mut issue = json!({
+            "version": 1, "key": format!("o/r#{name}"), "tracker": "gh-o-r",
+            "number": name.parse::<u64>().unwrap(),
+            "remote": {"id": "I_1", "url": "u", "updated_at": ago(age)},
+            "fields": fields, "base": fields, "author": null, "native_state": null,
+            "milestone": null, "due_date": null,
+            "created_at": ago(age), "updated_at": ago(age), "synced_at": ago(age),
+            "comments": [], "links": {"prs": [], "issues": [], "reviews": [], "tasks": [], "branches": []},
+            "notes": [], "conflicts": [], "errors": [], "create": null,
+        });
+        edit(&mut issue);
+        let path = self
+            .agents()
+            .join("issues")
+            .join("gh-o-r")
+            .join(format!("{name}.json"));
+        self.write(&path, &issue);
+        path
+    }
+
+    fn task(&self, id: &str, status: &str, age: i64) -> PathBuf {
+        let path = self.agents().join("tasks").join(format!("{id}.json"));
+        self.write(
+            &path,
+            &json!({
+                "version": 1, "id": id, "revision": 1, "objective": "o", "status": status,
+                "createdAt": ago(age + 1), "updatedAt": ago(age),
+            }),
+        );
+        path
+    }
+
+    fn backup(&self, name: &str) -> PathBuf {
+        let path = self.agents().join("backups").join(name);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("copy.json"), "{}").unwrap();
+        path
+    }
+
+    fn run(&self, args: &[&str]) -> Value {
+        let output = self
+            .env
+            .command(BIN, &self.env.repo)
+            .arg("prune")
+            .args(args)
+            .env("AGT_NOW", NOW.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "agt prune {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+
+fn keys(report: &Value, category: &str) -> Vec<String> {
+    let mut found: Vec<String> = report["plan"][category]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["key"].as_str().unwrap().to_owned())
+        .collect();
+    found.sort();
+    found
+}
+
+/// The stamp agt gives a backup taken `days` ago.
+fn stamp(days: i64) -> String {
+    iso(NOW - days * DAY).replace(':', "-")
+}
+
+fn snapshot(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            found.push(entry.path());
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn reviews_older_than_90_days_go_in_every_repo() {
+    let prune = Prune::new();
+    let old = prune.target("github.com/o/a", "old", 91);
+    let near = prune.target("github.com/o/a", "near", 89);
+    let other = prune.target("github.com/o/b", "other-old", 120);
+    let report = prune.run(&["--yes"]);
+    assert_eq!(
+        keys(&report, "reviews"),
+        ["github.com/o/a/old", "github.com/o/b/other-old"]
+    );
+    assert!(!old.exists() && !other.exists() && near.exists());
+    assert_eq!(report["dry_run"], false);
+    assert_eq!(report["totals"]["items"], 2);
+    assert!(report["bytes_freed"].as_u64().unwrap() > 0);
+    assert_eq!(report["deleted"].as_array().unwrap().len(), 2);
+    assert_eq!(report["skipped"], json!([]));
+}
+
+#[test]
+fn local_repos_are_listed_only_when_every_target_expired() {
+    let prune = Prune::new();
+    let all_old = prune.target("local/gone-aaaaaaaaaaaa", "t", 100);
+    let account = all_old.with_file_name(".account.json");
+    fs::write(&account, "{}").unwrap();
+    let mixed_old = prune.target("local/live-bbbbbbbbbbbb", "old", 100);
+    let mixed_new = prune.target("local/live-bbbbbbbbbbbb", "new", 3);
+    let report = prune.run(&[]);
+    assert_eq!(keys(&report, "local_repos"), ["local/gone-aaaaaaaaaaaa"]);
+    assert!(
+        report["plan"]["local_repos"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be checked")
+    );
+    assert!(all_old.exists());
+    prune.run(&["--yes"]);
+    assert!(!all_old.parent().unwrap().exists());
+    assert!(!mixed_old.exists() && mixed_new.exists());
+}
+
+#[test]
+fn issues_drop_only_when_closed_and_holding_nothing_local() {
+    let prune = Prune::new();
+    let old = prune.issue("1", 91, "closed", |_| {});
+    let near = prune.issue("2", 89, "closed", |_| {});
+    let open = prune.issue("3", 400, "open", |_| {});
+    let noted = prune.issue("4", 400, "closed", |issue| {
+        issue["notes"] = json!([{"id": "n1", "text": "mine", "created_at": ago(400)}]);
+    });
+    let queued = prune.issue("5", 400, "closed", |issue| {
+        issue["fields"]["title"] = json!("renamed");
+    });
+    let unsent = prune.issue("6", 400, "closed", |issue| {
+        issue["comments"] = json!([{
+            "id": "c1", "author": {"kind": "human", "login": "a"}, "body": "b",
+            "created_at": ago(400), "post": "pending", "attempt": null, "sent": null,
+            "remote": null, "draft_id": null, "local": false, "deleted_remote": false,
+            "deleted_seen_at": null,
+        }]);
+    });
+    let conflicted = prune.issue("7", 400, "closed", |issue| {
+        let fields = issue["fields"].clone();
+        issue["conflicts"] = json!([{
+            "field": "title", "local": fields, "remote": fields, "seen_at": ago(400),
+        }]);
+    });
+    let tracker = old.with_file_name("tracker.json");
+    fs::write(&tracker, "{}").unwrap();
+    let report = prune.run(&[]);
+    assert_eq!(keys(&report, "issues"), ["o/r#1"]);
+    assert!(old.exists());
+    prune.run(&["--yes"]);
+    assert!(!old.exists());
+    for kept in [near, open, noted, queued, unsent, conflicted, tracker] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+}
+
+#[test]
+fn tasks_drop_when_complete_for_90_days_and_the_index_stays() {
+    let prune = Prune::new();
+    let old = prune.task("done-old", "complete", 91);
+    let near = prune.task("done-near", "complete", 89);
+    let active = prune.task("active", "active", 400);
+    let paused = prune.task("paused", "paused", 400);
+    let index = prune.agents().join("tasks/session-index/index.json");
+    fs::create_dir_all(index.parent().unwrap()).unwrap();
+    fs::write(&index, "{}").unwrap();
+    let report = prune.run(&["--yes"]);
+    assert_eq!(keys(&report, "tasks"), ["done-old"]);
+    assert!(!old.exists());
+    for kept in [near, active, paused, index] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+}
+
+#[test]
+fn stray_locks_go_unless_held_or_their_document_exists() {
+    let prune = Prune::new();
+    let live = prune.target("github.com/o/a", "live", 1);
+    let live_lock = live.with_file_name(".live.lock");
+    let live_publish = live.with_file_name(".live.publish.lock");
+    let stray = live.with_file_name(".gone.lock");
+    let stray_publish = live.with_file_name(".gone.publish.lock");
+    let held = live.with_file_name(".busy.lock");
+    for path in [&live_lock, &live_publish, &stray, &stray_publish, &held] {
+        File::create(path).unwrap();
+    }
+    let guard = File::options().write(true).open(&held).unwrap();
+    guard.lock().unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(!stray.exists() && !stray_publish.exists());
+    for kept in [&live_lock, &live_publish, &held, &live] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+    let skipped = report["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["key"], ".busy.lock");
+    assert!(skipped[0]["why"].as_str().unwrap().contains("locked"));
+    drop(guard);
+}
+
+#[test]
+fn backups_keep_the_newest_per_namespace_and_foreign_names() {
+    let prune = Prune::new();
+    let oldest = prune.backup(&format!("reviews-v1-{}", stamp(200)));
+    let older = prune.backup(&format!("reviews-v1-{}-2", stamp(100)));
+    let newest_old = prune.backup(&format!("reviews-v1-{}", stamp(95)));
+    let only_issues = prune.backup(&format!("issues-v1-{}", stamp(300)));
+    let recent = prune.backup(&format!("tasks-v1-{}", stamp(10)));
+    let tasks_old = prune.backup(&format!("tasks-v1-{}", stamp(120)));
+    let foreign = [
+        prune.backup("some-repo"),
+        prune.backup(&format!("reviews-{}", stamp(400))),
+        prune.backup(&format!("reviews-v1-{}-1", stamp(400))),
+        prune.backup(&format!("reviews-v1-{}.bak", stamp(400))),
+        prune.backup(&format!(".other-{}.partial", stamp(400))),
+    ];
+    let partial = prune.backup(&format!(".issues-v1-{}.partial", stamp(1)));
+    let report = prune.run(&["--only", "backups"]);
+    assert_eq!(report["totals"]["by_category"]["backups"]["items"], 3);
+    assert!(oldest.exists());
+    prune.run(&["--yes", "--only", "backups"]);
+    for gone in [&oldest, &older, &tasks_old, &partial] {
+        assert!(!gone.exists(), "{}", gone.display());
+    }
+    for kept in [&newest_old, &only_issues, &recent] {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+    for kept in &foreign {
+        assert!(kept.exists(), "{}", kept.display());
+    }
+}
+
+#[test]
+fn a_backup_in_progress_is_skipped() {
+    let prune = Prune::new();
+    let partial = prune.backup(&format!(".reviews-v1-{}.partial", stamp(1)));
+    let lock = prune.agents().join(".reviews-backup.lock");
+    File::create(&lock).unwrap();
+    let guard = File::options().write(true).open(&lock).unwrap();
+    guard.lock().unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(partial.exists());
+    assert_eq!(report["skipped"].as_array().unwrap().len(), 1);
+    drop(guard);
+    prune.run(&["--yes"]);
+    assert!(!partial.exists());
+}
+
+#[test]
+fn a_target_held_by_another_run_is_skipped() {
+    let prune = Prune::new();
+    let old = prune.target("github.com/o/a", "busy", 120);
+    let lock = old.with_file_name(".busy.lock");
+    File::create(&lock).unwrap();
+    let guard = File::options().write(true).open(&lock).unwrap();
+    guard.lock().unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(old.exists());
+    assert_eq!(report["deleted"], json!([]));
+    assert!(
+        report["skipped"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("locked")
+    );
+    drop(guard);
+}
+
+#[test]
+fn a_dry_run_deletes_nothing_and_only_limits_the_pass() {
+    let prune = Prune::new();
+    prune.target("github.com/o/a", "old", 120);
+    prune.target("local/gone-cccccccccccc", "t", 120);
+    prune.issue("1", 120, "closed", |_| {});
+    prune.task("t1", "complete", 120);
+    prune.backup(&format!("reviews-v1-{}", stamp(200)));
+    prune.backup(&format!("reviews-v1-{}", stamp(150)));
+    File::create(prune.agents().join("reviews/github.com/o/a/.nobody.lock")).unwrap();
+    let before = snapshot(&prune.agents());
+    let report = prune.run(&[]);
+    assert_eq!(snapshot(&prune.agents()), before);
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["retention_days"], 90);
+    assert_eq!(report["totals"]["items"], 7);
+    assert!(report.get("deleted").is_none());
+    for category in [
+        "reviews",
+        "local_repos",
+        "issues",
+        "tasks",
+        "locks",
+        "backups",
+    ] {
+        assert_eq!(
+            report["totals"]["by_category"][category]["items"],
+            report["plan"][category].as_array().unwrap().len(),
+            "{category}"
+        );
+    }
+    let only = prune.run(&["--only", "issues", "--only", "tasks"]);
+    assert_eq!(only["totals"]["items"], 2);
+}

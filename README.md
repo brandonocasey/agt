@@ -299,6 +299,41 @@ agt review prune --dry-run
 agt review prune --all
 ```
 
+## Prune
+
+`agt prune` cleans the whole store, every repository and namespace, in one pass. By
+default it deletes nothing and prints a JSON plan; `--yes` deletes. `--only` limits the
+pass to `reviews`, `issues`, `tasks`, `backups` or `locks` (repeat it for several).
+
+```sh
+agt prune                  # print the plan
+agt prune --only backups   # plan for one kind
+agt prune --yes            # delete
+```
+
+Everything is kept 90 days (`retention_days`). The rules:
+
+- `reviews`: the review rule above, applied to every repository. `local/<name>-<hash>` repositories
+  are named after a hash of the git common directory and the store records no path, so
+  whether the directory still exists cannot be checked. Such a repository is listed
+  under `local_repos`, and its directory removed, only when every target in it has
+  expired.
+- `issues`: a closed issue, 90 days after the later of its last local and host update,
+  and only with no queued change, unsent comment or create, conflict, failed send, note
+  or local-only comment. Open issues, `tracker.json` and anything holding such data stay.
+- `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
+  tasks stay, and so does the session index, a cache that `agt task index` rebuilds.
+- `locks`: `.<key>.lock` and `.<key>.publish.lock` files whose `<key>.json` is gone.
+- `backups`: `<namespace>-v<n>-<stamp>` directories that agt made before a schema
+  migration, 90 days after they were taken, except the newest of each namespace, and
+  unfinished `.<namespace>-v<n>-<stamp>.partial` copies (`partial_backups`). Other
+  names in the same backups directory belong to other tools and are never touched.
+
+Each item is deleted under its own lock without waiting; one that another agt process
+holds is skipped. The output has `plan` (per category a list of `path`, `key`, `reason`
+and `bytes`), `totals` and `warnings`. With `--yes` it adds `deleted`, `skipped` (with
+`why`) and `bytes_freed`. `agt review prune` still prunes only reviews.
+
 ## Reviewed, counting and pruning rules
 
 - A pass records its `base..head`, the reviewed tree id, each commit's

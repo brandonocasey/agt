@@ -5,6 +5,7 @@ mod issue_push;
 mod issue_queue;
 mod issue_read;
 mod matrix;
+mod prune;
 mod publish;
 mod reviewed;
 mod support;
