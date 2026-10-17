@@ -475,6 +475,48 @@ fn gitlab_responses(setup: &Setup, old: &str) {
     );
 }
 
+fn assert_unsent_finding(local: &Value) {
+    assert_eq!(local["comments"][0]["body"], "Local text of f1.");
+    assert_eq!(local["comments"][0]["post"], "pending");
+    assert_eq!(local["comments"][0]["remote"], Value::Null);
+}
+
+#[test]
+fn gitlab_sync_does_not_claim_an_unsent_legacy_marker() {
+    let setup = reviewed_branch("git@gitlab.example.com:group/sub/proj.git");
+    let env = &setup.env;
+    let f1 = format!("{}.c1p0.r1.f1", setup.run);
+    gitlab_responses(&setup, &setup.head);
+    let replacement = format!("Edited text\n<!-- review-finding v1 id={f1} -->");
+    env.respond(
+        &[
+            "api",
+            "-X",
+            "GET",
+            "--paginate",
+            "projects/group%2Fsub%2Fproj/merge_requests/3/discussions?per_page=100",
+        ],
+        &json!([{
+            "id": "edited-discussion",
+            "individual_note": false,
+            "notes": [{
+                "id": 8000, "body": replacement, "author": {"username": "me"},
+                "created_at": "2026-10-16T10:00:00Z", "system": false,
+                "resolvable": true, "resolved": true,
+            }],
+        }])
+        .to_string(),
+    );
+
+    env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
+    let list = env.run(&["list"]);
+    let local = thread(&list, &f1);
+    assert_unsent_finding(local);
+    assert_eq!(local["resolved"], false);
+    assert_eq!(thread(&list, "gl-n8000")["type"], "comment");
+    assert_read_only(env);
+}
+
 #[test]
 fn gitlab_self_hosted_sync() {
     let setup = reviewed_branch("git@gitlab.example.com:group/sub/proj.git");
@@ -487,8 +529,8 @@ fn gitlab_self_hosted_sync() {
     let synced = env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
     assert_eq!(synced["target"], "gl-3");
     assert_eq!(synced["drafts"], 1);
-    assert_eq!(synced["threads"]["imported"], 3);
-    assert_eq!(synced["threads"]["updated"], 1);
+    assert_eq!(synced["threads"]["imported"], 4);
+    assert_eq!(synced["threads"]["updated"], 0);
     assert_read_only(env);
     for call in env.forge_calls() {
         assert!(call.starts_with("gitlab.example.com\t"), "{call}");
@@ -520,7 +562,8 @@ fn gitlab_self_hosted_sync() {
     assert_eq!(mine["resolve_pending"], true);
     assert_eq!(mine["resolution"], "answered");
     assert_eq!(mine["severity"], "high");
-    assert_eq!(mine["comments"][0]["remote"]["id"], "4005300001");
+    assert_unsent_finding(mine);
+    assert_eq!(thread(&list, "gl-n4005300001")["type"], "comment");
     let draft = &thread(&list, &format!("{}.c1p0.r1.f2", setup.run))["comments"][0];
     assert_eq!(draft["post"], "posting");
     assert_eq!(draft["draft_id"], "77");

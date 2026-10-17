@@ -403,9 +403,9 @@ agent-review prune --all
   in the thread's first comment. Untrusted ones import as plain comments.
   GitLab notes report no editor (the API has no `last_edited_by`, and
   `updated_at` also changes on resolve), so a maintainer could edit a note of
-  mine unseen. On GitLab, records, `Re:` answers and `agent-review` marker
-  claims therefore count only when the note's body equals a body this store
-  sent (`sent` on the comment or record); anything else imports as a plain
+  mine unseen. On GitLab, records, `Re:` answers, and both `review-finding`
+  and `agent-review` marker claims count only when the note's body matches
+  a body this store sent (`sent` on the comment or record); anything else imports as a plain
   comment. A record posted from another clone thus never counts on GitLab.
   Trusted records are stored under `records`; a trusted general comment ending
   in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`

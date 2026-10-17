@@ -884,7 +884,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
     let marker = data
         .comments
         .first()
-        .filter(|first| trusted(first, trust.login))
+        .filter(|first| trust.verified(first))
         .and_then(|first| marker_id(&first.body));
     let by_remote = target.threads.iter().position(|thread| {
         thread.remote.as_ref().is_some_and(|remote| {
