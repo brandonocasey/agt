@@ -127,8 +127,13 @@ fn stale_in(
 ) -> Vec<Stale> {
     let mut found = Vec::new();
     for dir in dirs {
-        if fs::symlink_metadata(dir).is_err() {
-            continue;
+        match fs::symlink_metadata(dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warnings.push(format!("{}: {error}", dir.display()));
+                continue;
+            }
+            Ok(_) => {}
         }
         if !trusted(root, &dir.join("entry")) {
             warnings.push(format!(
@@ -173,9 +178,15 @@ fn relative(root: &Path, path: &Path) -> String {
         .into_owned()
 }
 
+/// A root in the user's own cache, with links resolved: only this user writes there, so a
+/// link (say, to a bigger disk) is the user's choice. Unlike `/tmp/claude-<uid>`.
+fn own_root(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
+}
+
 /// Task directories and files in `agents/output`.
 pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
-    let root = cache_root()?.join("agents").join("output");
+    let root = own_root(cache_root()?.join("agents").join("output"));
     Ok(stale_in(
         &root,
         std::slice::from_ref(&root),
@@ -188,7 +199,7 @@ pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
 
 /// Task directories in `agents/scratch`, and harness session directories.
 pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
-    let root = cache_root()?.join("agents").join("scratch");
+    let root = own_root(cache_root()?.join("agents").join("scratch"));
     let mut found = stale_in(
         &root,
         std::slice::from_ref(&root),
@@ -198,8 +209,13 @@ pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
         warnings,
     );
     for harness in harness_roots()? {
-        if fs::symlink_metadata(&harness).is_err() {
-            continue;
+        match fs::symlink_metadata(&harness) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warnings.push(format!("{}: {error}", harness.display()));
+                continue;
+            }
+            Ok(_) => {}
         }
         if !own_dir(&harness) {
             warnings.push(format!(
@@ -250,6 +266,10 @@ pub fn remove(
     now: i64,
     prune_parent: bool,
 ) -> Result<Removal> {
+    // Gone, perhaps deleted by another cleanup: nothing to do, and no link to refuse.
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Ok(Removal::Kept);
+    }
     if !trusted(root, path) {
         return Err(Error(format!(
             "{}: not deleted, a directory above it is a link or another user's",
@@ -264,14 +284,19 @@ pub fn remove(
     if now - newest <= days * DAY {
         return Ok(Removal::Kept);
     }
-    let meta = fs::symlink_metadata(path)
-        .map_err(|error| Error(format!("{}: {error}", path.display())))?;
-    let result = if meta.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    };
-    result.map_err(|error| Error(format!("{}: {error}", path.display())))?;
+    let result = fs::symlink_metadata(path).and_then(|meta| {
+        if meta.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        }
+    });
+    match result {
+        Ok(()) => {}
+        // Another process deleted it first.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Removal::Kept),
+        Err(error) => return Err(Error(format!("{}: {error}", path.display()))),
+    }
     if prune_parent && let Some(parent) = path.parent() {
         // Fails, and is meant to, while anything else is in it.
         let _ = fs::remove_dir(parent);

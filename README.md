@@ -356,7 +356,8 @@ for the whole period, so a task that is still writing keeps all of its files:
   and `/tmp`, untouched for 30 days. A `<cwd-slug>` directory goes once its last session
   has gone. Links are never followed: a `claude-<uid>` directory that is a link or another
   user's is skipped with a warning, and nothing is deleted unless every directory above it,
-  up to its root, is a real directory of this user.
+  up to its root, is a real directory of this user. `agents/output` and `agents/scratch`
+  themselves may be links (say, to a bigger disk); they are in the user's own cache.
 
 `processes` lists the user's own processes that carry `CLAUDE_PID` and are a day or more
 old, whose Claude Code session is gone. A session is alive while its
