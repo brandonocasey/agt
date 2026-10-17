@@ -154,10 +154,6 @@ impl IssueService for Gitlab {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the issue writes, which land in a later change"
-)]
 impl Gitlab {
     /// The ids of `logins`; `[0]` for none, which GitLab reads as "unassign everyone".
     fn user_ids(&self, logins: &[String]) -> Result<Vec<u64>> {

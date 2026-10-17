@@ -4,6 +4,7 @@
 mod cli;
 mod local;
 mod merge;
+mod push;
 mod refs;
 mod sync;
 mod trackers;
@@ -42,6 +43,15 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::LinkPr { key, pr } => local::link_pr(&store, filter, key, pr)?,
         Command::Create(args) => local::create(&store, &Config::load()?, filter, args)?,
         Command::Edit(args) => local::edit(&store, filter, args)?,
+        Command::Push { dry_run, force } => push::run(
+            &store,
+            &Config::load()?,
+            filter,
+            &push::Options {
+                dry_run: *dry_run,
+                force: *force,
+            },
+        )?,
     };
     Ok(Output::Json(value))
 }

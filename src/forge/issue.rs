@@ -63,10 +63,6 @@ impl Changes {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the issue writes, which land in a later change"
-)]
 pub struct NewIssue<'a> {
     pub title: &'a str,
     pub body: &'a str,

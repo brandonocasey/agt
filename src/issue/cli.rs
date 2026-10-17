@@ -69,6 +69,15 @@ pub enum Command {
     Create(CreateArgs),
     /// Queue a new title or body.
     Edit(EditArgs),
+    /// Send the queued changes to the hosts of the trackers with `push = true`.
+    Push {
+        /// Show the requests without sending anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Send local values that conflict with a newer remote value.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Args)]

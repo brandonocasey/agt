@@ -7,10 +7,6 @@ use assert_fs::TempDir;
 use serde_json::Value;
 
 pub mod forge;
-#[allow(
-    dead_code,
-    reason = "used by the issue writes, which land in a later change"
-)]
 pub mod issue;
 pub mod scenario;
 
