@@ -1,6 +1,6 @@
-# agent-review
+# agt
 
-`agent-review` keeps PR/MR-style code review threads on your machine, one store
+`agt` is one command-line binary for coding agents. `agt review` keeps PR/MR-style code review threads on your machine, one store
 per repository. It records review runs and passes, each reviewer's model,
 effort, harness and harness version, the findings reviewers kept or killed, and
 line-anchored threads with replies and resolutions. It works without a PR or
@@ -18,10 +18,17 @@ mise use -g github:brandonocasey/agent-review
 ```
 
 From a checkout, `mise run install` runs `cargo install --locked --path .` and
-puts `agent-review` in `~/.cargo/bin`. A `v*` tag publishes a release
+puts `agt` in `~/.cargo/bin`. A `v*` tag publishes a release
 (`.github/workflows/release.yml`); Windows is not supported. Git 2.31 or newer must be on `PATH`; before git 2.38 (no
 `merge-tree --write-tree`) every merge commit in a range counts as unreviewed.
 `sync` also needs an authenticated `gh` (GitHub) or `glab` (GitLab).
+
+Run `agt --version` to check the install; it prints `agt <version>`. Every review
+command below is a subcommand of `agt review`. Up to 0.4.0 the binary was
+`agent-review` and took the same arguments without the `review` word; the store
+location, schema, output and exit codes are unchanged, and a store written by
+0.4.0 reads as is. The `agent-review` markers in posted comments and the
+`$XDG_CONFIG_HOME/agent-review/hosts.json` path keep their names.
 
 Repositories with SHA-1 or SHA-256 object ids both work.
 
@@ -29,7 +36,7 @@ Repositories with SHA-1 or SHA-256 object ids both work.
 
 Every command prints JSON on stdout, except `list --format prompt`, which prints
 plain text. JSON is indented at a terminal and one compact line otherwise, since
-agents pay for every byte they read. On failure a command prints `agent-review: error: <message>` on stderr (the word `error:` matches
+agents pay for every byte they read. On failure a command prints `agt: error: <message>` on stderr (the word `error:` matches
 clap's usage errors, so one pattern finds both) and
 exits with status 1. Timestamps are RFC 3339 in UTC, such as
 `2026-10-16T12:00:00Z`.
@@ -76,10 +83,10 @@ Start a run, then passes inside it. A `full` pass opens a new cycle (`c1p0`,
 `c1p2`).
 
 ```sh
-agent-review run start
+agt review run start
 # {"run": "rv-7k2m", "target": "branch-feat%2Flogin-1a2b..."}
 
-agent-review pass start --run rv-7k2m --kind full --reviewers - <<'EOF'
+agt review pass start --run rv-7k2m --kind full --reviewers - <<'EOF'
 [{"model": "claude-opus-5-5", "effort": "xhigh", "harness": "claude-code",
   "harness_version": "2.1.296", "starting_context": "fresh"}]
 EOF
@@ -103,17 +110,17 @@ patch-ids (`commit_count` gives their number); `show <run>.<pass>` prints them.
 `--base`, `--reviewers` and `--head`, saving a call:
 
 ```sh
-agent-review run start --kind full --base 1a2b3c4 --reviewers - < reviewers.json
+agt review run start --kind full --base 1a2b3c4 --reviewers - < reviewers.json
 # {"target": "...", "run": "rv-7k2m", "pass": {"id": "c1p0", ...}}
 ```
 
 ```sh
-agent-review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
-agent-review pass end --run rv-7k2m --pass c1p0 --lock
-agent-review pass end --run rv-7k2m --pass c1p0 --findings - --reviewer r1 < all.json
-agent-review finding kill rv-7k2m.c1p0.r1.f2 --reason "The caller checks it."
-agent-review run end --run rv-7k2m
-agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
+agt review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
+agt review pass end --run rv-7k2m --pass c1p0 --lock
+agt review pass end --run rv-7k2m --pass c1p0 --findings - --reviewer r1 < all.json
+agt review finding kill rv-7k2m.c1p0.r1.f2 --reason "The caller checks it."
+agt review run end --run rv-7k2m
+agt review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 ```
 
 `pass end --findings <file|->` adds findings and ends the pass in one write, as
@@ -167,20 +174,20 @@ would evaluate that branch's tip rather than the checked-out work. `run start
 Threads for humans and agents:
 
 ```sh
-agent-review comment --body "Why 3 retries?" --path src/net.rs --line 42
-agent-review comment --body - --type question < note.md   # general comment
-agent-review reply h1 --body "Matches the API limit."
-agent-review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
+agt review comment --body "Why 3 retries?" --path src/net.rs --line 42
+agt review comment --body - --type question < note.md   # general comment
+agt review reply h1 --body "Matches the API limit."
+agt review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
   --run rv-7k2m --pass c1p0 --reviewer fix --model claude-opus-5-5 --harness claude-code
-agent-review resolve h1 --resolution answered
-agent-review resolve rv-7k2m.c1p0.r1.f1 --triage fixed --resolution "fixed 9e8d7c6"
-agent-review resolve rv-7k2m.c1p0.r1.f2 --triage question     # held, stays open
-agent-review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still loses data"
+agt review resolve h1 --resolution answered
+agt review resolve rv-7k2m.c1p0.r1.f1 --triage fixed --resolution "fixed 9e8d7c6"
+agt review resolve rv-7k2m.c1p0.r1.f2 --triage question     # held, stays open
+agt review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still loses data"
 # Fixed: triage, resolution and a "Fixed in <sha>." reply for each, in one write
-agent-review resolve rv-7k2m.c1p0.r1.f1 rv-7k2m.c1p0.r2.f1 --fixed 9e8d7c6 \
+agt review resolve rv-7k2m.c1p0.r1.f1 rv-7k2m.c1p0.r2.f1 --fixed 9e8d7c6 \
   --run rv-7k2m --pass c1p1 --reviewer fix
 # A fix check disagrees: reopen with a "Not fixed: <reason>." reply
-agent-review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
+agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   --run rv-7k2m --pass c1p1 --reviewer r1
 ```
 
@@ -217,15 +224,15 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
 Reading:
 
 ```sh
-agent-review list --open
-agent-review list --run rv-7k2m --format prompt   # fix-check and reveal input
-agent-review list --run rv-7k2m --cycle 2         # one cycle's findings
-agent-review show rv-7k2m.c1p0.r1.f1              # thread or killed finding
-agent-review show rv-7k2m                          # run
-agent-review show rv-7k2m.c1p0                     # pass
-agent-review status
-agent-review status --head 1a2b3c4
-agent-review status --full                         # plus commits, runs, records
+agt review list --open
+agt review list --run rv-7k2m --format prompt   # fix-check and reveal input
+agt review list --run rv-7k2m --cycle 2         # one cycle's findings
+agt review show rv-7k2m.c1p0.r1.f1              # thread or killed finding
+agt review show rv-7k2m                          # run
+agt review show rv-7k2m.c1p0                     # pass
+agt review status
+agt review status --head 1a2b3c4
+agt review status --full                         # plus commits, runs, records
 ```
 
 `list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
@@ -258,9 +265,9 @@ posted by `publish` with its marker), so other people's and my own unmarked ones
 Sync with a PR or MR:
 
 ```sh
-agent-review sync                     # the PR/MR whose head is this branch
-agent-review sync --pr 1235
-agent-review sync --pr https://gitlab.example.com/group/proj/-/merge_requests/3
+agt review sync                     # the PR/MR whose head is this branch
+agt review sync --pr 1235
+agt review sync --pr https://gitlab.example.com/group/proj/-/merge_requests/3
 ```
 
 `sync` is read-only on the forge: it sends only `GET` requests and GraphQL
@@ -269,10 +276,10 @@ queries. See [Sync](#sync).
 Publish to an own PR or MR:
 
 ```sh
-agent-review publish --dry-run        # print every payload; writes nothing
-agent-review publish
-agent-review publish --pr 1235 --not-own
-agent-review publish --only rv-7k2m.c1p0.r1.f1,h1
+agt review publish --dry-run        # print every payload; writes nothing
+agt review publish
+agt review publish --pr 1235 --not-own
+agt review publish --only rv-7k2m.c1p0.r1.f1,h1
 ```
 
 `publish` posts what changed locally since the last publish. See
@@ -281,8 +288,8 @@ agent-review publish --only rv-7k2m.c1p0.r1.f1,h1
 Cleanup:
 
 ```sh
-agent-review prune --dry-run
-agent-review prune --all
+agt review prune --dry-run
+agt review prune --all
 ```
 
 ## Reviewed, counting and pruning rules
@@ -333,7 +340,7 @@ agent-review prune --all
   new-side line inside a changed hunk, or a deleted file, is outdated; other
   lines shift and follow renames. An old-side anchor is outdated once its file
   changes. Anchors on uncommitted work name a tree that no ref points to;
-  `agent-review` never writes refs to pin it, so once `git gc` prunes it (by
+  `agt review` never writes refs to pin it, so once `git gc` prunes it (by
   default about two weeks later, unless `run end` has since moved the anchor
   to a commit) the anchor counts as outdated.
 - A target is deleted 90 days after the later of its PR/MR's close or merge
@@ -681,7 +688,7 @@ for uncommitted work. The output lists the new ids under `added` and
 
 ## Testing
 
-`AGENT_REVIEW_GH_BIN` and `AGENT_REVIEW_GLAB_BIN` replace the `gh` and `glab`
+`AGT_GH_BIN` and `AGT_GLAB_BIN` (or the pre-0.5 `AGENT_REVIEW_GH_BIN` and `AGENT_REVIEW_GLAB_BIN`) replace the `gh` and `glab`
 executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
 canned responses and fails on any other call. `AGENT_REVIEW_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning; do not set it otherwise. Tests use temporary

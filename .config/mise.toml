@@ -15,5 +15,5 @@ description = "Run the test suite"
 run = "cargo nextest run"
 
 [tasks.install]
-description = "Install agent-review into ~/.cargo/bin"
+description = "Install agt into ~/.cargo/bin"
 run = "cargo install --locked --path ."
