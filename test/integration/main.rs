@@ -5,6 +5,7 @@ mod publish;
 mod reviewed;
 mod support;
 mod sync;
+mod task;
 
 use assert_cmd::Command;
 
