@@ -10,7 +10,7 @@ pub mod forge;
 pub mod scenario;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agt");
-const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
+pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
 /// A temporary HOME, XDG dirs, git config and repository; nothing reads the user's real state.

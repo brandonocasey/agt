@@ -1,3 +1,4 @@
+mod agt;
 mod commands;
 mod matrix;
 mod publish;
