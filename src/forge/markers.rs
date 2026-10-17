@@ -45,20 +45,22 @@ pub fn record_run(id: &str) -> Option<&str> {
     id.strip_suffix(RECORD_SUFFIX)
 }
 
-fn first_token(body: &str, marker: &str) -> Option<String> {
-    let rest = body.split_once(marker)?.1;
+/// The token after the last `marker`: `publish` writes its markers after the text, so a marker
+/// the text quotes comes first.
+fn last_token(body: &str, marker: &str) -> Option<String> {
+    let rest = body.rsplit_once(marker)?.1;
     let id = rest.split_whitespace().next()?.trim_end_matches(CLOSE);
     (!id.is_empty()).then(|| id.to_owned())
 }
 
 /// The local id in an `<!-- agent-review id=<id> -->` marker, which `publish` adds to every body.
 pub fn agent_id(body: &str) -> Option<String> {
-    first_token(body, AGENT)
+    last_token(body, AGENT)
 }
 
 /// The attempt id in an `<!-- agent-review id=<id> attempt=<attempt> -->` marker.
 pub fn agent_attempt(body: &str) -> Option<&str> {
-    let inner = body.split_once(AGENT)?.1.split_once(CLOSE)?.0;
+    let inner = body.rsplit_once(AGENT)?.1.split_once(CLOSE)?.0;
     inner
         .split_whitespace()
         .find_map(|pair| pair.strip_prefix("attempt="))
@@ -66,7 +68,7 @@ pub fn agent_attempt(body: &str) -> Option<&str> {
 
 /// `body` without its `agent-review` marker and the blank space before it, as a person reads it.
 pub fn strip_agent(body: &str) -> String {
-    let Some(start) = body.find(AGENT) else {
+    let Some(start) = body.rfind(AGENT) else {
         return body.to_owned();
     };
     let Some(len) = body[start..].find(CLOSE) else {
@@ -80,7 +82,7 @@ pub fn strip_agent(body: &str) -> String {
 
 /// The finding id in a `review-finding` marker.
 pub fn finding_id(body: &str) -> Option<String> {
-    first_token(body, FINDING)
+    last_token(body, FINDING)
 }
 
 /// The fields of a `review-record` marker.
@@ -92,12 +94,20 @@ pub struct RecordMarker {
 }
 
 /// Every `review-record` marker of `body`: one in a run's own record, one per run in a
-/// summary.
+/// summary. Only the marker lines that end the body count, not a record the text quotes.
 pub fn parse_records(body: &str) -> Vec<RecordMarker> {
-    body.split(RECORD)
-        .skip(1)
-        .filter_map(|rest| {
-            let inner = rest.split_once(CLOSE)?.0;
+    let mut trailer: Vec<&str> = body
+        .lines()
+        .rev()
+        .map(str::trim)
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| line.starts_with("<!--") && line.ends_with(CLOSE))
+        .collect();
+    trailer.reverse();
+    trailer
+        .into_iter()
+        .filter_map(|line| {
+            let inner = line.strip_prefix(RECORD)?.strip_suffix(CLOSE)?;
             let field = |name: &str| {
                 inner
                     .split_whitespace()
@@ -182,5 +192,28 @@ mod tests {
             Some("review/abc")
         );
         assert_eq!(agent_attempt("no marker"), None);
+    }
+
+    #[test]
+    fn markers_the_text_quotes_are_not_the_body_s() {
+        let quoted = format!(
+            "Quotes `{}` and\n{}\n\nmore text.",
+            agent("x", Some("at-x")),
+            record("rv-quoted", "abc", 1, 0)
+        );
+        let body = format!(
+            "{quoted}\n{}\n{}\n",
+            record("rv-7k2m", "def", 2, 1),
+            agent(SUMMARY_ID, Some("at-9"))
+        );
+        assert_eq!(agent_id(&body).as_deref(), Some(SUMMARY_ID));
+        assert_eq!(agent_attempt(&body), Some("at-9"));
+        let runs: Vec<_> = parse_records(&body)
+            .into_iter()
+            .map(|marker| marker.run)
+            .collect();
+        assert_eq!(runs, ["rv-7k2m"]);
+        assert!(strip_agent(&body).starts_with(&quoted));
+        assert!(parse_records(&quoted).is_empty());
     }
 }

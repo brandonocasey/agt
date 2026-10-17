@@ -241,6 +241,36 @@ fn a_failed_summary_edit_is_sent_again() {
     assert_eq!(record.get("earlier"), None, "{record}");
 }
 
+/// A finding that quotes a marker leaves the summary's own id alone.
+#[test]
+fn a_marker_quoted_in_a_finding_is_not_the_summary_s() {
+    const QUOTING: crate::support::scenario::Review = crate::support::scenario::Review {
+        reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"claude-code"}]"#,
+        findings: r#"[
+  {"type":"bug","severity":"low","scenario":"`<!-- agent-review id=x -->` is read first."}
+]"#,
+    };
+    let svc = Github::new();
+    let setup = Setup::branch(svc.origin(), &QUOTING, false, false);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--rejected", "not worth it"]);
+    svc.link(&setup);
+    svc.accept(env, Call::PostNote, 604);
+    env.run(&["publish", "--pr", "42"]);
+    let sent = summary_sent(env);
+    assert!(sent.contains("`<!-- agent-review id=x -->`"), "{sent}");
+    let mut remote = Remote::new();
+    remote.general("c604", Comment::new(604, "me", &sent));
+    svc.sync(&setup, &remote);
+    svc.accept(env, Call::PostNote, 605);
+    let again = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(
+        again["posted"],
+        json!([]),
+        "an unchanged summary is not posted again"
+    );
+}
+
 #[test]
 fn concurrent_publish_posts_a_pending_comment_once() {
     use std::fs::{self, OpenOptions, Permissions};
