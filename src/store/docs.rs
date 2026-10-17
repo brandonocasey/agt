@@ -49,31 +49,37 @@ impl Store {
 
     /// Every document of `dir` except the ones named in `skip`, in name order.
     pub fn docs<T: DeserializeOwned>(&self, dir: &Path, skip: &[&str]) -> Result<Vec<T>> {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return fail(format!("read {}: {error}", dir.display())),
-        };
-        let mut paths = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(stem) = name.strip_suffix(".json") else {
-                continue;
-            };
-            if name.starts_with('.') || skip.contains(&stem) || !entry.path().is_file() {
-                continue;
-            }
-            paths.push(entry.path());
-        }
-        paths.sort();
         let mut docs = Vec::new();
-        for path in paths {
+        for path in doc_paths(dir, skip)? {
             if let Some(document) = read_document(&path)? {
                 docs.push(self.parse_doc(&path, document)?);
             }
         }
         Ok(docs)
+    }
+
+    /// Like [`Store::docs`], but leaves out documents with fields this build does not know,
+    /// because acting on them would lose those fields. Each is named in the second list.
+    pub fn docs_intact<T: Serialize + DeserializeOwned>(
+        &self,
+        dir: &Path,
+        skip: &[&str],
+    ) -> Result<(Vec<T>, Vec<String>)> {
+        let (mut docs, mut unknown) = (Vec::new(), Vec::new());
+        for path in doc_paths(dir, skip)? {
+            let Some(document) = read_document(&path)? else {
+                continue;
+            };
+            let doc: T = self.parse_doc(&path, document.clone())?;
+            match lost_field_of(&path, &document, &doc)? {
+                Some(field) => unknown.push(format!(
+                    "{} has field {field} that this agt does not know; kept",
+                    path.display()
+                )),
+                None => docs.push(doc),
+            }
+        }
+        Ok((docs, unknown))
     }
 
     /// Runs `change` on the document under its lock and writes the result atomically. A missing
@@ -93,9 +99,7 @@ impl Store {
             Some(document) => {
                 let doc: T = self.parse_doc(&path, document.clone())?;
                 // Writing a file with fields this build does not know would drop them.
-                let written = serde_json::to_value(&doc)
-                    .map_err(ctx(format!("encode {}", path.display())))?;
-                if let Some(field) = lost_field(&document, &written, "") {
+                if let Some(field) = lost_field_of(&path, &document, &doc)? {
                     return fail(format!(
                         "{} has field {field} that this agt does not know; it was probably written by a newer agt, so upgrade agt before changing it",
                         path.display()
@@ -113,7 +117,7 @@ impl Store {
 
     /// Deletes the document when `remove` approves it, re-reading it under its lock first. Gives
     /// up with [`Removal::Busy`] when another process holds the lock.
-    pub fn try_remove_doc_if<T: DeserializeOwned>(
+    pub fn try_remove_doc_if<T: Serialize + DeserializeOwned>(
         &self,
         dir: &Path,
         name: &str,
@@ -128,7 +132,9 @@ impl Store {
         let Some(document) = read_document(&path)? else {
             return Ok(Removal::Kept);
         };
-        if !remove(&self.parse_doc(&path, document)?) {
+        let doc: T = self.parse_doc(&path, document.clone())?;
+        // A document with fields this build does not know is not this build's to delete.
+        if lost_field_of(&path, &document, &doc)?.is_some() || !remove(&doc) {
             return Ok(Removal::Kept);
         }
         remove_with_lock(&path, &lock_path).map(Removal::Removed)
@@ -172,6 +178,39 @@ impl Store {
         }
         serde_json::from_value(document).map_err(ctx(format!("parse {}", path.display())))
     }
+}
+
+/// The `.json` documents of `dir` that are not hidden or in `skip`, in name order.
+fn doc_paths(dir: &Path, skip: &[&str]) -> Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return fail(format!("read {}: {error}", dir.display())),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if name.starts_with('.') || skip.contains(&stem) || !entry.path().is_file() {
+            continue;
+        }
+        paths.push(entry.path());
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// The first field of `document` that `doc` would not write back.
+fn lost_field_of<T: Serialize>(
+    path: &Path,
+    document: &serde_json::Value,
+    doc: &T,
+) -> Result<Option<String>> {
+    let written = serde_json::to_value(doc).map_err(ctx(format!("encode {}", path.display())))?;
+    Ok(lost_field(document, &written, ""))
 }
 
 #[cfg(test)]
@@ -254,5 +293,25 @@ mod tests {
             .unwrap()
             .0;
         assert!(error.contains("field extra"), "{error}");
+    }
+
+    #[test]
+    fn a_document_with_unknown_fields_is_not_removed_or_listed_as_intact() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Issues);
+        let dir = store.repo_dir("t").unwrap();
+        create_dir(&dir).unwrap();
+        fs::write(dir.join("1.json"), r#"{"version":1,"text":"x","extra":1}"#).unwrap();
+        fs::write(dir.join("2.json"), r#"{"version":1,"text":"y"}"#).unwrap();
+        let (docs, unknown) = store.docs_intact::<Note>(&dir, &[]).unwrap();
+        assert_eq!(docs, [note("y")]);
+        assert_eq!(unknown.len(), 1);
+        assert!(unknown[0].contains("field extra"), "{unknown:?}");
+        let kept = store.try_remove_doc_if::<Note>(&dir, "1", |_| true).unwrap();
+        assert_eq!(kept, Removal::Kept);
+        assert!(dir.join("1.json").exists());
+        let gone = store.try_remove_doc_if::<Note>(&dir, "2", |_| true).unwrap();
+        assert!(matches!(gone, Removal::Removed(_)));
+        assert!(!dir.join("2.json").exists());
     }
 }
