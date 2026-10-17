@@ -35,10 +35,6 @@ pub enum Namespace {
         reason = "opened by `agt issue`, which lands in a later phase"
     )]
     Issues,
-    #[allow(
-        dead_code,
-        reason = "opened by `agt task`, which lands in a later phase"
-    )]
     Tasks,
 }
 
@@ -92,6 +88,11 @@ impl Store {
             }
         };
         Ok(Self::at(&base, namespace))
+    }
+
+    /// The namespace directory, for domains whose documents are not review targets.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Opens `namespace` under the state directory `base` (the parent of `agents`).

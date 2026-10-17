@@ -22,6 +22,21 @@ pub fn now() -> Result<String> {
     Ok(format(now_secs()?))
 }
 
+/// The current time as `YYYY-MM-DDTHH:MM:SS.mmmZ`, the form `Date.toISOString()` prints.
+pub fn now_iso_millis() -> Result<String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| Error(format!("system clock is before 1970: {error}")))?;
+    let secs = i64::try_from(elapsed.as_secs())
+        .map_err(|_| Error("system clock is out of range".into()))?;
+    let stamp = format(secs);
+    Ok(format!(
+        "{}.{:03}Z",
+        stamp.trim_end_matches('Z'),
+        elapsed.subsec_millis()
+    ))
+}
+
 pub fn format(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rest = secs.rem_euclid(86_400);

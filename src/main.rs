@@ -4,6 +4,7 @@ mod forge;
 mod git;
 mod review;
 mod store;
+mod task;
 
 use std::process::ExitCode;
 
