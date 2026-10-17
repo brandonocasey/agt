@@ -5,7 +5,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::markers;
 use crate::forge::service::{
-    ApproveCap, Capabilities, Inline, Placement, Position, Request, Service,
+    ApproveCap, Capabilities, Inline, Placement, Position, Request, ReviewService,
 };
 use crate::git::Repo;
 use crate::review::commands::Ctx;
@@ -326,7 +326,7 @@ impl<'a> Planner<'a> {
         })
     }
 
-    fn service(&self) -> &dyn Service {
+    fn service(&self) -> &dyn ReviewService {
         self.connection.service.as_ref()
     }
 

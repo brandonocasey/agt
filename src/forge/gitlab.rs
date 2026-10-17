@@ -5,7 +5,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::service::{
     ApproveCap, Capabilities, Inline, Kind, Method, Pagination, Placement, Position, Posted,
-    ReplyCap, Request, Service, Subject,
+    ReplyCap, Request, ReviewService, ReviewSubject, Service,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Draft, Fetched, PrInfo, ThreadData};
@@ -68,7 +68,7 @@ impl Gitlab {
     }
 }
 
-fn base(subject: Subject) -> String {
+fn base(subject: ReviewSubject) -> String {
     format!(
         "projects/{}/merge_requests/{}",
         forge::encode(subject.repo),
@@ -96,12 +96,14 @@ impl Service for Gitlab {
     fn login(&self) -> Result<String> {
         login(self.transport())
     }
+}
 
+impl ReviewService for Gitlab {
     fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
         find_mr(self.transport(), origin, branch)
     }
 
-    fn fetch(&self, subject: Subject) -> Result<Fetched> {
+    fn fetch(&self, subject: ReviewSubject) -> Result<Fetched> {
         fetch(self.transport(), subject.repo, subject.number)
     }
 
@@ -120,7 +122,7 @@ impl Service for Gitlab {
         place(repo, review, anchor, commit, line)
     }
 
-    fn draft(&self, subject: Subject, body: &str, position: &Position) -> Request {
+    fn draft(&self, subject: ReviewSubject, body: &str, position: &Position) -> Request {
         Request::rest(
             Method::Post,
             format!("{}/draft_notes", base(subject)),
@@ -128,7 +130,7 @@ impl Service for Gitlab {
         )
     }
 
-    fn publish_draft(&self, subject: Subject, draft: &str) -> Request {
+    fn publish_draft(&self, subject: ReviewSubject, draft: &str) -> Request {
         Request::rest(
             Method::Put,
             format!("{}/draft_notes/{draft}/publish", base(subject)),
@@ -136,7 +138,7 @@ impl Service for Gitlab {
         )
     }
 
-    fn thread(&self, subject: Subject, text: &str) -> Request {
+    fn thread(&self, subject: ReviewSubject, text: &str) -> Request {
         Request::rest(
             Method::Post,
             format!("{}/discussions", base(subject)),
@@ -145,7 +147,7 @@ impl Service for Gitlab {
     }
 
     // A note, not a discussion: discussions are resolvable and can block merging.
-    fn note(&self, subject: Subject, text: &str) -> Request {
+    fn note(&self, subject: ReviewSubject, text: &str) -> Request {
         Request::rest(
             Method::Post,
             format!("{}/notes", base(subject)),
@@ -153,7 +155,7 @@ impl Service for Gitlab {
         )
     }
 
-    fn reply(&self, subject: Subject, remote: &RemoteThread, text: &str) -> Request {
+    fn reply(&self, subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request {
         Request::rest(
             Method::Post,
             format!("{}/discussions/{}/notes", base(subject), remote.id),
@@ -161,7 +163,7 @@ impl Service for Gitlab {
         )
     }
 
-    fn resolve(&self, subject: Subject, remote: &RemoteThread, resolved: bool) -> Request {
+    fn resolve(&self, subject: ReviewSubject, remote: &RemoteThread, resolved: bool) -> Request {
         Request::rest(
             Method::Put,
             format!("{}/discussions/{}", base(subject), remote.id),
@@ -169,7 +171,7 @@ impl Service for Gitlab {
         )
     }
 
-    fn approve(&self, subject: Subject, head: &str, _comment: Option<&str>) -> Request {
+    fn approve(&self, subject: ReviewSubject, head: &str, _comment: Option<&str>) -> Request {
         Request::rest(
             Method::Post,
             format!("{}/approve", base(subject)),
@@ -191,7 +193,11 @@ impl Service for Gitlab {
         forge::id(response, "/id")
     }
 
-    fn review_posted(&self, _subject: Subject, _response: &Value) -> Result<(String, Vec<Posted>)> {
+    fn review_posted(
+        &self,
+        _subject: ReviewSubject,
+        _response: &Value,
+    ) -> Result<(String, Vec<Posted>)> {
         Err(Error("GitLab takes no review batches".into()))
     }
 }
@@ -494,8 +500,8 @@ mod tests {
         Gitlab::new(Box::new(replay))
     }
 
-    fn subject() -> Subject<'static> {
-        Subject {
+    fn subject() -> ReviewSubject<'static> {
+        ReviewSubject {
             repo: "group/sub/proj",
             number: 3,
         }

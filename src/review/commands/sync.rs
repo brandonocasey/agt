@@ -10,7 +10,7 @@ use super::{Ctx, Scope};
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
 use crate::forge::anchors;
-use crate::forge::service::{self, Capabilities, Kind, SERVICES, Service, Subject};
+use crate::forge::service::{self, Capabilities, Kind, ReviewService, ReviewSubject, SERVICES};
 use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
 use crate::git::{Repo, split_remote};
 use crate::store::Account;
@@ -34,7 +34,7 @@ struct Summary {
 
 /// The service, authenticated login and PR/MR a `sync` or `publish` works on.
 pub(super) struct Connection {
-    pub service: Box<dyn Service>,
+    pub service: Box<dyn ReviewService>,
     pub host: String,
     pub login: String,
     pub repo: String,
@@ -47,8 +47,8 @@ impl Connection {
         self.service.forge()
     }
 
-    pub fn subject(&self) -> Subject<'_> {
-        Subject {
+    pub fn subject(&self) -> ReviewSubject<'_> {
+        ReviewSubject {
             repo: &self.repo,
             number: self.number,
         }
@@ -178,7 +178,7 @@ fn hosts_file(host: &str) -> Result<Option<Forge>> {
     Ok(Some(entry.service))
 }
 
-fn authenticate(forge: Forge, host: &str) -> Result<(Box<dyn Service>, String)> {
+fn authenticate(forge: Forge, host: &str) -> Result<(Box<dyn ReviewService>, String)> {
     let service = (service::kind(forge).connect)(host);
     let login = service.login()?;
     Ok((service, login))
@@ -497,14 +497,14 @@ fn trusted(comment: &CommentData, login: &str) -> bool {
 struct Trust<'a> {
     login: &'a str,
     caps: &'a Capabilities,
-    service: &'a dyn Service,
+    service: &'a dyn ReviewService,
     sent: HashSet<String>,
     killed: HashSet<String>,
 }
 
 impl<'a> Trust<'a> {
     /// The context of merging into `target`: its sent texts and killed finding ids.
-    fn for_target(target: &Target, login: &'a str, service: &'a dyn Service) -> Self {
+    fn for_target(target: &Target, login: &'a str, service: &'a dyn ReviewService) -> Self {
         let comments = target
             .threads
             .iter()
@@ -528,7 +528,7 @@ impl<'a> Trust<'a> {
     /// have a thread but may not be reused.
     fn new<'t>(
         login: &'a str,
-        service: &'a dyn Service,
+        service: &'a dyn ReviewService,
         sent: impl Iterator<Item = &'t str>,
         killed: HashSet<String>,
     ) -> Self {
@@ -672,7 +672,7 @@ fn imported_comment(comment: CommentData, login: &str) -> Comment {
     )
 }
 
-fn imported_id(service: &dyn Service, data: &ThreadData) -> String {
+fn imported_id(service: &dyn ReviewService, data: &ThreadData) -> String {
     let first = data
         .comments
         .first()
@@ -684,7 +684,7 @@ fn merge(
     target: &mut Target,
     fetched: Fetched,
     login: &str,
-    service: &dyn Service,
+    service: &dyn ReviewService,
     now: &str,
 ) -> Summary {
     let trust = Trust::for_target(target, login, service);

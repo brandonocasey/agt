@@ -1,5 +1,5 @@
-//! The seam between the review workflow and a git hosting service. `sync` and `publish` speak
-//! only to [`Service`] and [`Capabilities`]; everything that is specific to GitHub, GitLab or a
+//! The seam between the workflows and a git hosting service. `sync` and `publish` speak only to
+//! [`ReviewService`] and [`Capabilities`], issue sync to [`IssueService`]; everything that is specific to GitHub, GitLab or a
 //! later service (REST paths, tool flags, GraphQL, response shapes) lives behind it.
 
 use serde_json::Value;
@@ -12,7 +12,19 @@ use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review};
 
 /// The PR/MR a write or read is about.
 #[derive(Clone, Copy)]
-pub struct Subject<'a> {
+pub struct ReviewSubject<'a> {
+    pub repo: &'a str,
+    pub number: u64,
+}
+
+/// The issue a write or read is about. A different type from [`ReviewSubject`], so an issue
+/// number cannot reach a review call.
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "built by `agt issue`, which lands in a later phase"
+)]
+pub struct IssueSubject<'a> {
     pub repo: &'a str,
     pub number: u64,
 }
@@ -213,8 +225,9 @@ pub struct Posted {
     pub body: String,
 }
 
-/// A service behind a CLI or API. Builders are pure; the methods that take `&self` and talk to
-/// the host are `login`, `find_review`, `fetch`, `send` and `review_posted`.
+/// What every service offers, whatever the workflow: who it is, what it can do, how to reach it
+/// and who the user is on it. Builders are pure; the methods that take `&self` and talk to the
+/// host are `login` and `send`.
 pub trait Service {
     fn forge(&self) -> Forge;
     /// For messages: `GitHub`, `GitLab`.
@@ -222,11 +235,6 @@ pub trait Service {
     fn caps(&self) -> &Capabilities;
 
     fn login(&self) -> Result<String>;
-    /// The PR/MR of `branch` of `origin`, in `origin` or its parent: repository and number.
-    fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>>;
-    fn fetch(&self, subject: Subject) -> Result<Fetched>;
-    /// The local id a thread with no agent marker gets, from the host's first comment id.
-    fn imported_id(&self, kind: RemoteKind, first: &str) -> String;
 
     fn transport(&self) -> &dyn Transport;
     /// What a dry run shows for a request.
@@ -237,6 +245,15 @@ pub trait Service {
     fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
         self.transport().send(request)
     }
+}
+
+/// A service as the review workflow uses it. The methods that take `&self` and talk to the host
+/// are `find_review`, `fetch` and `review_posted`.
+pub trait ReviewService: Service {
+    fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>>;
+    fn fetch(&self, subject: ReviewSubject) -> Result<Fetched>;
+    /// The local id a thread with no agent marker gets, from the host's first comment id.
+    fn imported_id(&self, kind: RemoteKind, first: &str) -> String;
 
     /// Where `anchor`, at `line` of `commit`, goes in the PR/MR diff, or `None` when it does
     /// not fit.
@@ -252,7 +269,7 @@ pub trait Service {
     /// [`Inline::ReviewBatch`].
     fn review_batch(
         &self,
-        _subject: Subject,
+        _subject: ReviewSubject,
         _commit: &str,
         _summary: &str,
         _comments: &[(Position, String)],
@@ -260,23 +277,23 @@ pub trait Service {
         unreachable!("{} takes no review batches", self.name())
     }
     /// A draft note holding an in-diff comment. Only for [`Inline::DraftThenPublish`].
-    fn draft(&self, _subject: Subject, _body: &str, _position: &Position) -> Request {
+    fn draft(&self, _subject: ReviewSubject, _body: &str, _position: &Position) -> Request {
         unreachable!("{} takes no draft notes", self.name())
     }
-    fn publish_draft(&self, _subject: Subject, _draft: &str) -> Request {
+    fn publish_draft(&self, _subject: ReviewSubject, _draft: &str) -> Request {
         unreachable!("{} takes no draft notes", self.name())
     }
     /// A new general thread.
-    fn thread(&self, subject: Subject, text: &str) -> Request;
+    fn thread(&self, subject: ReviewSubject, text: &str) -> Request;
     /// A general comment that does not block merging.
-    fn note(&self, subject: Subject, text: &str) -> Request;
+    fn note(&self, subject: ReviewSubject, text: &str) -> Request;
     /// A native reply; only for kinds [`Capabilities::replies_natively`] accepts.
-    fn reply(&self, subject: Subject, remote: &RemoteThread, text: &str) -> Request;
+    fn reply(&self, subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request;
     /// Only for threads of a service with `caps().resolve`; `resolved == false` reopens.
-    fn resolve(&self, subject: Subject, remote: &RemoteThread, resolved: bool) -> Request;
+    fn resolve(&self, subject: ReviewSubject, remote: &RemoteThread, resolved: bool) -> Request;
     /// The formal approval of `head`; the review carries `comment` when the service approves
     /// by review.
-    fn approve(&self, subject: Subject, head: &str, comment: Option<&str>) -> Request;
+    fn approve(&self, subject: ReviewSubject, head: &str, comment: Option<&str>) -> Request;
 
     /// The id and URL of a comment from the response to a thread, reply, note or approval.
     fn comment_created(
@@ -286,7 +303,23 @@ pub trait Service {
     ) -> Option<(String, Option<String>)>;
     fn draft_created(&self, response: &Value) -> Option<String>;
     /// The id of a posted review and the comments it holds.
-    fn review_posted(&self, subject: Subject, response: &Value) -> Result<(String, Vec<Posted>)>;
+    fn review_posted(
+        &self,
+        subject: ReviewSubject,
+        response: &Value,
+    ) -> Result<(String, Vec<Posted>)>;
+}
+
+/// A service as issue sync uses it. Builders are pure; phase 5 adds listing and fetching.
+#[allow(
+    dead_code,
+    reason = "implemented by the services once `agt issue` lands"
+)]
+pub trait IssueService: Service {
+    /// A new comment on the issue.
+    fn comment(&self, subject: IssueSubject, text: &str) -> Request;
+    /// Opens or closes the issue.
+    fn set_state(&self, subject: IssueSubject, open: bool) -> Request;
 }
 
 /// One registered service: what is needed to find it for a host and build it. Adding a service
@@ -303,7 +336,7 @@ pub struct Kind {
     pub configured: fn(&str) -> bool,
     /// The service's CLI is logged in to this host.
     pub probe: fn(&str) -> bool,
-    pub connect: fn(&str) -> Box<dyn Service>,
+    pub connect: fn(&str) -> Box<dyn ReviewService>,
 }
 
 pub const SERVICES: &[Kind] = &[crate::forge::github::KIND, crate::forge::gitlab::KIND];

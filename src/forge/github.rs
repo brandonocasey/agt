@@ -5,7 +5,7 @@ use crate::core::error::{Error, Result, fail};
 use crate::forge::anchors;
 use crate::forge::service::{
     ApproveCap, Capabilities, Inline, Kind, Method, Pagination, Placement, Position, Posted,
-    ReplyCap, Request, Service, Subject, Var,
+    ReplyCap, Request, ReviewService, ReviewSubject, Service, Var,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Fetched, PrInfo, ThreadData};
@@ -69,15 +69,15 @@ impl Github {
     }
 }
 
-fn base(subject: Subject) -> String {
+fn base(subject: ReviewSubject) -> String {
     format!("repos/{}", subject.repo)
 }
 
-fn comments_path(subject: Subject) -> String {
+fn comments_path(subject: ReviewSubject) -> String {
     format!("{}/issues/{}/comments", base(subject), subject.number)
 }
 
-fn reviews_path(subject: Subject) -> String {
+fn reviews_path(subject: ReviewSubject) -> String {
     format!("{}/pulls/{}/reviews", base(subject), subject.number)
 }
 
@@ -101,12 +101,14 @@ impl Service for Github {
     fn login(&self) -> Result<String> {
         login(self.transport())
     }
+}
 
+impl ReviewService for Github {
     fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
         find_pr(self.transport(), origin, branch)
     }
 
-    fn fetch(&self, subject: Subject) -> Result<Fetched> {
+    fn fetch(&self, subject: ReviewSubject) -> Result<Fetched> {
         fetch(self.transport(), subject.repo, subject.number)
     }
 
@@ -131,7 +133,7 @@ impl Service for Github {
 
     fn review_batch(
         &self,
-        subject: Subject,
+        subject: ReviewSubject,
         commit: &str,
         summary: &str,
         comments: &[(Position, String)],
@@ -156,11 +158,11 @@ impl Service for Github {
         )
     }
 
-    fn thread(&self, subject: Subject, text: &str) -> Request {
+    fn thread(&self, subject: ReviewSubject, text: &str) -> Request {
         self.note(subject, text)
     }
 
-    fn note(&self, subject: Subject, text: &str) -> Request {
+    fn note(&self, subject: ReviewSubject, text: &str) -> Request {
         Request::rest(
             Method::Post,
             comments_path(subject),
@@ -168,7 +170,7 @@ impl Service for Github {
         )
     }
 
-    fn reply(&self, _subject: Subject, remote: &RemoteThread, text: &str) -> Request {
+    fn reply(&self, _subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request {
         Request::graphql(vec![
             Var::text("threadId", remote.id.clone()),
             Var::text("body", text),
@@ -176,7 +178,7 @@ impl Service for Github {
         ])
     }
 
-    fn resolve(&self, _subject: Subject, remote: &RemoteThread, resolved: bool) -> Request {
+    fn resolve(&self, _subject: ReviewSubject, remote: &RemoteThread, resolved: bool) -> Request {
         let mutation = if resolved {
             RESOLVE_MUTATION
         } else {
@@ -188,7 +190,7 @@ impl Service for Github {
         ])
     }
 
-    fn approve(&self, subject: Subject, head: &str, comment: Option<&str>) -> Request {
+    fn approve(&self, subject: ReviewSubject, head: &str, comment: Option<&str>) -> Request {
         let mut body = json!({ "commit_id": head, "event": "APPROVE" });
         if let Some(comment) = comment {
             body["body"] = json!(comment);
@@ -215,7 +217,11 @@ impl Service for Github {
         None
     }
 
-    fn review_posted(&self, subject: Subject, response: &Value) -> Result<(String, Vec<Posted>)> {
+    fn review_posted(
+        &self,
+        subject: ReviewSubject,
+        response: &Value,
+    ) -> Result<(String, Vec<Posted>)> {
         let review = forge::id(response, "/id")
             .ok_or_else(|| Error("GitHub returned no review id".into()))?;
         let path = format!("{}/{review}/comments", reviews_path(subject));
@@ -618,8 +624,8 @@ mod tests {
         Github::new(Box::new(replay))
     }
 
-    fn subject() -> Subject<'static> {
-        Subject {
+    fn subject() -> ReviewSubject<'static> {
+        ReviewSubject {
             repo: "me/repo",
             number: 42,
         }
