@@ -243,7 +243,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         )?,
         Command::Prune { dry_run, .. } => {
             let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, dry_run)?;
-            json!({ "dry_run": dry_run, "pruned": pruned })
+            json!({ "dry_run": dry_run, "pruned": pruned.pruned, "skipped": pruned.skipped })
         }
     };
     Ok(Output::Json(value))

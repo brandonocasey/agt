@@ -263,6 +263,18 @@ impl Store {
     /// each file left out: one that cannot be read or parsed, or that holds fields this agt does
     /// not know. One bad file does not hide the others.
     pub fn targets_intact(&self, dir: &Path) -> Result<(Vec<Target>, Vec<String>)> {
+        let (targets, left_out) = self.targets_intact_by_key(dir)?;
+        Ok((
+            targets,
+            left_out.into_iter().map(|(_, warning)| warning).collect(),
+        ))
+    }
+
+    /// Like [`Store::targets_intact`], with each file left out as its key and warning.
+    pub fn targets_intact_by_key(
+        &self,
+        dir: &Path,
+    ) -> Result<(Vec<Target>, Vec<(String, String)>)> {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -279,63 +291,82 @@ impl Store {
                 continue;
             }
             let path = entry.path();
+            let key = name.trim_end_matches(".json").to_owned();
             match read_target_intact(&path, self.schema) {
                 Ok(Some(Ok(target))) => targets.push(target),
-                Ok(Some(Err(field))) => warnings.push(format!(
-                    "{} has field {field} that this agt does not know; kept",
-                    path.display()
+                Ok(Some(Err(field))) => warnings.push((
+                    key,
+                    format!(
+                        "{} has field {field} that this agt does not know; kept",
+                        path.display()
+                    ),
                 )),
                 Ok(None) => {}
-                Err(error) => warnings.push(format!("{error}; kept")),
+                Err(error) => warnings.push((key, format!("{error}; kept"))),
             }
         }
         targets.sort_by(|a, b| a.key.cmp(&b.key));
         Ok((targets, warnings))
     }
 
-    /// Every directory under the store root that holds at least one target file.
-    pub fn repo_dirs(&self) -> Result<Vec<PathBuf>> {
-        self.find_repo_dirs(None)
-    }
-
-    /// Like [`Store::repo_dirs`], but a directory or file that cannot be read is skipped with a
+    /// Every directory under the store root that holds at least one target file. A directory or file that cannot be read is skipped with a
     /// warning instead of ending the search.
     pub fn repo_dirs_lenient(&self) -> (Vec<PathBuf>, Vec<String>) {
         let mut warnings = Vec::new();
-        let found = self.find_repo_dirs(Some(&mut warnings)).unwrap_or_default();
+        let found = self
+            .find_repo_dirs(Some(&mut warnings))
+            .unwrap_or_default();
         (found, warnings)
     }
 
+    /// With `warnings`, a problem is recorded and the search goes on; without, it ends the search.
     fn find_repo_dirs(&self, mut warnings: Option<&mut Vec<String>>) -> Result<Vec<PathBuf>> {
         let mut found = Vec::new();
         let mut pending = vec![self.root.clone()];
+        let note = |warnings: &mut Option<&mut Vec<String>>, message: String| match warnings
+            .as_deref_mut()
+        {
+            Some(warnings) => {
+                warnings.push(message);
+                Ok(())
+            }
+            None => fail(message),
+        };
         while let Some(dir) = pending.pop() {
             let entries = match fs::read_dir(&dir) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
                 Err(error) => {
-                    let message = format!("read {}: {error}", dir.display());
-                    match warnings.as_deref_mut() {
-                        Some(warnings) => warnings.push(message),
-                        None => return fail(message),
-                    }
+                    note(&mut warnings, format!("read {}: {error}", dir.display()))?;
                     continue;
                 }
             };
             let mut has_target = false;
             for entry in entries {
-                let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
-                let kind = entry
-                    .file_type()
-                    .map_err(ctx(format!("stat {}", entry.path().display())))?;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        note(&mut warnings, format!("read {}: {error}", dir.display()))?;
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let kind = match entry.file_type() {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        note(&mut warnings, format!("stat {}: {error}", path.display()))?;
+                        continue;
+                    }
+                };
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if kind.is_dir() {
-                    pending.push(entry.path());
+                    pending.push(path);
                 } else if kind.is_file() && !name.starts_with('.') && name.ends_with(".json") {
-                    match (is_target_file(&entry.path()), warnings.as_deref_mut()) {
-                        (Ok(is_target), _) => has_target |= is_target,
-                        (Err(error), Some(warnings)) => warnings.push(error.to_string()),
-                        (Err(error), None) => return Err(error),
+                    match is_target_file(&path) {
+                        Ok(is_target) => has_target |= is_target,
+                        // Lenient: the caller reads the directory and warns about this file once.
+                        Err(_) if warnings.is_some() => has_target = true,
+                        Err(error) => return Err(error),
                     }
                 }
             }

@@ -96,7 +96,7 @@ pub(super) fn run_end(
         let spent = run_spend(run);
         Ok((now.to_owned(), adoption.apply(target), spent))
     })?;
-    let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?;
+    let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?.pruned;
     Ok(json!({
         "target": scope.key,
         "run": run_id,

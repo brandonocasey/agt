@@ -330,7 +330,7 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
             login: connection.login.clone(),
         },
     )?;
-    let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?;
+    let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?.pruned;
     Ok(json!({
         "target": key,
         "renamed_from": renamed.then_some(from),
