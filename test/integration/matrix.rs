@@ -7,7 +7,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::forge::{Call, Comment, FakeService, Remote};
+use crate::support::forge::{Call, Comment, FakeService, Remote, assert_read_only};
 use crate::support::scenario::{
     Setup, ids, kinds, local_changes, marked, open_ids, skipped_items, thread, write_starting,
     write_text, writes_for,
@@ -36,6 +36,7 @@ macro_rules! matrix {
 }
 
 matrix!(
+    sync_is_read_only_and_a_second_sync_imports_nothing,
     publish_posts_every_payload_once,
     publish_refuses_a_pr_by_someone_else,
     not_own_publish_posts_only_replies_and_resolves_on_others_threads,
@@ -94,6 +95,30 @@ fn dry_run(env: &Env, svc: Svc, extra: &[&str]) -> Value {
 
 fn sync(env: &Env, svc: Svc) -> Value {
     env.run(&["sync", "--pr", svc.number()])
+}
+
+/// A sync adopts the PR's key for the branch's, reads and never writes, and finds nothing new
+/// the second time.
+fn sync_is_read_only_and_a_second_sync_imports_nothing(svc: Svc) {
+    let setup = Setup::synced_branch(svc.rich_origin());
+    let env = &setup.env;
+    let branch_key = env.run(&["status", "--full"])["target"].clone();
+    svc.rich_sync(&setup);
+    let envs = svc.rich_env();
+
+    let synced = env.run_with(&["sync"], None, &envs);
+    assert_eq!(synced["target"], svc.target());
+    assert_eq!(synced["renamed_from"], branch_key);
+    assert_eq!(synced["login"], "me");
+    assert_read_only(svc, env);
+    let status = env.run(&["status", "--full"]);
+    assert_eq!(status["target"], svc.target());
+    assert_eq!(status["runs"][0]["id"], setup.run.as_str());
+
+    let again = env.run_with(&["sync"], None, &envs);
+    assert_eq!(again["threads"]["imported"], 0);
+    assert_eq!(again["threads"]["total"], synced["threads"]["total"]);
+    assert!(again["renamed_from"].is_null());
 }
 
 fn publish_posts_every_payload_once(svc: Svc) {

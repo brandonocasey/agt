@@ -225,6 +225,13 @@ pub trait FakeService {
     /// Registers `remote` for the `call`-th sync only (from 1); `None` is every sync.
     fn sync_with(&self, setup: &Setup, call: Option<usize>, remote: &Remote);
 
+    /// The `origin` of a repository whose PR the rich sync fixtures describe.
+    fn rich_origin(&self) -> &'static str;
+    /// The environment a sync of that repository needs to find its host's service.
+    fn rich_env(&self) -> Vec<(&'static str, &'static str)>;
+    /// Registers the service's contract fixtures for a sync of a branch from
+    /// [`Setup::synced_branch`]: several pages, every kind of comment, and a few it must drop.
+    fn rich_sync(&self, setup: &Setup);
     /// Whether the arguments of a fake call only read from the host.
     fn is_read(&self, args: &str) -> bool;
     /// The arguments the fake sees for `call`.

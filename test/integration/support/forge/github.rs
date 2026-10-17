@@ -198,6 +198,18 @@ impl FakeService for Github {
         }
     }
 
+    fn rich_origin(&self) -> &'static str {
+        ORIGIN
+    }
+
+    fn rich_env(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
+
+    fn rich_sync(&self, setup: &Setup) {
+        sync_fixtures(setup);
+    }
+
     fn is_read(&self, args: &str) -> bool {
         args.starts_with("api --method GET ")
             || (args.starts_with("api graphql ") && args.contains("query="))

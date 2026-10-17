@@ -180,6 +180,19 @@ impl FakeService for Gitlab {
         }
     }
 
+    fn rich_origin(&self) -> &'static str {
+        "git@gitlab.example.com:group/sub/proj.git"
+    }
+
+    fn rich_env(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("GITLAB_HOST", "gitlab.example.com")]
+    }
+
+    fn rich_sync(&self, setup: &Setup) {
+        let old = setup.env.git(&["rev-parse", "HEAD~1"]);
+        sync_fixtures(setup, &old);
+    }
+
     fn is_read(&self, args: &str) -> bool {
         args.starts_with("api -X GET ")
     }
