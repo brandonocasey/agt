@@ -170,7 +170,16 @@ fn findings_table(text: &mut String, target: &Target, findings: &[&Thread]) {
         let place = match url {
             Some(url) => format!("[{}]({url})", cell(&place)),
             None if posted => cell(&place),
-            None if thread.held => format!("{}, not posted", cell(&place)),
+            // A held question waits for its answer; a finding withdrawn before it was posted
+            // has nothing to tell the host.
+            None if thread.held
+                || thread
+                    .resolution
+                    .as_ref()
+                    .is_some_and(Resolution::withdrawn) =>
+            {
+                format!("{}, not posted", cell(&place))
+            }
             None => {
                 unposted += 1;
                 let mark = superscript(unposted);
