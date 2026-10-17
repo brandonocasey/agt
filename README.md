@@ -124,8 +124,8 @@ takes `--reviewer`; `[]` ends a clean pass. Output lists the new ids under
 "duration_ms": 61000, "tool_uses": 9}]}`, which also stores what each reviewer
 spent (as its harness reports it) on the pass. `pass end --lock` freezes the pass for a blind review:
 `finding add` to it then fails. `finding kill` moves a surviving finding to its pass's killed list, also
-on a locked pass; a finding that is posted or being posted to the PR/MR is
-resolved as `stale` instead. `run end` closes the run, records commit patch-ids
+on a locked pass; `finding kill` refuses a finding that is posted or being posted to the
+PR/MR, so resolve it with `--triage stale` instead. `run end` closes the run, records commit patch-ids
 for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
 `HEAD` (on a range or commit target, its end or `--head <rev>`, which MUST
 descend from the end) as the run's `repaired_head` (commits after the last pass
@@ -502,7 +502,10 @@ Files live under `$XDG_STATE_HOME/agents/reviews/` (default
 common directory path). Each target is one JSON file, mode 0600, in a 0700
 directory. Writes take a per-target lock (`.<key>.lock`), write a temporary
 file in the same directory, fsync it and rename it over the target. Symbolic
-links are refused. After `sync`, the key is `gh-<number>` or `gl-<iid>`.
+links are refused. After `sync`, the key is `gh-<number>` or `gl-<iid>`. Other JSON
+documents in a repository directory (their `kind` is not `branch`, `range` or `commit`)
+are ignored. A file with a newer `version` than the binary supports is refused with a
+message to upgrade, and so is writing a file that holds fields the binary does not know.
 
 Target file:
 

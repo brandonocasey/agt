@@ -7,8 +7,9 @@ use serde_json::Value;
 use crate::error::{Error, Result, ctx, fail};
 use crate::model::{RemoteThread, ReviewState};
 
-/// Runs `gh` or `glab` and parses their JSON output. Callers MUST pass only read requests:
-/// `--method GET` / `-X GET` REST calls and GraphQL queries, never mutations.
+/// Runs `gh` or `glab` and parses their JSON output. The read methods (`json`, `items`, `text`)
+/// take only read requests (`--method GET` / `-X GET` REST calls and GraphQL queries, never
+/// mutations); `send` is the one write call, used by `publish`.
 pub struct Client {
     program: OsString,
     name: &'static str,

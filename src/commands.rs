@@ -548,8 +548,6 @@ impl Ctx {
         })
     }
 
-    /// Returns the review base and the commit that names the target. On the default branch
-    /// itself the merge-base is the head, so the root commit names the target instead.
     /// The scope at `--head`: a range or commit target's later head, such as its fix, which
     /// MUST descend from the target's end.
     fn scope_at(&self, rev: Option<&str>) -> Result<Scope> {
@@ -585,6 +583,8 @@ impl Ctx {
         Ok(default == format!("refs/heads/{branch}"))
     }
 
+    /// Returns the review base and the commit that names the target. On the default branch
+    /// itself the merge-base is the head, so the root commit names the target instead.
     fn branch_base(&self, branch: &str, head: &str) -> Result<(String, String)> {
         let default = self
             .repo
