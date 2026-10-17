@@ -97,12 +97,14 @@ pub fn run<S: AsRef<OsStr>>(program: &OsStr, args: &[S], options: &Options) -> R
     let mut stopped = false;
     let mut last_running = None;
     let status = loop {
+        // Read the time first: the child is known to be running at any time before a
+        // `try_wait` that finds it still running.
+        let now = Instant::now();
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
             Err(_) => break None,
         }
-        let now = Instant::now();
         last_running = Some(now);
         let cancelled = options
             .cancel

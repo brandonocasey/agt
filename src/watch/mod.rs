@@ -91,7 +91,7 @@ impl Runner for Tool {
             return CmdResult::deadline();
         }
         let remaining = self.deadline - now;
-        let timeout = remaining.min(QUERY_TIMEOUT).max(Duration::from_millis(1));
+        let timeout = remaining.min(QUERY_TIMEOUT);
         let run = proc::run(
             &self.program,
             args,
@@ -297,7 +297,10 @@ fn watch(options: &Options) -> u8 {
         }
         let remaining = deadline
             .saturating_duration_since(Instant::now())
-            .as_millis();
+            // Round up, so the last nap ends past the deadline and the loop stops there
+            // instead of starting a tool run with under a millisecond left.
+            .as_micros()
+            .div_ceil(1000);
         let delay = u128::from(backoff_delay(
             attempt,
             options.interval_ms,
