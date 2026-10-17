@@ -222,8 +222,14 @@ pub(super) fn record_head(run: &Run) -> String {
 }
 
 /// The body of the review that carries the in-diff findings `threads` of `commit`:
-/// `**🔍 Agent review rv-rtom** of f48de58: 1 of 2 findings is inline here. ...`.
-pub(super) fn review_body(target: &Target, commit: &str, threads: &[&Thread]) -> String {
+/// `**🔍 Agent review rv-rtom** of f48de58: 1 of 2 findings is inline here. ...`. `summary`
+/// says whether a summary comment lists the rest.
+pub(super) fn review_body(
+    target: &Target,
+    commit: &str,
+    threads: &[&Thread],
+    summary: bool,
+) -> String {
     let mut passes: Vec<(&str, &str)> = threads
         .iter()
         .filter_map(|thread| thread.finding.as_ref())
@@ -282,15 +288,15 @@ pub(super) fn review_body(target: &Target, commit: &str, threads: &[&Thread]) ->
         }
         (here, total) => {
             let verb = if here == 1 { "is" } else { "are" };
-            let all = if total == 2 {
-                "both".to_owned()
-            } else {
-                format!("all {total}")
-            };
-            let _ = write!(
-                text,
-                "{here} of {total} findings {verb} inline here. The summary comment lists {all}."
-            );
+            let _ = write!(text, "{here} of {total} findings {verb} inline here.");
+            if summary {
+                let all = if total == 2 {
+                    "both".to_owned()
+                } else {
+                    format!("all {total}")
+                };
+                let _ = write!(text, " The summary comment lists {all}.");
+            }
         }
     }
     let _ = write!(

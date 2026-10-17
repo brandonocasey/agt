@@ -681,6 +681,10 @@ fn not_own_findings_posts_findings_and_my_threads_but_no_record(svc: Svc) {
     assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
     let skipped = dry["skipped"].to_string();
     assert!(skipped.contains("\"summary\""), "{dry}");
+    assert!(
+        !dry.to_string().contains("The summary comment lists"),
+        "{dry}"
+    );
 }
 
 fn only_limits_publish_to_named_threads(svc: Svc) {
