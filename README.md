@@ -1,6 +1,6 @@
 # agt
 
-`agt` is one command-line binary for coding agents. `agt review` keeps PR/MR-style code review threads on your machine, one store
+`agt` is one command-line binary for coding agents. `agt issue` syncs GitHub and GitLab issues (see [Issues](#issues)). `agt review` keeps PR/MR-style code review threads on your machine, one store
 per repository. It records review runs and passes, each reviewer's model,
 effort, harness and harness version, the findings reviewers kept or killed, and
 line-anchored threads with replies and resolutions. It works without a PR or
@@ -739,6 +739,82 @@ after SIGINT or SIGTERM. `AGT_GH_BIN` and `AGT_GLAB_BIN` (or `AGENT_WATCH_GH_BIN
   pipeline finishes, then lists its failed jobs. With an MR it first waits for a pipeline on the MR's
   newest commit or on `--sha`; pass `--sha "$(git rev-parse HEAD)"` right after a push. Exit status:
   0 success, 1 failed, canceled, skipped or manual, 2 usage or API error, 3 timeout.
+
+## Issues
+
+`agt issue` keeps GitHub and GitLab issues on your machine. Reads are local and
+work offline. `sync` is the only command that reads a host; every write is queued
+in the local copy and goes out only on `push`, and only for trackers with
+`push = true`. Nothing deletes an issue or a comment or edits someone else's
+comment.
+
+Trackers are listed in `$XDG_CONFIG_HOME/agt/config.toml` (`~/.config` when unset).
+A missing file means no trackers; an unknown key or bad value is an error that
+names the file and the key.
+
+```toml
+[[issues.tracker]]
+forge = "github"            # or "gitlab"
+host = "github.com"
+repo = "owner/repo"         # GitLab: the full project path
+scope = "involved"          # involved (default) | assigned | all
+since_days = 90             # first sync only; later syncs list from the watermark
+push = false                # writes stay local until this is true
+```
+
+`involved` is what you created, are assigned or (GitHub only) are mentioned in; GitLab
+has no mentions filter, so there it is created or assigned. Credentials come from
+`gh` and `glab`; the config holds none. Issues are stored per tracker under
+`$XDG_STATE_HOME/agents/issues/<tracker>/<number>.json`, where the tracker is
+`gh-<host>-<owner>-<repo>` or `gl-<host>-<group>-<project>`. A tracker is named by
+that key or by `owner/repo` (`--tracker`, global to `agt issue`); an issue by
+`owner/repo#12`, `#12`, `12` or `local-xxxxxx` (not yet created on the host).
+
+| Command | What it does |
+| --- | --- |
+| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Skips an issue whose `updated_at` is unchanged. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts` per tracker. |
+| `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending]` | Summaries; `pending` is whether anything is queued for the issue. |
+| `show <key>` | The issue, its comments, links, notes, what is queued (`queued`), conflicts and errors. |
+| `search <text>` | Case-insensitive match over title, body, comments and notes; `matched` says where. |
+| `status` | Per tracker: counts, issues with queued changes, conflicts, errors, `push` and the last sync. |
+| `find --pr <n\|url>` / `find --branch <name>` / `--title <text>` | Issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which. |
+| `link <key> --pr\|--issue\|--review\|--task\|--branch <value>` | A local link, never sent. |
+| `note <key> <text>` | A private note, never sent. |
+
+Queued writes (`<text>` is read from stdin when it is `-`):
+
+| Command | Queues |
+| --- | --- |
+| `comment <key> <text>` | A comment. |
+| `close <key> [--reason completed\|not-planned]` / `reopen <key>` | A state change. A reason is GitHub only. |
+| `assign <key> <login>...` / `unassign ...` | Assignees. GitLab takes one assignee here. |
+| `label add\|remove <key> <label>...` | Labels. |
+| `link-pr <key> --pr <n\|url>` | A comment `Linked: <url>` (the host then cross-references it) and a local link. Sent once. |
+| `create --title T [--body B] [--label L]... [--assignee A]...` | A new issue under a `local-` key. With several trackers pass `--tracker`. |
+| `edit <key> [--title T] [--body B]` | A new title or body. |
+
+`push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
+one update with every changed field, then each comment. `--dry-run` prints the exact
+`gh`/`glab` argument list and body of every write (`writes`; a real run lists `sent`)
+and reads only. A tracker with `push = false` is skipped, or an error when named with
+`--tracker`. An issue with nothing queued costs no call.
+
+Before sending, `push` re-fetches the issue and merges three ways against the last
+synced copy (`base`). A field only you changed is sent, one only the host changed is
+taken. A title, body or state both sides changed to different values is a conflict:
+the host's value wins, `push` reports it under `conflicts` (and `status` shows it),
+and `push --force` sends your value on top. Labels and assignees merge as additions
+and removals. After a send `base` moves to what was sent, so a second `push` sends
+nothing.
+
+A comment is marked `posting` with an attempt id before it is sent, and carries a
+hidden `<!-- agent-review id=<id> attempt=<attempt> -->` marker. If the response is
+lost, the next `sync` or `push` finds the comment by that marker and records it
+instead of sending it again. A create works the same way (the marker is in the body;
+`sync` or `push` then gives the local issue its number). A send the host refuses (a
+4xx other than a timeout or rate limit) puts the comment back in the queue with the
+error kept under `errors`; any other failure leaves it marked as possibly sent. A
+failure does not make `push` exit non-zero: it is listed under `failed`.
 
 ## Testing
 
