@@ -1,0 +1,5 @@
+3 total in 1 sessions
+count  sessions        last  group                  example
+-----  --------  ----------  ---------------------  -----------------------------------------------------
+2             1  2026-03-01  user rejected          Bash: git status
+1             1  2026-03-01  auto mode: [external]  mcp__slack__post: {"text": "h\u00e9llo \ud83d\ude00"}

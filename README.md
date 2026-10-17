@@ -859,6 +859,44 @@ after SIGINT or SIGTERM. `AGT_GH_BIN` and `AGT_GLAB_BIN` replace the tools.
   newest commit or on `--sha`; pass `--sha "$(git rev-parse HEAD)"` right after a push. Exit status:
   0 success, 1 failed, canceled, skipped or manual, 2 usage or API error, 3 timeout.
 
+## Sessions
+
+`agt sessions` reports on Claude Code transcripts (`~/.claude/projects`, `~/.claude-*/projects`)
+and Codex rollouts (`~/.codex/sessions`, `~/.codex/archived_sessions`). It replaces the
+`agent-sessions` script: for Claude Code transcripts it prints byte for byte what the script
+printed, and the integration tests compare against the script's output.
+
+```sh
+agt sessions cost [--by agent,model,project,session,file,harness] [--json] [FILE...]
+agt sessions agents          # per agent type: runs, start and peak context, calls, USD
+agt sessions tools           # tool calls and the share of cost their results carry
+agt sessions cache-gaps [--gap MIN]
+agt sessions errors          # tool errors grouped by tool and message
+agt sessions denials         # permission denials grouped by source and reason
+agt sessions friction [--tsv [--width N]]
+```
+
+Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `--scratch`
+(scratch and probe projects are skipped otherwise), `--root DIR` (repeatable), `--top N` (25) and
+`--harness all|claude|codex`. A root named with `--root` can hold either harness; a file whose
+first line is a Codex `session_meta` is read as Codex. Prices come from
+`~/.config/agents/model-prices.json`, or the file `AGT_PRICES` names; models it does not list are
+reported as unpriced.
+
+Codex rollouts are read as Claude Code records: each billed `token_count` is one call, with
+`input_tokens` net of cached tokens; shell calls (`exec`, `exec_command`, `shell`) count as `Bash`;
+an output starting `Script failed` or `aborted by user` is an error; injected `AGENTS.md` and
+`<environment_context>` text is not a user message. A subagent rollout is grouped under its role
+and its parent's session.
+
+## Wait
+
+`agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every
+`--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. It replaces the
+`agent-wait` script. Agents run it in the background so they wake within the prompt cache's five
+minutes to look at a long job. Exit status: 0 the check passed (`agt wait: done after Ns`), 3
+`--max` passed first, 2 usage.
+
 ## Issues
 
 `agt issue` keeps GitHub and GitLab issues on your machine. Reads are local and

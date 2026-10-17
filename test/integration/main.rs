@@ -8,9 +8,11 @@ mod issue_read;
 mod matrix;
 mod publish;
 mod reviewed;
+mod sessions;
 mod support;
 mod sync;
 mod task;
+mod wait;
 mod watch;
 
 use assert_cmd::Command;

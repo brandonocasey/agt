@@ -6,8 +6,10 @@ mod forge;
 mod git;
 mod issue;
 mod review;
+mod sessions;
 mod store;
 mod task;
+mod wait;
 mod watch;
 
 use std::process::ExitCode;

@@ -1,0 +1,18 @@
+Gaps over 5 min: 2; cache expired in 2; rewritten 30.0k tokens, about $0.19 (as 5m writes)
+
+Rewrite tokens by agent and project:
+agent  project    rewrite tok
+-----  ---------  -----------
+main   -repo-app        30.0k
+
+Tool running before the expired gap:
+count  tool
+-----  ------------------
+1      mcp__slack__post:
+1      Bash: git status
+
+Largest rewrites:
+time              gap min  rewrite tok  agent  project    session
+----------------  -------  -----------  -----  ---------  --------
+2026-03-01T10:20       20        30.0k  main   -repo-app  aaaaaaaa
+2026-03-01T10:40       20            0  main   -repo-app  aaaaaaaa

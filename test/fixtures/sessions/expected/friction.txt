@@ -1,0 +1,23 @@
+13 user messages since 2026-02-15
+
+Interrupts and corrections:
+7 total in 4 sessions
+count  sessions        last  group                 example
+-----  --------  ----------  --------------------  ----------------------
+3             3  2026-03-04  correction: did you   did you check the logs
+2             2  2026-03-03  correction: continue  continue
+1             1  2026-03-01  interrupt (tool use)  -repo-app
+1             1  2026-03-01  correction: again     run the tests again?
+
+Short replies (3 words or fewer), top 20:
+count  sessions        last  reply
+-----  --------  ----------  -------------
+4             4  2026-03-04  ok
+2             2  2026-03-03  continue
+1             1  2026-03-01  /review --fix
+
+Same prompt in 3 or more sessions:
+count  sessions        last  prompt
+-----  --------  ----------  ----------------------
+4             4  2026-03-04  ok
+3             3  2026-03-04  did you check the logs

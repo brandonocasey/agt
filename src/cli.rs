@@ -6,7 +6,9 @@ use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::issue;
 use crate::review;
+use crate::sessions;
 use crate::task;
+use crate::wait;
 use crate::watch;
 
 /// Tools for coding agents.
@@ -31,6 +33,10 @@ enum Command {
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
     Cleanup(cleanup::Cli),
+    /// Cost, context, tool, cache, error and friction reports from agent transcripts.
+    Sessions(sessions::Cli),
+    /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
+    Wait(wait::Cli),
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -41,5 +47,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
         Command::Cleanup(args) => cleanup::run(args),
+        Command::Sessions(args) => sessions::run(args),
+        Command::Wait(args) => wait::run(args),
     }
 }

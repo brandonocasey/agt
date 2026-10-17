@@ -1,0 +1,12 @@
+Total $2.12 since 2026-02-15
+agent     model              project     session   calls      in  write   read  out   USD     %  write%  read%  out%
+--------  -----------------  ----------  --------  -----  ------  -----  -----  ---  ----  ----  ------  -----  ----
+main      claude-sonnet-4-6  -repo-app   aaaaaaaa      2  250.0k      0   1.0k   20  1.50  70.9       0      0     0
+main      claude-opus-4-8    -repo-app   aaaaaaaa      3      22  51.0k  20.1k  470  0.49  23.3      82     12     5
+explorer  claude-sonnet-4-6  -repo-app   aaaaaaaa      4      12  20.1k  16.0k  570  0.09   4.2      85      5    10
+main      claude-sonnet-4-6  -repo-web   bbbbbbbb      1       2   4.0k      0   70  0.02   0.8      93      0     6
+main      claude-opus-4-8    -repo-docs  cccccccc      1       1   2.0k      0   15  0.01   0.6      97      0     3
+main      claude-opus-4-8    -repo-ops   dddddddd      1       1    900      0    9  0.01   0.3      95      0     3
+main      claude-mystery-1   -repo-app   aaaaaaaa      1     100      0      0   10  0.00   0.0       0      0     0
+Unpriced models (add them to the price file): {'claude-mystery-1': 1}
+Fast-mode calls: 1

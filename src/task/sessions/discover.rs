@@ -3,12 +3,13 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::core::error::Result;
+use crate::core::transcripts::{claude_profiles, codex_roots};
 use crate::task::files::{error_code, home};
 use crate::task::sessions::scan::{MAX_LINE_BYTES, READ_CHUNK};
 
@@ -86,23 +87,6 @@ fn first_line_session(file: &Path, session: &str) -> bool {
         || own(entry.get("session_id"))
 }
 
-fn claude_profiles(home: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(home) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(fs::DirEntry::file_name);
-    entries
-        .into_iter()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            name == ".claude" || name.starts_with(".claude-")
-        })
-        .map(|entry| entry.path())
-        .collect()
-}
-
 /// The items in first-seen order without repeats.
 pub fn unique(items: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -120,10 +104,7 @@ fn lossy(path: &Path) -> String {
 /// which is found even beyond the limit.
 pub fn discover(maximum: u64, session: Option<&str>) -> Result<Discovered> {
     let home = home()?;
-    let mut roots = vec![
-        home.join(".codex").join("sessions"),
-        home.join(".codex").join("archived_sessions"),
-    ];
+    let mut roots = codex_roots(&home).to_vec();
     let profiles = claude_profiles(&home);
     for profile in &profiles {
         roots.extend(["projects", "archive", "archives"].map(|name| profile.join(name)));

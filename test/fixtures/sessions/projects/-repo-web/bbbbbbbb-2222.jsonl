@@ -1,0 +1,4 @@
+{"type": "user", "timestamp": "2026-03-02T08:00:00.000Z", "message": {"role": "user", "content": "ok"}}
+{"type": "user", "timestamp": "2026-03-02T08:00:30.000Z", "message": {"role": "user", "content": "did you check the logs"}}
+{"type": "assistant", "timestamp": "2026-03-02T08:01:00.000Z", "message": {"id": "w1", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 2, "cache_creation_input_tokens": 4000, "cache_read_input_tokens": 0, "output_tokens": 70}, "content": []}}
+{"type": "user", "timestamp": "2026-03-02T08:30:00.000Z", "message": {"role": "user", "content": "continue"}}

@@ -1,0 +1,9 @@
+Total $2.12 since 2026-02-15 (project ~ repo)
+agent     model              calls      in  write   read  out   USD     %  write%  read%  out%
+--------  -----------------  -----  ------  -----  -----  ---  ----  ----  ------  -----  ----
+main      claude-sonnet-4-6      3  250.0k   4.0k   1.0k   90  1.52  71.6       1      0     0
+main      claude-opus-4-8        5      24  53.9k  20.1k  494  0.51  24.2      83     12     5
+explorer  claude-sonnet-4-6      4      12  20.1k  16.0k  570  0.09   4.2      85      5    10
+main      claude-mystery-1       1     100      0      0   10  0.00   0.0       0      0     0
+Unpriced models (add them to the price file): {'claude-mystery-1': 1}
+Fast-mode calls: 1

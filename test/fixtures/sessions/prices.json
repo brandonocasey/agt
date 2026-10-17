@@ -1,0 +1,41 @@
+{
+ "models": {
+  "claude-opus-4": {
+   "input": 15,
+   "write_5m": 18.75,
+   "write_1h": 30,
+   "read": 1.5,
+   "output": 75
+  },
+  "claude-opus-4-8": {
+   "input": 5,
+   "write_5m": 6.25,
+   "write_1h": 10,
+   "read": 0.5,
+   "output": 25,
+   "fast_multiplier": 6
+  },
+  "claude-sonnet-4-6": {
+   "input": 3,
+   "write_5m": 3.75,
+   "write_1h": 6,
+   "read": 0.3,
+   "output": 15,
+   "over": {
+    "prompt_tokens": 200000,
+    "input": 6,
+    "write_5m": 7.5,
+    "write_1h": 12,
+    "read": 0.6,
+    "output": 22.5
+   }
+  },
+  "gpt-test-1": {
+   "input": 2,
+   "write_5m": 0,
+   "write_1h": 0,
+   "read": 0.5,
+   "output": 10
+  }
+ }
+}
