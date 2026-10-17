@@ -707,11 +707,44 @@ The integration tests run the Node script too when it is available (set
 `AGT_LEGACY_AGENT_TASK` to its path, or keep the chezmoi source in its usual place; they skip
 without it) to check that each tool reads what the other wrote.
 
+## Watch
+
+`agt watch` polls required checks until they finish, fail or change; it replaces
+the `agent-watch` script with the same arguments, events and exit statuses.
+
+```sh
+agt watch --target OWNER/REPO#PR@HEAD_SHA --target GROUP/PROJECT!IID@HEAD_SHA \
+  [--deadline-seconds N] [--interval-ms N] [--max-interval-ms N]
+```
+
+A GitHub target polls `gh pr view` and `gh pr checks --required`; a GitLab target polls the MR and
+its head pipeline with `glab api`, on `GITLAB_HOST` or `glab config get host`. Stdout gets one JSON
+event per line: `initial` and `change` per target when its state first appears or changes, then one
+`final` event with every result. Defaults: 3600 seconds, a 15 second interval doubling up to 120
+seconds. Exit status: 0 all checks passed or the PR merged, 2 a target needs action (failed or
+cancelled checks, a changed head, a closed PR, a query error), 124 deadline, 64 usage, 130 or 143
+after SIGINT or SIGTERM. `AGT_GH_BIN` and `AGT_GLAB_BIN` (or `AGENT_WATCH_GH_BIN` and
+`AGENT_WATCH_GLAB_BIN`) replace the tools.
+
+## CI
+
+`agt ci` is GitLab CI triage, replacing the `gl-ci` script. Both subcommands take `-R group/project`
+(default: the current repository, or the project in a URL) and an MR as `123`, `!123` or a URL.
+
+- `agt ci failures <mr> [-n N]` lists the failed and retried jobs of the MR's head pipeline, the
+  failing specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the
+  last N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
+  `pending` or `unclear`.
+- `agt ci wait <pipeline|!mr|url> [--sha SHA] [--interval SEC] [--timeout SEC]` polls until the
+  pipeline finishes, then lists its failed jobs. With an MR it first waits for a pipeline on the MR's
+  newest commit or on `--sha`; pass `--sha "$(git rev-parse HEAD)"` right after a push. Exit status:
+  0 success, 1 failed, canceled, skipped or manual, 2 usage or API error, 3 timeout.
+
 ## Testing
 
 `AGT_GH_BIN` and `AGT_GLAB_BIN` (or the pre-0.5 `AGENT_REVIEW_GH_BIN` and `AGENT_REVIEW_GLAB_BIN`) replace the `gh` and `glab`
 executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
-canned responses and fails on any other call. `AGENT_REVIEW_NOW=<unix seconds>` replaces the current time. It exists only so
+canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt watch`, and `test/fixtures/ci/*.json` hold the responses and the gl-ci output for `agt ci`. `AGENT_REVIEW_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning; do not set it otherwise. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`. See `AGENTS.md` for the checks.

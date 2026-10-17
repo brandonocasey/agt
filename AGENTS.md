@@ -15,7 +15,7 @@ mise run test
 ```
 
 `mise run install` installs the binary into `~/.cargo/bin`. Commands run as
-`agt review <command>`; the integration helper `Env::agt` prepends `review`.
+`agt review <command>`, `agt watch` and `agt ci`; the integration helper `Env::agt` prepends `review`.
 
 ## Layout
 
