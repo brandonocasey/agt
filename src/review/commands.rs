@@ -77,6 +77,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             | Command::List(_)
             | Command::Show { .. }
             | Command::Publish { dry_run: true, .. }
+            | Command::Prune { dry_run: true, .. }
     );
     if let Command::Prune { all: true, dry_run } = cli.command {
         return prune_all(&store, dry_run).map(Output::Json);

@@ -771,3 +771,18 @@ fn review_prune_skips_a_target_whose_publish_lock_is_held() {
     assert_eq!(report["pruned"].as_array().unwrap().len(), 1, "{report}");
     assert!(old.exists() && !free.exists());
 }
+
+#[test]
+fn review_prune_dry_run_writes_nothing() {
+    let prune = Prune {
+        env: Env::with_branch(),
+    };
+    prune.env.run(&["prune", "--dry-run"]);
+    assert!(!prune.env.state().join("local").exists());
+    prune.env.run(&["prune"]);
+    let dirs: Vec<_> = fs::read_dir(prune.env.state().join("local"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(dirs[0].path().join(".repo.json").exists());
+}
