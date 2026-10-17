@@ -747,3 +747,27 @@ fn one_corrupt_file_does_not_stop_the_review_and_local_repo_passes() {
         "{report}"
     );
 }
+
+#[test]
+fn review_prune_skips_a_target_whose_publish_lock_is_held() {
+    let prune = Prune::new();
+    let old = prune.target("github.com/o/a", "old", 200);
+    let free = prune.target("github.com/o/a", "free", 200);
+    let publish = File::options()
+        .create(true)
+        .append(true)
+        .open(old.with_file_name(".old.publish.lock"))
+        .unwrap();
+    publish.lock().unwrap();
+    let output = prune
+        .env
+        .command(BIN, &prune.env.repo)
+        .args(["review", "prune", "--all"])
+        .env("AGT_NOW", NOW.to_string())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["pruned"].as_array().unwrap().len(), 1, "{report}");
+    assert!(old.exists() && !free.exists());
+}

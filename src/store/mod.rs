@@ -478,29 +478,6 @@ impl Store {
     pub fn recorded_repo(&self, dir: &Path) -> Result<Option<RepoFile>> {
         read_json(&dir.join(REPO_FILE))
     }
-
-    /// Deletes the target when `remove` approves it, re-reading it under its lock first.
-    pub fn remove_if(
-        &self,
-        dir: &Path,
-        key: &str,
-        remove: impl FnOnce(&Target) -> Result<bool>,
-    ) -> Result<bool> {
-        validate_key(key)?;
-        let lock_path = dir.join(format!(".{key}.lock"));
-        let _lock = lock(&lock_path)?;
-        let path = dir.join(format!("{key}.json"));
-        let Some(target) = read_target(&path, self.schema)? else {
-            return Ok(false);
-        };
-        if !remove(&target)? {
-            return Ok(false);
-        }
-        fs::remove_file(&path).map_err(ctx(format!("remove {}", path.display())))?;
-        // Waiters on the old lock inode notice the unlink and retry on a fresh file.
-        fs::remove_file(&lock_path).map_err(ctx(format!("remove {}", lock_path.display())))?;
-        Ok(true)
-    }
 }
 
 fn validate_key(key: &str) -> Result<()> {
