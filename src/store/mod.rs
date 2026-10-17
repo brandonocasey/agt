@@ -1,3 +1,4 @@
+mod docs;
 pub mod model;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{ErrorKind, Read, Write};
@@ -32,7 +33,7 @@ pub enum Namespace {
     Reviews,
     #[allow(
         dead_code,
-        reason = "opened by `agt issue`, which lands in a later phase"
+        reason = "opened by `agt issue`, which lands in the next change"
     )]
     Issues,
     Tasks,
