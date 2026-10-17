@@ -1956,13 +1956,18 @@ fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
     let default = ctx.default_author()?;
     let formal = args.formal;
     let thread = ctx.update(&scope, |target, now| {
-        // Approving the same head the same way again reuses the approval, so it posts once.
-        if let Some(existing) = target.threads.iter().find(|thread| {
+        // Approving the same head again reuses its approval, so it posts once; `--formal`
+        // upgrades a comment approval and retries a refused formal one.
+        if let Some(existing) = target.threads.iter_mut().rev().find(|thread| {
             thread
                 .approval
                 .as_ref()
-                .is_some_and(|approval| approval.head == head && approval.formal == formal)
+                .is_some_and(|approval| approval.head == head)
         }) {
+            if formal && let Some(approval) = existing.approval.as_mut() {
+                approval.formal = true;
+                approval.refused = None;
+            }
             return Ok(existing.clone());
         }
         let author = author(&args.author, target, default)?;
@@ -1984,6 +1989,7 @@ fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
             head: head.clone(),
             formal,
             approved: false,
+            refused: None,
         });
         target.threads.push(thread.clone());
         Ok(thread)

@@ -218,6 +218,9 @@ pub struct Approval {
     /// GitLab accepted the formal approval; a rerun does not send it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approved: bool,
+    /// Why the host refused the formal approval; `approve --formal` clears it to retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// Host-side state of a thread. `resolvable` is false for general comments and review bodies.

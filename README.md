@@ -139,14 +139,15 @@ outside them (`fixing_secs`), and the reported reviewer and main-session
 tokens; the final record carries the same as a `Time: ... Tokens: ...` line.
 
 `approve` records an approval of the head as a general thread, refused while a
-`bug`, `requirement` or `question` is open; approving the same head the same way
-again returns the same thread. `publish` posts it as a comment (default text
+`bug`, `requirement` or `question` is open; approving the same head again
+returns the same thread, and `--formal` upgrades a comment approval. `publish` posts it as a comment (default text
 `Approved at <sha>.`, or `--body`; a GitLab note, which never blocks merging).
 `approve --formal` also submits the host's approval: a GitHub `APPROVE` review,
 or GitLab's `approve` at that head. On your own GitHub PR, which GitHub refuses
-to approve, the comment still posts and `skipped` lists `<id>/formal`. A GitLab
-refusal (already approved, or not allowed) shows as an `error` under `posted`
-and blocks nothing; an accepted approval is never sent again. An approval posts
+to approve, the comment still posts and `skipped` lists `<id>/formal`. A host
+refusal of the formal approval (already approved, not allowed, or a failed call)
+shows as an `error` under `posted` and blocks nothing; `approve --formal` again
+retries only the host's approval. An accepted approval is never sent again. An approval posts
 only while the PR/MR head is the head it approved and no blocking finding is
 open, never counts as open, and goes to someone else's PR/MR with
 `publish --not-own --only <id>`.

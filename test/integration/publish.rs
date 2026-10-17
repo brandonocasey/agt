@@ -1960,10 +1960,12 @@ fn approvals_post_a_comment_unless_formal() {
         !open.contains(&format!("\"{id}\"")),
         "an approval is never open: {open}"
     );
+    // A formal approval of the same head upgrades the comment approval: one comment.
     let formal = env.run(&["approve", "--formal"])["thread"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    assert_eq!(formal, id);
     link(&setup);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     let comment = dry["writes"]
@@ -1990,15 +1992,7 @@ fn approvals_post_a_comment_unless_formal() {
                     .contains("approve their own PR")),
         "{dry}"
     );
-    assert!(
-        dry["writes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|write| write["items"] == json!([format!("{formal}/c1")])
-                && write["call"] == json!(post(GH_COMMENTS))),
-        "{dry}"
-    );
+    assert_eq!(approval_writes(&dry), 1, "{dry}");
 }
 
 #[test]
@@ -2145,11 +2139,23 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
     // The approval comment and the final record both went out as notes.
     assert_eq!(count_calls(env, &notes), 2, "{out}");
     env.pass_call(&strs(&approve));
+    env.respond(&strs(&approve), r#"{"approved":true}"#);
     env.run(&["publish", "--pr", "3"]);
     assert_eq!(
         count_calls(env, &approve),
         1,
-        "a posted approval is not sent again"
+        "a refusal is not retried by itself"
+    );
+    // `approve --formal` again retries the host's approval alone, without a second note.
+    env.run(&["approve", "--formal"]);
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(count_calls(env, &approve), 2);
+    assert_eq!(count_calls(env, &notes), 2);
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(
+        count_calls(env, &approve),
+        2,
+        "an accepted approval is not sent again"
     );
 }
 

@@ -345,6 +345,14 @@ impl Planner<'_> {
                 || first.remote.is_some()
                 || first.post == PostState::Posted
             {
+                // An approval posted as a comment, then made formal or refused and retried.
+                match self.pending_approve(thread, target) {
+                    Some(Ok(write)) => writes.push(write),
+                    Some(Err(reason)) => {
+                        skipped.push(skip(&format!("{}/formal", thread.id), reason))
+                    }
+                    None => {}
+                }
                 continue;
             }
             // A finding judged stale before it was ever posted has nothing to tell the host.
@@ -469,34 +477,8 @@ impl Planner<'_> {
         approval: &Approval,
         target: &Target,
     ) -> std::result::Result<(Vec<Write>, RemoteKind, Option<String>), String> {
+        self.approvable(approval, target)?;
         let head = &self.review.head_sha;
-        if &approval.head != head {
-            return Err(format!(
-                "it approves {}, but the PR/MR head is now {}",
-                short(&approval.head),
-                short(head)
-            ));
-        }
-        let blocking: Vec<&str> = target
-            .threads
-            .iter()
-            .filter(|other| {
-                is_open(other)
-                    && matches!(
-                        other.kind,
-                        crate::model::ThreadType::Bug
-                            | crate::model::ThreadType::Requirement
-                            | crate::model::ThreadType::Question
-                    )
-            })
-            .map(|other| other.id.as_str())
-            .collect();
-        if !blocking.is_empty() {
-            return Err(format!(
-                "open findings block approval: {}",
-                blocking.join(", ")
-            ));
-        }
         let text = body(target, thread, first, None, self.attempt);
         // A note, not a discussion: GitLab discussions are resolvable and can block merging.
         let comment = |args: Vec<String>| Write {
@@ -535,7 +517,7 @@ impl Planner<'_> {
                         .to_owned()
                 }),
             )),
-            (true, Forge::Gitlab) if !approval.approved => Ok((
+            (true, Forge::Gitlab) if !approval.approved && approval.refused.is_none() => Ok((
                 vec![
                     Write {
                         item: Item::Approve {
@@ -550,6 +532,81 @@ impl Planner<'_> {
                 None,
             )),
             (_, Forge::Gitlab) => Ok((vec![comment(note())], RemoteKind::General, None)),
+        }
+    }
+
+    /// The host's approval for a posted approval thread that is formal but not yet accepted.
+    fn pending_approve(
+        &self,
+        thread: &Thread,
+        target: &Target,
+    ) -> Option<std::result::Result<Write, String>> {
+        let approval = thread.approval.as_ref()?;
+        if !approval.formal || approval.approved || approval.refused.is_some() {
+            return None;
+        }
+        let own = self.foreign().is_none();
+        if own && self.connection.forge == Forge::Github {
+            return None;
+        }
+        if let Err(reason) = self.approvable(approval, target) {
+            return Some(Err(reason));
+        }
+        let head = &self.review.head_sha;
+        let write = match self.connection.forge {
+            Forge::Github => Write {
+                item: Item::Approve {
+                    thread: thread.id.clone(),
+                },
+                args: self.post(&format!(
+                    "{}/pulls/{}/reviews",
+                    self.base_path(),
+                    self.connection.number
+                )),
+                body: Some(json!({ "commit_id": head, "event": "APPROVE" })),
+            },
+            Forge::Gitlab => Write {
+                item: Item::Approve {
+                    thread: thread.id.clone(),
+                },
+                args: self.post(&format!("{}/approve", self.base_path())),
+                body: Some(json!({ "sha": head })),
+            },
+        };
+        Some(Ok(write))
+    }
+
+    /// Whether an approval may go out now: at the head it approved, with no blocking finding.
+    fn approvable(&self, approval: &Approval, target: &Target) -> std::result::Result<(), String> {
+        let head = &self.review.head_sha;
+        if &approval.head != head {
+            return Err(format!(
+                "it approves {}, but the PR/MR head is now {}",
+                short(&approval.head),
+                short(head)
+            ));
+        }
+        let blocking: Vec<&str> = target
+            .threads
+            .iter()
+            .filter(|other| {
+                is_open(other)
+                    && matches!(
+                        other.kind,
+                        crate::model::ThreadType::Bug
+                            | crate::model::ThreadType::Requirement
+                            | crate::model::ThreadType::Question
+                    )
+            })
+            .map(|other| other.id.as_str())
+            .collect();
+        if blocking.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "open findings block approval: {}",
+                blocking.join(", ")
+            ))
         }
     }
 
@@ -1354,12 +1411,29 @@ fn run_writes(
             // GitLab refuses a repeat or ineligible approval; the comment still posts, and the
             // refusal is reported instead of blocking every later write.
             Err(error) if matches!(write.item, Item::Approve { .. }) => {
-                posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": error.to_string() }));
+                let reason = error.to_string();
+                change(ctx, target, |target| {
+                    set_approval(target, &write.ids()[0], |approval| {
+                        approval.refused = Some(reason.clone());
+                    });
+                    Ok(())
+                })?;
+                posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": reason }));
                 continue;
             }
             Err(error) => return Err(error),
         };
         let remote = save(ctx, connection, target, &write.item, &response)?;
+        // A GitHub `APPROVE` review posted as the approval thread itself.
+        if let (Item::Thread { comment }, Some(body)) = (&write.item, &write.body)
+            && body["event"] == "APPROVE"
+        {
+            let thread = comment.split('/').next().unwrap_or_default().to_owned();
+            change(ctx, target, |target| {
+                set_approval(target, &thread, |approval| approval.approved = true);
+                Ok(())
+            })?;
+        }
         if matches!(write.item, Item::Draft { .. }) {
             created.clone_from(&remote);
         }
@@ -1380,6 +1454,17 @@ fn comment_mut<'a>(target: &'a mut Target, id: &str) -> Option<&'a mut Comment> 
         .iter_mut()
         .flat_map(|thread| thread.comments.iter_mut())
         .find(|comment| comment.id == id)
+}
+
+fn set_approval(target: &mut Target, thread: &str, edit: impl FnOnce(&mut Approval)) {
+    if let Some(approval) = target
+        .threads
+        .iter_mut()
+        .find(|local| local.id == thread)
+        .and_then(|local| local.approval.as_mut())
+    {
+        edit(approval);
+    }
 }
 
 fn clear_pending(target: &mut Target, id: &str) {
@@ -1557,14 +1642,7 @@ fn save(
         Item::PublishDraft { draft, .. } => Ok(Some(draft.clone())),
         Item::Approve { thread } => {
             change(ctx, target, |target| {
-                if let Some(approval) = target
-                    .threads
-                    .iter_mut()
-                    .find(|local| local.id == *thread)
-                    .and_then(|local| local.approval.as_mut())
-                {
-                    approval.approved = true;
-                }
+                set_approval(target, thread, |approval| approval.approved = true);
                 Ok(())
             })?;
             Ok(None)
