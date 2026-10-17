@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::model::{Comment, Forge, Target, Thread, VERSION};
 
 const MAX_KEY: usize = 200;
+const _: () = assert!(MIGRATIONS.len() + 1 == VERSION as usize);
 const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 
@@ -100,7 +101,7 @@ impl Store {
                 continue;
             };
             if is_target_document(&document) {
-                targets.push(parse_target(&path, document)?);
+                targets.push(parse_target(&path, document)?.0);
             }
         }
         targets.sort_by(|a, b| a.key.cmp(&b.key));
@@ -163,7 +164,7 @@ impl Store {
         create_dir(dir)?;
         let _lock = lock(&dir.join(format!(".{key}.lock")))?;
         let path = dir.join(format!("{key}.json"));
-        let current = read_target(&path)?;
+        let current = read_target_for_write(&path)?;
         let expected = current.as_ref().map(|target| target.revision);
         let mut target = current.unwrap_or_else(init);
         let result = change(&mut target)?;
@@ -202,8 +203,8 @@ impl Store {
         let _second = lock(second)?;
         let from_path = dir.join(format!("{from}.json"));
         let to_path = dir.join(format!("{to}.json"));
-        let old = read_target(&from_path)?;
-        let current = read_target(&to_path)?;
+        let old = read_target_for_write(&from_path)?;
+        let current = read_target_for_write(&to_path)?;
         let expected = current.as_ref().map(|target| target.revision);
         let had_old = old.is_some();
         let base_revision = expected.or(old.as_ref().map(|target| target.revision));
@@ -341,36 +342,111 @@ fn is_target_document(document: &Value) -> bool {
 }
 
 fn is_target_file(path: &Path) -> Result<bool> {
-    Ok(read_json::<Value>(path)?.is_some_and(|document| is_target_document(&document)))
+    Ok(read_document(path)?.is_some_and(|document| is_target_document(&document)))
 }
 
 /// Reads the target a caller asked for by key. A file of another document kind is an error so
 /// that a write never replaces it.
 fn read_target(path: &Path) -> Result<Option<Target>> {
     match read_document(path)? {
-        Some(document) => parse_target(path, document).map(Some),
+        Some(document) => parse_target(path, document).map(|(target, _)| Some(target)),
         None => Ok(None),
     }
+}
+
+/// Like [`read_target`], for a caller that will write the target back. Refuses a file holding
+/// fields this build does not know, because writing it would silently drop them.
+fn read_target_for_write(path: &Path) -> Result<Option<Target>> {
+    let Some(document) = read_document(path)? else {
+        return Ok(None);
+    };
+    let (target, document) = parse_target(path, document)?;
+    let written =
+        serde_json::to_value(&target).map_err(ctx(format!("encode {}", path.display())))?;
+    if let Some(field) = lost_field(&document, &written, "") {
+        return fail(format!(
+            "{} has field {field} that this agent-review does not know; it was probably written by a newer agent-review, so upgrade agent-review before changing it",
+            path.display()
+        ));
+    }
+    Ok(Some(target))
 }
 
 fn read_document(path: &Path) -> Result<Option<Value>> {
     read_json(path)
 }
 
-fn parse_target(path: &Path, document: Value) -> Result<Target> {
+/// The first field of `original` that `written` lacks, as a path.
+fn lost_field(original: &Value, written: &Value, at: &str) -> Option<String> {
+    match (original, written) {
+        (Value::Object(original), Value::Object(written)) => {
+            original.iter().find_map(|(name, value)| {
+                let path = if at.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{at}.{name}")
+                };
+                match written.get(name) {
+                    Some(written) => lost_field(value, written, &path),
+                    None => Some(path),
+                }
+            })
+        }
+        (Value::Array(original), Value::Array(written)) => original
+            .iter()
+            .zip(written)
+            .enumerate()
+            .find_map(|(index, (original, written))| {
+                lost_field(original, written, &format!("{at}[{index}]"))
+            }),
+        _ => None,
+    }
+}
+
+/// Parses a stored target, migrating older schema versions first. Returns the migrated
+/// document alongside the target.
+fn parse_target(path: &Path, mut document: Value) -> Result<(Target, Value)> {
     if !is_target_document(&document) {
         return fail(format!("{} is not a target document", path.display()));
     }
-    let target: Target =
-        serde_json::from_value(document).map_err(ctx(format!("parse {}", path.display())))?;
-    if target.version != VERSION {
+    let version = document.get("version").and_then(Value::as_u64);
+    let version = match version.map(u32::try_from) {
+        Some(Ok(version)) => version,
+        _ => return fail(format!("{} has no valid schema version", path.display())),
+    };
+    if version > VERSION {
         return fail(format!(
-            "{} has unsupported version {}",
+            "{} uses schema version {version}, newer than the {VERSION} this agent-review (v{}) supports; upgrade agent-review to a release that supports schema version {version}",
             path.display(),
-            target.version
+            env!("CARGO_PKG_VERSION"),
         ));
     }
-    Ok(target)
+    if version == 0 {
+        return fail(format!("{} has unsupported version 0", path.display()));
+    }
+    migrate(&mut document, version);
+    let target: Target = serde_json::from_value(document.clone())
+        .map_err(ctx(format!("parse {}", path.display())))?;
+    Ok((target, document))
+}
+
+/// One step per schema version: `MIGRATIONS[n - 1]` rewrites a version `n` document into
+/// version `n + 1`'s shape. Bumping [`VERSION`] means adding a step here and a frozen-JSON test.
+const MIGRATIONS: &[fn(&mut Value)] = &[];
+
+fn migrate(document: &mut Value, from: u32) {
+    migrate_with(document, from, MIGRATIONS);
+}
+
+fn migrate_with(document: &mut Value, from: u32, steps: &[fn(&mut Value)]) {
+    let from = from as usize;
+    for step in steps.iter().skip(from - 1) {
+        step(document);
+    }
+    let to = steps.len() as u32 + 1;
+    if let Some(version) = document.get_mut("version") {
+        *version = Value::from(to);
+    }
 }
 
 /// Writes `value` to a temporary file in `dir`, fsyncs it, runs `check` and renames it over
@@ -616,5 +692,80 @@ mod tests {
             )]
         );
         assert_eq!(into.threads[0].comments[2].id, "gh-c900/c2");
+    }
+
+    fn stored(version: u64) -> Value {
+        json!({
+            "version": version, "revision": 1, "key": "k", "repo": "r", "kind": "branch",
+            "branch": null, "branch_birth": null, "base": null, "head": null,
+            "created_at": "t", "updated_at": "t", "review": null,
+            "runs": [], "records": [], "threads": [],
+        })
+    }
+
+    fn file(name: &str, document: &Value) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        fs::write(&path, document.to_string()).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn current_version_loads() {
+        let (_dir, path) = file("k.json", &stored(VERSION.into()));
+        assert!(read_target(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn newer_version_is_refused_with_an_upgrade_hint() {
+        let (_dir, path) = file("k.json", &stored(u64::from(VERSION) + 1));
+        let error = read_target(&path).err().unwrap().0;
+        assert!(error.contains("newer"), "{error}");
+        assert!(error.contains("upgrade agent-review"), "{error}");
+        assert!(
+            error.contains(&format!("version {}", VERSION + 1)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn version_zero_is_refused() {
+        let (_dir, path) = file("k.json", &stored(0));
+        assert!(read_target(&path).is_err());
+    }
+
+    #[test]
+    fn migrations_run_from_the_stored_version() {
+        fn rename(document: &mut Value) {
+            document["renamed"] = json!(true);
+        }
+        fn twice(document: &mut Value) {
+            document["twice"] = json!(true);
+        }
+        let steps: &[fn(&mut Value)] = &[rename, twice];
+        let mut document = json!({"version": 1});
+        migrate_with(&mut document, 1, steps);
+        assert_eq!(
+            document,
+            json!({"version": 3, "renamed": true, "twice": true})
+        );
+        let mut document = json!({"version": 2});
+        migrate_with(&mut document, 2, steps);
+        assert_eq!(document, json!({"version": 3, "twice": true}));
+    }
+
+    #[test]
+    fn writing_refuses_to_drop_unknown_fields() {
+        let mut document = stored(VERSION.into());
+        document["threads"] = json!([]);
+        document["from_the_future"] = json!(1);
+        let (_dir, path) = file("k.json", &document);
+        assert!(read_target(&path).unwrap().is_some());
+        let error = read_target_for_write(&path).err().unwrap().0;
+        assert!(error.contains("from_the_future"), "{error}");
+        let mut document = stored(VERSION.into());
+        document["runs"] = json!([]);
+        let (_dir, path) = file("k.json", &document);
+        assert!(read_target_for_write(&path).unwrap().is_some());
     }
 }
