@@ -314,9 +314,11 @@ impl Push<'_> {
             return Ok(Step::Done);
         }
         let (attempt, sent) = (self.attempt.clone(), body.clone());
+        let began = clock::now()?;
         self.mutate(name, doc, |issue| {
             if let Some(create) = issue.create.as_mut() {
                 create.begin(&attempt, Some(sent));
+                create.began_at = Some(began);
             }
         })?;
         match self.service().send(&request) {
@@ -347,10 +349,26 @@ impl Push<'_> {
         {
             return Ok(false);
         }
-        let Some(error) = doc.errors.iter().find(|error| error.what == "create") else {
+        // The mark written before the call; a document from before it existed has only the
+        // error of a failed send.
+        let began = doc
+            .create
+            .as_ref()
+            .and_then(|create| create.began_at.as_ref());
+        let failed = doc
+            .errors
+            .iter()
+            .find(|error| error.what == "create")
+            .map(|error| &error.at);
+        let mut latest = None;
+        for at in began.into_iter().chain(failed) {
+            let at = clock::parse(at)?;
+            latest = latest.max(Some(at));
+        }
+        let Some(sent) = latest else {
             return Ok(false);
         };
-        Ok(clock::now_secs()? - clock::parse(&error.at)? < LISTING_LAG_SECS)
+        Ok(clock::now_secs()? - sent < LISTING_LAG_SECS)
     }
 
     /// The host's copy of a create that was sent but never answered, found by its marker.
@@ -368,9 +386,18 @@ impl Push<'_> {
     }
 
     fn update(&mut self, name: &str, doc: &mut Issue) -> Result<Step> {
-        let changes = pending_changes(doc);
+        let mut changes = pending_changes(doc);
         if changes.is_empty() {
             return Ok(Step::Done);
+        }
+        // Record what the service gets: a close with no reason is sent with its default.
+        if let Some((Category::Closed, reason)) = changes.state.as_mut()
+            && reason.is_none()
+            && crate::forge::service::kind(self.tracker.doc.forge)
+                .issue_caps
+                .close_reasons
+        {
+            *reason = Some("completed".to_owned());
         }
         let request = self.service().update(self.subject(doc)?, &changes)?;
         if self.options.dry_run {
@@ -382,6 +409,13 @@ impl Push<'_> {
                 self.mutate(name, doc, |issue| {
                     if let Some(base) = issue.base.as_mut() {
                         record_sent(base, &changes);
+                    }
+                    // The local copy takes the reason that went out, so nothing is left to send.
+                    if let Some((state, Some(reason))) = &changes.state
+                        && issue.fields.state == *state
+                        && issue.fields.reason.is_none()
+                    {
+                        issue.fields.reason = Some(reason.clone());
                     }
                     issue.conflicts.clear();
                 })?;

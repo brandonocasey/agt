@@ -814,7 +814,7 @@ instead of sending it again. A create works the same way (the marker is in the b
 `sync` or `push` then gives the local issue its number). A send the host refuses (a
 4xx other than a timeout or rate limit) puts the comment back in the queue with the
 error kept under `errors`; any other failure leaves it marked as possibly sent. A
-failure does not make `push` exit non-zero: it is listed under `failed`. A create with no answer is not sent again for two minutes, since the hosts list a new issue late and a search right after proves nothing; `push` reports it under `deferred`, and a later push claims it or sends it again.
+failure does not make `push` exit non-zero: it is listed under `failed`. A create with no answer, whether the call failed, its response could not be read, or the process died mid-call, is not sent again until two minutes after it was sent, since the hosts list a new issue late and a search right after proves nothing; `push` reports it under `deferred`, and a later push claims it or sends it again.
 
 ## Testing
 

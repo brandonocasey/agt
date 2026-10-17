@@ -40,6 +40,9 @@ matrix!(
     a_lost_create_is_claimed_by_its_marker_on_sync,
     a_lost_create_is_claimed_by_its_marker_on_the_next_push,
     a_lost_create_is_not_sent_again_while_the_listing_may_lag,
+    a_create_whose_answer_cannot_be_read_is_not_sent_again_while_the_listing_may_lag,
+    a_killed_create_is_not_sent_again_despite_an_old_create_error,
+    a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_conflict,
     push_refuses_a_tracker_with_push_false,
     no_token_reaches_a_call_a_file_or_the_output,
 );
@@ -622,4 +625,96 @@ fn a_lost_create_is_not_sent_again_while_the_listing_may_lag(fake: Fake) {
     assert_eq!(kinds(&writes(&report, "sent")), ["create"], "{report}");
     assert_eq!(fake.count(&env, &fake.create_call()), 2);
     assert!(doc(&env, fake, "5")["number"] == 5, "{key}");
+}
+
+/// A pushed create whose send is cut short by `respond`ing with `answer`, so the host may hold
+/// the issue while the doc is left `posting`.
+fn push_a_create_with_answer(fake: Fake, answer: &str) -> (Env, String) {
+    let env = Env::new();
+    env.write_config(&fake.config(true));
+    let made = env.issue(&["create", "--title", "Brand new", "--body", "Text"]);
+    let key = made["key"].as_str().unwrap().to_owned();
+    env.respond(
+        &strs(&fake.user_call()),
+        if fake.name() == "github" {
+            r#"{"login":"me"}"#
+        } else {
+            r#"{"username":"me"}"#
+        },
+    );
+    env.respond(&strs(&fake.create_call()), answer);
+    env.issue_exec(&["push"], "", &[]);
+    assert_eq!(fake.count(&env, &fake.create_call()), 1);
+    (env, key)
+}
+
+fn the_second_push_waits_then_sends(fake: Fake, env: &Env, key: &str) {
+    // The host lists nothing yet.
+    fake.serve_since(env, "2026-10-17T11%3A55%3A00Z", &[]);
+    env.respond(
+        &strs(&fake.create_call()),
+        &fake.issue_json(&created()).to_string(),
+    );
+    let report = env.issue(&["push"]);
+    assert!(writes(&report, "sent").is_empty(), "{report}");
+    assert_eq!(writes(&report, "deferred")[0]["what"], "create");
+    assert_eq!(fake.count(env, &fake.create_call()), 1, "no second issue");
+    let later = crate::support::issue::NOW + 300;
+    let report = env.issue_at(later, &["push"]);
+    assert_eq!(kinds(&writes(&report, "sent")), ["create"], "{report}");
+    assert_eq!(fake.count(env, &fake.create_call()), 2, "{key}");
+}
+
+fn a_create_whose_answer_cannot_be_read_is_not_sent_again_while_the_listing_may_lag(fake: Fake) {
+    let (env, key) = push_a_create_with_answer(fake, "{}");
+    let stored = doc(&env, fake, &key);
+    assert_eq!(stored["create"]["post"], "posting");
+    assert!(stored["create"]["began_at"].as_str().is_some(), "{stored}");
+    the_second_push_waits_then_sends(fake, &env, &key);
+}
+
+fn a_killed_create_is_not_sent_again_despite_an_old_create_error(fake: Fake) {
+    let (env, key) = push_a_create_with_answer(fake, "{}");
+    // A process killed mid-call leaves the mark and no new error; an error from an earlier,
+    // much older attempt must not shorten the wait.
+    let path = env
+        .issue_state()
+        .join(fake.tracker())
+        .join(format!("{key}.json"));
+    let mut stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    stored["errors"] = json!([{
+        "what": "create", "message": "old", "refused": false, "at": "2026-10-17T10:00:00Z"
+    }]);
+    std::fs::write(&path, stored.to_string()).unwrap();
+    the_second_push_waits_then_sends(fake, &env, &key);
+}
+
+fn a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_conflict(fake: Fake) {
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["close", "1"]);
+    // A document queued before closes carried a reason: drop it.
+    let path = env.issue_state().join(fake.tracker()).join("1.json");
+    let mut stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    stored["fields"]["reason"] = Value::Null;
+    std::fs::write(&path, stored.to_string()).unwrap();
+    fake.accept_update(&env, 1);
+    env.issue(&["push"]);
+    let after = doc(&env, fake, "1");
+    let sent = &fake.sent(&env, &fake.update_call(1))[0];
+    let reason = if fake.name() == "github" {
+        assert_eq!(sent["state_reason"], "completed");
+        Value::from("completed")
+    } else {
+        Value::Null
+    };
+    assert_eq!(after["base"]["reason"], reason, "{after}");
+    assert_eq!(after["base"], after["fields"], "nothing left to send");
+    // The host shows the close as sent; reopening is no conflict.
+    let mut remote = issue().closed().updated("2026-10-18T10:00:00Z");
+    remote.reason = Some("completed");
+    fake.serve_issue(&env, &remote);
+    env.issue(&["reopen", "1"]);
+    let report = env.issue(&["push", "--dry-run"]);
+    assert!(writes(&report, "conflicts").is_empty(), "{report}");
+    assert_eq!(kinds(&writes(&report, "writes")), ["update"]);
 }

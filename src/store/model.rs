@@ -188,6 +188,10 @@ pub struct Delivery {
     /// The body last sent; a service that shows no edits is trusted only for this text.
     #[serde(default)]
     pub sent: Option<String>,
+    /// When the call was about to go out, written with the `Posting` mark; absent in documents
+    /// stored before it existed.
+    #[serde(default)]
+    pub began_at: Option<String>,
 }
 
 impl Delivery {
@@ -196,6 +200,7 @@ impl Delivery {
             post,
             attempt: None,
             sent: None,
+            began_at: None,
         }
     }
 
@@ -204,6 +209,7 @@ impl Delivery {
         self.post = PostState::Posting;
         self.attempt = Some(attempt.to_owned());
         self.sent = sent;
+        self.began_at = None;
     }
 
     pub fn is_posting(&self) -> bool {
