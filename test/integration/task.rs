@@ -12,7 +12,12 @@ use crate::support::Env;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agt");
 const LEGACY: &str = "AGT_LEGACY_AGENT_TASK";
-const LEGACY_SOURCE: &str = ".local/share/chezmoi/home/private_dot_local/bin/executable_agent-task";
+/// The Node agent-task in the dotfiles source: its legacy home first, then the path it had
+/// before the `agt task` wrapper replaced it.
+const LEGACY_SOURCES: [&str; 2] = [
+    ".local/share/chezmoi/home/private_dot_local/libexec/agt/executable_agent-task.legacy",
+    ".local/share/chezmoi/home/private_dot_local/bin/executable_agent-task",
+];
 
 struct Task {
     env: Env,
@@ -731,9 +736,16 @@ fn input_errors_match_the_node_tool() {
 // when the script or node is not on this host.
 
 fn legacy_script() -> Option<PathBuf> {
-    let path = std::env::var_os(LEGACY)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(LEGACY_SOURCE)))?;
+    let path = std::env::var_os(LEGACY).map(PathBuf::from).or_else(|| {
+        let home = std::env::var_os("HOME")?;
+        LEGACY_SOURCES
+            .iter()
+            .map(|source| Path::new(&home).join(source))
+            .find(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|text| text.starts_with("#!/usr/bin/env node"))
+            })
+    })?;
     let node = std::process::Command::new("node")
         .arg("--version")
         .output()
