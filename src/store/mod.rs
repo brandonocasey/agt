@@ -136,7 +136,21 @@ impl Store {
             attempt += 1;
             target = self.backups.join(format!("{prefix}{stamp}-{attempt}"));
         }
-        copy_tree(&self.root, &target)?;
+        // Copy under a hidden name and rename when complete, so a failed copy never looks
+        // like a finished backup to the next run.
+        let partial = self.backups.join(format!(
+            ".{}.partial",
+            target.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        if partial.exists() {
+            fs::remove_dir_all(&partial).map_err(ctx(format!("remove {}", partial.display())))?;
+        }
+        copy_tree(&self.root, &partial)?;
+        fs::rename(&partial, &target).map_err(ctx(format!(
+            "rename {} to {}",
+            partial.display(),
+            target.display()
+        )))?;
         self.backed_up.store(true, Ordering::Release);
         Ok(())
     }
@@ -1019,5 +1033,28 @@ mod tests {
             .collect();
         assert_eq!(made.len(), 1, "{made:?}");
         assert!(made[0].starts_with("reviews-v1-"), "{made:?}");
+    }
+
+    #[test]
+    fn a_partial_backup_is_not_taken_for_a_finished_one() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = store.repo_dir("o/r").unwrap();
+        write_target_named(&store, &dir);
+        let backups = base.path().join("agents").join("backups");
+        // What a copy that failed part way leaves behind.
+        fs::create_dir_all(backups.join(".reviews-v1-2026-01-01T00-00-00Z.partial")).unwrap();
+        let mut next = Store::at(base.path(), Namespace::Reviews);
+        next.schema = Schema {
+            version: 2,
+            migrations: &[|_| {}],
+        };
+        write_target_named(&next, &dir);
+        let finished: Vec<String> = fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("reviews-v1-"))
+            .collect();
+        assert_eq!(finished.len(), 1, "{finished:?}");
     }
 }
