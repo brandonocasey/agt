@@ -13,6 +13,38 @@ use crate::support::{Env, fixture, numbered};
 
 // GitHub
 
+/// A comment marked `posting` is stored and shown without a `began_at` key: agent-review 0.4.0
+/// refuses to write documents with fields it does not know.
+#[test]
+fn review_documents_and_output_carry_no_began_at() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    svc.lose(env, Call::PostInline);
+    env.fail(&["publish", "--pr", "42"], None);
+    let list = env.run(&["list"]);
+    assert_eq!(
+        thread(&list, &setup.finding(1))["comments"][0]["post"],
+        "posting"
+    );
+    assert!(!list.to_string().contains("began_at"), "{list}");
+    let mut stored = String::new();
+    let mut pending = vec![env.state()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(content) = std::fs::read_to_string(&path) {
+                stored.push_str(&content);
+            }
+        }
+    }
+    assert!(stored.contains("posting"), "the marked comment is stored");
+    assert!(!stored.contains("began_at"), "{stored}");
+}
+
 /// A write that reached GitHub but lost its response is matched by its marker on the next
 /// run, never posted again.
 #[test]
