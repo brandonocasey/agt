@@ -7,10 +7,10 @@ use crate::core::error::{Error, Result};
 use crate::core::output::Output;
 use crate::git::Repo;
 use crate::review::cli::{Cli, Command, FindingAction, PassAction, RunAction};
-use crate::store::Store;
 use crate::store::model::{
     Pass, Reveal, RoleUsage, Run, Severity, Target, TargetKind, Thread, ThreadType,
 };
+use crate::store::{Namespace, Store};
 
 mod approve;
 mod findings;
@@ -66,7 +66,7 @@ struct Scope {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let store = Store::open()?;
+    let store = Store::open(Namespace::Reviews)?;
     let selection = Selection {
         target: cli.target,
         range: cli.range,
@@ -160,7 +160,12 @@ pub fn run(cli: Cli) -> Result<Output> {
             let mut ended = run_end(&ctx, &run, reveal, head.as_deref(), usage)?;
             // The status the caller would check next, from a read-only repository so
             // merge checks write no objects.
-            let reader = Ctx::new(Store::open()?, status_selection, true, true)?;
+            let reader = Ctx::new(
+                Store::open(Namespace::Reviews)?,
+                status_selection,
+                true,
+                true,
+            )?;
             ended["status"] = brief_status(status(&reader, head.as_deref())?);
             ended
         }

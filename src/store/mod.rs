@@ -3,6 +3,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::core::error::{Error, Result, ctx, fail};
 use serde::de::DeserializeOwned;
@@ -12,7 +13,7 @@ use serde_json::Value;
 use crate::store::model::{Forge, Target, VERSION};
 
 const MAX_KEY: usize = 200;
-const _: () = assert!(MIGRATIONS.len() + 1 == VERSION as usize);
+const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);
 const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 
@@ -24,12 +25,63 @@ pub struct Account {
     pub login: String,
 }
 
+/// A store area with its own directory and schema version, so a change to one cannot break
+/// another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Namespace {
+    Reviews,
+    #[allow(
+        dead_code,
+        reason = "opened by `agt issue`, which lands in a later phase"
+    )]
+    Issues,
+    #[allow(
+        dead_code,
+        reason = "opened by `agt task`, which lands in a later phase"
+    )]
+    Tasks,
+}
+
+/// The current schema version of a namespace and the steps that bring older documents to it.
+#[derive(Clone, Copy)]
+struct Schema {
+    version: u32,
+    migrations: &'static [fn(&mut Value)],
+}
+
+impl Namespace {
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Reviews => "reviews",
+            Self::Issues => "issues",
+            Self::Tasks => "tasks",
+        }
+    }
+
+    fn schema(self) -> Schema {
+        match self {
+            Self::Reviews => Schema {
+                version: VERSION,
+                migrations: REVIEW_MIGRATIONS,
+            },
+            Self::Issues | Self::Tasks => Schema {
+                version: 1,
+                migrations: &[],
+            },
+        }
+    }
+}
+
 pub struct Store {
     root: PathBuf,
+    backups: PathBuf,
+    namespace: Namespace,
+    schema: Schema,
+    backed_up: AtomicBool,
 }
 
 impl Store {
-    pub fn open() -> Result<Self> {
+    pub fn open(namespace: Namespace) -> Result<Self> {
         let base = match std::env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
             Some(path) if path.is_absolute() => path,
             _ => {
@@ -39,9 +91,48 @@ impl Store {
                 PathBuf::from(home).join(".local").join("state")
             }
         };
-        Ok(Self {
-            root: base.join("agents").join("reviews"),
-        })
+        Ok(Self::at(&base, namespace))
+    }
+
+    /// Opens `namespace` under the state directory `base` (the parent of `agents`).
+    fn at(base: &Path, namespace: Namespace) -> Self {
+        let agents = base.join("agents");
+        Self {
+            root: agents.join(namespace.dir_name()),
+            backups: agents.join("backups"),
+            namespace,
+            schema: namespace.schema(),
+            backed_up: AtomicBool::new(false),
+        }
+    }
+
+    /// Copies the namespace to `backups/<namespace>-<timestamp>/` the first time this store is
+    /// about to overwrite a document written under an older schema version.
+    fn backup_before_migration(&self, path: &Path) -> Result<()> {
+        if self.backed_up.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let stored = read_document(path)?
+            .and_then(|document| document.get("version").and_then(Value::as_u64));
+        if stored.is_none_or(|version| version >= u64::from(self.schema.version)) {
+            return Ok(());
+        }
+        let stamp = crate::core::clock::now()?.replace(':', "-");
+        let name = self.namespace.dir_name();
+        let mut target = self.backups.join(format!("{name}-{stamp}"));
+        let mut attempt = 1;
+        while target.exists() {
+            attempt += 1;
+            target = self.backups.join(format!("{name}-{stamp}-{attempt}"));
+        }
+        copy_tree(&self.root, &target)?;
+        self.backed_up.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn write(&self, dir: &Path, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
+        self.backup_before_migration(path)?;
+        write_target(dir, path, target, expected, self.schema)
     }
 
     pub fn repo_dir(&self, repo_key: &str) -> Result<PathBuf> {
@@ -74,7 +165,7 @@ impl Store {
 
     pub fn load(&self, dir: &Path, key: &str) -> Result<Option<Target>> {
         validate_key(key)?;
-        read_target(&dir.join(format!("{key}.json")))
+        read_target(&dir.join(format!("{key}.json")), self.schema)
     }
 
     pub fn targets(&self, dir: &Path) -> Result<Vec<Target>> {
@@ -102,7 +193,7 @@ impl Store {
                 continue;
             };
             if is_target_document(&document) {
-                targets.push(parse_target(&path, document)?.0);
+                targets.push(parse_target(&path, document, self.schema)?.0);
             }
         }
         targets.sort_by(|a, b| a.key.cmp(&b.key));
@@ -165,13 +256,13 @@ impl Store {
         create_dir(dir)?;
         let _lock = lock(&dir.join(format!(".{key}.lock")))?;
         let path = dir.join(format!("{key}.json"));
-        let current = read_target_for_write(&path)?;
+        let current = read_target_for_write(&path, self.schema)?;
         let expected = current.as_ref().map(|target| target.revision);
         let mut target = current.unwrap_or_else(init);
         let result = change(&mut target)?;
         target.revision = expected.unwrap_or(0) + 1;
         target.updated_at = now.to_owned();
-        write_target(dir, &path, &target, expected)?;
+        self.write(dir, &path, &target, expected)?;
         Ok(result)
     }
 
@@ -227,8 +318,8 @@ impl Store {
         let _second = lock(second)?;
         let from_path = dir.join(format!("{from}.json"));
         let to_path = dir.join(format!("{to}.json"));
-        let old = read_target_for_write(&from_path)?;
-        let current = read_target_for_write(&to_path)?;
+        let old = read_target_for_write(&from_path, self.schema)?;
+        let current = read_target_for_write(&to_path, self.schema)?;
         let expected = current.as_ref().map(|target| target.revision);
         let had_old = old.is_some();
         let base_revision = expected.or(old.as_ref().map(|target| target.revision));
@@ -245,7 +336,7 @@ impl Store {
         let result = change(&mut target)?;
         target.revision = base_revision.unwrap_or(0) + 1;
         target.updated_at = now.to_owned();
-        write_target(dir, &to_path, &target, expected)?;
+        self.write(dir, &to_path, &target, expected)?;
         if had_old {
             fs::remove_file(&from_path).map_err(ctx(format!("remove {}", from_path.display())))?;
             fs::remove_file(&from_lock).map_err(ctx(format!("remove {}", from_lock.display())))?;
@@ -273,7 +364,7 @@ impl Store {
         let lock_path = dir.join(format!(".{key}.lock"));
         let _lock = lock(&lock_path)?;
         let path = dir.join(format!("{key}.json"));
-        let Some(target) = read_target(&path)? else {
+        let Some(target) = read_target(&path, self.schema)? else {
             return Ok(false);
         };
         if !remove(&target)? {
@@ -371,20 +462,20 @@ fn is_target_file(path: &Path) -> Result<bool> {
 
 /// Reads the target a caller asked for by key. A file of another document kind is an error so
 /// that a write never replaces it.
-fn read_target(path: &Path) -> Result<Option<Target>> {
+fn read_target(path: &Path, schema: Schema) -> Result<Option<Target>> {
     match read_document(path)? {
-        Some(document) => parse_target(path, document).map(|(target, _)| Some(target)),
+        Some(document) => parse_target(path, document, schema).map(|(target, _)| Some(target)),
         None => Ok(None),
     }
 }
 
 /// Like [`read_target`], for a caller that will write the target back. Refuses a file holding
 /// fields this build does not know, because writing it would silently drop them.
-fn read_target_for_write(path: &Path) -> Result<Option<Target>> {
+fn read_target_for_write(path: &Path, schema: Schema) -> Result<Option<Target>> {
     let Some(document) = read_document(path)? else {
         return Ok(None);
     };
-    let (target, document) = parse_target(path, document)?;
+    let (target, document) = parse_target(path, document, schema)?;
     let written =
         serde_json::to_value(&target).map_err(ctx(format!("encode {}", path.display())))?;
     if let Some(field) = lost_field(&document, &written, "") {
@@ -429,7 +520,7 @@ fn lost_field(original: &Value, written: &Value, at: &str) -> Option<String> {
 
 /// Parses a stored target, migrating older schema versions first. Returns the migrated
 /// document alongside the target.
-fn parse_target(path: &Path, mut document: Value) -> Result<(Target, Value)> {
+fn parse_target(path: &Path, mut document: Value, schema: Schema) -> Result<(Target, Value)> {
     if !is_target_document(&document) {
         return fail(format!("{} is not a target document", path.display()));
     }
@@ -438,17 +529,18 @@ fn parse_target(path: &Path, mut document: Value) -> Result<(Target, Value)> {
         Some(Ok(version)) => version,
         _ => return fail(format!("{} has no valid schema version", path.display())),
     };
-    if version > VERSION {
+    if version > schema.version {
         return fail(format!(
-            "{} uses schema version {version}, newer than the {VERSION} this agt (v{}) supports; upgrade agt to a release that supports schema version {version}",
+            "{} uses schema version {version}, newer than the {} this agt (v{}) supports; upgrade agt to a release that supports schema version {version}",
             path.display(),
+            schema.version,
             env!("CARGO_PKG_VERSION"),
         ));
     }
     if version == 0 {
         return fail(format!("{} has unsupported version 0", path.display()));
     }
-    migrate(&mut document, version);
+    migrate_with(&mut document, version, schema.migrations);
     let target: Target = serde_json::from_value(document.clone())
         .map_err(ctx(format!("parse {}", path.display())))?;
     Ok((target, document))
@@ -456,11 +548,7 @@ fn parse_target(path: &Path, mut document: Value) -> Result<(Target, Value)> {
 
 /// One step per schema version: `MIGRATIONS[n - 1]` rewrites a version `n` document into
 /// version `n + 1`'s shape. Bumping [`VERSION`] means adding a step here and a frozen-JSON test.
-const MIGRATIONS: &[fn(&mut Value)] = &[];
-
-fn migrate(document: &mut Value, from: u32) {
-    migrate_with(document, from, MIGRATIONS);
-}
+const REVIEW_MIGRATIONS: &[fn(&mut Value)] = &[];
 
 fn migrate_with(document: &mut Value, from: u32, steps: &[fn(&mut Value)]) {
     let from = from as usize;
@@ -504,9 +592,15 @@ fn persist_json(
         .map_err(ctx(format!("sync {}", dir.display())))
 }
 
-fn write_target(dir: &Path, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
+fn write_target(
+    dir: &Path,
+    path: &Path,
+    target: &Target,
+    expected: Option<u64>,
+    schema: Schema,
+) -> Result<()> {
     persist_json(dir, path, target, || {
-        let on_disk = read_target(path)?.map(|current| current.revision);
+        let on_disk = read_target(path, schema)?.map(|current| current.revision);
         if on_disk != expected {
             return fail(format!(
                 "target {} changed during update; retry",
@@ -515,6 +609,31 @@ fn write_target(dir: &Path, path: &Path, target: &Target, expected: Option<u64>)
         }
         Ok(())
     })
+}
+
+/// Copies regular files and directories from `from` into the new directory `to`, skipping lock
+/// files and anything that is not a plain file or directory.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    create_dir(to)?;
+    let entries = match fs::read_dir(from) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return fail(format!("read {}: {error}", from.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(ctx(format!("read {}", from.display())))?;
+        let kind = entry
+            .file_type()
+            .map_err(ctx(format!("stat {}", entry.path().display())))?;
+        let destination = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &destination)?;
+        } else if kind.is_file() && !entry.file_name().to_string_lossy().ends_with(".lock") {
+            fs::copy(entry.path(), &destination)
+                .map_err(ctx(format!("copy {}", entry.path().display())))?;
+        }
+    }
+    Ok(())
 }
 
 fn create_dir(dir: &Path) -> Result<()> {
@@ -589,9 +708,7 @@ mod tests {
     #[test]
     fn update_existing_refuses_a_deleted_target() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store {
-            root: dir.path().to_owned(),
-        };
+        let store = Store::at(dir.path(), Namespace::Reviews);
         let kept = target(Vec::new());
         let result = store.update_existing(dir.path(), &kept, "2026-10-16T12:00:00Z", |_| Ok(()));
         assert!(result.unwrap_err().to_string().contains("vanished"));
@@ -692,13 +809,20 @@ mod tests {
     #[test]
     fn current_version_loads() {
         let (_dir, path) = file("k.json", &stored(VERSION.into()));
-        assert!(read_target(&path).unwrap().is_some());
+        assert!(
+            read_target(&path, Namespace::Reviews.schema())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
     fn newer_version_is_refused_with_an_upgrade_hint() {
         let (_dir, path) = file("k.json", &stored(u64::from(VERSION) + 1));
-        let error = read_target(&path).err().unwrap().0;
+        let error = read_target(&path, Namespace::Reviews.schema())
+            .err()
+            .unwrap()
+            .0;
         assert!(error.contains("newer"), "{error}");
         assert!(error.contains("upgrade agt"), "{error}");
         assert!(
@@ -710,7 +834,7 @@ mod tests {
     #[test]
     fn version_zero_is_refused() {
         let (_dir, path) = file("k.json", &stored(0));
-        assert!(read_target(&path).is_err());
+        assert!(read_target(&path, Namespace::Reviews.schema()).is_err());
     }
 
     #[test]
@@ -739,12 +863,119 @@ mod tests {
         document["threads"] = json!([]);
         document["from_the_future"] = json!(1);
         let (_dir, path) = file("k.json", &document);
-        assert!(read_target(&path).unwrap().is_some());
-        let error = read_target_for_write(&path).err().unwrap().0;
+        assert!(
+            read_target(&path, Namespace::Reviews.schema())
+                .unwrap()
+                .is_some()
+        );
+        let error = read_target_for_write(&path, Namespace::Reviews.schema())
+            .err()
+            .unwrap()
+            .0;
         assert!(error.contains("from_the_future"), "{error}");
         let mut document = stored(VERSION.into());
         document["runs"] = json!([]);
         let (_dir, path) = file("k.json", &document);
-        assert!(read_target_for_write(&path).unwrap().is_some());
+        assert!(
+            read_target_for_write(&path, Namespace::Reviews.schema())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    const NOW: &str = "2026-10-16T12:00:00Z";
+
+    fn write_target_named(store: &Store, dir: &Path) {
+        store
+            .update(dir, "k", NOW, || target(Vec::new()), |_| Ok(()))
+            .unwrap();
+    }
+
+    #[test]
+    fn namespaces_use_separate_directories_and_do_not_see_each_other() {
+        let base = tempfile::tempdir().unwrap();
+        let reviews = Store::at(base.path(), Namespace::Reviews);
+        let issues = Store::at(base.path(), Namespace::Issues);
+        let tasks = Store::at(base.path(), Namespace::Tasks);
+        let dir = reviews.repo_dir("github.com/o/r").unwrap();
+        write_target_named(&reviews, &dir);
+        assert!(dir.starts_with(base.path().join("agents").join("reviews")));
+        assert_eq!(reviews.repo_dirs().unwrap(), vec![dir.clone()]);
+        assert!(issues.repo_dirs().unwrap().is_empty());
+        assert!(tasks.repo_dirs().unwrap().is_empty());
+        let issue_dir = issues.repo_dir("github.com/o/r").unwrap();
+        assert!(issue_dir.starts_with(base.path().join("agents").join("issues")));
+        assert!(issues.load(&issue_dir, "k").unwrap().is_none());
+        assert!(
+            tasks
+                .repo_dir("x")
+                .unwrap()
+                .starts_with(base.path().join("agents").join("tasks"))
+        );
+    }
+
+    #[test]
+    fn each_namespace_refuses_a_newer_schema_version() {
+        for namespace in [Namespace::Reviews, Namespace::Issues, Namespace::Tasks] {
+            let base = tempfile::tempdir().unwrap();
+            let store = Store::at(base.path(), namespace);
+            let dir = store.repo_dir("o/r").unwrap();
+            let newer = stored(u64::from(namespace.schema().version) + 1);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("k.json"), newer.to_string()).unwrap();
+            let error = store.load(&dir, "k").err().unwrap().0;
+            assert!(error.contains("upgrade agt"), "{namespace:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn schema_versions_are_independent_per_namespace() {
+        let base = tempfile::tempdir().unwrap();
+        let mut reviews = Store::at(base.path(), Namespace::Reviews);
+        let issues = Store::at(base.path(), Namespace::Issues);
+        reviews.schema.version = 2;
+        let dir = issues.repo_dir("o/r").unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("k.json"), stored(2).to_string()).unwrap();
+        assert!(issues.load(&dir, "k").is_err());
+        let dir = reviews.repo_dir("o/r").unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("k.json"), stored(2).to_string()).unwrap();
+        reviews.schema.migrations = &[|_| {}];
+        assert!(reviews.load(&dir, "k").unwrap().is_some());
+    }
+
+    #[test]
+    fn migrating_write_backs_up_the_namespace_first_and_only_once() {
+        let base = tempfile::tempdir().unwrap();
+        let mut store = Store::at(base.path(), Namespace::Reviews);
+        let dir = store.repo_dir("o/r").unwrap();
+        write_target_named(&store, &dir);
+        let backups = base.path().join("agents").join("backups");
+        assert!(!backups.exists(), "a current-version write needs no backup");
+        let before = fs::read_to_string(dir.join("k.json")).unwrap();
+
+        store.schema = Schema {
+            version: 2,
+            migrations: &[|_| {}],
+        };
+        write_target_named(&store, &dir);
+        let made: Vec<_> = fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(made.len(), 1);
+        let name = made[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("reviews-"), "{name}");
+        let copy = made[0].join("o").join("r").join("k.json");
+        assert_eq!(fs::read_to_string(copy).unwrap(), before);
+        let after = fs::read_to_string(dir.join("k.json")).unwrap();
+        assert_ne!(
+            after, before,
+            "the live file was rewritten after the backup"
+        );
+
+        write_target_named(&store, &dir);
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), 1);
     }
 }
