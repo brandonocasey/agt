@@ -98,6 +98,22 @@ pub struct Fetched {
     pub drafts: Vec<Draft>,
 }
 
+/// The review `search` finds in `origin` or, failing that, in the repository it was forked from;
+/// returns that repository and the number.
+pub fn in_origin_or_parent(
+    origin: &str,
+    search: impl Fn(&str) -> Result<Option<u64>>,
+    parent: impl FnOnce() -> Result<Option<String>>,
+) -> Result<Option<(String, u64)>> {
+    if let Some(number) = search(origin)? {
+        return Ok(Some((origin.to_owned(), number)));
+    }
+    let Some(parent) = parent()? else {
+        return Ok(None);
+    };
+    Ok(search(&parent)?.map(|number| (parent, number)))
+}
+
 pub fn text(value: &Value, pointer: &str) -> Option<String> {
     value
         .pointer(pointer)

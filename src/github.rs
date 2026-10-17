@@ -300,14 +300,10 @@ fn find_pr(gh: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(Str
             .or(pulls.first());
         Ok(open.and_then(|pull| pull["number"].as_u64()))
     };
-    if let Some(number) = search(origin)? {
-        return Ok(Some((origin.to_owned(), number)));
-    }
-    let repo = gh.json(&Request::get(format!("repos/{origin}")))?;
-    let Some(parent) = forge::text(&repo, "/parent/full_name") else {
-        return Ok(None);
-    };
-    Ok(search(&parent)?.map(|number| (parent, number)))
+    forge::in_origin_or_parent(origin, search, || {
+        let repo = gh.json(&Request::get(format!("repos/{origin}")))?;
+        Ok(forge::text(&repo, "/parent/full_name"))
+    })
 }
 
 struct Pager<'a> {

@@ -322,13 +322,12 @@ fn find_mr(glab: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(S
             .or(mrs.first())
             .and_then(|mr| mr["iid"].as_u64()))
     };
-    if let Some(iid) = search(origin)? {
-        return Ok(Some((origin.to_owned(), iid)));
-    }
-    let Some(parent) = forge::text(&project, "/forked_from_project/path_with_namespace") else {
-        return Ok(None);
-    };
-    Ok(search(&parent)?.map(|iid| (parent, iid)))
+    forge::in_origin_or_parent(origin, search, || {
+        Ok(forge::text(
+            &project,
+            "/forked_from_project/path_with_namespace",
+        ))
+    })
 }
 
 fn state(text: &str) -> ReviewState {
