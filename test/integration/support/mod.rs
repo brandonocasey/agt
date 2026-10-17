@@ -9,7 +9,7 @@ use serde_json::Value;
 pub mod forge;
 pub mod scenario;
 
-pub const BIN: &str = env!("CARGO_BIN_EXE_agent-review");
+const BIN: &str = env!("CARGO_BIN_EXE_agt");
 const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
@@ -49,6 +49,13 @@ impl Env {
         self.root.join(name)
     }
 
+    /// `agt review` in `dir`, in the isolated environment.
+    pub fn agt(&self, dir: &Path) -> Command {
+        let mut command = self.command(BIN, dir);
+        command.arg("review");
+        command
+    }
+
     pub fn command(&self, program: &str, dir: &Path) -> Command {
         let mut command = Command::new(program);
         command
@@ -63,8 +70,8 @@ impl Env {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_OBJECT_DIRECTORY")
-            .env("AGENT_REVIEW_GH_BIN", FAKE_FORGE)
-            .env("AGENT_REVIEW_GLAB_BIN", FAKE_FORGE)
+            .env("AGT_GH_BIN", FAKE_FORGE)
+            .env("AGT_GLAB_BIN", FAKE_FORGE)
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
             .env_remove("GITLAB_HOST")
             .env_remove("AGENT_REVIEW_NOW");
@@ -223,7 +230,7 @@ impl Env {
     }
 
     pub fn exec(&self, args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> Output {
-        let mut command = self.command(BIN, &self.repo);
+        let mut command = self.agt(&self.repo);
         command
             .args(args)
             .envs(env.iter().copied())
@@ -241,7 +248,7 @@ impl Env {
         let output = self.exec(args, stdin, env);
         assert!(
             output.status.success(),
-            "agent-review {args:?} failed: {}",
+            "agt review {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).unwrap()
@@ -251,12 +258,12 @@ impl Env {
         self.run_with(args, None, &[])
     }
 
-    /// Runs agent-review from another directory, such as a linked worktree.
+    /// Runs agt review from another directory, such as a linked worktree.
     pub fn run_in(&self, dir: &Path, args: &[&str]) -> Value {
-        let output = self.command(BIN, dir).args(args).output().unwrap();
+        let output = self.agt(dir).args(args).output().unwrap();
         assert!(
             output.status.success(),
-            "agent-review {args:?} failed: {}",
+            "agt review {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).unwrap()
@@ -282,7 +289,7 @@ impl Env {
         assert_eq!(
             output.status.code(),
             Some(1),
-            "agent-review {args:?} should fail"
+            "agt review {args:?} should fail"
         );
         assert!(output.stdout.is_empty());
         String::from_utf8(output.stderr).unwrap()

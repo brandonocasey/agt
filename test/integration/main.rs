@@ -9,10 +9,10 @@ use assert_cmd::Command;
 
 #[test]
 fn prints_version() {
-    Command::cargo_bin("agent-review")
+    Command::cargo_bin("agt")
         .expect("binary builds")
         .arg("--version")
         .assert()
         .success()
-        .stdout(concat!("agent-review ", env!("CARGO_PKG_VERSION"), "\n"));
+        .stdout(concat!("agt ", env!("CARGO_PKG_VERSION"), "\n"));
 }

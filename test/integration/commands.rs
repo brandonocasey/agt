@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
-use crate::support::{BIN, Env, numbered, snapshot};
+use crate::support::{Env, numbered, snapshot};
 
 const FINDINGS: &str = include_str!("../fixtures/findings.json");
 const REVIEWER: &str = r#"[{"model":"gpt-6","effort":"high","harness":"codex","harness_version":"0.162.1","starting_context":"fresh"}]"#;
@@ -228,7 +228,7 @@ fn finding_add_records_verified_and_killed() {
             ],
             Some(input),
         );
-        assert!(error.starts_with("agent-review: "), "{error}");
+        assert!(error.starts_with("agt: "), "{error}");
         assert!(error.contains(message), "{input}: {error}");
     }
     let unknown = env.fail(
@@ -511,15 +511,11 @@ fn range_and_commit_targets() {
 #[test]
 fn errors_outside_a_repository() {
     let env = Env::new();
-    let output = env
-        .command(BIN, &env.path("home"))
-        .arg("status")
-        .output()
-        .unwrap();
+    let output = env.agt(&env.path("home")).arg("status").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "agent-review: error: not inside a git work tree\n"
+        "agt: error: not inside a git work tree\n"
     );
 }
 
@@ -608,7 +604,7 @@ fn concurrent_writers_do_not_lose_updates() {
     let writers = 12;
     let children: Vec<_> = (0..writers)
         .map(|index| {
-            env.command(BIN, &env.repo)
+            env.agt(&env.repo)
                 .args(["comment", "--body", &format!("note {index}")])
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -698,7 +694,7 @@ fn prune_by_age() {
 
     env.run(&["comment", "--body", "again"]);
     let output = env
-        .command(BIN, &env.path("home"))
+        .agt(&env.path("home"))
         .args(["prune", "--all"])
         .env("AGENT_REVIEW_NOW", &later)
         .output()
@@ -1401,7 +1397,7 @@ fn run_id_finds_its_range_target() {
     let ended = env.run(&["run", "end", "--run", &run]);
     assert_eq!(ended["target"], key, "{ended}");
     let error = env.fail(&["pass", "end", "--run", "rv-zzzz", "--pass", "c1p0"], None);
-    assert!(error.starts_with("agent-review: error: "), "{error}");
+    assert!(error.starts_with("agt: error: "), "{error}");
 }
 
 #[test]

@@ -5,7 +5,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use crate::error::{Error, Result, ctx, fail};
+use crate::core::error::{Error, Result, ctx, fail};
 
 // Fixed diff options so patch-ids and anchors do not depend on user diff config.
 const DIFF_FLAGS: [&str; 5] = [

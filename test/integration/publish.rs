@@ -118,9 +118,9 @@ exec "$FAKE_FORGE_REAL" "$@"
         .open(fifo)
         .unwrap();
     let spawn = || {
-        env.command(crate::support::BIN, &env.repo)
+        env.agt(&env.repo)
             .args(["--target", "gl-3", "publish", "--only", "h1"])
-            .env("AGENT_REVIEW_GLAB_BIN", &wrapper)
+            .env("AGT_GLAB_BIN", &wrapper)
             .env(
                 "FAKE_FORGE_REAL",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh"),
