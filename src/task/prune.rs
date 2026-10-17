@@ -1,4 +1,4 @@
-//! Which task records `agt prune` may drop, with the directory lock `agent-task` uses.
+//! Which task records `agt cleanup` may drop, with the directory lock `agent-task` uses.
 
 use std::fs;
 use std::io::ErrorKind;

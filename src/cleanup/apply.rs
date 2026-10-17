@@ -12,6 +12,8 @@ use crate::store::{Namespace, Store};
 pub struct Outcome {
     deleted: Vec<(&'static str, String, std::path::PathBuf, u64)>,
     skipped: Vec<(&'static str, String, std::path::PathBuf, String)>,
+    /// Process ids and the last signal each was sent.
+    signalled: Vec<(String, &'static str)>,
 }
 
 impl Outcome {
@@ -36,6 +38,13 @@ impl Outcome {
                 })
                 .collect(),
         );
+        map.insert(
+            "signalled".into(),
+            self.signalled
+                .iter()
+                .map(|(pid, signal)| json!({ "pid": pid, "signal": signal }))
+                .collect(),
+        );
         map.insert("bytes_freed".into(), json!(freed));
         map
     }
@@ -43,12 +52,28 @@ impl Outcome {
 
 /// Deletes every item whose lock is free and which still qualifies; the rest are reported as
 /// skipped with the reason. An error on one item skips it and does not stop the others.
-pub fn run(plan: &Plan, now: i64) -> Outcome {
+/// Processes are signalled only when `signal` is set, all together, after the files.
+pub fn run(plan: &Plan, now: i64, signal: bool) -> Outcome {
     let mut outcome = Outcome {
         deleted: Vec::new(),
         skipped: Vec::new(),
+        signalled: Vec::new(),
     };
+    let mut stopping = Vec::new();
     for item in &plan.items {
+        if let Action::Process(proc) = &item.action {
+            if signal {
+                stopping.push(proc.clone());
+            } else {
+                outcome.skipped.push((
+                    item.category,
+                    item.key.clone(),
+                    item.path.clone(),
+                    "processes are signalled only with --only processes".into(),
+                ));
+            }
+            continue;
+        }
         let result = delete(item, now);
         let item_id = (item.category, item.key.clone(), item.path.clone());
         match result {
@@ -74,6 +99,15 @@ pub fn run(plan: &Plan, now: i64) -> Outcome {
             }
         }
     }
+    for (proc, result) in super::procs::stop(&stopping) {
+        let key = proc.pid.to_string();
+        match result {
+            Ok(signal) => outcome.signalled.push((key, signal)),
+            Err(why) => outcome
+                .skipped
+                .push(("processes", key, std::path::PathBuf::new(), why)),
+        }
+    }
     outcome
 }
 
@@ -92,5 +126,8 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         Action::LocalRepo { dir, had_targets } => {
             Store::open(Namespace::Reviews)?.remove_local_repo(dir, now, *had_targets)
         }
+        Action::Files { days, harness } => super::files::remove(&item.path, *days, now, *harness),
+        // `run` signals processes on its own.
+        Action::Process(_) => Ok(Removal::Kept),
     }
 }

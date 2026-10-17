@@ -1,4 +1,4 @@
-//! What `agt prune` may delete from the store, and the locked, non-blocking ways to delete it, so
+//! What `agt cleanup` may delete from the store, and the locked, non-blocking ways to delete it, so
 //! a prune never waits for or corrupts a concurrent agt run.
 
 use std::fs;

@@ -1,7 +1,8 @@
-//! `agt prune`: every rule deletes what it should and keeps its near miss. The clock is the
+//! `agt cleanup`: every rule deletes what it should and keeps its near miss. The clock is the
 //! `AGT_NOW` override, so no test waits.
 
 use std::fs::{self, File};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -153,14 +154,14 @@ impl Prune {
         let output = self
             .env
             .command(BIN, &self.env.repo)
-            .arg("prune")
+            .arg("cleanup")
             .args(args)
             .env("AGT_NOW", NOW.to_string())
             .output()
             .unwrap();
         assert!(
             output.status.success(),
-            "agt prune {args:?}: {}",
+            "agt cleanup {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         serde_json::from_slice(&output.stdout).unwrap()
@@ -947,4 +948,271 @@ fn a_local_repo_with_no_targets_is_listed_only_after_a_quiet_quarter() {
     );
     prune.run(&["--yes"]);
     assert!(!dir.exists());
+}
+
+/// Sets a path's modification time to `days` before `NOW`.
+fn age(path: &Path, days: i64) {
+    let secs = u64::try_from(NOW - days * DAY).unwrap();
+    File::open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+/// A file `days` old, in a directory created as needed.
+fn old_file(path: &Path, days: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, "x").unwrap();
+    age(path, days);
+}
+
+#[test]
+fn output_and_scratch_go_whole_once_every_file_is_old() {
+    let prune = Prune::new();
+    let cache = prune.env.path("cache").join("agents");
+    let output = cache.join("output");
+    old_file(&output.join("old/a.md"), 8);
+    age(&output.join("old"), 8);
+    old_file(&output.join("mixed/a.md"), 8);
+    old_file(&output.join("mixed/b.md"), 1);
+    age(&output.join("mixed"), 8);
+    old_file(&output.join("loose.md"), 6);
+    let scratch = cache.join("scratch");
+    old_file(&scratch.join("task/notes.md"), 31);
+    age(&scratch.join("task"), 31);
+    old_file(&scratch.join(".keep"), 400);
+    old_file(&scratch.join("young/notes.md"), 29);
+    age(&scratch.join("young"), 29);
+    let uid = unsafe { libc::getuid() };
+    let harness = prune.env.path("tmp").join(format!("claude-{uid}"));
+    let session = harness.join("-Users-me-repo/0f0f");
+    old_file(&session.join("scratchpad/x"), 40);
+    age(&session.join("scratchpad"), 40);
+    age(&session, 40);
+    let live = harness.join("-Users-me-other/1a1a");
+    old_file(&live.join("tasks/out"), 2);
+
+    let report = prune.run(&["--only", "output", "--only", "scratch"]);
+    assert_eq!(keys(&report, "output"), ["old"]);
+    let session_key = session.to_string_lossy().into_owned();
+    assert_eq!(keys(&report, "scratch"), [session_key.as_str(), "task"]);
+    assert!(output.join("old").exists());
+
+    let report = prune.run(&["--only", "output", "--only", "scratch", "--yes"]);
+    assert_eq!(report["deleted"].as_array().unwrap().len(), 3, "{report}");
+    assert!(!output.join("old").exists() && output.join("mixed/a.md").exists());
+    assert!(output.join("loose.md").exists() && scratch.join(".keep").exists());
+    assert!(!scratch.join("task").exists() && scratch.join("young").exists());
+    // The emptied cwd directory goes with its last session; the live one stays.
+    assert!(!session.parent().unwrap().exists() && live.exists());
+}
+
+/// Not a test of its own: with `AGT_TEST_SLEEP` set it stands in for a tool a session
+/// started. The test binary is used because macOS hides the environment of Apple's binaries.
+#[test]
+fn sleeper() {
+    if std::env::var_os("AGT_TEST_SLEEP").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[test]
+fn orphan_processes_are_signalled_only_when_named() {
+    let prune = Prune::new();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cleanup::sleeper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("AGT_TEST_SLEEP", "1")
+        // A session pid that no process has.
+        .env("CLAUDE_PID", "2000000000")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id().to_string();
+    let run = |args: &[&str]| {
+        let output = prune
+            .env
+            .command(BIN, &prune.env.repo)
+            .arg("cleanup")
+            .args(args)
+            .env("AGT_NOW", NOW.to_string())
+            .env("AGT_CLEANUP_PID", &pid)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    // The environment is readable a moment after the spawn, once the child has exec'd.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let listed = loop {
+        let report = run(&["--only", "processes"]);
+        if !keys(&report, "processes").is_empty() || std::time::Instant::now() > deadline {
+            break report;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(keys(&listed, "processes"), [pid.as_str()], "{listed}");
+    let reason = listed["plan"]["processes"][0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("Claude session 2000000000 is gone"),
+        "{reason}"
+    );
+
+    let report = run(&["--yes"]);
+    assert_eq!(report["signalled"], json!([]));
+    assert!(
+        report["skipped"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("--only processes")
+    );
+    assert!(child.try_wait().unwrap().is_none());
+
+    let report = run(&["--only", "processes", "--yes"]);
+    assert_eq!(
+        report["signalled"],
+        json!([{ "pid": pid, "signal": "SIGTERM" }])
+    );
+    assert!(child.wait().unwrap().signal().is_some());
+}
+
+#[test]
+fn a_live_session_keeps_its_tools() {
+    let prune = Prune::new();
+    let sessions = prune.env.path("home").join(".claude-two/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let me = std::process::id();
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    fs::write(
+        sessions.join(format!("{me}.json")),
+        json!({ "pid": me, "startedAt": started }).to_string(),
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cleanup::sleeper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("AGT_TEST_SLEEP", "1")
+        .env("CLAUDE_PID", me.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let output = prune
+        .env
+        .command(BIN, &prune.env.repo)
+        .args(["cleanup", "--only", "processes"])
+        .env("AGT_NOW", NOW.to_string())
+        .env("AGT_CLEANUP_PID", child.id().to_string())
+        .output()
+        .unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(keys(&report, "processes"), Vec::<String>::new(), "{report}");
+}
+
+#[test]
+fn manual_leftovers_are_listed_and_saved_never_deleted() {
+    let prune = Prune::new();
+    let home = prune.env.path("home");
+    let repo = home.join("projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&["branch", "done"]);
+    git(&["branch", "busy"]);
+    git(&["worktree", "add", "-q", ".worktrees/busy", "busy"]);
+    let releases = home.join(".codex/packages/standalone/releases");
+    for name in ["0.9.0", "0.10.0", "0.11.0", "0.12.0"] {
+        fs::create_dir_all(releases.join(name)).unwrap();
+    }
+    std::os::unix::fs::symlink(
+        releases.join("0.11.0"),
+        home.join(".codex/packages/standalone/current"),
+    )
+    .unwrap();
+    let browsers = home.join(".cache/ms-playwright");
+    for name in ["chromium-1100", "chromium-1200", "ffmpeg-1010"] {
+        fs::create_dir_all(browsers.join(name)).unwrap();
+    }
+
+    let report = prune.run(&["--only", "manual"]);
+    let manual = &report["manual"];
+    let repo_path = repo.canonicalize().unwrap();
+    assert_eq!(
+        manual["branches"],
+        json!([format!("git -C {} branch -d done", repo_path.display())])
+    );
+    // Merged and clean; the clock is months past its last use. Its branch is checked out.
+    assert_eq!(
+        manual["worktrees"],
+        json!([format!(
+            "git -C {} worktree remove {}",
+            repo_path.display(),
+            repo_path.join(".worktrees/busy").display()
+        )])
+    );
+    assert_eq!(
+        manual["codex_releases"],
+        json!([
+            releases.join("0.9.0").display().to_string(),
+            releases.join("0.12.0").display().to_string()
+        ])
+    );
+    assert_eq!(
+        manual["playwright"],
+        json!([browsers.join("chromium-1100").display().to_string()])
+    );
+    assert!(report.get("manual_report").is_none());
+    let count = |prune: &Prune| {
+        let output = prune
+            .env
+            .command(BIN, &prune.env.repo)
+            .args(["cleanup", "--count"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(count(&prune), "");
+
+    let report = prune.run(&["--only", "manual", "--yes"]);
+    let saved = PathBuf::from(report["manual_report"].as_str().unwrap());
+    let text = fs::read_to_string(&saved).unwrap();
+    assert!(text.contains("<!-- count: 5 -->"), "{text}");
+    assert!(text.contains("branch -d done"));
+    assert_eq!(
+        count(&prune),
+        format!("agt: 5 cleanup candidates in {}\n", saved.display())
+    );
+    assert!(releases.join("0.9.0").exists() && browsers.join("chromium-1100").exists());
+    assert!(repo_path.join(".worktrees/busy").exists());
 }

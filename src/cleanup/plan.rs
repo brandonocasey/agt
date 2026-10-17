@@ -1,10 +1,12 @@
-//! What a prune would delete, found without changing anything.
+//! What a cleanup would delete, found without changing anything.
 
 use std::fs;
 use std::path::PathBuf;
 
 use serde_json::{Map, Value, json};
 
+use super::files::{self, OUTPUT_DAYS, SCRATCH_DAYS};
+use super::procs::{self, Proc};
 use crate::core::error::Result;
 use crate::issue::prune::prunable;
 use crate::review::commands::prune::expired;
@@ -14,7 +16,7 @@ use crate::store::prune::{Backup, PRUNE_AFTER_SECS};
 use crate::store::{Namespace, Store};
 use crate::task::prune::{Expired, expired as expired_tasks};
 
-pub const CATEGORIES: [&str; 7] = [
+pub const CATEGORIES: [&str; 10] = [
     "reviews",
     "local_repos",
     "issues",
@@ -22,6 +24,9 @@ pub const CATEGORIES: [&str; 7] = [
     "locks",
     "partial_backups",
     "backups",
+    "output",
+    "scratch",
+    "processes",
 ];
 
 /// How to delete one planned item.
@@ -45,6 +50,13 @@ pub enum Action {
         path: PathBuf,
     },
     Backup(Backup),
+    /// A tree under the cache root, deleted while it is still `days` days old.
+    Files {
+        days: i64,
+        /// A harness session directory, whose emptied parent goes too.
+        harness: bool,
+    },
+    Process(Proc),
 }
 
 pub struct Item {
@@ -351,6 +363,62 @@ impl Plan {
                     Action::Backup(backup.clone()),
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Long-output copies untouched for a week.
+    pub fn output(&mut self, now: i64) -> Result<()> {
+        for stale in files::output(now, &mut self.warnings)? {
+            let reason = files::reason(&stale, now, OUTPUT_DAYS);
+            self.add(
+                "output",
+                stale.path,
+                stale.key,
+                reason,
+                stale.bytes,
+                Action::Files {
+                    days: OUTPUT_DAYS,
+                    harness: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Scratch and harness session directories untouched for 30 days.
+    pub fn scratch(&mut self, now: i64) -> Result<()> {
+        let harness = files::harness_roots()?;
+        for stale in files::scratch(now, &mut self.warnings)? {
+            let reason = files::reason(&stale, now, SCRATCH_DAYS);
+            let in_harness = harness.iter().any(|root| stale.path.starts_with(root));
+            self.add(
+                "scratch",
+                stale.path,
+                stale.key,
+                reason,
+                stale.bytes,
+                Action::Files {
+                    days: SCRATCH_DAYS,
+                    harness: in_harness,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Processes whose agent session is gone, a day or more old.
+    pub fn processes(&mut self, now: i64) -> Result<()> {
+        for orphan in procs::orphans(now)? {
+            let reason = procs::reason(&orphan);
+            self.add(
+                "processes",
+                PathBuf::new(),
+                orphan.proc.pid.to_string(),
+                reason,
+                0,
+                Action::Process(orphan.proc),
+            );
         }
         Ok(())
     }

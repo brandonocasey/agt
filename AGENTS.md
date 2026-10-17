@@ -15,7 +15,7 @@ mise run test
 ```
 
 `mise run install` installs the binary into `~/.cargo/bin`. Commands run as
-`agt review <command>`, `agt issue <command>`, `agt prune`, `agt watch` and `agt ci`; the integration helper `Env::agt` prepends
+`agt review <command>`, `agt issue <command>`, `agt cleanup`, `agt watch` and `agt ci`; the integration helper `Env::agt` prepends
 `review` and `Env::issue*` (in `support/issue.rs`, with the fake issue tracker) prepend `issue`.
 
 ## Layout
@@ -25,7 +25,7 @@ persisted `model`), `src/git.rs` and `src/forge` (services, transports, anchors,
 markers) are foundations. `src/review` and `src/issue` are domain modules. Foundations never
 import a domain module and domain modules never import each other;
 `test/integration/agt.rs` scans `src/` and fails on the offending line. `src/task` is the `agt task` domain (records and the session index in `agents/tasks`, the
-Node `agent-task` format). `src/prune` is not a domain: it may import every domain's `prune` module and deletes across all namespaces. Add new domains (`watch`, `ci`) as sibling modules.
+Node `agent-task` format). `src/cleanup` is not a domain: it may import every domain's `prune` module and deletes across all namespaces, cache files and orphan processes. Add new domains (`watch`, `ci`) as sibling modules.
 
 ## Release
 

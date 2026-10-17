@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
 
 use crate::ci;
+use crate::cleanup;
 use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::issue;
-use crate::prune;
 use crate::review;
 use crate::task;
 use crate::watch;
@@ -30,7 +30,7 @@ enum Command {
     /// GitHub and GitLab issues, synced locally; writes wait for `push`.
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
-    Prune(prune::Cli),
+    Cleanup(cleanup::Cli),
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -40,6 +40,6 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Watch(args) => watch::run(args),
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
-        Command::Prune(args) => prune::run(args),
+        Command::Cleanup(args) => cleanup::run(args),
     }
 }

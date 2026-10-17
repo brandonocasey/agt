@@ -49,7 +49,7 @@ pub(super) fn prune_dir(store: &Store, dir: &Path, now: i64, dry_run: bool) -> R
         if !expired(&target, now)? {
             continue;
         }
-        // Skips a target whose publish is in flight or that another agt holds, as `agt prune`
+        // Skips a target whose publish is in flight or that another agt holds, as `agt cleanup`
         // does; the next run picks it up.
         let removed = dry_run
             || match store.try_remove_if(dir, &target.key, |current| expired(current, now))? {

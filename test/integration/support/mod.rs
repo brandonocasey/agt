@@ -75,7 +75,13 @@ impl Env {
             .env("AGT_GLAB_BIN", FAKE_FORGE)
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
             .env_remove("GITLAB_HOST")
-            .env_remove("AGT_NOW");
+            .env_remove("AGT_NOW")
+            // `agt cleanup` must see only this environment: its cache, its tmp, no processes.
+            .env("XDG_CACHE_HOME", self.root.join("cache"))
+            .env("AGT_CLEANUP_TMP", self.root.join("tmp"))
+            .env("AGT_CLEANUP_PID", "0")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("PLAYWRIGHT_BROWSERS_PATH");
         command
     }
 

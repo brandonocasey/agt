@@ -114,6 +114,16 @@ impl Store {
         &self.root
     }
 
+    /// The shared backups directory, `agents/backups`.
+    pub fn backups_dir(&self) -> &Path {
+        &self.backups
+    }
+
+    /// The `agents` directory above every namespace.
+    pub fn agents_dir(&self) -> &Path {
+        self.backups.parent().unwrap_or(&self.backups)
+    }
+
     /// Opens `namespace` under the state directory `base` (the parent of `agents`).
     fn at(base: &Path, namespace: Namespace) -> Self {
         let agents = base.join("agents");

@@ -1,10 +1,10 @@
 mod ci;
+mod cleanup;
 mod cli;
 mod core;
 mod forge;
 mod git;
 mod issue;
-mod prune;
 mod review;
 mod store;
 mod task;

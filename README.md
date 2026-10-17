@@ -299,19 +299,23 @@ agt review prune --dry-run
 agt review prune --all
 ```
 
-## Prune
+## Cleanup
 
-`agt prune` cleans the whole store, every repository and namespace, in one pass. By
-default it deletes nothing and prints a JSON plan; `--yes` deletes. `--only` limits the
-pass to `reviews`, `issues`, `tasks`, `backups` or `locks` (repeat it for several).
+`agt cleanup` cleans up after agents in one pass: the whole store (every repository and
+namespace), old cache files and orphan processes. It also lists leftovers for you to remove
+by hand. By default it changes nothing and prints a JSON plan; `--yes` deletes. `--only`
+limits the pass to `reviews`, `issues`, `tasks`, `backups`, `locks`, `output`, `scratch`,
+`processes` or `manual` (repeat it for several). Before 0.8.0 it was `agt prune`.
 
 ```sh
-agt prune                  # print the plan
-agt prune --only backups   # plan for one kind
-agt prune --yes            # delete
+agt cleanup                            # print the plan
+agt cleanup --only backups             # plan for one kind
+agt cleanup --yes                      # delete; processes are left alone
+agt cleanup --only processes --yes     # stop orphan processes
+agt cleanup --count                    # leftovers the last --yes run listed
 ```
 
-Everything is kept 90 days (`retention_days`). The rules:
+Store documents are kept 90 days (`retention_days`). The rules:
 
 - `reviews`: the review rule above, applied to every repository, and skipped for a
   target whose `.<key>.publish.lock` is held. agt records the absolute git common
@@ -342,11 +346,40 @@ Everything is kept 90 days (`retention_days`). The rules:
   unfinished `.<namespace>-v<n>-<stamp>.partial` copies (`partial_backups`). Other
   names in the same backups directory belong to other tools and are never touched.
 
+Cache files go by age. Each top-level entry goes whole, and only once nothing in it changed
+for the whole period, so a task that is still writing keeps all of its files:
+
+- `output`: entries of `$XDG_CACHE_HOME/agents/output` (default `~/.cache`) untouched for
+  7 days.
+- `scratch`: entries of `$XDG_CACHE_HOME/agents/scratch` (except `.keep`) and Claude Code
+  session directories, `<root>/claude-<uid>/<cwd-slug>/<session>` under `~/.cache/claude-tmp`
+  and `/tmp`, untouched for 30 days. A `<cwd-slug>` directory goes once its last session
+  has gone.
+
+`processes` lists the user's own processes that carry `CLAUDE_PID` and are a day or more
+old, whose Claude Code session is gone. A session is alive while its
+`~/.claude*/sessions/<pid>.json` (or `$CLAUDE_CONFIG_DIR/sessions`) record exists and the
+process with that pid started at the record's `startedAt`. With no record, a pid that still
+runs is left alone. Claude and Codex themselves are never listed, nor agt and its parents.
+`--yes` signals them only when `--only processes` is named: SIGTERM, then SIGKILL to any
+still running 10 seconds later, each only while its pid still has the planned start time.
+Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such as
+`/bin/sleep`, so those are never found there.
+
+`manual` lists what cleanup never deletes, in `manual` by section: `worktrees` (merged,
+clean worktrees in `.worktrees/` untouched for 3 days) and `branches` (merged local
+branches, not `main`, `master` or `develop` and not checked out), as commands, for repositories at
+`~/projects/<owner>/<name>` or `~/Projects/<owner>/<name>`; `backups` (everything in the
+backups directory but agt's own, largest first); `codex_releases` (all but the current
+and the one before it); and `playwright` (superseded browser builds). `--yes` saves the list
+to `$XDG_STATE_HOME/agents/reports/cleanup-candidates.md` (`manual_report`), and `--count`
+reads it back without scanning: `agt: <n> cleanup candidates in <path>`, or nothing.
+
 Each item is deleted under its own lock without waiting; one that another agt process
 holds is skipped. The output has `plan` (per category a list of `path`, `key`, `reason`
 and `bytes`), `totals` and `warnings`; a place that cannot be read is a warning and the
 rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
-`why`) and `bytes_freed`. `agt review prune` still prunes only reviews; its output has `pruned` and `skipped`
+`why`), `signalled` (`pid`, and `signal`: the last one sent) and `bytes_freed`. `agt review prune` still prunes only reviews; its output has `pruned` and `skipped`
 (`repo`, `key`, `why`: a target that is locked by another agt, has fields this agt does not
 know, or cannot be read), and `agt review prune --all` adds `warnings` and goes on past a
 repository directory or file it cannot read.
