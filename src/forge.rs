@@ -22,7 +22,11 @@ pub fn parse_pr(arg: &str) -> Result<PrRef> {
     let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
     let (repo, number) = SERVICES
         .iter()
-        .find_map(|kind| path.split_once(kind.url_marker))
+        .filter(|kind| path.contains(kind.url_marker))
+        // The longest marker is the most specific, so a project named `pull` on GitLab is not
+        // mistaken for a GitHub PR path.
+        .max_by_key(|kind| kind.url_marker.len())
+        .and_then(|kind| path.split_once(kind.url_marker))
         .ok_or_else(invalid)?;
     let number = number
         .split(['/', '#', '?'])
@@ -159,6 +163,16 @@ mod tests {
             Some(("gitlab.example.com".into(), "g/s/p".into()))
         );
         assert!(parse_pr("nope").is_err());
+    }
+
+    #[test]
+    fn a_gitlab_project_named_pull_is_still_a_merge_request() {
+        let pr = parse_pr("https://gitlab.com/acme/pull/-/merge_requests/7").unwrap();
+        assert_eq!(pr.number, 7);
+        assert_eq!(
+            pr.location,
+            Some(("gitlab.com".to_owned(), "acme/pull".to_owned()))
+        );
         assert_eq!(encode("feat/a b"), "feat%2Fa%20b");
     }
 }
