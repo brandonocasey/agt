@@ -157,10 +157,19 @@ pub fn parse_pr(arg: &str) -> Result<PrRef> {
     })
 }
 
+/// Percent-encodes `text` for a URL path segment, keeping `~` as RFC 3986 does.
 pub fn encode(text: &str) -> String {
+    percent_encode(text, b"~")
+}
+
+/// Percent-encodes every byte except letters, digits, `-`, `_`, `.` and those in `keep`.
+pub fn percent_encode(text: &str, keep: &[u8]) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.')
+            || keep.contains(&byte)
+        {
             out.push(char::from(byte));
         } else {
             out.push_str(&format!("%{byte:02X}"));

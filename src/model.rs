@@ -212,6 +212,35 @@ pub struct Thread {
 }
 
 impl Thread {
+    /// A thread with no host state, resolution or approval yet.
+    pub fn new(
+        id: String,
+        kind: ThreadType,
+        comments: Vec<Comment>,
+        created_at: String,
+        updated_at: String,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            severity: None,
+            anchor: None,
+            resolved: false,
+            resolution: None,
+            triage: None,
+            held: false,
+            finding: None,
+            comments,
+            remote: None,
+            resolve_pending: None,
+            deleted_remote: false,
+            deleted_seen_at: None,
+            created_at,
+            updated_at,
+            approval: None,
+        }
+    }
+
     /// Applies the host's resolved state, keeping `resolution` consistent: a thread the host
     /// reopened no longer carries the outcome of its resolving.
     pub fn set_remote_resolved(&mut self, resolved: bool) {
@@ -329,6 +358,29 @@ pub struct RemoteThread {
     pub review_state: Option<String>,
 }
 
+impl RemoteThread {
+    /// Host state with no position, as before a thread is anchored.
+    pub fn new(kind: RemoteKind, id: String, resolvable: bool) -> Self {
+        Self {
+            kind,
+            id,
+            url: None,
+            resolvable,
+            outdated: None,
+            path: None,
+            old_path: None,
+            line: None,
+            old_line: None,
+            original_line: None,
+            start_line: None,
+            original_start_line: None,
+            side: None,
+            commit: None,
+            review_state: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoteKind {
@@ -348,12 +400,53 @@ pub enum ThreadType {
     Comment,
 }
 
+impl ThreadType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bug => "bug",
+            Self::Question => "question",
+            Self::Requirement => "requirement",
+            Self::Nit => "nit",
+            Self::Comment => "comment",
+        }
+    }
+
+    /// The type named in a finding heading; anything unknown is a plain comment.
+    pub fn parse(text: &str) -> Self {
+        [Self::Bug, Self::Question, Self::Requirement, Self::Nit]
+            .into_iter()
+            .find(|kind| kind.as_str() == text)
+            .unwrap_or(Self::Comment)
+    }
+
+    /// Whether an open thread of this type stops an approval.
+    pub fn blocks_approval(self) -> bool {
+        matches!(self, Self::Bug | Self::Requirement | Self::Question)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Severity {
     High,
     Medium,
     Low,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::High, Self::Medium, Self::Low]
+            .into_iter()
+            .find(|severity| severity.as_str() == text)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -431,6 +524,33 @@ pub struct Comment {
     pub deleted_seen_at: Option<String>,
 }
 
+impl Comment {
+    /// A comment with no draft, attempt or deletion state yet.
+    pub fn new(
+        id: String,
+        author: Author,
+        body: String,
+        created_at: String,
+        post: PostState,
+        remote: Option<RemoteComment>,
+    ) -> Self {
+        Self {
+            id,
+            author,
+            body,
+            created_at,
+            post,
+            remote,
+            draft_id: None,
+            attempt: None,
+            sent: None,
+            local: false,
+            deleted_remote: false,
+            deleted_seen_at: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PostState {
@@ -484,6 +604,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn type_and_severity_names_match_their_serialized_form() {
+        for kind in [
+            ThreadType::Bug,
+            ThreadType::Question,
+            ThreadType::Requirement,
+            ThreadType::Nit,
+            ThreadType::Comment,
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
+            assert!(ThreadType::parse(kind.as_str()) == kind);
+        }
+        for severity in [Severity::High, Severity::Medium, Severity::Low] {
+            assert_eq!(serde_json::to_value(severity).unwrap(), severity.as_str());
+            assert!(Severity::parse(severity.as_str()) == Some(severity));
+        }
+        assert!(ThreadType::parse("other") == ThreadType::Comment);
     }
 
     #[test]

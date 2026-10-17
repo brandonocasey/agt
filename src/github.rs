@@ -199,21 +199,9 @@ fn review_thread(pager: &Pager, node: &Value) -> Result<ThreadData> {
 fn general(kind: RemoteKind, comment: CommentData, review_state: Option<String>) -> ThreadData {
     ThreadData {
         info: RemoteThread {
-            kind,
-            id: comment.id.clone(),
             url: comment.url.clone(),
-            resolvable: false,
-            outdated: None,
-            path: None,
-            old_path: None,
-            line: None,
-            old_line: None,
-            original_line: None,
-            start_line: None,
-            original_start_line: None,
-            side: None,
-            commit: None,
             review_state,
+            ..RemoteThread::new(kind, comment.id.clone(), false)
         },
         resolved: false,
         comments: vec![comment],

@@ -585,20 +585,7 @@ fn finding_kind(body: &str) -> (ThreadType, Option<Severity>) {
         Some((kind, severity)) => (kind, severity.strip_suffix(')')),
         None => (heading, None),
     };
-    let kind = match kind {
-        "bug" => ThreadType::Bug,
-        "question" => ThreadType::Question,
-        "requirement" => ThreadType::Requirement,
-        "nit" => ThreadType::Nit,
-        _ => ThreadType::Comment,
-    };
-    let severity = match severity {
-        Some("high") => Some(Severity::High),
-        Some("medium") => Some(Severity::Medium),
-        Some("low") => Some(Severity::Low),
-        _ => None,
-    };
-    (kind, severity)
+    (ThreadType::parse(kind), severity.and_then(Severity::parse))
 }
 
 fn finding_info(id: &str) -> Option<FindingInfo> {
@@ -630,23 +617,19 @@ fn remote_comment(comment: &CommentData, login: &str) -> RemoteComment {
 }
 
 fn imported_comment(comment: CommentData, login: &str) -> Comment {
-    Comment {
-        id: format!("remote-{}", comment.id),
-        attempt: None,
-        sent: None,
-        local: false,
-        deleted_remote: false,
-        deleted_seen_at: None,
-        author: Author::Human {
-            login: comment.login.clone().unwrap_or_else(|| "ghost".to_owned()),
-            git_name: false,
-        },
-        remote: Some(remote_comment(&comment, login)),
-        body: comment.body,
-        created_at: comment.created_at,
-        post: PostState::Posted,
-        draft_id: None,
-    }
+    let author = Author::Human {
+        login: comment.login.clone().unwrap_or_else(|| "ghost".to_owned()),
+        git_name: false,
+    };
+    let remote = remote_comment(&comment, login);
+    Comment::new(
+        format!("remote-{}", comment.id),
+        author,
+        comment.body,
+        comment.created_at,
+        PostState::Posted,
+        Some(remote),
+    )
 }
 
 fn imported_id(forge: Forge, data: &ThreadData) -> String {
@@ -927,28 +910,17 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
         .comments
         .first()
         .map_or_else(|| now.to_owned(), |first| first.created_at.clone());
+    let comments = data
+        .comments
+        .into_iter()
+        .map(|comment| imported_comment(comment, login))
+        .collect();
     target.threads.push(Thread {
         finding: finding_info(&id),
-        id,
-        kind,
         severity,
-        anchor: None,
         resolved: data.info.resolvable && data.resolved,
-        resolution: None,
-        triage: None,
-        held: false,
-        comments: data
-            .comments
-            .into_iter()
-            .map(|comment| imported_comment(comment, login))
-            .collect(),
         remote: Some(data.info),
-        resolve_pending: None,
-        deleted_remote: false,
-        deleted_seen_at: None,
-        created_at,
-        updated_at: now.to_owned(),
-        approval: None,
+        ..Thread::new(id, kind, comments, created_at, now.to_owned())
     });
     summary.imported += 1;
 }

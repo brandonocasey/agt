@@ -502,7 +502,7 @@ impl Ctx {
     /// under the store's length limit.
     fn branch_key(&self, branch: &str) -> Result<String> {
         const KEEP: usize = 87;
-        let encoded = encode_key(branch);
+        let encoded = crate::forge::percent_encode(branch, b"");
         if encoded.len() <= KEEP + 13 {
             return Ok(encoded);
         }
@@ -690,18 +690,6 @@ impl Ctx {
             Ok((None, tree))
         }
     }
-}
-
-fn encode_key(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
-            out.push(char::from(byte));
-        } else {
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
 }
 
 fn passes(target: &Target) -> impl Iterator<Item = &Pass> {
@@ -923,20 +911,14 @@ fn local_comment(
 ) -> Comment {
     let prefix = format!("{thread}/c");
     let number = next_number(existing.iter().map(|comment| comment.id.clone()), &prefix) + 1;
-    Comment {
-        id: format!("{prefix}{number}"),
+    Comment::new(
+        format!("{prefix}{number}"),
         author,
         body,
-        created_at: now.to_owned(),
-        post: PostState::Pending,
-        remote: None,
-        draft_id: None,
-        attempt: None,
-        sent: None,
-        local: false,
-        deleted_remote: false,
-        deleted_seen_at: None,
-    }
+        now.to_owned(),
+        PostState::Pending,
+        None,
+    )
 }
 
 struct NewThread {
@@ -950,23 +932,16 @@ struct NewThread {
 fn local_thread(new: NewThread, author: Author, body: String, now: &str) -> Thread {
     let first = local_comment(&new.id, &[], author, body, now);
     Thread {
-        id: new.id,
-        kind: new.kind,
         severity: new.severity,
         anchor: new.anchor,
-        resolved: false,
-        resolution: None,
-        triage: None,
-        held: false,
         finding: new.finding,
-        comments: vec![first],
-        remote: None,
-        resolve_pending: None,
-        deleted_remote: false,
-        deleted_seen_at: None,
-        created_at: now.to_owned(),
-        updated_at: now.to_owned(),
-        approval: None,
+        ..Thread::new(
+            new.id,
+            new.kind,
+            vec![first],
+            now.to_owned(),
+            now.to_owned(),
+        )
     }
 }
 
@@ -1930,19 +1905,7 @@ fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
         return fail("approve needs a head: check out the branch or pass --target");
     }
     let head = scope.head.clone();
-    let blocking: Vec<&str> = scope
-        .existing
-        .iter()
-        .flat_map(|target| &target.threads)
-        .filter(|thread| {
-            is_open(thread)
-                && matches!(
-                    thread.kind,
-                    ThreadType::Bug | ThreadType::Requirement | ThreadType::Question
-                )
-        })
-        .map(|thread| thread.id.as_str())
-        .collect();
+    let blocking: Vec<&str> = scope.existing.iter().flat_map(blocking_threads).collect();
     if !blocking.is_empty() {
         return fail(format!(
             "open findings block approval: {}",
@@ -2284,13 +2247,9 @@ fn author_label(author: &Author) -> String {
 }
 
 fn kind_label(kind: ThreadType, severity: Option<Severity>) -> String {
-    let kind = serde_json::to_value(kind)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_default();
-    match severity.and_then(|severity| serde_json::to_value(severity).ok()) {
-        Some(Value::String(severity)) => format!("{kind}/{severity}"),
-        _ => kind,
+    match severity {
+        Some(severity) => format!("{}/{}", kind.as_str(), severity.as_str()),
+        None => kind.as_str().to_owned(),
     }
 }
 
@@ -3014,6 +2973,15 @@ fn run_views(target: Option<&Target>) -> Vec<Value> {
 /// Open review items: unresolved findings and threads still on the host. A general comment or
 /// review body counts only when it is ours: written here, or posted by `publish` (it carries an
 /// `agent-review` marker). Other people's, and my own unmarked ones, have no resolved state.
+/// Ids of the open threads that stop an approval of `target`.
+fn blocking_threads(target: &Target) -> impl Iterator<Item = &str> {
+    target
+        .threads
+        .iter()
+        .filter(|thread| is_open(thread) && thread.kind.blocks_approval())
+        .map(|thread| thread.id.as_str())
+}
+
 fn is_open(thread: &Thread) -> bool {
     let ours = thread
         .comments

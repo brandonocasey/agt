@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 
 use super::sync::{self, Connection};
-use super::{Ctx, author_label, is_open, random_id, run_reviews_at};
+use super::{Ctx, author_label, blocking_threads, is_open, random_id, run_reviews_at};
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
@@ -261,23 +261,11 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options
 }
 
 fn placeholder(id: &str, kind: RemoteKind, forge: Forge) -> RemoteThread {
-    RemoteThread {
+    RemoteThread::new(
         kind,
-        id: format!("<remote id of {id}>"),
-        url: None,
-        resolvable: kind != RemoteKind::General || forge == Forge::Gitlab,
-        outdated: None,
-        path: None,
-        old_path: None,
-        line: None,
-        old_line: None,
-        original_line: None,
-        start_line: None,
-        original_start_line: None,
-        side: None,
-        commit: None,
-        review_state: None,
-    }
+        format!("<remote id of {id}>"),
+        kind != RemoteKind::General || forge == Forge::Gitlab,
+    )
 }
 
 /// Only agents and the authenticated user speak through `publish`.
@@ -611,20 +599,7 @@ impl Planner<'_> {
                 short(head)
             ));
         }
-        let blocking: Vec<&str> = target
-            .threads
-            .iter()
-            .filter(|other| {
-                is_open(other)
-                    && matches!(
-                        other.kind,
-                        crate::model::ThreadType::Bug
-                            | crate::model::ThreadType::Requirement
-                            | crate::model::ThreadType::Question
-                    )
-            })
-            .map(|other| other.id.as_str())
-            .collect();
+        let blocking: Vec<&str> = blocking_threads(target).collect();
         if blocking.is_empty() {
             Ok(())
         } else {
@@ -1200,18 +1175,12 @@ fn body(
         let _ = write!(text, "`{location}`\n\n");
     }
     if finding.is_some() {
-        let kind = serde_json::to_value(thread.kind)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        match thread
-            .severity
-            .and_then(|severity| serde_json::to_value(severity).ok())
-        {
-            Some(Value::String(severity)) => {
-                let _ = write!(text, "**{kind} ({severity}):** ");
+        let kind = thread.kind.as_str();
+        match thread.severity {
+            Some(severity) => {
+                let _ = write!(text, "**{kind} ({}):** ", severity.as_str());
             }
-            _ => {
+            None => {
                 let _ = write!(text, "**{kind}:** ");
             }
         }
