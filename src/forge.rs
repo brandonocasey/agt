@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
@@ -64,14 +64,19 @@ impl Client {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(ctx(format!("run {}", self.name)))?;
-        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-            stdin
-                .write_all(input)
-                .map_err(ctx(format!("write to {}", self.name)))?;
-        }
+        // Input is written from another thread so a tool that exits before reading it shows
+        // its own error, not a broken pipe, and a large reply cannot fill the pipe.
+        let writer = match (input, child.stdin.take()) {
+            (Some(input), Some(mut stdin)) => {
+                let input = input.to_vec();
+                Some(std::thread::spawn(move || stdin.write_all(&input)))
+            }
+            _ => None,
+        };
         let output = child
             .wait_with_output()
             .map_err(ctx(format!("run {}", self.name)))?;
+        let wrote = writer.map(std::thread::JoinHandle::join);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return fail(format!(
@@ -80,6 +85,12 @@ impl Client {
                 args.first().copied().unwrap_or_default(),
                 stderr.trim()
             ));
+        }
+        match wrote {
+            None | Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(error))) if error.kind() == ErrorKind::BrokenPipe => {}
+            Some(Ok(Err(error))) => return fail(format!("write to {}: {error}", self.name)),
+            Some(Err(_)) => return fail(format!("{} input writer panicked", self.name)),
         }
         Ok(output.stdout)
     }
