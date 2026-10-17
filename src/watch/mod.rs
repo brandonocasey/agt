@@ -76,6 +76,14 @@ struct Tool {
     deadline: Instant,
 }
 
+/// The deadline result for a run that was still going at the deadline, unless the watch was
+/// cancelled. A tool that ended before it keeps its own outcome even when polling noticed that
+/// only after the deadline.
+fn settle(run: &proc::Run, deadline: Instant, cancelled: bool) -> Option<CmdResult> {
+    let at_deadline = run.last_running.is_some_and(|seen| seen >= deadline);
+    (at_deadline && !cancelled).then(CmdResult::deadline)
+}
+
 impl Runner for Tool {
     fn run(&mut self, args: &[String]) -> CmdResult {
         let now = Instant::now();
@@ -93,11 +101,8 @@ impl Runner for Tool {
                 cancel: Some(&CANCEL),
             },
         );
-        // A run that ends at or past the deadline is out of time whatever its outcome: the
-        // timeout is only polled, so a tool that exits just after it is due, or one killed for
-        // it, must not be reported as that tool's own failure.
-        if Instant::now() >= self.deadline && !CANCEL.load(Ordering::SeqCst) {
-            return CmdResult::deadline();
+        if let Some(result) = settle(&run, self.deadline, CANCEL.load(Ordering::SeqCst)) {
+            return result;
         }
         let program = self.program.to_string_lossy().into_owned();
         let mut invocation = vec![program];
@@ -421,13 +426,45 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_that_exits_after_the_deadline_is_a_deadline() {
-        // The tool is not killed for its timeout (the poll finds it already gone) yet it ends
-        // past the deadline, so its failure is the deadline's.
+    fn settle_decides_the_deadline_from_when_the_tool_was_last_seen_running() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let run = |seen: Option<Instant>, code: i32, timed_out: bool| crate::core::proc::Run {
+            code: Some(code),
+            last_running: seen,
+            timed_out,
+            ..crate::core::proc::Run::default()
+        };
+        let late = deadline + Duration::from_millis(2);
+        let early = deadline - Duration::from_millis(2);
+        // Still running at the deadline, then failing: the deadline's failure, not the tool's.
+        let seen_late = run(Some(late), 70, false);
+        assert!(
+            super::settle(&seen_late, deadline, false)
+                .unwrap()
+                .deadline_exceeded
+        );
+        // Killed for its timeout at the deadline.
+        let killed = run(Some(deadline), 1, true);
+        assert!(
+            super::settle(&killed, deadline, false)
+                .unwrap()
+                .deadline_exceeded
+        );
+        // Ended before the deadline though polling noticed it after: a real result.
+        let finished = run(Some(early), 0, false);
+        assert!(super::settle(&finished, deadline, false).is_none());
+        // A cancelled watch keeps the run's own result.
+        assert!(super::settle(&seen_late, deadline, true).is_none());
+        // A tool that never started was never seen running.
+        assert!(super::settle(&run(None, 0, false), deadline, false).is_none());
+    }
+
+    #[test]
+    fn a_tool_still_running_when_a_short_timeout_ends_is_a_deadline() {
         let mut tool = super::Tool {
-            program: OsString::from("false"),
+            program: OsString::from("sleep"),
             deadline: Instant::now() + Duration::from_millis(1),
         };
-        assert!(tool.run(&[]).deadline_exceeded);
+        assert!(tool.run(&["5".to_string()]).deadline_exceeded);
     }
 }

@@ -30,6 +30,8 @@ pub struct Run {
     /// Why the tool did not start, as an errno name such as `ENOENT`.
     pub spawn_error: Option<&'static str>,
     pub timed_out: bool,
+    /// The last moment the tool was observed still running, `None` when it never was.
+    pub last_running: Option<Instant>,
 }
 
 fn signal_name(signal: i32) -> &'static str {
@@ -93,24 +95,33 @@ pub fn run<S: AsRef<OsStr>>(program: &OsStr, args: &[S], options: &Options) -> R
     let started = Instant::now();
     let mut timed_out = false;
     let mut stopped = false;
+    let mut last_running = None;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
             Err(_) => break None,
         }
+        let now = Instant::now();
+        last_running = Some(now);
         let cancelled = options
             .cancel
             .is_some_and(|flag| flag.load(Ordering::SeqCst));
         let late = options
             .timeout
-            .is_some_and(|limit| started.elapsed() >= limit);
+            .is_some_and(|limit| now.duration_since(started) >= limit);
         if (cancelled || late) && !stopped {
             stopped = true;
             timed_out = late && !cancelled;
             terminate(child.id());
         }
-        thread::sleep(POLL);
+        // Wake exactly when the timeout is due, so a tool still running then is seen so.
+        let nap = options.timeout.filter(|_| !stopped).map_or(POLL, |limit| {
+            limit
+                .saturating_sub(now.duration_since(started))
+                .clamp(Duration::from_micros(100), POLL)
+        });
+        thread::sleep(nap);
     };
     let join = |handle: Option<thread::JoinHandle<String>>| {
         handle.and_then(|h| h.join().ok()).unwrap_or_default()
@@ -122,5 +133,6 @@ pub fn run<S: AsRef<OsStr>>(program: &OsStr, args: &[S], options: &Options) -> R
         stderr: join(stderr),
         spawn_error: None,
         timed_out,
+        last_running,
     }
 }
