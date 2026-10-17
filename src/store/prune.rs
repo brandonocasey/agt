@@ -30,7 +30,7 @@ pub enum Presence {
     Unreadable(String),
     /// The recorded path exists.
     Alive(String),
-    /// The path is missing but agt ran there recently: the repository was probably moved.
+    /// The path is missing but agt wrote there recently: the repository was probably moved.
     Missing {
         common_dir: String,
         unseen_secs: i64,
@@ -52,7 +52,7 @@ impl Presence {
 
     /// Why the repository is, or is not, treated as gone, naming the rule that decided.
     pub fn describe(&self) -> String {
-        let days = |secs: &i64| secs / 86_400;
+        let days = |secs: &i64| (secs / 86_400).max(0);
         match self {
             Self::NoRecord => "no recorded path, so its existence cannot be checked".into(),
             Self::Unreadable(why) => format!("its path record is unreadable ({why})"),
@@ -61,7 +61,7 @@ impl Presence {
                 common_dir,
                 unseen_secs,
             } => format!(
-                "{common_dir} is missing but agt ran there {} day(s) ago, under the {} days that mark a repository gone, so it may have moved",
+                "{common_dir} is missing but agt last wrote there {} day(s) ago, under the {} days that mark a repository gone, so it may have moved",
                 days(unseen_secs),
                 GONE_AFTER_SECS / 86_400
             ),
@@ -72,7 +72,7 @@ impl Presence {
                 common_dir,
                 unseen_secs,
             } => format!(
-                "local repository is gone: {common_dir} no longer exists and agt last ran there {} days ago (path missing and unseen for {}+ days)",
+                "local repository is gone: {common_dir} no longer exists and agt last wrote there {} day(s) ago (path missing and unseen for {}+ days)",
                 days(unseen_secs),
                 GONE_AFTER_SECS / 86_400
             ),
@@ -800,7 +800,7 @@ mod tests {
     fn a_missing_repo_unseen_for_a_month_is_gone() {
         let presence = presence_of("/nowhere/old/.git", Some(NOW - 31 * DAY));
         assert!(presence.is_gone(), "{presence:?}");
-        assert!(presence.describe().contains("31 days ago"));
+        assert!(presence.describe().contains("31 day(s) ago"));
         assert!(presence_of("/nowhere/old/.git", Some(NOW - 30 * DAY)).is_gone());
     }
 
@@ -876,5 +876,19 @@ mod tests {
             store.recorded_repo(&dir).unwrap().unwrap().common_dir,
             "/s/.git"
         );
+    }
+
+    #[test]
+    fn a_future_last_seen_is_refreshed_and_never_described_as_negative_days() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = base.path().join("local/x-1");
+        record(&store, &dir, "/nowhere/future/.git", Some(NOW + 40 * DAY));
+        let presence = store.presence(&dir, NOW);
+        assert!(!presence.is_gone());
+        assert!(presence.describe().contains(" 0 day(s) ago"), "{presence:?}");
+        store.record_repo(&dir, "/nowhere/future/.git", NOW).unwrap();
+        let seen = store.recorded_repo(&dir).unwrap().unwrap().last_seen;
+        assert_eq!(seen.as_deref(), Some(clock::format(NOW).as_str()));
     }
 }

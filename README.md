@@ -318,7 +318,7 @@ Everything is kept 90 days (`retention_days`). The rules:
   directory of a `local/<name>-<hash>` repository in `<dir>/.repo.json`, with `last_seen`
   (refreshed by commands that write, at most once a day; a record without it counts from the
   file's modification time). A repository is listed under `local_repos` at any age, with all its
-  targets, only when that directory no longer exists, agt has not run there for 30 days, and
+  targets, only when that directory no longer exists, agt last wrote there 30 or more days ago, and
   the directory is not below a mount root (`/Volumes`, `/media`, `/run/media`, `/mnt`), where
   it may only be unmounted. Otherwise, including a repository that was moved a moment ago, it is
   listed only when every target in it has expired, and its reason says which rule applied. Either

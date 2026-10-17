@@ -577,7 +577,7 @@ fn a_local_repo_whose_path_is_gone_and_unseen_for_a_month_is_listed_at_any_age()
     )
     .unwrap();
     fs::write(dir.join(".account.json"), "{}").unwrap();
-    // Missing too, but agt ran there a day ago (a moved repository), or the path is on a
+    // Missing too, but agt wrote there a day ago (a moved repository), or the path is on a
     // volume that may be unmounted: both stay.
     let moved = prune.target("local/moved-dddddddddddd", "fresh", 1);
     fs::write(
@@ -602,7 +602,7 @@ fn a_local_repo_whose_path_is_gone_and_unseen_for_a_month_is_listed_at_any_age()
     assert_eq!(keys(&report, "local_repos"), ["local/gone-aaaaaaaaaaaa"]);
     let reason = report["plan"]["local_repos"][0]["reason"].as_str().unwrap();
     assert!(
-        reason.contains("is gone") && reason.contains("missing") && reason.contains("31 days ago"),
+        reason.contains("is gone") && reason.contains("missing") && reason.contains("31 day(s) ago"),
         "{reason}"
     );
     // The fresh target is part of the repository item; nothing is double counted.

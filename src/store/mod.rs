@@ -476,7 +476,7 @@ impl Store {
                 .last_seen
                 .as_deref()
                 .and_then(|seen| clock::parse(seen).ok())
-            && now - seen < SEEN_REFRESH_SECS
+            && (0..SEEN_REFRESH_SECS).contains(&(now - seen))
         {
             return Ok(());
         }
