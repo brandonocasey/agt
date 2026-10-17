@@ -429,6 +429,11 @@ agt review prune --all
   and `agent-review` marker claims count only when the note's body matches
   a body this store sent (`sent` on the comment or record); anything else imports as a plain
   comment. A record posted from another clone thus never counts on GitLab.
+  A record's `earlier` bodies count too: the run's own record comment from
+  builds before the summary, and the summary text an edit replaces until the
+  edit's attempt shows on the host. Only the last `agent-review` and
+  `review-finding` marker of a body counts, and records only in the marker
+  lines that end it, so text that quotes a marker claims nothing.
   Trusted records are stored under `records`; a trusted general comment ending
   in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`
   marker) answers that thread: it is added as a reply and, when the thread is
@@ -507,9 +512,11 @@ agt review prune --all
   it. It opens with `**✅ Agent review: <O> open at <head>.**`, the outcome
   counts and how many PR/MR commits a pass reviewed, then collapsed sections:
   the findings (kind, where, raised in, outcome, and the text of each one not
-  posted inline), the commits and how each was reviewed, and the numbered steps
-  of every run with its time. A grey quoted table names each agent's model,
-  harness and id, above `Posted by agt <version>`. It ends with one
+  posted inline, except one withdrawn before it was posted), the commits and
+  how each was reviewed, and the numbered steps of every run with its time. A
+  grey quoted table names each agent's model, harness and id, above
+  `Posted by agt <version>`. A summary longer than GitHub's 65,536 characters
+  is cut at a line and says so. It ends with one
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`
   per run it covers and `<!-- agent-review id=summary attempt=<attempt> -->`.
   `N` counts the run's passes covering the repaired head by the same rules as
