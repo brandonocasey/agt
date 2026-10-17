@@ -162,29 +162,37 @@ fn fit(text: &mut String, max: usize) {
     let room = max.saturating_sub(1000);
     let mut kept = String::new();
     let mut length = 0;
-    let mut fenced = false;
     let mut open = 0usize;
     for line in text.lines() {
         length += line.chars().count() + 1;
         if length > room {
             break;
         }
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-        }
         open += line.matches("<details>").count();
         open = open.saturating_sub(line.matches("</details>").count());
         kept.push_str(line);
         kept.push('\n');
     }
-    if fenced {
-        kept.push_str("```\n");
-    }
+    close_fence(&mut kept);
     for _ in 0..open {
         kept.push_str("\n</details>\n");
     }
     kept.push_str(CUT);
     *text = kept;
+}
+
+/// Closes the code block a cut `text` leaves open, so what follows does not render as code.
+fn close_fence(text: &mut String) {
+    let fences = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    if fences % 2 == 1 {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("```\n");
+    }
 }
 
 /// The collapsed findings table, then the text of each finding that was not posted inline.
@@ -228,7 +236,8 @@ fn findings_table(text: &mut String, target: &Target, findings: &[&Thread]) {
                     .anchor
                     .as_ref()
                     .map_or_else(|| "general".to_owned(), location);
-                let said = clip(first.map_or("", |first| first.body.trim()), MAX_NOTE);
+                let mut said = clip(first.map_or("", |first| first.body.trim()), MAX_NOTE);
+                close_fence(&mut said);
                 let _ = write!(
                     notes,
                     "\n{mark} **{}** at `{full}`, not posted inline:\n\n{said}\n",
@@ -733,6 +742,16 @@ mod tests {
         assert_eq!(count(1, "commit"), "1 commit");
         assert_eq!(count(3, "commit"), "3 commits");
         assert_eq!(capitalize("reviewer agent x"), "Reviewer agent x");
+    }
+
+    #[test]
+    fn a_cut_note_closes_its_code_block() {
+        let mut note = clip("Text\n```\nlet a = 1;\nlet b = 2;\n```", 20);
+        close_fence(&mut note);
+        assert_eq!(note, "Text\n```\nlet a = 1;…\n```\n");
+        let mut whole = "Text\n```\ncode\n```".to_owned();
+        close_fence(&mut whole);
+        assert_eq!(whole, "Text\n```\ncode\n```");
     }
 
     #[test]
