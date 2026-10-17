@@ -317,6 +317,33 @@ fn hosts_file_names_the_service_of_an_unknown_host() {
 }
 
 #[test]
+fn an_unknown_service_in_the_hosts_file_only_matters_for_its_own_host() {
+    let setup = Setup::synced_branch("git@gitlab.example.com:group/sub/proj.git");
+    let env = &setup.env;
+    let old = env.git(&["rev-parse", "HEAD~1"]);
+    gitlab::sync_fixtures(&setup, &old);
+    let dir = env.path("config/agent-review");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("hosts.json"),
+        r#"{"git.example.org": {"service": "forgejo"}, "gitlab.example.com": {"service": "gitlab"}}"#,
+    )
+    .unwrap();
+    assert_eq!(env.run(&["sync"])["target"], "gl-3");
+
+    std::fs::write(
+        dir.join("hosts.json"),
+        r#"{"gitlab.example.com": {"service": "forgejo"}}"#,
+    )
+    .unwrap();
+    let refused = env.fail(&["sync"], None);
+    assert!(
+        refused.contains("gitlab.example.com") && refused.contains("forgejo"),
+        "{refused}"
+    );
+}
+
+#[test]
 fn a_host_synced_before_is_remembered_without_asking_the_cli() {
     let setup = Setup::synced_branch("git@gitlab.example.com:group/sub/proj.git");
     let env = &setup.env;

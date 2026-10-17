@@ -163,12 +163,19 @@ fn hosts_file(host: &str) -> Result<Option<Forge>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return fail(format!("read {}: {error}", path.display())),
     };
-    let hosts: HashMap<String, HostEntry> = serde_json::from_str(&text)
+    // Entries stay unparsed until one names this host, so an entry for another host that this
+    // build does not understand never breaks it.
+    let hosts: HashMap<String, serde_json::Value> = serde_json::from_str(&text)
         .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
-    Ok(hosts
+    let Some((_, entry)) = hosts
         .into_iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(host))
-        .map(|(_, entry)| entry.service))
+    else {
+        return Ok(None);
+    };
+    let entry: HostEntry = serde_json::from_value(entry)
+        .map_err(|error| Error(format!("{} entry for {host}: {error}", path.display())))?;
+    Ok(Some(entry.service))
 }
 
 fn authenticate(forge: Forge, host: &str) -> Result<(Box<dyn Service>, String)> {
