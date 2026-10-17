@@ -884,10 +884,11 @@ first line is a Codex `session_meta` is read as Codex. Prices come from
 reported as unpriced.
 
 Codex rollouts are read as Claude Code records: each billed `token_count` is one call, with
-`input_tokens` net of cached tokens; the `token_count` events a forked rollout replays before its
-first turn are left to the parent. Shell calls (`exec`, `exec_command`, `shell`) count as `Bash`.
-An output starting `Script failed` or `aborted by user`, holding ` failed: `, or with a
-`Process exited with code N` line other than 0 is an error. Injected `AGENTS.md` and
+`input_tokens` net of cached tokens. A forked rollout's replay of its parent (the records stamped
+with its `session_meta` time) is left to the parent. Shell calls (`exec`, `exec_command`, `shell`)
+count as `Bash`. An output starting `Script failed` or `aborted by user`, holding ` failed: `, with
+a `Process exited with code N` or `Exit code: N` header line other than 0, or an `exec` script
+result whose `exit_code` is not 0 is an error, read as Claude Code's `Exit code N`. Injected `AGENTS.md` and
 `<environment_context>` text is not a user message, and `codex exec` prompts are left out of
 `friction` as `claude -p` ones are. In `cache-gaps` a Codex cache miss shows as uncached input,
 priced at the input rate. A session is labelled by the last 8 characters of its thread id (UUIDv7

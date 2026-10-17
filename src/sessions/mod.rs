@@ -195,6 +195,12 @@ fn scope(common: Common, files: Vec<String>) -> Result<Scope> {
     let Some(cutoff) = midnight(&since) else {
         return fail("--since needs YYYY-MM-DD");
     };
+    // A file that cannot be read must not price as nothing.
+    for file in &files {
+        if let Err(error) = std::fs::File::open(file) {
+            return fail(format!("read {file}: {error}"));
+        }
+    }
     Ok(Scope {
         // Stream-json files from `claude -p` have no timestamps, so explicit files skip the
         // date filter.

@@ -1,5 +1,7 @@
 {"timestamp": "2026-03-06T11:00:00.000Z", "type": "session_meta", "payload": {"id": "0199cccc-0000-7000-8000-00000000bbbb", "cwd": "/repo/cases", "source": "cli", "forked_from_id": "0199cccc-0000-7000-8000-00000000aaaa"}}
 {"timestamp": "2026-03-06T11:00:00.000Z", "type": "compacted", "payload": {}}
+{"timestamp": "2026-03-06T11:00:00.000Z", "type": "turn_context", "payload": {"model": "gpt-test-1"}}
+{"timestamp": "2026-03-06T11:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "replayed parent prompt"}]}}
 {"timestamp": "2026-03-06T11:00:00.000Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 100000, "cached_input_tokens": 100000, "cache_write_input_tokens": 0, "output_tokens": 10}, "last_token_usage": {"input_tokens": 100000, "cached_input_tokens": 100000, "cache_write_input_tokens": 0, "output_tokens": 10}}}}
 {"timestamp": "2026-03-06T11:00:00.000Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 200000, "cached_input_tokens": 100000, "cache_write_input_tokens": 0, "output_tokens": 20}, "last_token_usage": {"input_tokens": 100000, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 10}}}}
 {"timestamp": "2026-03-06T11:00:01.000Z", "type": "turn_context", "payload": {"model": "gpt-test-1"}}

@@ -183,7 +183,8 @@ fn codex_cache_misses_forks_exits_and_exec_prompts() {
         ),
         "{gaps}"
     );
-    // The fork's two replayed calls were billed in its parent; only its own turn counts.
+    // The fork's replayed calls, turn context and prompt were billed and typed in its parent;
+    // only its own turn counts.
     let cost = stdout(sessions(
         &env,
         &["cost", "--by", "session", "--root", "codex-cases"],
@@ -192,9 +193,18 @@ fn codex_cache_misses_forks_exits_and_exec_prompts() {
     let errors = stdout(sessions(&env, &["errors", "--root", "codex-cases"]));
     // Claude Code's "Exit code N" form, with the first output line; an exit line inside the
     // output of a command that exited 0 is not a failure.
-    assert!(errors.starts_with("1 total in 1 sessions"), "{errors}");
+    // Both of Codex's exit forms count, and so does a failed command inside an `exec` script.
+    assert!(errors.starts_with("3 total in 2 sessions"), "{errors}");
     assert!(
-        errors.contains("Bash: Exit code # | boom  make check"),
+        errors.contains("apply_patch: Exit code # | Operation not permitted"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("Bash: Exit code # | FAIL src/a.test.ts"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("Bash: Exit code # | boom ") && errors.contains("  make check\n"),
         "{errors}"
     );
     // A built-in subagent is grouped under its parent's session.
@@ -240,6 +250,9 @@ fn bad_input_fails_with_a_reason() {
     let (code, _, err) = run(bare(&env, &["cost", "--since", "2026-02-30"]));
     assert_eq!(code, Some(1));
     assert!(err.contains("--since needs YYYY-MM-DD"), "{err}");
+    let (code, _, err) = run(sessions(&env, &["cost", "/nonexistent/run.jsonl"]));
+    assert_eq!(code, Some(1));
+    assert!(err.contains("read /nonexistent/run.jsonl"), "{err}");
     let mut missing = sessions(&env, &["cost", "--root", "projects"]);
     missing.env("AGT_PRICES", "/nonexistent/prices.json");
     let (code, _, err) = run(missing);

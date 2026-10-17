@@ -66,9 +66,26 @@ pub fn project(cwd: &str) -> String {
         .collect()
 }
 
+/// The exit line of a failed shell call, in either of the forms Codex writes.
 static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^Process exited with code ([1-9][0-9]*)\s*$").expect("valid pattern")
+    Regex::new(r"(?m)^(?:Process exited with code |Exit code: )([1-9][0-9]*)\s*$")
+        .expect("valid pattern")
 });
+
+/// A failed `exec_command` inside a code-mode `exec` script: its exit code and output, from a
+/// result item such as `{"status": "fulfilled", "value": {"exit_code": 1, "output": ...}}`.
+fn nested_failure(items: &[Value]) -> Option<(i64, String)> {
+    items.iter().find_map(|item| {
+        let parsed: Value = serde_json::from_str(text(item, "text")).ok()?;
+        let result = if parsed.get("value").is_some_and(Value::is_object) {
+            get(&parsed, "value")
+        } else {
+            &parsed
+        };
+        let code = result.get("exit_code")?.as_i64()?;
+        (code != 0).then(|| (code, text(result, "output").to_owned()))
+    })
+}
 
 static EXEC_COMMAND: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\bcmd"?\s*:\s*("(?:[^"\\]|\\.)*")"#).expect("valid pattern"));
@@ -168,6 +185,12 @@ fn output(payload: &Value) -> (Value, bool) {
             true,
         );
     }
+    if let Some((code, body)) = get(payload, "output")
+        .as_array()
+        .and_then(|items| nested_failure(items))
+    {
+        return (Value::String(format!("Exit code {code}\n{body}")), true);
+    }
     let failed = first.starts_with("Script failed")
         || first.starts_with("aborted by user")
         || first.contains(" failed: ");
@@ -189,9 +212,12 @@ fn user_text(payload: &Value) -> Option<String> {
 pub struct Adapter {
     id: String,
     scripted: bool,
-    /// Whether a `turn_context` has been seen. A forked rollout first replays its parent's
-    /// `token_count` events, before any turn of its own; those were billed in the parent.
+    /// Whether a `turn_context` of this file's own has been seen; older rollouts bill replayed
+    /// history before one.
     started_turn: bool,
+    /// A forked rollout's write time: it replays its parent's history, billed and typed there,
+    /// with the `session_meta` timestamp.
+    replay: Option<Value>,
     model: String,
     calls: usize,
     total: Option<Value>,
@@ -206,6 +232,7 @@ impl Adapter {
             id,
             scripted,
             started_turn: false,
+            replay: None,
             model: "?".into(),
             calls: 0,
             total: None,
@@ -235,9 +262,16 @@ impl Adapter {
     pub fn feed(&mut self, record: &Value, out: &mut impl FnMut(&Value)) {
         let payload = get(record, "payload");
         let timestamp = get(record, "timestamp").clone();
-        match (text(record, "type"), text(payload, "type")) {
+        let kind = text(record, "type");
+        if kind == "session_meta" && !text(payload, "forked_from_id").is_empty() {
+            self.replay.get_or_insert(timestamp.clone());
+        }
+        if self.replay.as_ref() == Some(&timestamp) && kind != "turn_context" {
+            return;
+        }
+        match (kind, text(payload, "type")) {
             ("turn_context", _) => {
-                self.started_turn = true;
+                self.started_turn |= self.replay.as_ref() != Some(&timestamp);
                 if let Some(model) = payload.get("model").and_then(Value::as_str) {
                     self.model = model.to_owned();
                 }
