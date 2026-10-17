@@ -130,6 +130,11 @@ fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
     svc.accept(env, Call::PostNote, 604);
     let published = env.run(&["publish", "--pr", "42"]);
     assert_eq!(kinds(&published, "posted"), ["summary"]);
+    let sent = summary_sent(env);
+    assert!(
+        !sent.contains("not posted inline"),
+        "a finding withdrawn before it was posted gets no note with its text: {sent}"
+    );
     let remote_ids = |env: &Env| -> Vec<Value> {
         env.run(&["status", "--full"])["runs"]
             .as_array()
