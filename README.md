@@ -223,7 +223,7 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   <reason>` resolves a finding that will not be fixed, with `rejected: <reason>`
   and a reply `🚫 Rejected: <reason>.`, and the summary counts it as
   `<n> rejected`. A finding rejected before it was ever posted is not posted, as
-  with `stale`; another store that syncs the reply reads the rejection back. `--reply <text>`
+  with `stale`, and the summary lists it by its first sentence only; another store that syncs the reply reads the rejection back. `--reply <text>`
   replaces that text, or adds a reply to any `resolve`; the author flags sign
   it. With one id the output is the `thread`; with more, `threads` lists each
   id with `resolved`, `resolution` and `held`.
@@ -468,7 +468,8 @@ agt review prune --all
   until a later `reveal` pass of the same cycle, or the run, has ended) and
   local comment threads, new replies, resolve and reopen changes, and the
   summary when a run ended since it was posted or its text changed. Never posted: killed findings,
-  findings resolved `stale` before they were posted, imported comments, local
+  findings resolved `stale` before they were posted (the summary lists them by
+  their first sentence only), imported comments, local
   comments by another human author, and runs that ended before the target's
   `attached_at` (history from before the PR/MR) with their findings, replies,
   resolves and records (listed under `skipped`).
@@ -511,8 +512,9 @@ agt review prune --all
   `PUT .../notes/<id>` on GitLab), and posted anew when the host no longer has
   it. It opens with `**✅ Agent review: <O> open at <head>.**`, the outcome
   counts and how many PR/MR commits a pass reviewed, then collapsed sections:
-  the findings (kind, where, raised in, outcome, and the text of each one not
-  posted inline, except one withdrawn before it was posted), the commits and
+  the findings (kind, first sentence, where, raised in, outcome, and the text
+  of each one not posted inline, except one withdrawn before it was posted,
+  which shows only its first sentence), the commits and
   how each was reviewed, and the numbered steps of every run with its time. A
   grey quoted table names each agent's model, harness and id, above
   `Posted by agt <version>`. A summary longer than GitHub's 65,536 characters
