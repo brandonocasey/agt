@@ -22,6 +22,9 @@ const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 const REPO_FILE: &str = ".repo.json";
 
+/// Files left out of a read, each as its key and the warning that says why.
+pub type LeftOut = Vec<(String, String)>;
+
 /// How long `last_seen` in `.repo.json` may go without a refresh.
 const SEEN_REFRESH_SECS: i64 = 24 * 60 * 60;
 
@@ -271,10 +274,7 @@ impl Store {
     }
 
     /// Like [`Store::targets_intact`], with each file left out as its key and warning.
-    pub fn targets_intact_by_key(
-        &self,
-        dir: &Path,
-    ) -> Result<(Vec<Target>, Vec<(String, String)>)> {
+    pub fn targets_intact_by_key(&self, dir: &Path) -> Result<(Vec<Target>, LeftOut)> {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => {
