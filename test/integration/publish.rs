@@ -2215,3 +2215,99 @@ fn gitlab_finding_changed_by_a_fix_posts_with_its_location() {
     let text = write["input"]["body"].as_str().unwrap();
     assert!(text.starts_with("`a.txt:3`"), "{text}");
 }
+
+#[test]
+fn github_approve_review_claimed_by_sync_is_not_sent_again() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    let id = env.run(&["approve", "--formal"])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut pr = GhPr::new();
+    pr.author = "alice";
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let reviews = post(GH_REVIEWS);
+    // The review lands on GitHub, but its response is lost.
+    env.fail_call(&strs(&reviews));
+    env.fail(&["publish", "--pr", "42", "--not-own", "--only", &id], None);
+    pr.reviews.push(json!({
+        "databaseId": 701,
+        "url": "https://github.com/me/repo/pull/42#pullrequestreview-701",
+        "body": sent(env, &id),
+        "state": "APPROVED",
+        "submittedAt": TIME,
+        "author": { "login": "me" },
+        "editor": null,
+    }));
+    gh_sync(env, None, &pr.render(&setup));
+    env.pass_call(&strs(&reviews));
+    let out = env.run(&["publish", "--pr", "42", "--not-own", "--only", &id]);
+    assert_eq!(count_calls(env, &reviews), 1, "{out}");
+    assert!(!out["skipped"].to_string().contains(&id), "{out}");
+}
+
+#[test]
+fn a_pending_formal_approval_waits_for_only_to_name_it() {
+    let setup = reviewed(GL);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    let id = env.run(&["approve"])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    gl_sync(env, &setup, &[], &[]);
+    env.run(&["sync", "--pr", "3"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let notes = gl_write("POST", &format!("{GL_MR}/notes"));
+    env.respond_nth(&strs(&notes), 1, r#"{"id":5030}"#);
+    env.respond_nth(&strs(&notes), 2, r#"{"id":5031}"#);
+    env.run(&["publish", "--pr", "3"]);
+    env.run(&["approve", "--formal"]);
+    let other = env.run(&["comment", "--body", "Unrelated note."])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(other, id);
+    let approves = |dry: &Value| {
+        dry["writes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|write| write["kind"] == "approve")
+            .count()
+    };
+    let dry = env.run(&["publish", "--pr", "3", "--only", &other, "--dry-run"]);
+    assert_eq!(approves(&dry), 0, "{dry}");
+    let dry = env.run(&["publish", "--pr", "3", "--only", &id, "--dry-run"]);
+    assert_eq!(approves(&dry), 1, "{dry}");
+}
+
+#[test]
+fn own_github_upgrade_to_formal_is_reported() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    let id = env.run(&["approve"])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    link(&setup);
+    let comments = post(GH_COMMENTS);
+    env.respond_nth(&strs(&comments), 1, r#"{"id":610,"html_url":"u"}"#);
+    env.respond_nth(&strs(&comments), 2, r#"{"id":611,"html_url":"u"}"#);
+    env.run(&["publish", "--pr", "42"]);
+    env.run(&["approve", "--formal"]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert!(
+        dry["skipped"].to_string().contains(&format!("{id}/formal")),
+        "{dry}"
+    );
+    assert_eq!(dry["writes"], json!([]), "{dry}");
+}

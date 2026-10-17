@@ -545,9 +545,21 @@ impl Planner<'_> {
         if !approval.formal || approval.approved || approval.refused.is_some() {
             return None;
         }
+        // Posted as the APPROVE review itself, as when its response was lost and sync
+        // claimed it.
+        if thread
+            .remote
+            .as_ref()
+            .is_some_and(|remote| remote.kind == RemoteKind::Review)
+            || self.held(thread).is_some()
+        {
+            return None;
+        }
         let own = self.foreign().is_none();
         if own && self.connection.forge == Forge::Github {
-            return None;
+            return Some(Err(
+                "GitHub does not let the author approve their own PR".to_owned()
+            ));
         }
         if let Err(reason) = self.approvable(approval, target) {
             return Some(Err(reason));
@@ -613,12 +625,7 @@ impl Planner<'_> {
     /// Why a new thread is not posted: a finding of a pass still in progress, or another
     /// person's text.
     fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
-        if let Some(reason) = self.unnamed(thread) {
-            return Some(reason);
-        }
-        // An approval the user named with --only may go to someone else's PR/MR.
-        let named_approval = thread.approval.is_some() && self.only.contains(&thread.id);
-        if let Some(reason) = self.foreign_threads().filter(|_| !named_approval) {
+        if let Some(reason) = self.held(thread) {
             return Some(reason);
         }
         if let Some(reason) = self.pre_pr(target, thread) {
@@ -861,8 +868,11 @@ impl Planner<'_> {
             if thread.deleted_remote {
                 continue;
             }
-            let foreign = self.foreign_threads().filter(|_| !imported(thread));
-            let held = self.unnamed(thread).or(foreign);
+            let held = if imported(thread) {
+                self.unnamed(thread)
+            } else {
+                self.held(thread)
+            };
             if let Some(reason) = held.or_else(|| self.pre_pr(target, thread)) {
                 skipped.push(skip(&thread.id, reason));
                 continue;
@@ -1043,6 +1053,14 @@ impl Planner<'_> {
             })
             .collect::<Result<_>>()?;
         Ok((writes, Vec::new()))
+    }
+
+    /// Why a thread of ours is held: not named by `--only`, or on someone else's PR/MR
+    /// without `--findings`. An approval the user named with `--only` may go there.
+    fn held(&self, thread: &Thread) -> Option<String> {
+        let named_approval = thread.approval.is_some() && self.only.contains(&thread.id);
+        self.unnamed(thread)
+            .or_else(|| self.foreign_threads().filter(|_| !named_approval))
     }
 
     fn unnamed(&self, thread: &Thread) -> Option<String> {
