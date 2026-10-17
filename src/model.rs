@@ -193,7 +193,7 @@ pub struct Thread {
     pub severity: Option<Severity>,
     pub anchor: Option<Anchor>,
     pub resolved: bool,
-    pub resolution: Option<String>,
+    pub resolution: Option<Resolution>,
     pub triage: Option<Triage>,
     pub held: bool,
     pub finding: Option<FindingInfo>,
@@ -209,6 +209,92 @@ pub struct Thread {
     /// host's approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+}
+
+impl Thread {
+    /// Applies the host's resolved state, keeping `resolution` consistent: a thread the host
+    /// reopened no longer carries the outcome of its resolving.
+    pub fn set_remote_resolved(&mut self, resolved: bool) {
+        self.resolved = resolved;
+        if !resolved && self.resolution.as_ref().is_some_and(Resolution::resolves) {
+            self.resolution = None;
+        }
+    }
+}
+
+/// How a thread was resolved or answered. Stored as the free text older versions wrote, so
+/// files stay compatible: `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, `stale`
+/// and `answered`. Any other text is kept as it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    Fixed { sha: String },
+    NotFixed { reason: String },
+    Rejected { reason: String },
+    Stale,
+    Answered,
+    Other(String),
+}
+
+impl Resolution {
+    pub fn parse(text: &str) -> Self {
+        if text == "stale" {
+            return Self::Stale;
+        }
+        if text == "answered" {
+            return Self::Answered;
+        }
+        if let Some(reason) = text.strip_prefix("not fixed: ") {
+            return Self::NotFixed {
+                reason: reason.to_owned(),
+            };
+        }
+        if let Some(reason) = text.strip_prefix("rejected: ") {
+            return Self::Rejected {
+                reason: reason.to_owned(),
+            };
+        }
+        if let Some(sha) = text.strip_prefix("fixed ") {
+            return Self::Fixed {
+                sha: sha.to_owned(),
+            };
+        }
+        Self::Other(text.to_owned())
+    }
+
+    /// The outcome of a resolve, as opposed to a note left on a reopened thread.
+    pub fn resolves(&self) -> bool {
+        !matches!(self, Self::NotFixed { .. })
+    }
+
+    /// A finding that will never be posted: judged stale or rejected.
+    pub fn withdrawn(&self) -> bool {
+        matches!(self, Self::Stale | Self::Rejected { .. })
+    }
+}
+
+impl std::fmt::Display for Resolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fixed { sha } => write!(f, "fixed {sha}"),
+            Self::NotFixed { reason } => write!(f, "not fixed: {reason}"),
+            Self::Rejected { reason } => write!(f, "rejected: {reason}"),
+            Self::Stale => f.write_str("stale"),
+            Self::Answered => f.write_str("answered"),
+            Self::Other(text) => f.write_str(text),
+        }
+    }
+}
+
+impl Serialize for Resolution {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Resolution {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::parse(&String::deserialize(deserializer)?))
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -398,5 +484,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolution_round_trips_the_stored_text() {
+        for text in [
+            "fixed 0123abc",
+            "not fixed: still broken",
+            "rejected: by design",
+            "rejected: ",
+            "stale",
+            "answered",
+            "something older",
+        ] {
+            let resolution: Resolution = serde_json::from_value(serde_json::json!(text)).unwrap();
+            assert_eq!(serde_json::to_value(&resolution).unwrap(), text);
+            assert_eq!(resolution.to_string(), text);
+        }
+        assert_eq!(
+            Resolution::parse("fixed abc"),
+            Resolution::Fixed { sha: "abc".into() }
+        );
+        assert_eq!(
+            Resolution::parse("not fixed: x"),
+            Resolution::NotFixed { reason: "x".into() }
+        );
+        assert_eq!(
+            Resolution::parse("rejected: y"),
+            Resolution::Rejected { reason: "y".into() }
+        );
     }
 }

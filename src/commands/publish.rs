@@ -2,18 +2,17 @@ use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 
-use super::sync::{
-    self, AGENT_MARKER, Connection, FINDING_MARKER, RECORD_MARKER, REVIEW_ID, agent_id,
-};
+use super::sync::{self, Connection};
 use super::{Ctx, author_label, is_open, random_id, run_reviews_at};
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
 use crate::forge;
 use crate::git::Repo;
+use crate::markers::{self, agent_id};
 use crate::model::{
     Anchor, Approval, Author, Comment, Forge, Pass, PassKind, PostState, RecordPost, RemoteComment,
-    RemoteKind, RemoteThread, Review, Run, Side, Target, Thread,
+    RemoteKind, RemoteThread, Resolution, Review, Run, Side, Target, Thread,
 };
 
 /// Stands for the id of the draft created by the write before; filled in when it returns.
@@ -86,7 +85,7 @@ impl Write {
             | Item::PublishDraft { comment, .. }
             | Item::Reply { comment } => vec![comment.clone()],
             Item::Resolve { thread, .. } | Item::Approve { thread } => vec![thread.clone()],
-            Item::Record { run, .. } => vec![format!("{run}/record")],
+            Item::Record { run, .. } => vec![markers::record_id(run)],
         }
     }
 
@@ -363,9 +362,10 @@ impl Planner<'_> {
             // A finding judged stale or rejected before it was ever posted has nothing to tell
             // the host.
             if thread.finding.is_some()
-                && thread.resolution.as_deref().is_some_and(|resolution| {
-                    resolution == "stale" || resolution.starts_with("rejected:")
-                })
+                && thread
+                    .resolution
+                    .as_ref()
+                    .is_some_and(Resolution::withdrawn)
             {
                 continue;
             }
@@ -469,7 +469,10 @@ impl Planner<'_> {
             body: Some(json!({
                 "commit_id": commit,
                 "event": "COMMENT",
-                "body": format!("Review findings.\n{AGENT_MARKER}{REVIEW_ID}{commit} -->"),
+                "body": format!(
+                    "Review findings.\n{}",
+                    markers::agent(&markers::review_id(&commit), None)
+                ),
                 "comments": comments,
             })),
         });
@@ -1044,7 +1047,7 @@ impl Planner<'_> {
         if let Some(reason) = reason {
             let held = due
                 .iter()
-                .map(|run| skip(&format!("{}/record", run.id), reason.clone()))
+                .map(|run| skip(&markers::record_id(&run.id), reason.clone()))
                 .collect();
             return Ok((Vec::new(), held));
         }
@@ -1234,9 +1237,9 @@ fn body(
                     .map(|pass| pass.head.clone())
             })
             .unwrap_or_default();
-        let _ = write!(text, "\n{FINDING_MARKER}{} sha={sha} -->", thread.id);
+        let _ = write!(text, "\n{}", markers::finding(&thread.id, &sha));
     }
-    let _ = write!(text, "\n{AGENT_MARKER}{} attempt={attempt} -->", comment.id);
+    let _ = write!(text, "\n{}", markers::agent(&comment.id, Some(attempt)));
     text
 }
 
@@ -1290,20 +1293,13 @@ fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(
     let fixed = findings
         .iter()
         .filter(|thread| {
-            thread
-                .resolution
-                .as_deref()
-                .is_some_and(|resolution| resolution.starts_with("fixed"))
+            thread.resolved && matches!(thread.resolution, Some(Resolution::Fixed { .. }))
         })
         .count();
     let rejected = findings
         .iter()
         .filter(|thread| {
-            thread.resolved
-                && thread
-                    .resolution
-                    .as_deref()
-                    .is_some_and(|resolution| resolution.starts_with("rejected:"))
+            thread.resolved && matches!(thread.resolution, Some(Resolution::Rejected { .. }))
         })
         .count();
     let rejected = match rejected {
@@ -1400,15 +1396,11 @@ fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(
     if let Some(line) = spend_line(&super::run_spend(run)) {
         let _ = writeln!(text, "{line}");
     }
-    let _ = writeln!(
-        text,
-        "{RECORD_MARKER}id={} head={head} reviews-at-head={at_head} open={open} -->",
-        run.id
-    );
+    let _ = writeln!(text, "{}", markers::record(&run.id, &head, at_head, open));
     let _ = write!(
         text,
-        "{AGENT_MARKER}{}/record attempt={attempt} -->",
-        run.id
+        "{}",
+        markers::agent(&markers::record_id(&run.id), Some(attempt))
     );
     Ok((head, text))
 }

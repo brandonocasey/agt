@@ -16,8 +16,8 @@ use crate::error::{Error, Result, ctx, fail};
 use crate::git::{CommitInfo, LogEntry, Repo};
 use crate::model::{
     Anchor, Approval, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding,
-    Pass, PassKind, PostState, Reveal, ReviewState, Reviewer, RoleUsage, Run, Severity, Side,
-    Target, TargetKind, Thread, ThreadType, Triage, Usage, VERSION,
+    Pass, PassKind, PostState, Resolution, Reveal, ReviewState, Reviewer, RoleUsage, Run, Severity,
+    Side, Target, TargetKind, Thread, ThreadType, Triage, Usage, VERSION,
 };
 use crate::store::Store;
 
@@ -1997,20 +1997,25 @@ fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 
-fn normalize_resolution(ctx: &Ctx, resolution: &str) -> Result<String> {
-    if resolution == "stale" || resolution == "answered" {
-        return Ok(resolution.to_owned());
+fn normalize_resolution(ctx: &Ctx, resolution: &str) -> Result<Resolution> {
+    if resolution == "stale" {
+        return Ok(Resolution::Stale);
+    }
+    if resolution == "answered" {
+        return Ok(Resolution::Answered);
     }
     if let Some(reason) = resolution.strip_prefix("not fixed:") {
         let reason = limited(reason.trim().to_owned(), "not fixed reason")?;
-        return Ok(format!("not fixed: {reason}"));
+        return Ok(Resolution::NotFixed { reason });
     }
     if let Some(reason) = resolution.strip_prefix("rejected:") {
         let reason = limited(reason.trim().to_owned(), "rejected reason")?;
-        return Ok(format!("rejected: {reason}"));
+        return Ok(Resolution::Rejected { reason });
     }
     if let Some(rev) = resolution.strip_prefix("fixed ") {
-        return Ok(format!("fixed {}", ctx.repo.commit(rev.trim())?));
+        return Ok(Resolution::Fixed {
+            sha: ctx.repo.commit(rev.trim())?,
+        });
     }
     fail(
         "resolution must be `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, \
@@ -2065,7 +2070,7 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
         return fail("--resolution needs a resolving triage (fixed or stale)");
     }
     let resolution = match (triage, resolution) {
-        (Some(Triage::Stale), None) if !reopen => Some("stale".to_owned()),
+        (Some(Triage::Stale), None) if !reopen => Some(Resolution::Stale),
         (Some(Triage::Fixed), None) if !reopen => {
             return fail("--triage fixed needs --resolution 'fixed <sha>'");
         }
@@ -3015,7 +3020,7 @@ fn is_open(thread: &Thread) -> bool {
         .first()
         .is_some_and(|first| match &first.remote {
             None => true,
-            Some(remote) => remote.is_me && sync::agent_id(&first.body).is_some(),
+            Some(remote) => remote.is_me && crate::markers::agent_id(&first.body).is_some(),
         });
     // An approval is a statement, never something left to resolve.
     thread.approval.is_none()

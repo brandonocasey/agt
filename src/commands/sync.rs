@@ -12,15 +12,12 @@ use crate::github;
 use crate::gitlab;
 use crate::model::{
     Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RemoteComment,
-    RemoteKind, Review, ReviewState, Severity, Side, Target, TargetKind, Thread, ThreadType,
+    RemoteKind, Resolution, Review, ReviewState, Severity, Side, Target, TargetKind, Thread,
+    ThreadType,
 };
 use crate::store::Account;
 
-pub(super) const FINDING_MARKER: &str = "<!-- review-finding v1 id=";
-pub(super) const RECORD_MARKER: &str = "<!-- review-record v2 ";
-pub(super) const AGENT_MARKER: &str = "<!-- agent-review id=";
-/// Agent id prefix of the body of a GitHub review that `publish` posts; sync skips those.
-pub(super) const REVIEW_ID: &str = "review/";
+use crate::markers::{self, agent_attempt, agent_id};
 
 #[derive(Default)]
 struct Summary {
@@ -473,21 +470,6 @@ fn trusted(comment: &CommentData, login: &str) -> bool {
             .is_none_or(|editor| editor == login)
 }
 
-/// The local id in an `<!-- agent-review id=<id> -->` marker, which `publish` adds to every body.
-pub(super) fn agent_id(body: &str) -> Option<String> {
-    let rest = body.split_once(AGENT_MARKER)?.1;
-    let id = rest.split_whitespace().next()?.trim_end_matches("-->");
-    (!id.is_empty()).then(|| id.to_owned())
-}
-
-/// The attempt id in an `<!-- agent-review id=<id> attempt=<attempt> -->` marker.
-fn agent_attempt(body: &str) -> Option<&str> {
-    let inner = body.split_once(AGENT_MARKER)?.1.split_once("-->")?.0;
-    inner
-        .split_whitespace()
-        .find_map(|pair| pair.strip_prefix("attempt="))
-}
-
 /// What sync may believe of fetched comments. GitLab notes show no editor, so there only
 /// text this store sent is trusted.
 struct Trust<'a> {
@@ -549,29 +531,13 @@ impl<'a> Trust<'a> {
     }
 }
 
-fn marker_id(body: &str) -> Option<String> {
-    let rest = body.split_once(FINDING_MARKER)?.1;
-    let id = rest.split_whitespace().next()?.trim_end_matches("-->");
-    (!id.is_empty()).then(|| id.to_owned())
-}
-
 fn parse_record(comment: &CommentData) -> Option<ImportedRecord> {
-    let inner = comment
-        .body
-        .split_once(RECORD_MARKER)?
-        .1
-        .split_once("-->")?
-        .0;
-    let field = |name: &str| {
-        inner
-            .split_whitespace()
-            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
-    };
+    let marker = markers::parse_record(&comment.body)?;
     Some(ImportedRecord {
-        run: field("id")?.to_owned(),
-        head: field("head")?.to_owned(),
-        reviews_at_head: field("reviews-at-head")?.parse().ok()?,
-        open: field("open").and_then(|open| open.parse().ok()),
+        run: marker.run,
+        head: marker.head,
+        reviews_at_head: marker.reviews_at_head,
+        open: marker.open,
         comment_id: comment.id.clone(),
         url: comment.url.clone(),
         created_at: comment.created_at.clone(),
@@ -720,7 +686,7 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
         {
             let own = trust.own_id(comment);
             if data.info.kind == RemoteKind::Review
-                && own.as_ref().is_some_and(|id| id.starts_with(REVIEW_ID))
+                && own.as_ref().is_some_and(|id| markers::is_review_id(id))
             {
                 continue;
             }
@@ -768,7 +734,7 @@ fn merge(target: &mut Target, fetched: Fetched, login: &str, forge: Forge, now: 
     }
     for draft in fetched.drafts {
         let attempt = agent_attempt(&draft.body);
-        let comment = match (agent_id(&draft.body), marker_id(&draft.body)) {
+        let comment = match (agent_id(&draft.body), markers::finding_id(&draft.body)) {
             (Some(local), _) => target
                 .threads
                 .iter_mut()
@@ -824,9 +790,7 @@ fn take_record(target: &mut Target, comment: &CommentData, trust: &Trust) -> boo
         return false;
     };
     let own = trust.own_id(comment);
-    if let Some(run_id) = own
-        .as_deref()
-        .and_then(|local| local.strip_suffix("/record"))
+    if let Some(run_id) = own.as_deref().and_then(markers::record_run)
         && let Some(run) = target.runs.iter_mut().find(|run| run.id == run_id)
         && let Some(post) = &mut run.record
         && (post.remote_id.as_deref() == Some(comment.id.as_str())
@@ -885,7 +849,7 @@ fn import(target: &mut Target, data: ThreadData, trust: &Trust, now: &str, summa
         .comments
         .first()
         .filter(|first| trust.verified(first))
-        .and_then(|first| marker_id(&first.body));
+        .and_then(|first| markers::finding_id(&first.body));
     let by_remote = target.threads.iter().position(|thread| {
         thread.remote.as_ref().is_some_and(|remote| {
             // A GitLab note that gets a reply turns from general into a discussion with the
@@ -997,7 +961,7 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
             Some(pending) if pending == data.resolved => thread.resolve_pending = None,
             Some(_) => {}
             None => {
-                thread.resolved = data.resolved;
+                thread.set_remote_resolved(data.resolved);
                 if data.resolved {
                     thread.held = false;
                 }
@@ -1086,14 +1050,14 @@ fn answer(thread: &mut Thread, data: ThreadData, trust: &Trust, now: &str) {
         if !resolvable && thread.resolve_pending.is_none() {
             let fixed = fixed_sha(&comment.body);
             let rejected = rejected_reason(&comment.body);
-            thread.resolved = fixed.is_some() || rejected.is_some();
+            thread.set_remote_resolved(fixed.is_some() || rejected.is_some());
             if thread.resolved {
                 thread.held = false;
             }
             if thread.resolution.is_none() {
                 thread.resolution = match (fixed, rejected) {
-                    (Some(sha), _) => Some(format!("fixed {sha}")),
-                    (None, Some(reason)) => Some(format!("rejected: {reason}")),
+                    (Some(sha), _) => Some(Resolution::Fixed { sha }),
+                    (None, Some(reason)) => Some(Resolution::Rejected { reason }),
                     (None, None) => None,
                 };
             }
@@ -1110,7 +1074,10 @@ mod tests {
     #[test]
     fn parses_markers_and_records() {
         let body = "**bug (medium):** x\n<!-- review-finding v1 id=rv-17kj.c1p0.r1.f1 sha=abc -->";
-        assert_eq!(marker_id(body).as_deref(), Some("rv-17kj.c1p0.r1.f1"));
+        assert_eq!(
+            markers::finding_id(body).as_deref(),
+            Some("rv-17kj.c1p0.r1.f1")
+        );
         assert!(matches!(
             finding_kind(body),
             (ThreadType::Bug, Some(Severity::Medium))

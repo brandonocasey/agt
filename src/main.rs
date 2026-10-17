@@ -7,6 +7,7 @@ mod forge;
 mod git;
 mod github;
 mod gitlab;
+mod markers;
 mod model;
 mod store;
 

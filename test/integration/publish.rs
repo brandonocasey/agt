@@ -2491,3 +2491,52 @@ fn a_synced_rejected_reply_resolves_a_general_finding() {
     assert_eq!(synced["resolution"], "rejected: Intended behavior");
     assert!(!open_ids(&env.run(&["status"])).contains(&f9));
 }
+
+#[test]
+fn a_remote_unresolve_clears_the_fixed_outcome() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    let first = format!(
+        "**bug (high):** In-diff text of f1.\n\nm1 xhigh codex {}.c1p0.r1\n\
+         <!-- review-finding v1 id={f1} sha={} -->\n<!-- agent-review id={f1}/c1 attempt=at-1 -->",
+        setup.run, setup.head
+    );
+    let mut pr = GhPr::new();
+    pr.threads.push(gh_thread(
+        "T1",
+        false,
+        3,
+        vec![gh_comment(801, "me", &first)],
+        &setup.head,
+    ));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["resolve", &f1, "--fixed", &setup.head]);
+    pr.threads[0]["isResolved"] = json!(true);
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &f1)["resolved"], true);
+    pr.threads[0]["isResolved"] = json!(false);
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let synced = thread(&list, &f1);
+    assert_eq!(synced["resolved"], false, "{synced}");
+    assert_eq!(synced["resolution"], Value::Null, "{synced}");
+    env.run(&["run", "end", "--run", &setup.run]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let record = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|write| {
+            write["input"]["body"]
+                .as_str()
+                .filter(|body| body.starts_with("**Review "))
+        })
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert!(record.contains(" 0 fixed, "), "{record}");
+    assert!(!record.contains(" 1 fixed"), "{record}");
+}
