@@ -93,7 +93,10 @@ impl Runner for Tool {
                 cancel: Some(&CANCEL),
             },
         );
-        if run.timed_out && Instant::now() >= self.deadline {
+        // A run that ends at or past the deadline is out of time whatever its outcome: the
+        // timeout is only polled, so a tool that exits just after it is due, or one killed for
+        // it, must not be reported as that tool's own failure.
+        if Instant::now() >= self.deadline && !CANCEL.load(Ordering::SeqCst) {
             return CmdResult::deadline();
         }
         let program = self.program.to_string_lossy().into_owned();
@@ -319,7 +322,11 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::time::{Duration, Instant};
+
     use super::args::{backoff_delay, parse_args, parse_target};
+    use super::snapshot::Runner;
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
@@ -411,5 +418,16 @@ mod tests {
                 .deadline_seconds,
             0
         );
+    }
+
+    #[test]
+    fn a_tool_that_exits_after_the_deadline_is_a_deadline() {
+        // The tool is not killed for its timeout (the poll finds it already gone) yet it ends
+        // past the deadline, so its failure is the deadline's.
+        let mut tool = super::Tool {
+            program: OsString::from("false"),
+            deadline: Instant::now() + Duration::from_millis(1),
+        };
+        assert!(tool.run(&[]).deadline_exceeded);
     }
 }
