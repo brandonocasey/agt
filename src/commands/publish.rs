@@ -1286,6 +1286,19 @@ fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(
                 .is_some_and(|resolution| resolution.starts_with("fixed"))
         })
         .count();
+    let rejected = findings
+        .iter()
+        .filter(|thread| {
+            thread
+                .resolution
+                .as_deref()
+                .is_some_and(|resolution| resolution.starts_with("rejected:"))
+        })
+        .count();
+    let rejected = match rejected {
+        0 => String::new(),
+        count => format!(", {count} rejected"),
+    };
     let open = findings.iter().filter(|thread| is_open(thread)).count();
     let mut cycles: Vec<u32> = run.passes.iter().map(|pass| pass.cycle).collect();
     cycles.dedup();
@@ -1298,7 +1311,7 @@ fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(
         "review-fixed"
     };
     let mut text = format!(
-        "**Review {}:** {verdict} at {}. {} cycles, {} found, {fixed} fixed, {open} open.\n\n",
+        "**Review {}:** {verdict} at {}. {} cycles, {} found, {fixed} fixed{rejected}, {open} open.\n\n",
         run.id,
         short(&head),
         cycles.len(),

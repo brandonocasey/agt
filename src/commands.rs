@@ -2005,10 +2005,17 @@ fn normalize_resolution(ctx: &Ctx, resolution: &str) -> Result<String> {
         let reason = limited(reason.trim().to_owned(), "not fixed reason")?;
         return Ok(format!("not fixed: {reason}"));
     }
+    if let Some(reason) = resolution.strip_prefix("rejected:") {
+        let reason = limited(reason.trim().to_owned(), "rejected reason")?;
+        return Ok(format!("rejected: {reason}"));
+    }
     if let Some(rev) = resolution.strip_prefix("fixed ") {
         return Ok(format!("fixed {}", ctx.repo.commit(rev.trim())?));
     }
-    fail("resolution must be `fixed <sha>`, `not fixed: <reason>`, `stale` or `answered`")
+    fail(
+        "resolution must be `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, \
+         `stale` or `answered`",
+    )
 }
 
 fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
@@ -2016,9 +2023,18 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
     if scope.existing.is_none() {
         return fail(format!("thread {} not found", args.ids[0]));
     }
-    // `--fixed` and `--not-fixed` are shorthands for the triage, resolution and reply of a
-    // fix and of a failed fix check.
+    // `--fixed`, `--not-fixed` and `--rejected` are shorthands for the triage, resolution and
+    // reply of a fix, a failed fix check and a finding that will not be fixed.
     let (triage, resolution, reopen, default_reply) = match (&args.fixed, &args.not_fixed) {
+        (None, None) if let Some(reason) = &args.rejected => {
+            let reason = reason.trim().trim_end_matches('.');
+            (
+                None,
+                Some(format!("rejected: {reason}")),
+                false,
+                Some(format!("Rejected: {reason}.")),
+            )
+        }
         (Some(sha), _) => {
             let sha = ctx.repo.commit(sha)?;
             let reply = format!("Fixed in {}.", &sha[..sha.len().min(12)]);

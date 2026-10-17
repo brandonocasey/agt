@@ -261,14 +261,14 @@ pub struct ResolveArgs {
     /// Threads to change, all in one write.
     #[arg(required = true)]
     pub ids: Vec<String>,
-    /// `fixed <sha>`, `not fixed: <reason>`, `stale` or `answered`.
-    #[arg(long, conflicts_with_all = ["fixed", "not_fixed"])]
+    /// `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, `stale` or `answered`.
+    #[arg(long, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
     pub resolution: Option<String>,
     /// `fixed` and `stale` resolve; `valid` and `question` only record the triage.
-    #[arg(long, value_enum, conflicts_with_all = ["fixed", "not_fixed"])]
+    #[arg(long, value_enum, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
     pub triage: Option<Triage>,
     /// Mark the thread unresolved again.
-    #[arg(long, conflicts_with_all = ["fixed", "not_fixed"])]
+    #[arg(long, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
     pub reopen: bool,
     /// Fixed in this commit: triage `fixed`, resolution `fixed <sha>`, and a reply
     /// "Fixed in <sha>." unless `--reply` gives other text.
@@ -276,8 +276,12 @@ pub struct ResolveArgs {
     pub fixed: Option<String>,
     /// A fix check found it not fixed: reopen with `not fixed: <reason>` and a reply
     /// "Not fixed: <reason>." unless `--reply` gives other text.
-    #[arg(long, value_name = "REASON")]
+    #[arg(long, value_name = "REASON", conflicts_with = "rejected")]
     pub not_fixed: Option<String>,
+    /// Not to be fixed (wrong, or not worth it): resolve with `rejected: <reason>` and a
+    /// reply "Rejected: <reason>." unless `--reply` gives other text.
+    #[arg(long, value_name = "REASON", conflicts_with = "fixed")]
+    pub rejected: Option<String>,
     /// Also add this reply to each thread, or `-` for stdin.
     #[arg(long)]
     pub reply: Option<String>,

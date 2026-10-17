@@ -195,14 +195,17 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   to a held question: `list --format prompt` shows it and `publish` never posts
   it.
 - `resolve`: `--resolution` is one of `fixed <sha>`, `not fixed: <reason>`,
-  `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
+  `rejected: <reason>`, `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
   `stale` resolution; `fixed` needs `--resolution "fixed <sha>"`).
   `--triage valid|question` only records the triage and leaves the thread open;
   `question` marks it held. `--reopen` marks it unresolved. `resolve` takes
   several ids and changes them all in one write, or none when one is missing.
   `--fixed <sha>` means `--triage fixed --resolution "fixed <sha>"` plus a reply
   `Fixed in <sha>.`; `--not-fixed <reason>` means `--reopen --resolution
-  "not fixed: <reason>"` plus a reply `Not fixed: <reason>.`. `--reply <text>`
+  "not fixed: <reason>"` plus a reply `Not fixed: <reason>.`; `--rejected
+  <reason>` resolves a finding that will not be fixed, with `rejected: <reason>`
+  and a reply `Rejected: <reason>.`, and the final record counts it as
+  `<n> rejected`. `--reply <text>`
   replaces that text, or adds a reply to any `resolve`; the author flags sign
   it. With one id the output is the `thread`; with more, `threads` lists each
   id with `resolved`, `resolution` and `held`.

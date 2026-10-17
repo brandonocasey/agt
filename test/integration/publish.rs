@@ -2311,3 +2311,37 @@ fn own_github_upgrade_to_formal_is_reported() {
     );
     assert_eq!(dry["writes"], json!([]), "{dry}");
 }
+
+#[test]
+fn rejected_findings_resolve_with_a_reason_and_count_in_the_record() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    assert!(
+        env.fail(&["resolve", &f1, "--resolution", "rejected:"], None)
+            .contains("rejected reason must not be empty")
+    );
+    let thread = &env.run(&["resolve", &f1, "--rejected", "Intended behavior."])["thread"];
+    assert_eq!(thread["resolved"], true);
+    assert_eq!(thread["resolution"], "rejected: Intended behavior");
+    let replies = thread["comments"].as_array().unwrap();
+    assert_eq!(
+        replies.last().unwrap()["body"],
+        "Rejected: Intended behavior."
+    );
+    let open = env.run(&["status"])["open_threads"].to_string();
+    assert!(!open.contains(&f1), "{open}");
+    link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let record = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|write| {
+            write["input"]["body"]
+                .as_str()
+                .filter(|body| body.starts_with("**Review "))
+        })
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert!(record.contains("0 fixed, 1 rejected, "), "{record}");
+}
