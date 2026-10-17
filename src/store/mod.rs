@@ -120,6 +120,12 @@ impl Store {
         };
         let name = self.namespace.dir_name();
         let prefix = format!("{name}-v{stored}-");
+        create_dir(&self.backups)?;
+        // Beside the backups, not in them, so the backups directory holds only backups.
+        let lock_path = self.backups.with_file_name(format!(".{name}-backup.lock"));
+        // One backup at a time per namespace, across processes: the check, the copy and the
+        // rename are one step, so no run deletes or renames another's copy.
+        let _guard = lock(&lock_path)?;
         let done = fs::read_dir(&self.backups).is_ok_and(|entries| {
             entries
                 .flatten()
@@ -128,6 +134,18 @@ impl Store {
         if done {
             self.backed_up.store(true, Ordering::Release);
             return Ok(());
+        }
+        // Copies that failed part way are no backup; under the lock none is in progress.
+        let leftover = format!(".{prefix}");
+        for entry in fs::read_dir(&self.backups)
+            .map_err(ctx(format!("read {}", self.backups.display())))?
+            .flatten()
+        {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            if file.starts_with(&leftover) && file.ends_with(".partial") {
+                fs::remove_dir_all(entry.path())
+                    .map_err(ctx(format!("remove {}", entry.path().display())))?;
+            }
         }
         let stamp = crate::core::clock::now()?.replace(':', "-");
         let mut target = self.backups.join(format!("{prefix}{stamp}"));
@@ -142,15 +160,13 @@ impl Store {
             ".{}.partial",
             target.file_name().unwrap_or_default().to_string_lossy()
         ));
-        if partial.exists() {
-            fs::remove_dir_all(&partial).map_err(ctx(format!("remove {}", partial.display())))?;
-        }
         copy_tree(&self.root, &partial)?;
         fs::rename(&partial, &target).map_err(ctx(format!(
             "rename {} to {}",
             partial.display(),
             target.display()
         )))?;
+        sync_dir(&self.backups)?;
         self.backed_up.store(true, Ordering::Release);
         Ok(())
     }
@@ -612,9 +628,7 @@ fn persist_json(
     check()?;
     temp.persist(path)
         .map_err(|error| Error(format!("replace {}: {}", path.display(), error.error)))?;
-    File::open(dir)
-        .and_then(|handle| handle.sync_all())
-        .map_err(ctx(format!("sync {}", dir.display())))
+    sync_dir(dir)
 }
 
 fn write_target(
@@ -656,9 +670,18 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
         } else if kind.is_file() && !entry.file_name().to_string_lossy().ends_with(".lock") {
             fs::copy(entry.path(), &destination)
                 .map_err(ctx(format!("copy {}", entry.path().display())))?;
+            File::open(&destination)
+                .and_then(|copied| copied.sync_all())
+                .map_err(ctx(format!("sync {}", destination.display())))?;
         }
     }
-    Ok(())
+    sync_dir(to)
+}
+
+fn sync_dir(dir: &Path) -> Result<()> {
+    File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .map_err(ctx(format!("sync {}", dir.display())))
 }
 
 fn create_dir(dir: &Path) -> Result<()> {
@@ -1056,5 +1079,38 @@ mod tests {
             .filter(|name| name.starts_with("reviews-v1-"))
             .collect();
         assert_eq!(finished.len(), 1, "{finished:?}");
+        assert!(
+            !backups
+                .join(".reviews-v1-2026-01-01T00-00-00Z.partial")
+                .exists(),
+            "the stale partial copy is removed"
+        );
+    }
+
+    #[test]
+    fn concurrent_migrations_leave_one_whole_backup() {
+        let base = tempfile::tempdir().unwrap();
+        let store = Store::at(base.path(), Namespace::Reviews);
+        let dir = store.repo_dir("o/r").unwrap();
+        write_target_named(&store, &dir);
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| {
+                    let mut next = Store::at(base.path(), Namespace::Reviews);
+                    next.schema = Schema {
+                        version: 2,
+                        migrations: &[|_| {}],
+                    };
+                    write_target_named(&next, &dir);
+                });
+            }
+        });
+        let names: Vec<String> = fs::read_dir(base.path().join("agents").join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("-v1-"))
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(!names[0].ends_with(".partial"), "{names:?}");
     }
 }
