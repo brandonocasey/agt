@@ -3,13 +3,14 @@ use serde_json::Value;
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result, fail};
-use crate::forge::{self, Client, CommentData, Fetched, PrInfo, ThreadData};
+use crate::forge::{self, CommentData, Fetched, PrInfo, ThreadData};
 use crate::git::Repo;
 use crate::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
 use crate::service::{
-    ApproveCap, Capabilities, Endpoint, Inline, Kind, Method, Placement, Position, Posted,
+    ApproveCap, Capabilities, Inline, Kind, Method, Pagination, Placement, Position, Posted,
     ReplyCap, Request, Service, Subject, Var,
 };
+use crate::transport::{Cli, CliTransport, Transport};
 use serde_json::json;
 
 const COMMENT_FIELDS: &str = "databaseId url body createdAt author{login} editor{login} originalCommit{oid} pullRequestReview{databaseId}";
@@ -31,18 +32,15 @@ pub const KIND: Kind = Kind {
     well_known: |host| host == "github.com",
     configured: |_| false,
     probe: |host| {
-        Client::gh(host)
+        Cli::gh(host)
             .text(&["auth", "status", "--hostname", host])
             .is_some()
     },
-    connect: |host| {
-        Box::new(Github {
-            client: Client::gh(host),
-        })
-    },
+    connect: |host| Box::new(Github::new(Box::new(CliTransport::gh(host)))),
 };
 
 const CAPS: Capabilities = Capabilities {
+    pagination: Pagination::GraphqlCursor,
     inline: Inline::ReviewBatch,
     ranges: true,
     reply: ReplyCap::ReviewThreads,
@@ -58,7 +56,13 @@ const CAPS: Capabilities = Capabilities {
 };
 
 pub struct Github {
-    client: Client,
+    transport: Box<dyn Transport>,
+}
+
+impl Github {
+    pub fn new(transport: Box<dyn Transport>) -> Self {
+        Self { transport }
+    }
 }
 
 fn base(subject: Subject) -> String {
@@ -86,16 +90,20 @@ impl Service for Github {
         &CAPS
     }
 
+    fn transport(&self) -> &dyn Transport {
+        self.transport.as_ref()
+    }
+
     fn login(&self) -> Result<String> {
-        login(&self.client)
+        login(self.transport())
     }
 
     fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
-        find_pr(&self.client, origin, branch)
+        find_pr(self.transport(), origin, branch)
     }
 
     fn fetch(&self, subject: Subject) -> Result<Fetched> {
-        fetch(&self.client, subject.repo, subject.number)
+        fetch(self.transport(), subject.repo, subject.number)
     }
 
     fn imported_id(&self, kind: RemoteKind, first: &str) -> String {
@@ -104,16 +112,6 @@ impl Service for Github {
             RemoteKind::Review => format!("gh-r{first}"),
             _ => format!("gh-c{first}"),
         }
-    }
-
-    fn render(&self, request: &Request) -> Vec<String> {
-        render(request)
-    }
-
-    fn send(&self, request: &Request) -> Result<Value> {
-        let args = render(request);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.client.send(&args, request.body.as_ref())
     }
 
     fn place(
@@ -217,7 +215,7 @@ impl Service for Github {
         let review = forge::id(response, "/id")
             .ok_or_else(|| Error("GitHub returned no review id".into()))?;
         let path = format!("{}/{review}/comments", reviews_path(subject));
-        let listed = self.client.json(&["api", "--method", "GET", &path])?;
+        let listed = self.transport().json(&Request::get(path))?;
         let posted = listed
             .as_array()
             .into_iter()
@@ -232,28 +230,6 @@ impl Service for Github {
             .collect();
         Ok((review, posted))
     }
-}
-
-/// The `gh` arguments of a request.
-fn render(request: &Request) -> Vec<String> {
-    let mut args = vec!["api".to_owned()];
-    match &request.endpoint {
-        Endpoint::Rest(path) => {
-            args.extend(["--method".to_owned(), request.method.as_str().to_owned()]);
-            args.push(path.clone());
-            if request.body.is_some() {
-                args.extend(["--input".to_owned(), "-".to_owned()]);
-            }
-        }
-        Endpoint::Graphql(vars) => {
-            args.push("graphql".to_owned());
-            for var in vars {
-                args.push(if var.typed { "-F" } else { "-f" }.to_owned());
-                args.push(format!("{}={}", var.name, var.value));
-            }
-        }
-    }
-    args
 }
 
 /// The place of a comment in the PR diff: both ends on one hunk for a range, as GitHub
@@ -302,21 +278,17 @@ fn place(
     }))
 }
 
-pub fn login(gh: &Client) -> Result<String> {
-    forge::required(
-        &gh.json(&["api", "--method", "GET", "user"])?,
-        "/login",
-        "gh api user",
-    )
+fn login(gh: &dyn Transport) -> Result<String> {
+    forge::required(&gh.json(&Request::get("user"))?, "/login", "gh api user")
 }
 
 /// Finds the PR whose head is `<origin owner>:<branch>`, in `origin` or, for a fork, its parent.
-pub fn find_pr(gh: &Client, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
+fn find_pr(gh: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
     let owner = origin.split('/').next().unwrap_or_default();
     let head = forge::encode(&format!("{owner}:{branch}"));
     let search = |repo: &str| -> Result<Option<u64>> {
         let path = format!("repos/{repo}/pulls?head={head}&state=all&per_page=20");
-        let pulls = gh.json(&["api", "--method", "GET", &path])?;
+        let pulls = gh.json(&Request::get(path))?;
         let pulls = pulls.as_array().cloned().unwrap_or_default();
         let open = pulls
             .iter()
@@ -327,7 +299,7 @@ pub fn find_pr(gh: &Client, origin: &str, branch: &str) -> Result<Option<(String
     if let Some(number) = search(origin)? {
         return Ok(Some((origin.to_owned(), number)));
     }
-    let repo = gh.json(&["api", "--method", "GET", &format!("repos/{origin}")])?;
+    let repo = gh.json(&Request::get(format!("repos/{origin}")))?;
     let Some(parent) = forge::text(&repo, "/parent/full_name") else {
         return Ok(None);
     };
@@ -335,7 +307,7 @@ pub fn find_pr(gh: &Client, origin: &str, branch: &str) -> Result<Option<(String
 }
 
 struct Pager<'a> {
-    gh: &'a Client,
+    gh: &'a dyn Transport,
     owner: String,
     name: String,
     number: String,
@@ -348,18 +320,16 @@ impl Pager<'_> {
         let mut first = None;
         let mut cursor: Option<String> = None;
         loop {
-            let owner = format!("owner={}", self.owner);
-            let name = format!("name={}", self.name);
-            let number = format!("number={}", self.number);
-            let query_arg = format!("query={query}");
-            let mut args = vec![
-                "api", "graphql", "-f", &owner, "-f", &name, "-F", &number, "-f", &query_arg,
+            let mut vars = vec![
+                Var::text("owner", self.owner.clone()),
+                Var::text("name", self.name.clone()),
+                Var::typed("number", self.number.clone()),
+                Var::text("query", query),
             ];
-            let cursor_arg = cursor.as_ref().map(|cursor| format!("cursor={cursor}"));
-            if let Some(cursor_arg) = &cursor_arg {
-                args.extend(["-f", cursor_arg]);
+            if let Some(cursor) = &cursor {
+                vars.push(Var::text("cursor", cursor.clone()));
             }
-            let response = self.gh.json(&args)?;
+            let response = self.gh.json(&Request::graphql(vars))?;
             let pointer = format!("/data/repository/pullRequest/{connection}");
             let page = response
                 .pointer(&pointer)
@@ -383,19 +353,11 @@ impl Pager<'_> {
         let mut nodes = Vec::new();
         let mut cursor = Some(cursor);
         while let Some(after) = cursor {
-            let id = format!("id={thread}");
-            let query_arg = format!("query={query}");
-            let cursor_arg = format!("cursor={after}");
-            let response = self.gh.json(&[
-                "api",
-                "graphql",
-                "-f",
-                &id,
-                "-f",
-                &query_arg,
-                "-f",
-                &cursor_arg,
-            ])?;
+            let response = self.gh.json(&Request::graphql(vec![
+                Var::text("id", thread),
+                Var::text("query", query.clone()),
+                Var::text("cursor", after),
+            ]))?;
             let page = response
                 .pointer("/data/node/comments")
                 .ok_or_else(|| Error(format!("GitHub returned no comments for {thread}")))?;
@@ -498,7 +460,7 @@ fn general(kind: RemoteKind, comment: CommentData, review_state: Option<String>)
     }
 }
 
-pub fn fetch(gh: &Client, repo: &str, number: u64) -> Result<Fetched> {
+fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
     let Some((owner, name)) = repo.split_once('/') else {
         return fail(format!("GitHub repository must be owner/name: {repo}"));
     };

@@ -11,6 +11,7 @@ mod markers;
 mod model;
 mod service;
 mod store;
+mod transport;
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;

@@ -48,9 +48,9 @@ pub(super) fn run_writes(
                 posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": reason }));
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
-        let remote = save(ctx, connection, target, &write.item, &response)?;
+        let remote = save(ctx, connection, target, &write.item, &response.body)?;
         if let Item::ApprovalReview { comment } = &write.item {
             let thread = comment.split('/').next().unwrap_or_default().to_owned();
             change(ctx, target, |target| {

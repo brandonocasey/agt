@@ -3,13 +3,14 @@ use serde_json::Value;
 use crate::anchors;
 use crate::clock;
 use crate::error::{Error, Result};
-use crate::forge::{self, Client, CommentData, Draft, Fetched, PrInfo, ThreadData};
+use crate::forge::{self, CommentData, Draft, Fetched, PrInfo, ThreadData};
 use crate::git::Repo;
 use crate::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
 use crate::service::{
-    ApproveCap, Capabilities, Endpoint, Inline, Kind, Method, Placement, Position, Posted,
+    ApproveCap, Capabilities, Inline, Kind, Method, Pagination, Placement, Position, Posted,
     ReplyCap, Request, Service, Subject,
 };
+use crate::transport::{Cli, CliTransport, Transport};
 use serde_json::json;
 
 pub const KIND: Kind = Kind {
@@ -20,24 +21,21 @@ pub const KIND: Kind = Kind {
     configured: |host| {
         let named = |value: &str| bare_host(value) == host;
         std::env::var("GITLAB_HOST").is_ok_and(|value| named(&value))
-            || Client::glab_configured()
+            || Cli::glab_configured()
                 .text(&["config", "get", "host"])
                 .is_some_and(|value| named(&value))
     },
     // `glab config get host` names only the global default, not every host glab is logged in to.
     probe: |host| {
-        Client::glab(host)
+        Cli::glab(host)
             .text(&["auth", "status", "--hostname", host])
             .is_some()
     },
-    connect: |host| {
-        Box::new(Gitlab {
-            client: Client::glab(host),
-        })
-    },
+    connect: |host| Box::new(Gitlab::new(Box::new(CliTransport::glab(host)))),
 };
 
 const CAPS: Capabilities = Capabilities {
+    pagination: Pagination::CliPaginate,
     inline: Inline::DraftThenPublish,
     ranges: true,
     reply: ReplyCap::All,
@@ -61,7 +59,13 @@ fn bare_host(value: &str) -> String {
 }
 
 pub struct Gitlab {
-    client: Client,
+    transport: Box<dyn Transport>,
+}
+
+impl Gitlab {
+    pub fn new(transport: Box<dyn Transport>) -> Self {
+        Self { transport }
+    }
 }
 
 fn base(subject: Subject) -> String {
@@ -85,30 +89,24 @@ impl Service for Gitlab {
         &CAPS
     }
 
+    fn transport(&self) -> &dyn Transport {
+        self.transport.as_ref()
+    }
+
     fn login(&self) -> Result<String> {
-        login(&self.client)
+        login(self.transport())
     }
 
     fn find_review(&self, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
-        find_mr(&self.client, origin, branch)
+        find_mr(self.transport(), origin, branch)
     }
 
     fn fetch(&self, subject: Subject) -> Result<Fetched> {
-        fetch(&self.client, subject.repo, subject.number)
+        fetch(self.transport(), subject.repo, subject.number)
     }
 
     fn imported_id(&self, _kind: RemoteKind, first: &str) -> String {
         format!("gl-n{first}")
-    }
-
-    fn render(&self, request: &Request) -> Vec<String> {
-        render(request)
-    }
-
-    fn send(&self, request: &Request) -> Result<Value> {
-        let args = render(request);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.client.send(&args, request.body.as_ref())
     }
 
     fn place(
@@ -196,20 +194,6 @@ impl Service for Gitlab {
     fn review_posted(&self, _subject: Subject, _response: &Value) -> Result<(String, Vec<Posted>)> {
         Err(Error("GitLab takes no review batches".into()))
     }
-}
-
-/// The `glab` arguments of a request.
-fn render(request: &Request) -> Vec<String> {
-    let Endpoint::Rest(path) = &request.endpoint else {
-        unreachable!("GitLab has no GraphQL writes");
-    };
-    let mut args: Vec<String> = ["api", "-X", request.method.as_str(), path]
-        .map(str::to_owned)
-        .to_vec();
-    if request.body.is_some() {
-        args.extend(["-H", "Content-Type: application/json", "--input", "-"].map(str::to_owned));
-    }
-    args
 }
 
 /// One end of a `line_range`: its line code is the SHA-1 of the path and the old and new line
@@ -305,9 +289,9 @@ fn place(
     }))
 }
 
-pub fn login(glab: &Client) -> Result<String> {
+fn login(glab: &dyn Transport) -> Result<String> {
     forge::required(
-        &glab.json(&["api", "-X", "GET", "user"])?,
+        &glab.json(&Request::get("user"))?,
         "/username",
         "glab api user",
     )
@@ -315,14 +299,9 @@ pub fn login(glab: &Client) -> Result<String> {
 
 /// Finds the MR from `branch` of `origin`, in `origin` or, for a fork, in the project it was
 /// forked from. MRs from other forks with the same branch name are skipped.
-pub fn find_mr(glab: &Client, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
+fn find_mr(glab: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
     let branch = forge::encode(branch);
-    let project = glab.json(&[
-        "api",
-        "-X",
-        "GET",
-        &format!("projects/{}", forge::encode(origin)),
-    ])?;
+    let project = glab.json(&Request::get(format!("projects/{}", forge::encode(origin))))?;
     let own_id = project["id"].as_u64();
     let search = |target: &str| -> Result<Option<u64>> {
         let path = format!(
@@ -330,7 +309,7 @@ pub fn find_mr(glab: &Client, origin: &str, branch: &str) -> Result<Option<(Stri
             forge::encode(target)
         );
         let mrs: Vec<Value> = glab
-            .json(&["api", "-X", "GET", &path])?
+            .json(&Request::get(path))?
             .as_array()
             .cloned()
             .unwrap_or_default()
@@ -424,9 +403,9 @@ fn discussion(discussion: &Value, mr_url: &str) -> Result<Option<ThreadData>> {
     }))
 }
 
-pub fn fetch(glab: &Client, project: &str, iid: u64) -> Result<Fetched> {
+fn fetch(glab: &dyn Transport, project: &str, iid: u64) -> Result<Fetched> {
     let base = format!("projects/{}/merge_requests/{iid}", forge::encode(project));
-    let mr = glab.json(&["api", "-X", "GET", &base])?;
+    let mr = glab.json(&Request::get(base.clone()))?;
     let url = forge::required(&mr, "/web_url", "GitLab MR")?;
     let closed_at = forge::text(&mr, "/merged_at")
         .or_else(|| forge::text(&mr, "/closed_at"))
@@ -445,25 +424,19 @@ pub fn fetch(glab: &Client, project: &str, iid: u64) -> Result<Fetched> {
         author: forge::text(&mr, "/author/username"),
         url: url.clone(),
     };
-    let discussions = glab.items(&[
-        "api",
-        "-X",
-        "GET",
-        "--paginate",
-        &format!("{base}/discussions?per_page=100"),
-    ])?;
+    let discussions = glab.items(
+        &Request::get(format!("{base}/discussions?per_page=100")),
+        &CAPS.pagination,
+    )?;
     let mut threads = Vec::new();
     for item in &discussions {
         threads.extend(discussion(item, &url)?);
     }
     let drafts = glab
-        .items(&[
-            "api",
-            "-X",
-            "GET",
-            "--paginate",
-            &format!("{base}/draft_notes?per_page=100"),
-        ])?
+        .items(
+            &Request::get(format!("{base}/draft_notes?per_page=100")),
+            &CAPS.pagination,
+        )?
         .iter()
         .filter_map(|draft| {
             Some(Draft {

@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::forge::Fetched;
 use crate::git::Repo;
 use crate::model::{Anchor, Forge, RemoteKind, RemoteThread, Review};
+use crate::transport::{Response, Transport, TransportError};
 
 /// The PR/MR a write or read is about.
 #[derive(Clone, Copy)]
@@ -18,6 +19,7 @@ pub struct Subject<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Method {
+    Get,
     Post,
     Put,
 }
@@ -25,6 +27,7 @@ pub enum Method {
 impl Method {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Get => "GET",
             Self::Post => "POST",
             Self::Put => "PUT",
         }
@@ -48,6 +51,13 @@ impl Var {
             typed: false,
         }
     }
+
+    pub fn typed(name: &str, value: impl Into<String>) -> Self {
+        Self {
+            typed: true,
+            ..Self::text(name, value)
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -62,6 +72,8 @@ pub struct Request {
     pub method: Method,
     pub endpoint: Endpoint,
     pub body: Option<Value>,
+    /// Read every page of a list; see [`Pagination::CliPaginate`].
+    pub paginate: bool,
 }
 
 impl Request {
@@ -70,7 +82,12 @@ impl Request {
             method,
             endpoint: Endpoint::Rest(path.into()),
             body,
+            paginate: false,
         }
+    }
+
+    pub fn get(path: impl Into<String>) -> Self {
+        Self::rest(Method::Get, path, None)
     }
 
     pub fn graphql(vars: Vec<Var>) -> Self {
@@ -78,8 +95,27 @@ impl Request {
             method: Method::Post,
             endpoint: Endpoint::Graphql(vars),
             body: None,
+            paginate: false,
         }
     }
+}
+
+/// How a service pages a list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pagination {
+    /// GraphQL `pageInfo` cursors, which the service's own fetch follows.
+    GraphqlCursor,
+    /// The CLI joins the pages (`--paginate`).
+    CliPaginate,
+    /// A `Link: <url>; rel="next"` header.
+    #[cfg_attr(not(test), allow(dead_code, reason = "for services without a CLI"))]
+    LinkHeader,
+    /// A JSON pointer to the next page's URL in the body.
+    #[cfg_attr(not(test), allow(dead_code, reason = "for services without a CLI"))]
+    NextUrlInBody(&'static str),
+    /// A response header holding the token for the next page.
+    #[cfg_attr(not(test), allow(dead_code, reason = "for services without a CLI"))]
+    ContinuationHeader(&'static str),
 }
 
 /// How a service takes in-diff comments.
@@ -113,6 +149,7 @@ pub enum ApproveCap {
 }
 
 pub struct Capabilities {
+    pub pagination: Pagination,
     pub inline: Inline,
     /// Multi-line comments.
     pub ranges: bool,
@@ -176,10 +213,15 @@ pub trait Service {
     /// The local id a thread with no agent marker gets, from the host's first comment id.
     fn imported_id(&self, kind: RemoteKind, first: &str) -> String;
 
-    /// The argument list a request is run with, for dry-run output.
-    fn render(&self, request: &Request) -> Vec<String>;
+    fn transport(&self) -> &dyn Transport;
+    /// What a dry run shows for a request.
+    fn render(&self, request: &Request) -> Vec<String> {
+        self.transport().render(request)
+    }
     /// Runs a write; an empty reply is `null`.
-    fn send(&self, request: &Request) -> Result<Value>;
+    fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
+        self.transport().send(request)
+    }
 
     /// Where `anchor`, at `line` of `commit`, goes in the PR/MR diff, or `None` when it does
     /// not fit.
