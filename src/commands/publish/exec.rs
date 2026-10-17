@@ -6,7 +6,7 @@ use crate::commands::Ctx;
 use crate::commands::sync::Connection;
 use crate::error::{Error, Result};
 use crate::markers::agent_id;
-use crate::model::{Approval, Comment, PostState, RecordPost, RemoteComment, Target};
+use crate::model::{Approval, Comment, Delivery, PostState, RecordPost, RemoteComment, Target};
 
 /// Runs writes in order. Each item is marked `posting` and saved before its call and gets its
 /// remote id right after, so a rerun can match a write whose response was lost.
@@ -128,9 +128,11 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
                 .find(|candidate| candidate.id == *run)
             {
                 run.record = Some(RecordPost {
-                    post: PostState::Posting,
-                    attempt: Some(attempt.to_owned()),
-                    sent: texts.next().flatten(),
+                    delivery: {
+                        let mut delivery = Delivery::new(PostState::Posting);
+                        delivery.begin(attempt, texts.next().flatten());
+                        delivery
+                    },
                     head: head.clone(),
                     remote_id: None,
                     url: None,
@@ -143,9 +145,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     for id in ids {
         let text = texts.next().flatten();
         if let Some(comment) = comment_mut(target, &id) {
-            comment.post = PostState::Posting;
-            comment.attempt = Some(attempt.to_owned());
-            comment.sent = text;
+            comment.delivery.begin(attempt, text);
         }
     }
 }
@@ -191,7 +191,7 @@ pub(super) fn save(
             change(ctx, target, |target| {
                 for (local, remote) in found {
                     if let Some(comment) = comment_mut(target, &local) {
-                        comment.post = PostState::Posted;
+                        comment.delivery.post = PostState::Posted;
                         comment.remote = Some(remote);
                     }
                 }
@@ -205,7 +205,7 @@ pub(super) fn save(
                 .ok_or_else(|| Error(format!("no comment id returned for {comment}")))?;
             change(ctx, target, |target| {
                 if let Some(local) = comment_mut(target, comment) {
-                    local.post = PostState::Posted;
+                    local.delivery.post = PostState::Posted;
                     local.remote = Some(own(id.clone(), url, login, None));
                 }
                 Ok(())
@@ -253,7 +253,7 @@ pub(super) fn save(
                     .find(|candidate| candidate.id == *run)
                     .and_then(|run| run.record.as_mut())
                 {
-                    record.post = PostState::Posted;
+                    record.delivery.post = PostState::Posted;
                     record.remote_id = Some(id.clone());
                     record.url = url;
                 }

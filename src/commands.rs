@@ -1235,7 +1235,7 @@ fn finding_kill(ctx: &Ctx, id: &str, reason: &str) -> Result<Value> {
             || thread
                 .comments
                 .iter()
-                .any(|comment| comment.post != PostState::Pending);
+                .any(|comment| comment.delivery.post != PostState::Pending);
         if sent {
             return fail(format!(
                 "finding {id} is posted or being posted; resolve it with --triage stale instead"
@@ -2948,7 +2948,7 @@ fn thread_views(target: Option<&Target>, locator: &mut Locator) -> ThreadViews {
             "triage": thread.triage,
             "held": thread.held,
             "current": current,
-            "post": thread.comments.first().map(|first| first.post),
+            "post": thread.comments.first().map(|first| first.delivery.post),
             "remote_id": thread.remote.as_ref().map(|remote| &remote.id),
             "url": thread.remote.as_ref().and_then(|remote| remote.url.as_ref()),
         }));

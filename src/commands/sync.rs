@@ -455,11 +455,11 @@ impl<'a> Trust<'a> {
             .threads
             .iter()
             .flat_map(|thread| &thread.comments)
-            .filter_map(|comment| comment.sent.as_deref());
+            .filter_map(|comment| comment.delivery.sent.as_deref());
         let records = target
             .runs
             .iter()
-            .filter_map(|run| run.record.as_ref()?.sent.as_deref());
+            .filter_map(|run| run.record.as_ref()?.delivery.sent.as_deref());
         Self {
             login,
             caps: service.caps(),
@@ -493,12 +493,11 @@ impl<'a> Trust<'a> {
     /// comment is never claimed.
     fn claims(&self, comment: &Comment, incoming: &CommentData) -> bool {
         comment.remote.is_none()
-            && comment.post == PostState::Posting
+            && comment.delivery.is_posting()
             && trusted(incoming, self.login)
             && agent_id(&incoming.body).as_deref() == Some(comment.id.as_str())
-            && comment.attempt.is_some()
-            && agent_attempt(&incoming.body) == comment.attempt.as_deref()
-            && self.sent_text(comment.sent.as_deref(), incoming)
+            && comment.delivery.is_attempt(agent_attempt(&incoming.body))
+            && self.sent_text(comment.delivery.sent.as_deref(), incoming)
     }
 }
 
@@ -683,8 +682,8 @@ fn merge(
         {
             comment.draft_id = None;
         }
-        if comment.draft_id.is_none() && comment.post == PostState::Posting {
-            comment.post = PostState::Pending;
+        if comment.draft_id.is_none() && comment.delivery.is_posting() {
+            comment.delivery.post = PostState::Pending;
         }
     }
     for draft in fetched.drafts {
@@ -694,11 +693,7 @@ fn merge(
                 .threads
                 .iter_mut()
                 .flat_map(|thread| thread.comments.iter_mut())
-                .find(|comment| {
-                    comment.id == local
-                        && comment.attempt.is_some()
-                        && comment.attempt.as_deref() == attempt
-                }),
+                .find(|comment| comment.id == local && comment.delivery.is_attempt(attempt)),
             (None, Some(id)) => target
                 .threads
                 .iter_mut()
@@ -709,7 +704,7 @@ fn merge(
         if let Some(comment) = comment
             && comment.remote.is_none()
         {
-            comment.post = PostState::Posting;
+            comment.delivery.post = PostState::Posting;
             comment.draft_id = Some(draft.id);
             summary.drafts += 1;
         }
@@ -750,11 +745,10 @@ fn take_record(target: &mut Target, comment: &CommentData, trust: &Trust) -> boo
         && let Some(post) = &mut run.record
         && (post.remote_id.as_deref() == Some(comment.id.as_str())
             || (post.remote_id.is_none()
-                && post.post == PostState::Posting
-                && post.attempt.is_some()
-                && agent_attempt(&comment.body) == post.attempt.as_deref()))
+                && post.delivery.is_posting()
+                && post.delivery.is_attempt(agent_attempt(&comment.body))))
     {
-        post.post = PostState::Posted;
+        post.delivery.post = PostState::Posted;
         post.remote_id = Some(comment.id.clone());
         post.url.clone_from(&comment.url);
     }
@@ -946,7 +940,7 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
                 let mut comment = thread.comments[found].clone();
                 comment.remote = Some(remote_comment(&incoming, login));
                 comment.body = incoming.body;
-                comment.post = PostState::Posted;
+                comment.delivery.post = PostState::Posted;
                 comment.draft_id = None;
                 merged.push(comment);
             }
@@ -984,7 +978,7 @@ fn answer(thread: &mut Thread, data: ThreadData, trust: &Trust, now: &str) {
             .find(|existing| trust.claims(existing, &comment))
         {
             existing.remote = Some(remote_comment(&comment, login));
-            existing.post = PostState::Posted;
+            existing.delivery.post = PostState::Posted;
             existing.draft_id = None;
             continue;
         }

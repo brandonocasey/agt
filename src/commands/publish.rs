@@ -114,7 +114,7 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options
         if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
             thread.remote = Some(placeholder(&id, kind, connection.service.caps()));
             if let Some(first) = thread.comments.first_mut() {
-                first.post = PostState::Posted;
+                first.delivery.post = PostState::Posted;
             }
         }
     }

@@ -120,14 +120,48 @@ pub struct Reveal {
     pub disagree: u32,
 }
 
+/// The crash-safe posting state of something `publish` sends: marked `Posting` with an attempt
+/// id and the text before the call, so a rerun can match a write whose response was lost.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Delivery {
+    pub post: PostState,
+    pub attempt: Option<String>,
+    /// The body last sent; a service that shows no edits is trusted only for this text.
+    #[serde(default)]
+    pub sent: Option<String>,
+}
+
+impl Delivery {
+    pub fn new(post: PostState) -> Self {
+        Self {
+            post,
+            attempt: None,
+            sent: None,
+        }
+    }
+
+    /// Marks the item as being sent in `attempt`, before the call is made.
+    pub fn begin(&mut self, attempt: &str, sent: Option<String>) {
+        self.post = PostState::Posting;
+        self.attempt = Some(attempt.to_owned());
+        self.sent = sent;
+    }
+
+    pub fn is_posting(&self) -> bool {
+        self.post == PostState::Posting
+    }
+
+    /// Whether a marker naming `attempt` is the write of this item's attempt.
+    pub fn is_attempt(&self, attempt: Option<&str>) -> bool {
+        self.attempt.is_some() && self.attempt.as_deref() == attempt
+    }
+}
+
 /// Publish state of a run's final record.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RecordPost {
-    pub post: PostState,
-    pub attempt: Option<String>,
-    /// The body last sent; GitLab shows no edits, so sync trusts only this text.
-    #[serde(default)]
-    pub sent: Option<String>,
+    #[serde(flatten)]
+    pub delivery: Delivery,
     pub head: String,
     pub remote_id: Option<String>,
     pub url: Option<String>,
@@ -509,13 +543,10 @@ pub struct Comment {
     pub author: Author,
     pub body: String,
     pub created_at: String,
-    pub post: PostState,
+    #[serde(flatten)]
+    pub delivery: Delivery,
     pub remote: Option<RemoteComment>,
     pub draft_id: Option<String>,
-    pub attempt: Option<String>,
-    /// The body last sent; GitLab shows no edits, so sync trusts only this text.
-    #[serde(default)]
-    pub sent: Option<String>,
     /// Kept in the store only (`reply --local`), such as the user's answer to a held
     /// question; `publish` never posts it.
     #[serde(default)]
@@ -551,11 +582,9 @@ impl Comment {
             author,
             body,
             created_at,
-            post,
+            delivery: Delivery::new(post),
             remote,
             draft_id: None,
-            attempt: None,
-            sent: None,
             local: false,
             deleted_remote: false,
             deleted_seen_at: None,
@@ -605,6 +634,21 @@ pub enum Author {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_state_stays_flat_in_stored_records() {
+        let record: RecordPost = serde_json::from_str(
+            r#"{"post":"posting","attempt":"at-1","head":"abc","remote_id":null,"url":null}"#,
+        )
+        .unwrap();
+        assert!(record.delivery.is_posting());
+        assert_eq!(record.delivery.sent, None);
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["post"], "posting");
+        assert_eq!(value["attempt"], "at-1");
+        assert_eq!(value["sent"], serde_json::Value::Null);
+        assert!(value.get("delivery").is_none());
+    }
 
     #[test]
     fn human_authors_from_earlier_builds_parse() {

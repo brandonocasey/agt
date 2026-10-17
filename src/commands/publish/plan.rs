@@ -355,7 +355,7 @@ impl<'a> Planner<'a> {
             if thread.remote.is_some()
                 || thread.deleted_remote
                 || first.remote.is_some()
-                || first.post == PostState::Posted
+                || first.delivery.post == PostState::Posted
             {
                 // An approval posted as a comment, then made formal or refused and retried.
                 match self.pending_approve(thread, target) {
@@ -787,7 +787,10 @@ impl<'a> Planner<'a> {
                 continue;
             }
             for comment in thread.comments.iter().skip(1) {
-                if comment.local || comment.remote.is_some() || comment.post == PostState::Posted {
+                if comment.local
+                    || comment.remote.is_some()
+                    || comment.delivery.post == PostState::Posted
+                {
                     continue;
                 }
                 if !allowed(&comment.author, &self.connection.login) {
@@ -882,7 +885,7 @@ impl<'a> Planner<'a> {
             .filter(|run| {
                 run.record
                     .as_ref()
-                    .is_none_or(|record| record.post != PostState::Posted)
+                    .is_none_or(|record| record.delivery.post != PostState::Posted)
             })
             .collect();
         let reason = self
