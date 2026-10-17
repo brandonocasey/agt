@@ -22,6 +22,65 @@ pub struct Target {
     pub threads: Vec<Thread>,
 }
 
+impl Target {
+    /// Adds `thread` without losing anything: the same remote thread (or the same finding) gains
+    /// the comments it lacks; a different thread under a taken id (human `h<n>` ids restart per
+    /// target) gets the next free id.
+    fn absorb_thread(&mut self, mut thread: Thread) {
+        let Some(index) = self.threads.iter().position(|known| known.id == thread.id) else {
+            self.threads.push(thread);
+            return;
+        };
+        let known = &mut self.threads[index];
+        let same_remote = match (&known.remote, &thread.remote) {
+            (Some(a), Some(b)) => a.id == b.id,
+            (None, None) => thread.finding.is_some(),
+            _ => false,
+        };
+        if same_remote {
+            for comment in thread.comments {
+                known.absorb_comment(comment);
+            }
+            return;
+        }
+        let ids = self.threads.iter().map(|thread| thread.id.as_str());
+        let next = ids
+            .filter_map(|id| id.strip_prefix('h')?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let (old, new) = (format!("{}/", thread.id), format!("h{next}/"));
+        for comment in &mut thread.comments {
+            if let Some(rest) = comment.id.strip_prefix(&old) {
+                comment.id = format!("{new}{rest}");
+            }
+        }
+        thread.id = format!("h{next}");
+        self.threads.push(thread);
+    }
+
+    /// Moves runs, threads and records that `self` lacks over from `from`.
+    pub fn absorb(&mut self, from: Target) {
+        for run in from.runs {
+            if !self.runs.iter().any(|known| known.id == run.id) {
+                self.runs.push(run);
+            }
+        }
+        for thread in from.threads {
+            self.absorb_thread(thread);
+        }
+        for record in from.records {
+            if !self
+                .records
+                .iter()
+                .any(|known| known.comment_id == record.comment_id)
+            {
+                self.records.push(record);
+            }
+        }
+    }
+}
+
 /// The PR or MR a target is linked to, as of the last `sync`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Review {
@@ -246,6 +305,30 @@ pub struct Thread {
 }
 
 impl Thread {
+    /// Keeps a comment the thread lacks; a local comment id taken by different text is renumbered.
+    fn absorb_comment(&mut self, mut comment: Comment) {
+        let same = |known: &Comment| match (&known.remote, &comment.remote) {
+            (Some(a), Some(b)) => a.id == b.id,
+            (None, None) => known.id == comment.id && known.body == comment.body,
+            _ => false,
+        };
+        if self.comments.iter().any(same) {
+            return;
+        }
+        if self.comments.iter().any(|known| known.id == comment.id) {
+            let prefix = format!("{}/c", self.id);
+            let next = self
+                .comments
+                .iter()
+                .filter_map(|known| known.id.strip_prefix(&prefix)?.parse::<u32>().ok())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            comment.id = format!("{prefix}{next}");
+        }
+        self.comments.push(comment);
+    }
+
     /// A thread with no host state, resolution or approval yet.
     pub fn new(
         id: String,

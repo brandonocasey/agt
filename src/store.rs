@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Comment, Forge, Target, Thread, VERSION};
+use crate::model::{Forge, Target, VERSION};
 
 const MAX_KEY: usize = 200;
 const _: () = assert!(MIGRATIONS.len() + 1 == VERSION as usize);
@@ -233,7 +233,7 @@ impl Store {
         let base_revision = expected.or(old.as_ref().map(|target| target.revision));
         let mut target = match (current, old) {
             (Some(mut current), Some(old)) => {
-                merge_targets(&mut current, old);
+                current.absorb(old);
                 current
             }
             (Some(current), None) => current,
@@ -524,87 +524,6 @@ fn create_dir(dir: &Path) -> Result<()> {
         .map_err(ctx(format!("create {}", dir.display())))
 }
 
-/// Moves runs, threads and records that `into` lacks over from `from`.
-/// Adds `thread` without losing anything: the same remote thread (or the same finding) gains
-/// the comments it lacks; a different thread under a taken id (human `h<n>` ids restart per
-/// target) gets the next free id.
-fn merge_thread(into: &mut Target, mut thread: Thread) {
-    let Some(index) = into.threads.iter().position(|known| known.id == thread.id) else {
-        into.threads.push(thread);
-        return;
-    };
-    let known = &mut into.threads[index];
-    let same_remote = match (&known.remote, &thread.remote) {
-        (Some(a), Some(b)) => a.id == b.id,
-        (None, None) => thread.finding.is_some(),
-        _ => false,
-    };
-    if same_remote {
-        for comment in thread.comments {
-            merge_comment(known, comment);
-        }
-        return;
-    }
-    let ids = into.threads.iter().map(|thread| thread.id.as_str());
-    let next = ids
-        .filter_map(|id| id.strip_prefix('h')?.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0)
-        + 1;
-    let (old, new) = (format!("{}/", thread.id), format!("h{next}/"));
-    for comment in &mut thread.comments {
-        if let Some(rest) = comment.id.strip_prefix(&old) {
-            comment.id = format!("{new}{rest}");
-        }
-    }
-    thread.id = format!("h{next}");
-    into.threads.push(thread);
-}
-
-/// Keeps a comment the thread lacks; a local comment id taken by different text is renumbered.
-fn merge_comment(thread: &mut Thread, mut comment: Comment) {
-    let same = |known: &Comment| match (&known.remote, &comment.remote) {
-        (Some(a), Some(b)) => a.id == b.id,
-        (None, None) => known.id == comment.id && known.body == comment.body,
-        _ => false,
-    };
-    if thread.comments.iter().any(same) {
-        return;
-    }
-    if thread.comments.iter().any(|known| known.id == comment.id) {
-        let prefix = format!("{}/c", thread.id);
-        let next = thread
-            .comments
-            .iter()
-            .filter_map(|known| known.id.strip_prefix(&prefix)?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        comment.id = format!("{prefix}{next}");
-    }
-    thread.comments.push(comment);
-}
-
-fn merge_targets(into: &mut Target, from: Target) {
-    for run in from.runs {
-        if !into.runs.iter().any(|known| known.id == run.id) {
-            into.runs.push(run);
-        }
-    }
-    for thread in from.threads {
-        merge_thread(into, thread);
-    }
-    for record in from.records {
-        if !into
-            .records
-            .iter()
-            .any(|known| known.comment_id == record.comment_id)
-        {
-            into.records.push(record);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,7 +633,7 @@ mod tests {
             None,
             vec![comment("h1/c1", "From note", None)],
         )]);
-        merge_targets(&mut into, from);
+        into.absorb(from);
         assert_eq!(
             bodies(&into),
             [
@@ -738,7 +657,7 @@ mod tests {
             Some("900"),
             vec![imported(), comment("gh-c900/c1", "From reply", None)],
         )]);
-        merge_targets(&mut into, from);
+        into.absorb(from);
         assert_eq!(
             bodies(&into),
             [(
