@@ -112,14 +112,20 @@ pub struct TokenTransport {
 }
 
 impl TokenTransport {
-    pub fn new(base_url: &str, host: &str, auth: Auth, scheme: &'static str) -> Self {
-        Self {
+    /// Refuses a base URL that is not https: the token would cross the network in the clear.
+    pub fn new(base_url: &str, host: &str, auth: Auth, scheme: &'static str) -> Result<Self> {
+        if !base_url.starts_with("https://") {
+            return fail(format!(
+                "the token transport needs an https base URL, not {base_url}"
+            ));
+        }
+        Ok(Self {
             program: std::env::var_os("AGENT_REVIEW_CURL_BIN").unwrap_or_else(|| "curl".into()),
             base_url: base_url.trim_end_matches('/').to_owned(),
             host: host.to_owned(),
             auth,
             scheme,
-        }
+        })
     }
 
     /// The URL for `path`. An absolute URL (a next-page link) is only followed when it is https
@@ -212,6 +218,8 @@ impl Transport for TokenTransport {
                 "--silent",
                 "--show-error",
                 "--include",
+                // A proxy's `200 Connection established` block is not printed.
+                "--suppress-connect-headers",
                 "--config",
                 "-",
             ])
@@ -303,8 +311,8 @@ fn curl_quote(text: &str) -> String {
 }
 
 /// The final status, headers (lowercase names) and body of `curl --include` output, which
-/// starts with a block for each interim (1xx) reply and for a proxy's `200 Connection
-/// established`.
+/// starts with a block for each interim (1xx) reply. Proxy CONNECT replies are kept out of the
+/// output by `--suppress-connect-headers`.
 fn parse_http(raw: &[u8]) -> Result<Parsed<'_>> {
     let mut rest = raw;
     loop {
@@ -318,11 +326,7 @@ fn parse_http(raw: &[u8]) -> Result<Parsed<'_>> {
             .nth(1)
             .and_then(|status| status.parse().ok())
             .ok_or_else(|| Error("curl printed no status".into()))?;
-        let tunnel = status == 200
-            && status_line
-                .to_ascii_lowercase()
-                .contains("connection established");
-        if (100..200).contains(&status) || tunnel {
+        if (100..200).contains(&status) {
             rest = body;
             continue;
         }
@@ -365,8 +369,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_tunnel_and_interim_blocks_are_skipped() {
-        let raw = b"HTTP/1.1 200 Connection established\r\nProxy-Agent: p\r\n\r\nHTTP/1.1 103 Early Hints\r\nlink: <x>\r\n\r\nHTTP/2 404\r\nx-a: b\r\n\r\nnope";
+    fn interim_blocks_are_skipped() {
+        let raw = b"HTTP/1.1 102 Processing\r\n\r\nHTTP/1.1 103 Early Hints\r\nlink: <x>\r\n\r\nHTTP/2 404\r\nx-a: b\r\n\r\nnope";
         let parsed = parse_http(raw).unwrap();
         assert_eq!(parsed.status, 404);
         assert_eq!(parsed.body, b"nope");
@@ -375,7 +379,18 @@ mod tests {
 
     fn transport(base: &str) -> TokenTransport {
         let auth = Auth::Command(vec!["echo".into(), "t".into()]);
-        TokenTransport::new(base, "h", auth, "Bearer")
+        TokenTransport::new(base, "h", auth, "Bearer").unwrap()
+    }
+
+    #[test]
+    fn a_non_https_base_url_is_refused() {
+        for base in ["http://h/api", "ftp://h", "h"] {
+            let auth = Auth::Env("X".into());
+            assert!(
+                TokenTransport::new(base, "h", auth, "Bearer").is_err(),
+                "{base}"
+            );
+        }
     }
 
     #[test]
@@ -491,7 +506,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
         let auth = Auth::Command(vec!["echo".into(), "s3cret-token".into()]);
-        let mut transport = TokenTransport::new("https://h/api/v1/", "h", auth, "Bearer");
+        let mut transport = TokenTransport::new("https://h/api/v1/", "h", auth, "Bearer").unwrap();
         transport.program = curl.into_os_string();
         let request = Request::rest(
             Method::Post,
@@ -507,6 +522,7 @@ mod tests {
         );
         let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
         assert_eq!(argv.lines().next(), Some("-q"), "{argv}");
+        assert!(argv.lines().any(|arg| arg == "--suppress-connect-headers"));
         assert!(!argv.contains("s3cret-token"), "{argv}");
         assert!(!argv.contains("issues"), "{argv}");
         let stdin = std::fs::read_to_string(dir.path().join("stdin")).unwrap();
@@ -557,7 +573,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
         let auth = Auth::Command(vec!["echo".into(), "t".into()]);
-        let mut transport = TokenTransport::new("https://h", "h", auth, "Bearer");
+        let mut transport = TokenTransport::new("https://h", "h", auth, "Bearer").unwrap();
         transport.program = curl.into_os_string();
         let error = transport
             .send(&Request::rest(Method::Get, "x", None))
