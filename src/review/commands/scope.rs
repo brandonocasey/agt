@@ -63,6 +63,10 @@ impl Ctx {
         }
         let repo_key = repo.repo_key()?;
         let dir = store.repo_dir(&repo_key)?;
+        if !read_only && repo_key.starts_with("local/") {
+            // `prune` checks this path to tell a repository that is gone.
+            store.record_repo(&dir, &repo.common_dir()?)?;
+        }
         Ok(Self {
             repo,
             read_only,

@@ -485,13 +485,18 @@ impl Repo {
         self.git_opt(&["remote", "get-url", "origin"])
     }
 
+    /// The absolute git common dir, which names a `local/` repository.
+    pub fn common_dir(&self) -> Result<String> {
+        self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    }
+
     pub fn repo_key(&self) -> Result<String> {
         if let Some(url) = self.origin_url()?
             && let Some(key) = remote_key(&url)
         {
             return Ok(key);
         }
-        let common = self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let common = self.common_dir()?;
         let path = Path::new(&common);
         let named = if path.file_name().is_some_and(|name| name == ".git") {
             path.parent()

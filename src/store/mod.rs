@@ -19,6 +19,14 @@ const MAX_KEY: usize = 200;
 const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);
 const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
+const REPO_FILE: &str = ".repo.json";
+
+/// Where a `local/` repository lives, so `prune` can tell it is gone. Older agt ignores the
+/// file, which is why this is not a field of the target.
+#[derive(Serialize, Deserialize)]
+pub struct RepoFile {
+    pub common_dir: String,
+}
 
 /// The forge login `sync` authenticated as, cached per repository for author defaults.
 #[derive(Serialize, Deserialize)]
@@ -395,6 +403,27 @@ impl Store {
     pub fn save_account(&self, dir: &Path, account: &Account) -> Result<()> {
         create_dir(dir)?;
         persist_json(dir, &dir.join(ACCOUNT_FILE), account, || Ok(()))
+    }
+
+    /// Writes the repository's absolute git common dir beside its targets unless it is already
+    /// recorded.
+    pub fn record_repo(&self, dir: &Path, common_dir: &str) -> Result<()> {
+        let path = dir.join(REPO_FILE);
+        if let Ok(Some(known)) = read_json::<RepoFile>(&path)
+            && known.common_dir == common_dir
+        {
+            return Ok(());
+        }
+        create_dir(dir)?;
+        let file = RepoFile {
+            common_dir: common_dir.to_owned(),
+        };
+        persist_json(dir, &path, &file, || Ok(()))
+    }
+
+    /// The git common dir recorded by [`Store::record_repo`], if any.
+    pub fn recorded_repo(&self, dir: &Path) -> Result<Option<RepoFile>> {
+        read_json(&dir.join(REPO_FILE))
     }
 
     /// Deletes the target when `remove` approves it, re-reading it under its lock first.
