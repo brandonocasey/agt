@@ -5,7 +5,7 @@
 # `body=<text>` argument as `body=`. The request body (`--input -` stdin or the `body=` text) of
 # call number <c> in calls.log is saved as input-<c>. <key>.fail makes the call fail after its
 # input is read, as when a write reaches the host but its response is lost; a non-empty
-# <key>.fail is printed to stderr as the tool's error, such as `glab: 403 Forbidden`. In a response,
+# <key>.fail is printed to stderr as the tool's error, such as `glab: 403 Forbidden (HTTP 403)`. In a response,
 # {{LAST_NOTE}} and {{LAST_BODY}} stand for the JSON-escaped "note" or "body" of the latest
 # request that sent one, the text the host then shows. A glab call (one with GITLAB_HOST set)
 # first tries <key>.glab.json, so gh and glab can answer the same arguments differently. Any

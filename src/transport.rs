@@ -379,25 +379,26 @@ pub fn glab_args(request: &Request) -> Vec<String> {
     args
 }
 
-/// The HTTP status a CLI reports in its error text, such as `gh: Not Found (HTTP 404)` or
-/// `glab: 403 Forbidden`.
+/// The HTTP status a CLI reports in its error text: only the `(HTTP nnn)` suffix, as in
+/// `gh: Not Found (HTTP 404)` and `glab: 404 Project Not Found (HTTP 404)`. Other numbers in the
+/// text (a URL's `pulls/412/reviews`, a port) are not statuses.
 fn status_in(stderr: &str) -> Option<u16> {
-    let status = |digits: &str| {
-        let status: u16 = digits.get(..3)?.parse().ok()?;
-        ((400..600).contains(&status)
-            && !digits.get(3..)?.starts_with(|c: char| c.is_ascii_digit()))
-        .then_some(status)
-    };
-    if let Some((_, after)) = stderr.split_once("HTTP ")
-        && let Some(found) = status(after)
-    {
-        return Some(found);
+    let status = stderr.match_indices("(HTTP ").find_map(|(at, marker)| {
+        let rest = &stderr[at + marker.len()..];
+        let (digits, _) = rest.split_once(')')?;
+        let status: u16 = digits.parse().ok().filter(|_| digits.len() == 3)?;
+        (400..600).contains(&status).then_some(status)
+    })?;
+    Some(as_seen_by_retries(status, stderr))
+}
+
+/// GitHub answers a rate limit with 403, which is worth retrying later, unlike a real 403.
+pub(crate) fn as_seen_by_retries(status: u16, text: &str) -> u16 {
+    if status == 403 && text.to_ascii_lowercase().contains("rate limit") {
+        429
+    } else {
+        status
     }
-    let words: Vec<&str> = stderr.split_whitespace().collect();
-    words.windows(2).find_map(|pair| {
-        let named = pair[1].starts_with(|c: char| c.is_ascii_uppercase());
-        status(pair[0].trim_matches(|c: char| !c.is_ascii_digit())).filter(|_| named)
-    })
 }
 
 mod token;
@@ -479,17 +480,50 @@ mod tests {
     fn statuses_come_from_cli_error_text() {
         assert_eq!(status_in("gh: Not Found (HTTP 404)"), Some(404));
         assert_eq!(
-            status_in("gh: HTTP 403: Resource not accessible"),
+            status_in("glab: 404 Project Not Found (HTTP 404)"),
+            Some(404)
+        );
+        assert_eq!(
+            status_in("gh: Resource not accessible by integration (HTTP 403)"),
             Some(403)
         );
-        assert_eq!(status_in("glab: 403 Forbidden"), Some(403));
-        assert_eq!(status_in("glab api failed: 401 Unauthorized"), Some(401));
         assert_eq!(
             status_in("fake-forge: simulated failure: api -X POST"),
             None
         );
         assert_eq!(status_in("dial tcp: i/o timeout"), None);
-        assert_eq!(status_in("HTTP 200 OK"), None);
+        assert_eq!(status_in("gh: ok (HTTP 200)"), None);
+    }
+
+    #[test]
+    fn numbers_in_urls_and_ports_are_not_statuses() {
+        for text in [
+            "Get https://api.github.com/repos/o/r/pulls/412/reviews: unexpected EOF",
+            "dial tcp 140.82.112.5:443: connection reset",
+            "glab: 404 Not Found",
+            "gh: 403 Forbidden",
+            "HTTP 404: Not Found",
+        ] {
+            assert_eq!(status_in(text), None, "{text}");
+        }
+        let eof = TransportError {
+            status: status_in("Post https://x/pulls/412/reviews: EOF"),
+            message: String::new(),
+        };
+        assert!(!eof.refused());
+    }
+
+    #[test]
+    fn a_rate_limit_is_transient() {
+        let limited = status_in("gh: API rate limit exceeded for user (HTTP 403)");
+        assert_eq!(limited, Some(429));
+        let error = TransportError {
+            status: limited,
+            message: String::new(),
+        };
+        assert!(!error.refused());
+        let forbidden = status_in("gh: Resource not accessible (HTTP 403)");
+        assert_eq!(forbidden, Some(403));
     }
 
     #[test]

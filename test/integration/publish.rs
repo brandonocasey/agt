@@ -476,7 +476,7 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
     let env = &setup.env;
     let approve = svc.call(Call::Approve);
     // GitLab refuses: already approved, or the author may not approve.
-    env.fail_call_with(&strs(&approve), "glab: 403 Forbidden");
+    env.fail_call_with(&strs(&approve), "glab: 403 Forbidden (HTTP 403)");
     svc.accept(env, Call::PostNote, 5020);
     env.respond(
         &strs(&svc.call(Call::PostThread)),
