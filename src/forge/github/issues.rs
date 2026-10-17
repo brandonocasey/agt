@@ -16,7 +16,7 @@ use crate::forge::{self, CommentData};
 use crate::store::issues::{Category, LinkSource, PrLink};
 use crate::store::model::Forge;
 
-const PR_FIELDS: &str = "{number url state headRefName repository{nameWithOwner}}";
+const PR_FIELDS: &str = "number url state headRefName repository{nameWithOwner}";
 
 pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: true,
@@ -336,6 +336,21 @@ mod tests {
         assert_eq!(listed[0].body, "");
         assert_eq!(listed[0].reason.as_deref(), Some("completed"));
         assert_eq!(listed[0].labels, ["bug"]);
+    }
+
+    #[test]
+    fn the_links_query_is_well_formed() {
+        let query = LINKS_QUERY.replace("PR_FIELDS", PR_FIELDS);
+        assert!(
+            !query.contains("{{") && !query.contains("PR_FIELDS"),
+            "{query}"
+        );
+        assert_eq!(
+            query.matches('{').count(),
+            query.matches('}').count(),
+            "{query}"
+        );
+        assert!(query.contains("nodes{number url state headRefName repository{nameWithOwner}}"));
     }
 
     #[test]
