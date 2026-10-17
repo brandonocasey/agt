@@ -556,6 +556,34 @@ fn store_layout_and_permissions() {
 }
 
 #[test]
+fn foreign_documents_in_the_store_are_ignored() {
+    let env = Env::with_branch();
+    env.git(&["remote", "add", "origin", "git@github.com:Owner/Repo.git"]);
+    let key = env.run(&["comment", "--body", "x"])["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dir = env.state().join("github.com").join("Owner").join("Repo");
+    fs::write(
+        dir.join("issue-gh-7.json"),
+        r#"{"version":1,"kind":"issue","key":"issue-gh-7","threads":[]}"#,
+    )
+    .unwrap();
+    fs::create_dir(dir.join("issues.json")).unwrap();
+    fs::create_dir(dir.join("issues")).unwrap();
+    fs::write(
+        dir.join("issues").join("issue-gh-8.json"),
+        r#"{"version":1,"kind":"issue"}"#,
+    )
+    .unwrap();
+    assert_eq!(env.run(&["status"])["target"], key);
+    assert_eq!(env.run(&["list"])["threads"].as_array().unwrap().len(), 1);
+    env.run(&["prune", "--all"]);
+    assert!(dir.join("issue-gh-7.json").exists());
+    assert!(dir.join("issues").join("issue-gh-8.json").exists());
+}
+
+#[test]
 fn local_repo_key_without_remote() {
     let env = Env::with_branch();
     env.run(&["comment", "--body", "x"]);

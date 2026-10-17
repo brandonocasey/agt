@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result, ctx, fail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::model::{Comment, Forge, Target, Thread, VERSION};
 
 const MAX_KEY: usize = 200;
+const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 
 /// The forge login `sync` authenticated as, cached per repository for author defaults.
@@ -86,8 +88,19 @@ impl Store {
             if name.starts_with('.') || !name.ends_with(".json") {
                 continue;
             }
-            if let Some(target) = read_target(&entry.path())? {
-                targets.push(target);
+            let is_dir = entry
+                .file_type()
+                .map_err(ctx(format!("stat {}", entry.path().display())))?
+                .is_dir();
+            if is_dir {
+                continue;
+            }
+            let path = entry.path();
+            let Some(document) = read_document(&path)? else {
+                continue;
+            };
+            if is_target_document(&document) {
+                targets.push(parse_target(&path, document)?);
             }
         }
         targets.sort_by(|a, b| a.key.cmp(&b.key));
@@ -113,7 +126,11 @@ impl Store {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if kind.is_dir() {
                     pending.push(entry.path());
-                } else if kind.is_file() && !name.starts_with('.') && name.ends_with(".json") {
+                } else if kind.is_file()
+                    && !name.starts_with('.')
+                    && name.ends_with(".json")
+                    && is_target_file(&entry.path())?
+                {
                     has_target = true;
                 }
             }
@@ -314,11 +331,39 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     serde_json::from_str(&raw).map_err(ctx(format!("parse {}", path.display())))
 }
 
+/// Whether the store file holds a target. Other documents may share a repository directory; a
+/// file whose `kind` is not a target kind belongs to them and is left alone.
+fn is_target_document(document: &Value) -> bool {
+    match document.get("kind").and_then(Value::as_str) {
+        Some(kind) => TARGET_KINDS.contains(&kind),
+        None => true,
+    }
+}
+
+fn is_target_file(path: &Path) -> Result<bool> {
+    Ok(read_json::<Value>(path)?.is_some_and(|document| is_target_document(&document)))
+}
+
+/// Reads the target a caller asked for by key. A file of another document kind is an error so
+/// that a write never replaces it.
 fn read_target(path: &Path) -> Result<Option<Target>> {
-    let target: Option<Target> = read_json(path)?;
-    if let Some(target) = &target
-        && target.version != VERSION
-    {
+    match read_document(path)? {
+        Some(document) => parse_target(path, document).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn read_document(path: &Path) -> Result<Option<Value>> {
+    read_json(path)
+}
+
+fn parse_target(path: &Path, document: Value) -> Result<Target> {
+    if !is_target_document(&document) {
+        return fail(format!("{} is not a target document", path.display()));
+    }
+    let target: Target =
+        serde_json::from_value(document).map_err(ctx(format!("parse {}", path.display())))?;
+    if target.version != VERSION {
         return fail(format!(
             "{} has unsupported version {}",
             path.display(),
