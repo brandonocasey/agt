@@ -116,6 +116,12 @@ fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options
             thread.remote = Some(placeholder(&id, kind, connection.service.caps()));
             if let Some(first) = thread.comments.first_mut() {
                 first.delivery.post = PostState::Posted;
+                first.remote = Some(exec::own(
+                    format!("<remote id of {}>", first.id),
+                    None,
+                    &connection.login,
+                    None,
+                ));
             }
         }
     }
