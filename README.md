@@ -205,7 +205,8 @@ agent-review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   "not fixed: <reason>"` plus a reply `Not fixed: <reason>.`; `--rejected
   <reason>` resolves a finding that will not be fixed, with `rejected: <reason>`
   and a reply `Rejected: <reason>.`, and the final record counts it as
-  `<n> rejected`. `--reply <text>`
+  `<n> rejected`. A finding rejected before it was ever posted is not posted, as
+  with `stale`; another store that syncs the reply reads the rejection back. `--reply <text>`
   replaces that text, or adds a reply to any `resolve`; the author flags sign
   it. With one id the output is the `thread`; with more, `threads` lists each
   id with `resolved`, `resolution` and `held`.
@@ -473,7 +474,7 @@ agent-review prune --all
   base and the reviewed commit (GitHub) or MR head (GitLab, after mapping the
   line to it); when the commits are not local it is out of diff.
 - The final record follows the review skill: a header with cycles, found,
-  fixed and open counts, a `| Pass | Reviewed | Starting context | Reviewer |`
+  fixed, rejected (when any) and open counts, a `| Pass | Reviewed | Starting context | Reviewer |`
   table, `Reveal:`, `Fixed by:` and `Time: ... Tokens: ...` lines when known, and
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`.
   `N` counts the run's passes covering the repaired head by the same rules as

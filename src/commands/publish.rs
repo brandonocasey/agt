@@ -355,8 +355,13 @@ impl Planner<'_> {
                 }
                 continue;
             }
-            // A finding judged stale before it was ever posted has nothing to tell the host.
-            if thread.finding.is_some() && thread.resolution.as_deref() == Some("stale") {
+            // A finding judged stale or rejected before it was ever posted has nothing to tell
+            // the host.
+            if thread.finding.is_some()
+                && thread.resolution.as_deref().is_some_and(|resolution| {
+                    resolution == "stale" || resolution.starts_with("rejected:")
+                })
+            {
                 continue;
             }
             if let Some(reason) = self.blocked(target, thread, first) {
@@ -1289,10 +1294,11 @@ fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(
     let rejected = findings
         .iter()
         .filter(|thread| {
-            thread
-                .resolution
-                .as_deref()
-                .is_some_and(|resolution| resolution.starts_with("rejected:"))
+            thread.resolved
+                && thread
+                    .resolution
+                    .as_deref()
+                    .is_some_and(|resolution| resolution.starts_with("rejected:"))
         })
         .count();
     let rejected = match rejected {

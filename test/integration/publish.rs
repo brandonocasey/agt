@@ -2345,3 +2345,32 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record() {
         .unwrap_or_else(|| panic!("{dry}"));
     assert!(record.contains("0 fixed, 1 rejected, "), "{record}");
 }
+
+#[test]
+fn a_synced_rejected_reply_resolves_a_general_finding() {
+    let setup = reviewed(GH);
+    let env = &setup.env;
+    link(&setup);
+    let f9 = format!("{}.c1p0.r1.f9", setup.run);
+    let first = format!(
+        "**bug (low):** A general finding.\n\nm1 xhigh codex {}.c1p0.r1\n\
+         <!-- review-finding v1 id={f9} sha={} -->\n<!-- agent-review id={f9}/c1 attempt=at-1 -->",
+        setup.run, setup.head
+    );
+    let mut pr = GhPr::new();
+    pr.comments.push(gh_comment(901, "me", &first));
+    pr.comments.push(gh_comment(
+        902,
+        "me",
+        &format!(
+            "Rejected: Intended behavior.\n\nme\n<!-- agent-review id={f9}/c2 attempt=at-1 -->\nRe: {f9}"
+        ),
+    ));
+    gh_sync(env, None, &pr.render(&setup));
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let synced = thread(&list, &f9);
+    assert_eq!(synced["resolved"], true, "{synced}");
+    assert_eq!(synced["resolution"], "rejected: Intended behavior");
+    assert!(!open_ids(&env.run(&["status"])).contains(&f9));
+}

@@ -587,6 +587,18 @@ fn answered_id(body: &str, marked: bool) -> Option<String> {
     ((marked || before.contains("Fixed in")) && !id.is_empty()).then(|| id.to_owned())
 }
 
+/// The reason of a marked `Rejected: <reason>.` reply.
+fn rejected_reason(body: &str) -> Option<String> {
+    agent_id(body)?;
+    let reason = body
+        .lines()
+        .next()?
+        .strip_prefix("Rejected: ")?
+        .trim()
+        .trim_end_matches('.');
+    (!reason.is_empty()).then(|| reason.to_owned())
+}
+
 fn fixed_sha(body: &str) -> Option<String> {
     let rest = body.split_once("Fixed in ")?.1;
     let sha = rest.split_whitespace().next()?.trim_end_matches(['.', ',']);
@@ -1073,12 +1085,17 @@ fn answer(thread: &mut Thread, data: ThreadData, trust: &Trust, now: &str) {
             .is_some_and(|remote| remote.resolvable);
         if !resolvable && thread.resolve_pending.is_none() {
             let fixed = fixed_sha(&comment.body);
-            thread.resolved = fixed.is_some();
-            if let Some(sha) = fixed {
+            let rejected = rejected_reason(&comment.body);
+            thread.resolved = fixed.is_some() || rejected.is_some();
+            if thread.resolved {
                 thread.held = false;
-                if thread.resolution.is_none() {
-                    thread.resolution = Some(format!("fixed {sha}"));
-                }
+            }
+            if thread.resolution.is_none() {
+                thread.resolution = match (fixed, rejected) {
+                    (Some(sha), _) => Some(format!("fixed {sha}")),
+                    (None, Some(reason)) => Some(format!("rejected: {reason}")),
+                    (None, None) => None,
+                };
             }
         }
         thread.comments.push(imported_comment(comment, login));

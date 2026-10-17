@@ -2099,6 +2099,8 @@ fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
             }
             if triage.is_some() {
                 thread.triage = triage;
+            } else if args.rejected.is_some() {
+                thread.triage = None;
             }
             let was = thread.resolved;
             if reopen {
