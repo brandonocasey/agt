@@ -72,6 +72,10 @@ mod os {
         let stat = fs::read_to_string(format!("{dir}/stat")).ok()?;
         // The command name may hold spaces and parentheses; fields resume after the last `)`.
         let fields: Vec<&str> = stat.get(stat.rfind(')')? + 2..)?.split(' ').collect();
+        // An exited process waiting for its parent to reap it is gone, not running.
+        if fields.first() == Some(&"Z") {
+            return None;
+        }
         let ppid = fields.get(1)?.parse().ok()?;
         let ticks: u64 = fields.get(19)?.parse().ok()?;
         let per_sec = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
@@ -182,6 +186,10 @@ mod os {
 
     pub fn read(pid: i32) -> Option<Proc> {
         let info = info(pid)?;
+        // An exited process waiting for its parent to reap it is gone, not running.
+        if info.pbi_status == libc::SZOMB {
+            return None;
+        }
         if info.pbi_uid != unsafe { libc::getuid() } {
             return None;
         }
