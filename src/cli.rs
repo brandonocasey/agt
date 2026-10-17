@@ -125,6 +125,11 @@ pub enum RunAction {
         /// Repaired head of a range or commit target: a descendant of its end [default: the end].
         #[arg(long)]
         head: Option<String>,
+        /// What the main session spent, as a JSON array of `{"role", "tokens",
+        /// "duration_ms", "tool_uses"}` (roles such as `fix`, `manual`, `main`), from a file
+        /// or `-` for stdin.
+        #[arg(long, value_name = "FILE")]
+        usage: Option<PathBuf>,
     },
 }
 

@@ -981,6 +981,31 @@ fn imported(thread: &Thread) -> bool {
             .is_some_and(|first| first.id.starts_with("remote-"))
 }
 
+/// `Time: 14m (reviewing 9m, fixing 5m). Tokens: reviewers 120k, main session 80k.`
+fn spend_line(spent: &Value) -> Option<String> {
+    let minutes = |key: &str| spent[key].as_i64().map(|secs| format!("{}m", (secs + 30) / 60));
+    let thousands = |key: &str| spent[key].as_u64().map(|tokens| format!("{}k", (tokens + 500) / 1000));
+    let mut line = String::new();
+    if let Some(total) = minutes("total_secs") {
+        let _ = write!(line, "Time: {total}");
+        if let (Some(review), Some(fix)) = (minutes("reviewing_secs"), minutes("fixing_secs")) {
+            let _ = write!(line, " (reviewing {review}, fixing {fix})");
+        }
+        line.push('.');
+    }
+    let tokens: Vec<String> = [("reviewers", "reviewer_tokens"), ("main session", "main_tokens")]
+        .iter()
+        .filter_map(|(label, key)| thousands(key).map(|value| format!("{label} {value}")))
+        .collect();
+    if !tokens.is_empty() {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        let _ = write!(line, "Tokens: {}.", tokens.join(", "));
+    }
+    (!line.is_empty()).then_some(line)
+}
+
 /// One end of a GitLab `line_range`: its line code is the SHA-1 of the path and the old and new
 /// line counters, as GitLab builds it.
 fn line_point(line: &anchors::DiffLine) -> Value {
@@ -1197,6 +1222,9 @@ fn record_body(ctx: &Ctx, target: &Target, run: &Run, attempt: &str) -> Result<(
     }
     if !fixers.is_empty() {
         let _ = writeln!(text, "Fixed by: {}", fixers.join("; "));
+    }
+    if let Some(line) = spend_line(&super::run_spend(run)) {
+        let _ = writeln!(text, "{line}");
     }
     let _ = writeln!(
         text,

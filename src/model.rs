@@ -91,6 +91,27 @@ pub struct Run {
     pub repair: Vec<CommitPatch>,
     pub reveal: Option<Reveal>,
     pub record: Option<RecordPost>,
+    /// Usage of the main session's roles (`manual`, `fix`, `main`), from `run end --usage`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage: Vec<RoleUsage>,
+}
+
+/// Tokens, time and tool calls an agent spent, as its harness reports them.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Usage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RoleUsage {
+    pub role: String,
+    #[serde(flatten)]
+    pub usage: Usage,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -159,6 +180,9 @@ pub struct Reviewer {
     pub harness: String,
     pub harness_version: Option<String>,
     pub starting_context: String,
+    /// What the reviewer spent on this pass, from `pass end --findings`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

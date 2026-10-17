@@ -17,7 +17,7 @@ use crate::git::{CommitInfo, LogEntry, Repo};
 use crate::model::{
     Anchor, Approval, Author, Comment, CommitPatch, FindingInfo, ImportedRecord, KilledFinding, Pass,
     PassKind, PostState, Reveal, ReviewState, Reviewer, Run, Severity, Side, Target, TargetKind,
-    Thread, ThreadType, Triage, VERSION,
+    RoleUsage, Thread, ThreadType, Triage, Usage, VERSION,
 };
 use crate::store::Store;
 
@@ -130,12 +130,28 @@ pub fn run(cli: Cli) -> Result<Output> {
                     reveal_agree,
                     reveal_disagree,
                     head,
+                    usage,
                 },
         } => {
             let reveal = reveal_agree
                 .zip(reveal_disagree)
                 .map(|(agree, disagree)| Reveal { agree, disagree });
-            let mut ended = run_end(&ctx, &run, reveal, head.as_deref())?;
+            let usage = match usage {
+                Some(source) => {
+                    let inputs: Vec<UsageInput> =
+                        serde_json::from_str(&read_source(&source, "usage")?)
+                            .map_err(crate::error::ctx("parse usage (expected a JSON array)"))?;
+                    inputs
+                        .iter()
+                        .map(|input| RoleUsage {
+                            role: input.reviewer.clone(),
+                            usage: input.usage(),
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            let mut ended = run_end(&ctx, &run, reveal, head.as_deref(), usage)?;
             // The status the caller would check next, from a read-only repository so
             // merge checks write no objects.
             let reader = Ctx::new(Store::open()?, status_selection, true, true)?;
@@ -1023,6 +1039,7 @@ fn run_start(ctx: &Ctx) -> Result<Value> {
             repair: Vec::new(),
             reveal: None,
             record: None,
+            usage: Vec::new(),
         });
         Ok(id)
     })?;
@@ -1115,7 +1132,13 @@ impl Adoption {
     }
 }
 
-fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>, head: Option<&str>) -> Result<Value> {
+fn run_end(
+    ctx: &Ctx,
+    run_id: &str,
+    reveal: Option<Reveal>,
+    head: Option<&str>,
+    usage: Vec<RoleUsage>,
+) -> Result<Value> {
     let scope = ctx.scope_at(head)?;
     let Some(existing) = &scope.existing else {
         return fail(format!("run {run_id} not found in target {}", scope.key));
@@ -1140,7 +1163,7 @@ fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>, head: Option<&str>) 
             .collect(),
         _ => Vec::new(),
     };
-    let (ended_at, recorded) = ctx.update(&scope, |target, now| {
+    let (ended_at, recorded, spent) = ctx.update(&scope, |target, now| {
         let run = find_run_mut(target, run_id)?;
         if run.ended_at.is_some() {
             return fail(format!("run {run_id} already ended"));
@@ -1155,7 +1178,9 @@ fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>, head: Option<&str>) 
         run.repaired_head = Some(scope.head.clone());
         run.repair = repair;
         run.reveal = reveal;
-        Ok((now.to_owned(), adoption.apply(target)))
+        run.usage = usage;
+        let spent = run_spend(run);
+        Ok((now.to_owned(), adoption.apply(target), spent))
     })?;
     let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, false)?;
     Ok(json!({
@@ -1165,7 +1190,39 @@ fn run_end(ctx: &Ctx, run_id: &str, reveal: Option<Reveal>, head: Option<&str>) 
         "recorded": recorded,
         "repaired_head": scope.head,
         "pruned": pruned,
+        "spent": spent,
     }))
+}
+
+/// Time and tokens of a run: wall time, time in passes (reviewing), time between passes and
+/// after the last (fixing), and the tokens reviewers and the main session reported.
+pub fn run_spend(run: &Run) -> Value {
+    let secs = |text: &str| clock::parse(text).ok();
+    let span = |from: &str, to: Option<&str>| match (secs(from), to.and_then(secs)) {
+        (Some(from), Some(to)) => Some((to - from).max(0)),
+        _ => None,
+    };
+    let reviewing: i64 = run
+        .passes
+        .iter()
+        .filter_map(|pass| span(&pass.started_at, pass.ended_at.as_deref()))
+        .sum();
+    let total = span(&run.started_at, run.ended_at.as_deref());
+    let reviewer_tokens: u64 = run
+        .passes
+        .iter()
+        .flat_map(|pass| &pass.reviewers)
+        .filter_map(|reviewer| reviewer.usage.as_ref()?.tokens)
+        .sum();
+    let main_tokens: u64 = run.usage.iter().filter_map(|role| role.usage.tokens).sum();
+    json!({
+        "total_secs": total,
+        "reviewing_secs": reviewing,
+        "fixing_secs": total.map(|total| (total - reviewing).max(0)),
+        "reviewer_tokens": (reviewer_tokens > 0).then_some(reviewer_tokens),
+        "main_tokens": (main_tokens > 0).then_some(main_tokens),
+        "roles": run.usage,
+    })
 }
 
 /// Moves a surviving finding to its pass's killed list. A locked pass allows this: the lock
@@ -1303,6 +1360,7 @@ fn assign_reviewers(run: &Run, inputs: Vec<ReviewerInput>) -> Result<Vec<Reviewe
                 .harness_version
                 .or_else(|| earlier.and_then(|reviewer| reviewer.harness_version.clone())),
             starting_context: input.starting_context.unwrap_or_else(|| "fresh".to_owned()),
+            usage: None,
             id,
         });
     }
@@ -1424,9 +1482,9 @@ fn pass_end(
     reviewer: Option<&str>,
 ) -> Result<Value> {
     let scope = ctx.scope()?;
-    let findings = match findings {
-        Some(source) => read_findings(source, true)?,
-        None => Vec::new(),
+    let (findings, usage) = match findings {
+        Some(source) => read_pass_input(source)?,
+        None => (Vec::new(), Vec::new()),
     };
     // Group by reviewer, keeping input order, so each reviewer's ids number in order; the
     // output lists ids in input order.
@@ -1465,6 +1523,14 @@ fn pass_end(
         let pass = find_pass_mut(target, run_id, pass_id)?;
         if pass.ended_at.is_some() {
             return fail(format!("pass {run_id}.{pass_id} already ended"));
+        }
+        for spent in &usage {
+            let reviewer = pass
+                .reviewers
+                .iter_mut()
+                .find(|reviewer| reviewer.id == spent.reviewer)
+                .ok_or_else(|| Error(format!("usage: reviewer {} is not in pass {pass_id}", spent.reviewer)))?;
+            reviewer.usage = Some(spent.usage());
         }
         pass.ended_at = Some(now.to_owned());
         pass.locked = lock;
@@ -1506,14 +1572,61 @@ struct FindingInput {
     reviewer: Option<String>,
 }
 
+/// One agent's spend as `pass end` and `run end` read it: `reviewer` (pass) or `role` (run).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageInput {
+    #[serde(alias = "role")]
+    reviewer: String,
+    tokens: Option<u64>,
+    duration_ms: Option<u64>,
+    tool_uses: Option<u64>,
+}
+
+impl UsageInput {
+    fn usage(&self) -> Usage {
+        Usage {
+            tokens: self.tokens,
+            duration_ms: self.duration_ms,
+            tool_uses: self.tool_uses,
+        }
+    }
+}
+
+fn read_source(source: &Path, what: &str) -> Result<String> {
+    if source == Path::new("-") {
+        read_stdin(what)
+    } else {
+        std::fs::read_to_string(source).map_err(ctx(format!("read {}", source.display())))
+    }
+}
+
+/// `pass end --findings` input: a findings array, or `{"findings": [...], "usage": [...]}`.
+fn read_pass_input(source: &Path) -> Result<(Vec<FindingInput>, Vec<UsageInput>)> {
+    let value: Value =
+        serde_json::from_str(&read_source(source, "findings")?).map_err(ctx("parse findings JSON"))?;
+    match value {
+        Value::Object(mut fields) if fields.contains_key("findings") || fields.contains_key("usage") => {
+            if let Some(other) = fields.keys().find(|key| *key != "findings" && *key != "usage") {
+                return fail(format!("unknown field {other}; expected findings and usage"));
+            }
+            let findings = parse_findings(fields.remove("findings").unwrap_or(json!([])), true)?;
+            let usage = serde_json::from_value(fields.remove("usage").unwrap_or(json!([])))
+                .map_err(ctx("parse usage"))?;
+            Ok((findings, usage))
+        }
+        value => Ok((parse_findings(value, true)?, Vec::new())),
+    }
+}
+
 /// Findings from `source` (`-` for stdin); `allow_empty` accepts `[]` (a clean pass).
 fn read_findings(source: &Path, allow_empty: bool) -> Result<Vec<FindingInput>> {
-    let text = if source == Path::new("-") {
-        read_stdin("findings")?
-    } else {
-        std::fs::read_to_string(source).map_err(ctx(format!("read {}", source.display())))?
-    };
-    let value: Value = serde_json::from_str(&text).map_err(ctx("parse findings JSON"))?;
+    let value: Value =
+        serde_json::from_str(&read_source(source, "findings")?).map_err(ctx("parse findings JSON"))?;
+    parse_findings(value, allow_empty)
+}
+
+fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<FindingInput>> {
     let items = match value {
         Value::Array(items) => items,
         item @ Value::Object(_) => vec![item],

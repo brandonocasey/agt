@@ -1346,3 +1346,35 @@ fn pass_end_lists_ids_in_input_order() {
         "{ended}"
     );
 }
+
+#[test]
+fn usage_and_time_are_recorded() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let started = env.run_stdin(
+        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        r#"[{"model":"a","harness":"codex"}]"#,
+    );
+    let run = started["run"].as_str().unwrap().to_owned();
+    env.run_stdin(
+        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"{"findings": [], "usage": [{"reviewer": "r1", "tokens": 52000, "duration_ms": 61000, "tool_uses": 9}]}"#,
+    );
+    let ended = env.run_stdin(
+        &["run", "end", "--run", &run, "--usage", "-"],
+        r#"[{"role": "fix", "tokens": 18000, "duration_ms": 40000}]"#,
+    );
+    let spent = &ended["spent"];
+    assert_eq!(spent["reviewer_tokens"], 52000, "{ended}");
+    assert_eq!(spent["main_tokens"], 18000);
+    assert!(spent["total_secs"].is_i64());
+    assert_eq!(spent["roles"][0]["role"], "fix");
+    let pass = env.run(&["show", &format!("{run}.c1p0")]);
+    assert_eq!(pass["pass"]["reviewers"][0]["usage"]["tool_uses"], 9, "{pass}");
+    let error = env.fail(
+        &["pass", "end", "--run", &run, "--pass", "c1p0", "--findings", "-"],
+        Some(r#"{"findings": [], "usage": [], "extra": 1}"#),
+    );
+    assert!(error.contains("unknown field extra"), "{error}");
+}

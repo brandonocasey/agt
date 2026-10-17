@@ -23,6 +23,8 @@ puts `agent-review` in `~/.cargo/bin`. A `v*` tag publishes a release
 `merge-tree --write-tree`) every merge commit in a range counts as unreviewed.
 `sync` also needs an authenticated `gh` (GitHub) or `glab` (GitLab).
 
+Repositories with SHA-1 or SHA-256 object ids both work.
+
 ## Output and errors
 
 Every command prints JSON on stdout, except `list --format prompt`, which prints
@@ -117,7 +119,10 @@ agent-review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 `pass end --findings <file|->` adds findings and ends the pass in one write, as
 `finding add` would for each reviewer: each finding names its `"reviewer"`, or
 takes `--reviewer`; `[]` ends a clean pass. Output lists the new ids under
-`added` and `killed`, each in input order. `pass end --lock` freezes the pass for a blind review:
+`added` and `killed`, each in input order. The input may instead be an object,
+`{"findings": [...], "usage": [{"reviewer": "r1", "tokens": 52000,
+"duration_ms": 61000, "tool_uses": 9}]}`, which also stores what each reviewer
+spent (as its harness reports it) on the pass. `pass end --lock` freezes the pass for a blind review:
 `finding add` to it then fails. `finding kill` moves a surviving finding to its pass's killed list, also
 on a locked pass; a finding that is posted or being posted to the PR/MR is
 resolved as `stale` instead. `run end` closes the run, records commit patch-ids
@@ -126,7 +131,20 @@ for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
 descend from the end) as the run's `repaired_head` (commits after the last pass
 up to it are the run's `repair`), stores the reveal counts for the final record, and prunes
 old targets of this repository. Its output ends with `status`: the brief
-`status` of that head, so no separate call is needed.
+`status` of that head, so no separate call is needed. `run end --usage <file|->`
+stores what the main session spent, as an array of `{"role": "fix", "tokens",
+"duration_ms", "tool_uses"}` (roles such as `fix`, `manual`, `main`). Its output's
+`spent` gives the run's wall time, the time inside passes (`reviewing_secs`) and
+between and after them (`fixing_secs`), and the reported reviewer and main-session
+tokens; the final record carries the same as a `Time: ... Tokens: ...` line.
+
+`approve` records an approval of the head as a general thread, refused while a
+`bug`, `requirement` or `question` is open. `publish` posts it as a comment
+(default text `Approved at <sha>.`, or `--body`); `approve --formal` also
+submits the host's approval: a GitHub `APPROVE` review (never on your own PR,
+which GitHub refuses) or GitLab's `approve` at that head. An approval posts only
+while the PR/MR head is the head it approved, never counts as open, and goes to
+someone else's PR/MR with `publish --not-own --only <id>`.
 
 A wrong run, pass or reviewer id fails with the valid ones named: the open
 runs, the run's passes, or the pass's reviewers. Run ids are unique in the repository. With no `--target` or `--range`, a
@@ -421,15 +439,21 @@ agent-review prune --all
   `<!-- agent-review id=<local id> attempt=<attempt> -->`, with one attempt id
   per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
+- A thread anchored to lines posts only where those lines sit in the PR/MR
+  diff; otherwise it is listed under `skipped` and never posted elsewhere. A
+  line range (`start_line`..`line`) posts only as one multi-line comment, with
+  both ends on the new side of one hunk. Threads without an anchor post as
+  general comments.
 - GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
   (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
-  review). Anything else is an issue comment, with an out-of-diff finding's
-  location on its first line. Replies and resolves use the GraphQL
+  review), with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
   `addPullRequestReviewThreadReply`, `resolveReviewThread` and
   `unresolveReviewThread` mutations; a reply to a general comment is a new
   issue comment ending in `Re: <thread id>`.
 - GitLab: in-diff comments are draft notes at the latest MR diff, each
-  published on its own (never `bulk_publish`). Anything else is a discussion;
+  published on its own (never `bulk_publish`), with a `line_range` for a range
+  (line codes are the SHA-1 of the path plus the old and new line counters).
+  General comments are discussions;
   replies are discussion notes; resolves are `PUT .../discussions/<id>`. The
   final record is a plain note, so it never blocks merging.
 - In-diff means the line is in a hunk of `git diff -U3 -M` between the PR/MR
@@ -437,7 +461,7 @@ agent-review prune --all
   line to it); when the commits are not local it is out of diff.
 - The final record follows the review skill: a header with cycles, found,
   fixed and open counts, a `| Pass | Reviewed | Starting context | Reviewer |`
-  table, `Reveal:` and `Fixed by:` lines when known, and
+  table, `Reveal:`, `Fixed by:` and `Time: ... Tokens: ...` lines when known, and
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`.
   `N` counts the run's passes covering the repaired head by the same rules as
   `status`. The verdict is `review-fixed` when the run has repair commits that
