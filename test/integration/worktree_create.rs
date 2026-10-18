@@ -675,3 +675,69 @@ fn a_local_and_a_remote_branch_keep_the_local_one() {
     assert!(value.get("tracking").is_none());
     assert_ne!(local, first);
 }
+
+#[test]
+fn a_branch_pushed_after_the_last_fetch_is_fetched_and_tracked() {
+    let (env, _first) = repo_with_commit();
+    let bare = remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "origin", "main"]);
+    git(&env, &env.repo, &["fetch", "-q", "origin"]);
+    // Another clone pushes a branch this repository has never fetched.
+    let other = env.path("other-clone");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&env, &other, &["switch", "-q", "-c", "late"]);
+    let tip = commit(&env, &other, "late-file", "late");
+    git(&env, &other, &["push", "-q", "origin", "late"]);
+    assert_eq!(
+        git(&env, &env.repo, &["branch", "-r", "--list", "origin/late"]),
+        ""
+    );
+
+    let value = agt_json(&env, &env.repo, &["create", "late"]);
+    assert_eq!(value["tracking"], "origin/late");
+    assert_eq!(value["commit"], tip.as_str());
+    let dir = env.repo.join(".worktrees/late");
+    assert_eq!(git(&env, &dir, &["rev-parse", "HEAD"]), tip);
+    assert!(dir.join("late-file").exists());
+}
+
+#[test]
+fn a_branch_origin_does_not_have_still_starts_new_and_an_unreachable_origin_is_an_error() {
+    let (env, first) = repo_with_commit();
+    remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "origin", "main"]);
+    let value = agt_json(&env, &env.repo, &["create", "brand-new"]);
+    assert!(value.get("tracking").is_none());
+    assert_eq!(value["base"]["commit"], first.as_str());
+
+    git(
+        &env,
+        &env.repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            env.path("gone.git").to_str().unwrap(),
+        ],
+    );
+    let output = agt(&env, &env.repo, &["create", "unknowable"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("unknowable") && error.contains("--base"),
+        "{error}"
+    );
+    assert!(!env.repo.join(".worktrees/unknowable").exists());
+    // --base starts the new branch without asking origin.
+    let value = agt_json(&env, &env.repo, &["create", "unknowable", "--base", "main"]);
+    assert_eq!(value["base"]["commit"], first.as_str());
+}

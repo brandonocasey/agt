@@ -66,12 +66,9 @@ pub fn run(cli: Cli) -> Result<Output> {
             let dir = target(&repo, &cli)?;
             let dir_arg = dir.to_string_lossy();
             let mut value = json!({"reused": false});
-            let remote = format!("refs/remotes/origin/{branch}");
             if exists {
                 repo.git(&["worktree", "add", &dir_arg, branch])?;
-            } else if cli.base.is_none()
-                && repo.succeeds(&["show-ref", "--verify", "--quiet", &remote])?
-            {
+            } else if cli.base.is_none() && on_origin(&repo, branch)? {
                 let upstream = format!("origin/{branch}");
                 repo.git(&[
                     "worktree", "add", "--track", "-b", branch, &dir_arg, &upstream,
@@ -95,6 +92,28 @@ pub fn run(cli: Cli) -> Result<Output> {
         value["port"] = port::report(&path, number);
     }
     emit(value, ok)
+}
+
+/// Whether `origin` has `branch`, as `refs/remotes/origin/<branch>`. A branch pushed after the
+/// last fetch is fetched on its own first; "no such ref" means a new branch, and any other
+/// failure is an error rather than a silent new branch.
+fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
+    let tracking = format!("refs/remotes/origin/{branch}");
+    let known = || repo.succeeds(&["show-ref", "--verify", "--quiet", &tracking]);
+    if known()? {
+        return Ok(true);
+    }
+    if !repo.succeeds(&["remote", "get-url", "origin"])? {
+        return Ok(false);
+    }
+    let spec = format!("+refs/heads/{branch}:{tracking}");
+    match repo.git(&["fetch", "--quiet", "--no-tags", "origin", &spec]) {
+        Ok(_) => known(),
+        Err(error) if error.to_string().contains("couldn't find remote ref") => Ok(false),
+        Err(error) => fail(format!(
+            "cannot tell whether {branch} exists on origin: {error}; pass --base to start a new branch anyway"
+        )),
+    }
 }
 
 fn target(repo: &Repo, cli: &Cli) -> Result<PathBuf> {
