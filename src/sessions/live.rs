@@ -204,11 +204,21 @@ fn age(secs: i64) -> String {
     }
 }
 
+/// `place` with a leading `home` directory written `~`. Only whole path components match, so
+/// `/home/alice/x` is not under `/home/al`.
+fn tilde(place: &str, home: &Path) -> String {
+    match Path::new(place).strip_prefix(home) {
+        Ok(rest) if home.components().count() > 1 && rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) if home.components().count() > 1 => format!("~/{}", rest.display()),
+        _ => place.to_owned(),
+    }
+}
+
 fn render(rows: &[Value]) -> String {
     if rows.is_empty() {
         return "No agents are running.\n".into();
     }
-    let home = home().to_string_lossy().into_owned();
+    let home = home();
     let cell = |row: &Value, key: &str| row[key].as_str().unwrap_or("-").to_owned();
     let table_rows: Vec<Vec<String>> = rows
         .iter()
@@ -230,10 +240,7 @@ fn render(rows: &[Value]) -> String {
                 cell(row, "status"),
                 row["status_secs"].as_i64().map_or("-".into(), age),
                 cell(row, "branch"),
-                match place.strip_prefix(&home) {
-                    Some(rest) if home.len() > 1 => format!("~{rest}"),
-                    _ => place.to_owned(),
-                },
+                tilde(place, &home),
                 cell(row, "model"),
                 row["context_tokens"]
                     .as_i64()
@@ -261,4 +268,20 @@ fn render(rows: &[Value]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_is_abbreviated_by_whole_components_only() {
+        let home = Path::new("/home/al");
+        assert_eq!(tilde("/home/al/x/y", home), "~/x/y");
+        assert_eq!(tilde("/home/al", home), "~");
+        assert_eq!(tilde("/home/alice/x", home), "/home/alice/x");
+        assert_eq!(tilde("/srv/x", home), "/srv/x");
+        assert_eq!(tilde("-", home), "-");
+        assert_eq!(tilde("/x", Path::new("/")), "/x");
+    }
 }
