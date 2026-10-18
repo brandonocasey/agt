@@ -1802,6 +1802,56 @@ fn a_disabled_sparse_checkout_restores_without_a_warning_and_keeps_its_config() 
     );
 }
 
+/// Backs up `f`'s worktree, makes the main checkout sparse, then restores.
+fn restore_into_sparse_main(f: &Fixture) -> Value {
+    let removed = f.remove();
+    f.env
+        .git(&["sparse-checkout", "set", "--no-cone", "/a.txt"]);
+    f.json(&["restore", removed["id"].as_str().unwrap()])
+}
+
+#[test]
+fn a_full_worktree_restores_full_from_a_sparse_main_checkout() {
+    let f = sparse_fixture();
+    wgit(&f.env, &f.wt, &["sparse-checkout", "disable"]);
+    let restored = restore_into_sparse_main(&f);
+    assert_eq!(restored["sparse_checkout"], false);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert!(f.wt.join("d3/c").exists());
+    assert!(f.wt.join("b.txt").exists());
+    assert_eq!(
+        wgit(&f.env, &f.wt, &["ls-files", "-t"])
+            .matches("S ")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn a_backup_without_saved_files_restores_full_from_a_sparse_main_checkout() {
+    let f = Fixture::new();
+    let restored = restore_into_sparse_main(&f);
+    assert_eq!(restored["sparse_checkout"], false);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert!(f.wt.join("b.txt").exists());
+    assert_eq!(
+        wgit(&f.env, &f.wt, &["ls-files", "-t"])
+            .matches("S ")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn a_sparse_worktree_keeps_its_own_patterns_when_main_is_sparse() {
+    let f = sparse_fixture();
+    let restored = restore_into_sparse_main(&f);
+    assert_eq!(restored["sparse_checkout"], true, "{restored}");
+    assert_eq!(wgit(&f.env, &f.wt, &["sparse-checkout", "list"]), "d1\nd2");
+    assert!(f.wt.join("d2/b").exists());
+    assert!(!f.wt.join("d3").exists());
+}
+
 #[test]
 fn an_ignored_file_in_an_out_of_cone_directory_survives_restore() {
     let f = sparse_fixture();

@@ -102,19 +102,24 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Puts the saved sparse-checkout patterns and per-worktree config back into the restored
 /// worktree and reapplies them; true when it did. A failure is a warning naming the saved
-/// files, not an error: the worktree is restored, as a full checkout.
+/// files, not an error: the worktree is restored, as a full checkout. `worktree add` copies a
+/// sparse main checkout's patterns, so a backup that was not sparse turns that off again.
 fn reapply_sparse(
     saved: &std::path::Path,
     target: &std::path::Path,
     warnings: &mut Vec<String>,
 ) -> bool {
+    let repo = Repo::at(target);
+    let inherited = sparse_enabled(&repo);
     if !snapshot::SAVED_GIT_FILES
         .iter()
         .any(|name| saved.join(name).is_file())
     {
+        if inherited {
+            disable_inherited(&repo, warnings);
+        }
         return false;
     }
-    let repo = Repo::at(target);
     let Ok(git_dir) = repo.git(&["rev-parse", "--absolute-git-dir"]) else {
         return false;
     };
@@ -141,6 +146,8 @@ fn reapply_sparse(
             .is_some_and(|value| value == "true");
         if sparse {
             repo.git(&["sparse-checkout", "reapply"])?;
+        } else if inherited {
+            repo.git(&["sparse-checkout", "disable"])?;
         }
         Ok(sparse)
     };
@@ -158,6 +165,23 @@ fn reapply_sparse(
             ));
             false
         }
+    }
+}
+
+fn sparse_enabled(repo: &Repo) -> bool {
+    matches!(
+        repo.git_opt(&["config", "--get", "--type=bool", "core.sparseCheckout"]),
+        Ok(Some(value)) if value == "true"
+    )
+}
+
+/// Turns off a sparse checkout that `worktree add` inherited from the main checkout.
+fn disable_inherited(repo: &Repo, warnings: &mut Vec<String>) {
+    if let Err(error) = repo.git(&["sparse-checkout", "disable"]) {
+        warnings.push(format!(
+            "could not turn off the sparse checkout inherited from the main checkout ({})",
+            error.0
+        ));
     }
 }
 
