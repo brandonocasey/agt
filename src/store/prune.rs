@@ -6,8 +6,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::{
-    ACCOUNT_FILE, Namespace, REPO_FILE, Store, ctx, fail, is_current, read_target_intact, try_lock,
-    validate_key,
+    ACCOUNT_FILE, LOOKUP_FILE, Namespace, REPO_FILE, Store, ctx, fail, is_current,
+    read_target_intact, try_lock, validate_key,
 };
 use crate::core::clock;
 use crate::core::error::Result;
@@ -217,7 +217,7 @@ impl Store {
                 return Ok(None);
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name == ACCOUNT_FILE || name == REPO_FILE {
+            if name == ACCOUNT_FILE || name == REPO_FILE || name == LOOKUP_FILE {
                 extras.push(entry.path());
             } else if lock_target_gone(dir, &name) {
                 stray_locks.push(entry.path());

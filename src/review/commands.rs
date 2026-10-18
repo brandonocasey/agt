@@ -10,6 +10,7 @@ use crate::store::model::{
 use crate::store::{Namespace, Store};
 
 mod approve;
+mod auto;
 mod findings;
 mod input;
 pub mod prune;
@@ -79,6 +80,13 @@ pub fn run(cli: Cli) -> Result<Output> {
     let mut ctx = Ctx::new(store, selection, read_only, scratch_git)?;
     if let Some(run) = run_hint(&cli.command) {
         ctx.select_run_target(&run)?;
+    }
+    // Pure reads pull the PR/MR first when the local copy is stale.
+    if matches!(
+        cli.command,
+        Command::Status { .. } | Command::List(_) | Command::Show { .. }
+    ) {
+        auto::sync_stale(&ctx, cli.offline)?;
     }
     let status_selection = ctx.selection.clone();
     let value = match cli.command {

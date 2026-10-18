@@ -21,6 +21,7 @@ const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);
 const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 const REPO_FILE: &str = ".repo.json";
+const LOOKUP_FILE: &str = ".pr-lookups.json";
 
 /// Files left out of a read, each as its key and the warning that says why.
 pub type LeftOut = Vec<(String, String)>;
@@ -44,6 +45,15 @@ pub struct Account {
     pub forge: Forge,
     pub host: String,
     pub login: String,
+}
+
+/// The branches `agt review` last asked the forge for a PR/MR and found none, each with when,
+/// so reads ask again only after a while. Older agt ignores the file, which is why this is not
+/// a field of the target.
+#[derive(Default, Serialize, Deserialize)]
+pub struct Lookups {
+    #[serde(default)]
+    pub misses: std::collections::BTreeMap<String, String>,
 }
 
 /// A store area with its own directory and schema version, so a change to one cannot break
@@ -509,6 +519,20 @@ impl Store {
     pub fn save_account(&self, dir: &Path, account: &Account) -> Result<()> {
         create_dir(dir)?;
         persist_json(dir, &dir.join(ACCOUNT_FILE), account, || Ok(()))
+    }
+
+    /// The PR/MR lookup misses of the repository. A file that cannot be read counts as none:
+    /// the next lookup rewrites it.
+    pub fn load_lookups(&self, dir: &Path) -> Lookups {
+        read_json(&dir.join(LOOKUP_FILE))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    pub fn save_lookups(&self, dir: &Path, lookups: &Lookups) -> Result<()> {
+        create_dir(dir)?;
+        persist_json(dir, &dir.join(LOOKUP_FILE), lookups, || Ok(()))
     }
 
     /// Writes the repository's absolute git common dir and `now` beside its targets. A record

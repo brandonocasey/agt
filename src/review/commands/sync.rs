@@ -109,6 +109,57 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     })
 }
 
+/// The connection to the PR/MR a target was synced with.
+pub(super) fn connection_of(review: &Review) -> Result<Connection> {
+    let (service, login) = authenticate(review.forge, &review.host)?;
+    Ok(Connection {
+        key: pr_key(review.forge, review.number),
+        service,
+        host: review.host.clone(),
+        login,
+        repo: review.repo.clone(),
+        number: review.number,
+    })
+}
+
+/// The forge and repository of `origin`, or `None` when there is no origin or its host is not a
+/// forge this build knows. Neither is an error to a caller that only wants to try.
+pub(super) fn locate(ctx: &Ctx) -> Result<Option<(Forge, String, String)>> {
+    let Some((host, repo)) = ctx.repo.origin_url()?.and_then(|url| split_remote(&url)) else {
+        return Ok(None);
+    };
+    let cached = ctx
+        .store
+        .load_account(&ctx.dir)?
+        .filter(|account| account.host == host)
+        .map(|account| account.forge);
+    let Ok(forge) = pick(&host, hosts_file(&host)?, cached) else {
+        return Ok(None);
+    };
+    Ok(Some((forge, host, repo)))
+}
+
+/// The connection to the PR/MR of `branch` in `repo` on `host`, or `None` when it has none.
+pub(super) fn find_for_branch(
+    forge: Forge,
+    host: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<Option<Connection>> {
+    let (service, login) = authenticate(forge, host)?;
+    let Some((repo, number)) = service.find_review(repo, branch)? else {
+        return Ok(None);
+    };
+    Ok(Some(Connection {
+        key: pr_key(forge, number),
+        service,
+        host: host.to_owned(),
+        login,
+        repo,
+        number,
+    }))
+}
+
 /// The forge of `host`, never guessed. In order: the hosts file
 /// (`$XDG_CONFIG_HOME/agent-review/hosts.json`, `{"<host>": {"service": "gitlab"}}`), hosts
 /// every service knows by name, the forge this repository last synced that host with, then

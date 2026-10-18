@@ -48,6 +48,11 @@ impl Policy {
         let age = clock::now_secs()? - at;
         Ok(u64::try_from(age).map_or(true, |age| age >= self.max_age_secs))
     }
+
+    /// Whether a lookup that found nothing at `checked_at` still holds.
+    pub fn is_recent(&self, checked_at: Option<&str>) -> Result<bool> {
+        Ok(!self.is_stale(checked_at)?)
+    }
 }
 
 /// Runs `work` with every forge call capped at the time budget in total. A failure is reported

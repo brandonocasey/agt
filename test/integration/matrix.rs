@@ -102,7 +102,9 @@ fn sync(env: &Env, svc: Svc) -> Value {
 fn sync_is_read_only_and_a_second_sync_imports_nothing(svc: Svc) {
     let setup = Setup::synced_branch(svc.rich_origin());
     let env = &setup.env;
-    let branch_key = env.run(&["status", "--full"])["target"].clone();
+    // Local: the host has no answers yet and this test counts the calls of `sync`.
+    let branch_key =
+        env.run_with(&["status", "--full"], None, &[("AGT_OFFLINE", "1")])["target"].clone();
     svc.rich_sync(&setup);
     let envs = svc.rich_env();
 

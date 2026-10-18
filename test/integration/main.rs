@@ -10,6 +10,7 @@ mod issue_read;
 mod matrix;
 mod ps;
 mod publish;
+mod review_auto_sync;
 mod reviewed;
 mod session_index;
 mod sessions;
