@@ -33,20 +33,24 @@ pub const CATEGORIES: [&str; 10] = [
 /// How to delete one planned item.
 pub enum Action {
     Review {
+        root: PathBuf,
         dir: PathBuf,
         key: String,
     },
     /// `had_targets`: the plan found targets, all expired, so none left at delete time is normal.
     LocalRepo {
+        root: PathBuf,
         dir: PathBuf,
         had_targets: bool,
     },
     Issue {
+        root: PathBuf,
         dir: PathBuf,
         name: String,
     },
     Task(Expired),
     Lock {
+        root: PathBuf,
         namespace: Namespace,
         path: PathBuf,
     },
@@ -117,24 +121,25 @@ impl Plan {
     /// Reviews past the review rule, in every repository, and `local/` repositories that hold
     /// nothing newer.
     pub fn reviews(&mut self, now: i64) -> Result<()> {
-        let store = Store::open(Namespace::Reviews)?;
-        let (dirs, warnings) = store.repo_dirs_lenient();
-        self.warnings.extend(warnings);
-        for dir in dirs {
-            let result = self.review_dir(&store, &dir, now);
-            self.attempt(&dir, result);
-        }
-        let local = store.root().join("local");
-        if let Ok(entries) = fs::read_dir(&local) {
-            let mut dirs: Vec<PathBuf> = entries
-                .flatten()
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                .map(|entry| entry.path())
-                .collect();
-            dirs.sort();
+        for store in stores(Namespace::Reviews)? {
+            let (dirs, warnings) = store.repo_dirs_lenient();
+            self.warnings.extend(warnings);
             for dir in dirs {
-                let result = self.local_repo(&store, dir.clone(), now);
+                let result = self.review_dir(&store, &dir, now);
                 self.attempt(&dir, result);
+            }
+            let local = store.root().join("local");
+            if let Ok(entries) = fs::read_dir(&local) {
+                let mut dirs: Vec<PathBuf> = entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect();
+                dirs.sort();
+                for dir in dirs {
+                    let result = self.local_repo(&store, dir.clone(), now);
+                    self.attempt(&dir, result);
+                }
             }
         }
         Ok(())
@@ -148,13 +153,20 @@ impl Plan {
                 continue;
             }
             let path = dir.join(format!("{}.json", target.key));
+            let repository = store.relative(dir);
+            let key = if repository.is_empty() {
+                target.key.clone()
+            } else {
+                format!("{repository}/{}", target.key)
+            };
             self.add(
                 "reviews",
                 path.clone(),
-                format!("{}/{}", store.relative(dir), target.key),
+                key,
                 review_reason(&target),
                 size(&path),
                 Action::Review {
+                    root: store.root().to_path_buf(),
                     dir: dir.to_path_buf(),
                     key: target.key.clone(),
                 },
@@ -226,6 +238,7 @@ impl Plan {
             reason,
             bytes,
             Action::LocalRepo {
+                root: store.root().to_path_buf(),
                 dir,
                 had_targets: !repo.targets.is_empty(),
             },
@@ -235,21 +248,21 @@ impl Plan {
 
     /// Closed issues with nothing local to lose, past the issue rule.
     pub fn issues(&mut self, now: i64) -> Result<()> {
-        let store = Store::open(Namespace::Issues)?;
-        let found = store.child_dirs();
-        for dir in self.attempt(store.root(), found).unwrap_or_default() {
-            let result = (|| {
-                let (issues, unknown) = store.docs_intact::<Issue>(&dir, &[TRACKER_FILE])?;
-                self.warnings.extend(unknown);
-                for issue in issues {
-                    if !prunable(&issue, now) {
-                        continue;
-                    }
-                    let name = issue
-                        .number
-                        .map_or_else(|| issue.key.clone(), |n| n.to_string());
-                    let path = dir.join(format!("{name}.json"));
-                    self.add(
+        for store in stores(Namespace::Issues)? {
+            let found = store.child_dirs();
+            for dir in self.attempt(store.root(), found).unwrap_or_default() {
+                let result = (|| {
+                    let (issues, unknown) = store.docs_intact::<Issue>(&dir, &[TRACKER_FILE])?;
+                    self.warnings.extend(unknown);
+                    for issue in issues {
+                        if !prunable(&issue, now) {
+                            continue;
+                        }
+                        let name = issue
+                            .number
+                            .map_or_else(|| issue.key.clone(), |n| n.to_string());
+                        let path = dir.join(format!("{name}.json"));
+                        self.add(
                         "issues",
                         path.clone(),
                         issue.key.clone(),
@@ -259,14 +272,16 @@ impl Plan {
                         ),
                         size(&path),
                         Action::Issue {
+                            root: store.root().to_path_buf(),
                             dir: dir.clone(),
                             name,
                         },
                     );
-                }
-                Ok(())
-            })();
-            self.attempt(&dir, result);
+                    }
+                    Ok(())
+                })();
+                self.attempt(&dir, result);
+            }
         }
         Ok(())
     }
@@ -293,27 +308,32 @@ impl Plan {
     /// exist only while held, so they are not looked at.
     pub fn locks(&mut self) -> Result<()> {
         for namespace in [Namespace::Reviews, Namespace::Issues] {
-            let store = Store::open(namespace)?;
-            let found = store.stray_locks();
-            for path in self.attempt(store.root(), found).unwrap_or_default() {
-                // A local repository that is listed deletes its own stray locks.
-                let inside = self.items.iter().any(|item| {
+            for store in stores(namespace)? {
+                let found = store.stray_locks();
+                for path in self.attempt(store.root(), found).unwrap_or_default() {
+                    // A local repository that is listed deletes its own stray locks.
+                    let inside = self.items.iter().any(|item| {
                     matches!(&item.action, Action::LocalRepo { dir, .. } if path.parent() == Some(dir))
                 });
-                if inside {
-                    continue;
+                    if inside {
+                        continue;
+                    }
+                    self.add(
+                        "locks",
+                        path.clone(),
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        "lock file whose document no longer exists".into(),
+                        size(&path),
+                        Action::Lock {
+                            root: store.root().to_path_buf(),
+                            namespace,
+                            path,
+                        },
+                    );
                 }
-                self.add(
-                    "locks",
-                    path.clone(),
-                    path.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    "lock file whose document no longer exists".into(),
-                    size(&path),
-                    Action::Lock { namespace, path },
-                );
             }
         }
         Ok(())
@@ -326,15 +346,17 @@ impl Plan {
         let found = store.agt_backups();
         let all = self.attempt(store.root(), found).unwrap_or_default();
         for namespace in Namespace::ALL {
-            let newest = all
-                .iter()
-                // A stamp in the future is a clock error; it must not shield every older backup.
-                .filter(|backup| {
-                    backup.namespace == namespace && !backup.partial && backup.taken.0 <= now
-                })
-                .max_by_key(|backup| (backup.taken, backup.path.clone()))
-                .map(|backup| backup.path.clone());
             for backup in all.iter().filter(|backup| backup.namespace == namespace) {
+                let newest = all
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.namespace == namespace
+                            && !candidate.partial
+                            && candidate.taken.0 <= now
+                            && candidate.path.parent() == backup.path.parent()
+                    })
+                    .max_by_key(|candidate| (candidate.taken, candidate.path.clone()))
+                    .map(|candidate| candidate.path.clone());
                 let (category, reason) = if backup.partial {
                     ("partial_backups", "unfinished backup copy".to_owned())
                 } else if Some(&backup.path) == newest.as_ref()
@@ -478,4 +500,23 @@ fn review_reason(target: &Target) -> String {
         Some(closed) => format!("PR/MR closed {closed}, last updated {}", target.updated_at),
         None => format!("last changed {}", target.updated_at),
     }
+}
+
+fn stores(namespace: Namespace) -> Result<Vec<Store>> {
+    let mut found = vec![Store::open(namespace)?];
+    let mut roots = crate::worktree::roots::repositories()?;
+    if let Ok(repo) = crate::git::Repo::discover() {
+        roots.push(repo.root().to_path_buf());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for root in roots {
+        let repo = crate::git::Repo::at(root);
+        let Ok(main) = repo.main_checkout_root() else {
+            continue;
+        };
+        if seen.insert(main) {
+            found.push(Store::inspect_repo(namespace, &repo)?);
+        }
+    }
+    Ok(found)
 }

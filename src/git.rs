@@ -5,6 +5,7 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 
 use crate::core::error::{Error, Result, ctx, fail};
 
@@ -33,6 +34,7 @@ pub struct LogEntry {
 
 pub struct Repo {
     root: PathBuf,
+    main_checkout: OnceLock<PathBuf>,
     env: Vec<(OsString, OsString)>,
     _scratch: Option<tempfile::TempDir>,
 }
@@ -43,6 +45,7 @@ impl Repo {
     pub fn at(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            main_checkout: OnceLock::new(),
             env: Vec::new(),
             _scratch: None,
         }
@@ -64,6 +67,7 @@ impl Repo {
         let root = text(output.stdout)?;
         Ok(Self {
             root: PathBuf::from(root),
+            main_checkout: OnceLock::new(),
             env: Vec::new(),
             _scratch: None,
         })
@@ -685,6 +689,32 @@ impl Repo {
     /// The absolute git common dir, which names a `local/` repository.
     pub fn common_dir(&self) -> Result<String> {
         self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    }
+
+    pub fn main_checkout_root(&self) -> Result<PathBuf> {
+        if let Some(root) = self.main_checkout.get() {
+            return Ok(root.clone());
+        }
+        if self.git(&["rev-parse", "--is-bare-repository"])? == "true" {
+            return fail("repository-local state requires a non-bare main checkout");
+        }
+        let listing = self.checked(&["worktree", "list", "--porcelain", "-z"], None, &[])?;
+        let first = listing.split(|byte| *byte == 0).next().unwrap_or_default();
+        let path = first
+            .strip_prefix(b"worktree ")
+            .ok_or_else(|| Error("git did not report its main checkout".into()))?;
+        use std::os::unix::ffi::OsStrExt;
+        let root = fs::canonicalize(Path::new(std::ffi::OsStr::from_bytes(path)))
+            .map_err(ctx("main checkout is unavailable"))?;
+        let main = Self::at(&root);
+        if main.git(&["rev-parse", "--is-bare-repository"])? == "true"
+            || fs::canonicalize(main.common_dir()?).map_err(ctx("resolve main git directory"))?
+                != fs::canonicalize(self.common_dir()?).map_err(ctx("resolve git directory"))?
+        {
+            return fail("main checkout does not belong to this repository");
+        }
+        let _ = self.main_checkout.set(root.clone());
+        Ok(root)
     }
 
     pub fn repo_key(&self) -> Result<String> {

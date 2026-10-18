@@ -17,7 +17,7 @@ use crate::store::model::{ReviewState, TargetKind};
 const SYNC_LOCK: &str = "auto-sync";
 
 pub(super) fn sync_stale(ctx: &Ctx, offline: bool) -> Result<()> {
-    let Some(policy) = Policy::resolve(offline) else {
+    let Some(policy) = Policy::resolve_for_repo(&ctx.repo, offline) else {
         return Ok(());
     };
     // A scope that cannot be worked out is the read's own error to report.
@@ -161,4 +161,28 @@ fn remember_miss(ctx: &Ctx, branch: &str) -> Result<()> {
         .retain(|_, at| clock::parse(at).is_ok_and(|at| (0..auto::DAY).contains(&(now - at))));
     lookups.misses.insert(branch.to_owned(), clock::format(now));
     ctx.store.save_lookups(&ctx.dir, &lookups)
+}
+
+pub(super) fn publish_ended(ctx: &mut Ctx, run: &str, offline: bool) {
+    if auto::is_offline(offline) {
+        return;
+    }
+    auto::attempt(|| {
+        let config = crate::core::config::Config::load_for_repo(&ctx.repo)?;
+        if !config.sync.auto_push {
+            return Ok(());
+        }
+        super::publish::publish(
+            ctx,
+            None,
+            &super::publish::Options {
+                dry_run: false,
+                not_own: false,
+                findings: false,
+                only: Vec::new(),
+                run: Some(run.to_owned()),
+            },
+        )?;
+        Ok(())
+    });
 }

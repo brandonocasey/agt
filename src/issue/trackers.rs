@@ -66,21 +66,43 @@ fn matches(filter: &str, key: &str, repo: &str) -> bool {
 
 /// The tracker document for `tracker` with its configuration refreshed, created if new.
 pub fn ensure(store: &Store, tracker: &config::Tracker) -> Result<Tracker> {
+    ensure_mode(store, tracker, false)
+}
+
+pub fn ensure_mode(store: &Store, tracker: &config::Tracker, preview: bool) -> Result<Tracker> {
     let forge = forge_of(tracker.forge);
     let key = tracker_key(forge, &tracker.host, &tracker.repo);
     let dir = store.repo_dir(&key)?;
+    if preview {
+        let doc = store
+            .load_doc(&dir, TRACKER_FILE)?
+            .unwrap_or_else(|| TrackerDoc {
+                version: VERSION,
+                key: key.clone(),
+                forge: Some(forge),
+                host: tracker.host.clone(),
+                repo: tracker.repo.clone(),
+                scope: tracker.scope,
+                since_days: tracker.since_days,
+                push: tracker.push != Some(false),
+                watermark: None,
+                login: None,
+                synced_at: None,
+            });
+        return Ok(Tracker { dir, doc });
+    }
     let doc = store.update_doc(
         &dir,
         TRACKER_FILE,
         || TrackerDoc {
             version: VERSION,
             key: key.clone(),
-            forge,
+            forge: Some(forge),
             host: tracker.host.clone(),
             repo: tracker.repo.clone(),
             scope: tracker.scope,
             since_days: tracker.since_days,
-            push: tracker.push,
+            push: tracker.push != Some(false),
             watermark: None,
             login: None,
             synced_at: None,
@@ -88,7 +110,7 @@ pub fn ensure(store: &Store, tracker: &config::Tracker) -> Result<Tracker> {
         |doc| {
             doc.scope = tracker.scope;
             doc.since_days = tracker.since_days;
-            doc.push = tracker.push;
+            doc.push = tracker.push != Some(false);
             Ok(doc.clone())
         },
     )?;
@@ -169,4 +191,71 @@ pub fn doc_name(issue: &Issue) -> String {
     issue
         .number
         .map_or_else(|| issue.key.clone(), |number| number.to_string())
+}
+
+pub fn local(store: &Store) -> Result<Tracker> {
+    let dir = store.repo_dir("local")?;
+    let doc = store.update_doc(
+        &dir,
+        TRACKER_FILE,
+        || TrackerDoc {
+            version: VERSION,
+            key: "local".into(),
+            forge: None,
+            host: String::new(),
+            repo: "local".into(),
+            scope: config::Scope::All,
+            since_days: 90,
+            push: false,
+            watermark: None,
+            login: None,
+            synced_at: None,
+        },
+        |doc| Ok(doc.clone()),
+    )?;
+    Ok(Tracker { dir, doc })
+}
+
+pub fn destinations(
+    config: &mut Config,
+    repo: &crate::git::Repo,
+    filter: Option<&str>,
+    automatic: bool,
+) -> Result<()> {
+    let origin = repo
+        .origin_url()?
+        .and_then(|url| crate::git::split_remote(&url));
+    if automatic && filter.is_none() {
+        config.issues.tracker.retain(|tracker| {
+            origin.as_ref().is_some_and(|(host, path)| {
+                tracker.host.eq_ignore_ascii_case(host) && tracker.repo.eq_ignore_ascii_case(path)
+            })
+        });
+    }
+    if !config.issues.tracker.is_empty() {
+        if automatic && configured(config, filter)?.len() > 1 {
+            return fail("several automatic issue destinations; pass --tracker");
+        }
+        return Ok(());
+    }
+    let Some((host, path)) = origin else {
+        return fail(format!(
+            "no [[issues.tracker]] is configured in {}; configure a tracker or a supported origin",
+            config::path()?.display()
+        ));
+    };
+    let forge = match host.as_str() {
+        "github.com" => TrackerForge::Github,
+        "gitlab.com" => TrackerForge::Gitlab,
+        _ => return fail("origin has no known issue service; configure a tracker"),
+    };
+    config.issues.tracker.push(config::Tracker {
+        forge,
+        host,
+        repo: path,
+        scope: config::Scope::Involved,
+        since_days: 90,
+        push: None,
+    });
+    Ok(())
 }

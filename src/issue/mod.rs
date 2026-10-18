@@ -18,13 +18,16 @@ pub use cli::Cli;
 use cli::Command;
 
 use crate::core::config::Config;
-use crate::core::error::Result;
+use crate::core::error::{Result, fail};
 use crate::core::output::Output;
+use crate::git::Repo;
 use crate::store::issues::Category;
 use crate::store::{Namespace, Store};
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let store = Store::open(Namespace::Issues)?;
+    let repo = Repo::discover()?;
+    let preview = matches!(cli.command, Command::Push { dry_run: true, .. });
+    let store = Store::open_repo(Namespace::Issues, &repo, preview)?;
     let filter = cli.tracker.as_deref();
     if matches!(
         cli.command,
@@ -34,10 +37,19 @@ pub fn run(cli: Cli) -> Result<Output> {
             | Command::Status
             | Command::Find(_)
     ) {
-        auto::sync_stale(&store, filter, cli.offline)?;
+        auto::sync_stale(&store, &repo, filter, cli.offline)?;
     }
-    let value = match &cli.command {
-        Command::Sync => sync::run(&store, &Config::load()?, filter)?,
+    if matches!(cli.command, Command::Sync | Command::Push { .. })
+        && crate::forge::auto::is_offline(cli.offline)
+    {
+        return fail("offline mode forbids issue sync and push");
+    }
+    let mut value = match &cli.command {
+        Command::Sync => {
+            let mut config = Config::load_for_repo(&repo)?;
+            trackers::destinations(&mut config, &repo, filter, false)?;
+            sync::run(&store, &config, filter)?
+        }
         Command::List(args) => view::list(&store, filter, args)?,
         Command::Show { key } => view::show(&store, filter, key)?,
         Command::Search { text } => view::search(&store, filter, text)?,
@@ -54,17 +66,45 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Unassign(args) => local::assign(&store, filter, &args.key, &args.logins, false)?,
         Command::Label { action } => local::labels(&store, filter, action)?,
         Command::LinkPr { key, pr } => local::link_pr(&store, filter, key, pr)?,
-        Command::Create(args) => local::create(&store, &Config::load()?, filter, args)?,
+        Command::Create(args) => {
+            let config = if filter.is_some() && filter != Some("local") {
+                Config::load_for_repo(&repo)?
+            } else {
+                Config::default()
+            };
+            local::create(&store, &config, filter, args)?
+        }
         Command::Edit(args) => local::edit(&store, filter, args)?,
-        Command::Push { dry_run, force } => push::run(
-            &store,
-            &Config::load()?,
-            filter,
-            &push::Options {
-                dry_run: *dry_run,
-                force: *force,
-            },
-        )?,
+        Command::Push { dry_run, force } => {
+            let mut config = Config::load_for_repo(&repo)?;
+            trackers::destinations(&mut config, &repo, filter, false)?;
+            if !dry_run {
+                auto::attach_pending(&store, &config, filter)?;
+            }
+            push::run(
+                &store,
+                &config,
+                filter,
+                &push::Options {
+                    dry_run: *dry_run,
+                    force: *force,
+                },
+            )?
+        }
     };
+    if matches!(
+        cli.command,
+        Command::Create(_)
+            | Command::Edit(_)
+            | Command::Comment { .. }
+            | Command::Close { .. }
+            | Command::Reopen { .. }
+            | Command::Assign(_)
+            | Command::Unassign(_)
+            | Command::Label { .. }
+            | Command::LinkPr { .. }
+    ) {
+        auto::push_changed(&store, &repo, filter, cli.offline, &mut value);
+    }
     Ok(Output::Json(value))
 }

@@ -216,8 +216,9 @@ fn queue_commands_reject_bad_input(fake: Fake) {
     assert!(env.issue_fail(&["comment", "1", &long]).contains("exceeds"));
     let two = Env::new();
     two.write_config(&format!("{}\n{}", fake.config(false), other_tracker(fake)));
-    let error = two.issue_fail(&["create", "--title", "T"]);
-    assert!(error.contains("several trackers"), "{error}");
+    assert_eq!(two.issue(&["create", "--title", "T"])["tracker"], "local");
+    let error = two.issue_fail(&["create", "--tracker", "absent", "--title", "T"]);
+    assert!(error.contains("no configured tracker matches"), "{error}");
 }
 
 fn other_tracker(fake: Fake) -> String {
@@ -226,4 +227,33 @@ fn other_tracker(fake: Fake) -> String {
         "github" => own.replace("o/r", "o/other"),
         _ => own.replace("g/p", "g/other"),
     }
+}
+
+#[test]
+fn a_local_issue_needs_no_configuration_or_origin_and_keeps_private_content() {
+    let env = Env::new();
+    let made = env.issue(&["create", "--title", "Local work"]);
+    let key = made["key"].as_str().unwrap();
+    assert_eq!(made["tracker"], "local");
+    assert_eq!(env.issue_doc("local", "tracker")["forge"], Value::Null);
+    env.issue(&["note", key, "Private note"]);
+    env.issue(&["link", key, "--branch", "feat/local"]);
+    env.issue(&["link", key, "--pr", "https://github.com/o/r/pull/7"]);
+    let stored = env.issue_doc("local", key);
+    assert_eq!(stored["notes"][0]["text"], "Private note");
+    assert_eq!(stored["links"]["branches"], json!(["feat/local"]));
+    assert_eq!(stored["comments"], json!([]));
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn offline_flags_deny_explicit_sync_and_push() {
+    let env = Env::new();
+    for args in [vec!["--offline", "sync"], vec!["push", "--offline"]] {
+        assert!(env.issue_fail(&args).contains("offline mode forbids"));
+    }
+    let env = Env::new().offline();
+    assert!(env.issue_fail(&["sync"]).contains("offline mode forbids"));
+    assert!(env.issue_fail(&["push"]).contains("offline mode forbids"));
+    assert!(env.forge_calls().is_empty());
 }

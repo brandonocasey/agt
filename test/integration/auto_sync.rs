@@ -91,6 +91,21 @@ pub(crate) fn skipped_reason(output: &Output) -> String {
 /// The tracker as `synced` leaves it, then the host renames issue 1 after the watermark.
 fn changed_on_the_host(fake: Fake) -> Env {
     let env = synced(fake, &[Spec::new(1, "Login fails")]);
+    let host = if fake.name() == "github" {
+        "github.com"
+    } else {
+        "gitlab.com"
+    };
+    env.git(&[
+        "remote",
+        "add",
+        "origin",
+        &format!("https://{host}/{}.git", fake.repo()),
+    ]);
+    env.write_config(&format!(
+        "{}\n[sync]\nauto_pull = true\n",
+        fake.config(false)
+    ));
     let renamed = Spec::new(1, "Login fails, renamed").updated("2026-10-12T10:00:00Z");
     // The watermark is 2026-10-10T10:00:00Z; a listing starts five minutes before it.
     fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &[renamed]);
@@ -152,7 +167,10 @@ fn offline_keeps_issue_reads_local(fake: Fake) {
     assert_eq!(title(&config), "Login fails");
     assert_eq!(env.forge_calls().len(), before);
     // `AGT_OFFLINE=0` is not offline.
-    env.write_config(&fake.config(false));
+    env.write_config(&format!(
+        "{}\n[sync]\nauto_pull = true\n",
+        fake.config(false)
+    ));
     let online = read(&env, STALE, &["show", "1"], &[("AGT_OFFLINE", "0")]);
     assert_eq!(title(&online), "Login fails, renamed");
 }
@@ -310,7 +328,11 @@ fn a_tracker_filter_syncs_only_that_tracker(fake: Fake) {
         _ => Github.config(false),
     };
     let env = changed_on_the_host(fake);
-    env.write_config(&format!("{}\n{}", fake.config(false), other_config));
+    env.write_config(&format!(
+        "{}\n{}\n[sync]\nauto_pull = true\n",
+        fake.config(false),
+        other_config
+    ));
     // The other tracker has no answers: syncing it would fail and print the skip line.
     let before = env.forge_calls().len();
     let output = read(&env, STALE, &["--tracker", fake.repo(), "show", "1"], &[]);
@@ -407,7 +429,7 @@ fn max_age_secs_sets_how_long_a_sync_stays_fresh() {
     let fake: Fake = &Github;
     let env = changed_on_the_host(fake);
     env.write_config(&format!(
-        "{}\n[sync]\nmax_age_secs = 3600\n",
+        "{}\n[sync]\nauto_pull = true\nmax_age_secs = 3600\n",
         fake.config(false)
     ));
     let before = env.forge_calls().len();

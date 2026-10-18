@@ -2,6 +2,7 @@ mod docs;
 pub mod issues;
 pub mod model;
 pub mod prune;
+mod repository;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -102,6 +103,9 @@ impl Namespace {
 
 pub struct Store {
     root: PathBuf,
+    local: bool,
+    fallback: Vec<(PathBuf, PathBuf)>,
+    agents: PathBuf,
     backups: PathBuf,
     namespace: Namespace,
     schema: Schema,
@@ -134,7 +138,7 @@ impl Store {
 
     /// The `agents` directory above every namespace.
     pub fn agents_dir(&self) -> &Path {
-        self.backups.parent().unwrap_or(&self.backups)
+        &self.agents
     }
 
     /// Opens `namespace` under the state directory `base` (the parent of `agents`).
@@ -142,6 +146,9 @@ impl Store {
         let agents = base.join("agents");
         Self {
             root: agents.join(namespace.dir_name()),
+            local: false,
+            fallback: Vec::new(),
+            agents: agents.clone(),
             backups: agents.join("backups"),
             namespace,
             schema: namespace.schema(),
@@ -221,6 +228,9 @@ impl Store {
     }
 
     pub fn repo_dir(&self, repo_key: &str) -> Result<PathBuf> {
+        if self.local && self.namespace == Namespace::Reviews {
+            return Ok(self.root.clone());
+        }
         let mut dir = self.root.clone();
         for part in repo_key.split('/') {
             let part: String = part
@@ -250,18 +260,16 @@ impl Store {
 
     pub fn load(&self, dir: &Path, key: &str) -> Result<Option<Target>> {
         validate_key(key)?;
-        read_target(&dir.join(format!("{key}.json")), self.schema)
+        read_target(
+            &self.read_path(&dir.join(format!("{key}.json"))),
+            self.schema,
+        )
     }
 
     pub fn targets(&self, dir: &Path) -> Result<Vec<Target>> {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return fail(format!("read {}: {error}", dir.display())),
-        };
+        let entries = self.read_entries(dir)?;
         let mut targets = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') || !name.ends_with(".json") {
                 continue;
@@ -298,16 +306,9 @@ impl Store {
 
     /// Like [`Store::targets_intact`], with each file left out as its key and warning.
     pub fn targets_intact_by_key(&self, dir: &Path) -> Result<(Vec<Target>, LeftOut)> {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                return Ok((Vec::new(), Vec::new()));
-            }
-            Err(error) => return fail(format!("read {}: {error}", dir.display())),
-        };
+        let entries = self.read_entries(dir)?;
         let (mut targets, mut warnings) = (Vec::new(), Vec::new());
         for entry in entries {
-            let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
             if name.starts_with('.') || !name.ends_with(".json") || is_dir {

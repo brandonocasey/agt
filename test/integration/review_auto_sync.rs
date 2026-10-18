@@ -21,6 +21,11 @@ fn review_now(env: &Env, now: i64, args: &[&str], more: &[(&str, &str)]) -> Outp
     let now = now.to_string();
     let mut vars = vec![("AGT_NOW", now.as_str())];
     vars.extend_from_slice(more);
+    let config = env.path("config").join("agt/config.toml");
+    if !config.exists() {
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "[sync]\nauto_pull = true\n").unwrap();
+    }
     env.exec(args, None, &vars)
 }
 
@@ -181,15 +186,7 @@ fn a_slow_forge_is_killed_for_a_review_read() {
 
 /// The directory under `root` that holds target documents.
 fn repo_dir(root: &Path) -> std::path::PathBuf {
-    for entry in fs::read_dir(root).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir()
-            && let Some(found) = holds_targets(&path)
-        {
-            return found;
-        }
-    }
-    panic!("no repository directory under {}", root.display());
+    holds_targets(root).expect("repository holds targets")
 }
 
 fn holds_targets(dir: &Path) -> Option<std::path::PathBuf> {
@@ -432,5 +429,220 @@ fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() 
     assert_eq!(stderr.matches("sync skipped").count(), 1, "{stderr}");
     // One deadline for the whole read: two caps would take 3 s.
     assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+    assert_gone(&pid);
+}
+
+fn auto_push(env: &Env) {
+    let config = env.path("config").join("agt/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(config, "[sync]\nauto_push = true\n").unwrap();
+}
+
+#[test]
+fn default_review_commands_never_call_a_forge() {
+    let setup = Setup::reviewed(ORIGIN);
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    for args in [
+        vec!["list"],
+        vec!["status"],
+        vec!["run", "end", "--run", &setup.run],
+    ] {
+        review_json(&env.exec(&args, None, &[]));
+    }
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn offline_blocks_explicit_review_network_commands() {
+    let setup = Setup::reviewed(ORIGIN);
+    for args in [
+        vec!["--offline", "sync"],
+        vec!["--offline", "publish", "--dry-run"],
+        vec!["publish"],
+    ] {
+        let output = setup.env.exec(&args, None, &[("AGT_OFFLINE", "1")]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("offline"));
+    }
+    assert!(setup.env.forge_calls().is_empty());
+}
+
+#[test]
+fn automatic_publish_attaches_and_sends_only_the_completed_run() {
+    use crate::support::forge::{Call, FakeService, Remote};
+    use crate::support::scenario::{Review, start_review};
+    let old = Review {
+        reviewers: crate::support::scenario::PUBLISH.reviewers,
+        findings: r#"[{"type":"nit","scenario":"OLD PRIVATE FINDING"}]"#,
+    };
+    let current = Review {
+        reviewers: crate::support::scenario::PUBLISH.reviewers,
+        findings: r#"[{"type":"nit","scenario":"CURRENT FINDING"}]"#,
+    };
+    let setup = Setup::branch(ORIGIN, &old, false, false);
+    let env = &setup.env;
+    env.run(&["run", "end", "--run", &setup.run]);
+    env.run(&["comment", "--body", "UNRELATED PENDING THREAD"]);
+    let run = start_review(env, &current, true);
+    let finding = format!("{run}.c1p0.r1.f1");
+    env.run(&["reply", &finding, "--body", "PRIVATE REPLY", "--local"]);
+    env.run(&["reply", &finding, "--body", "UNRELATED PENDING REPLY"]);
+    env.run(&[
+        "comment",
+        "--body",
+        "CURRENT COMMENT",
+        "--run",
+        &run,
+        "--model",
+        "m1",
+        "--effort",
+        "high",
+        "--harness",
+        "codex",
+    ]);
+    let service = github::Github::new();
+    service.sync(&setup, &Remote::new());
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+    service.accept(env, Call::PostNote, 601);
+    auto_push(env);
+    let local_target = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    let output = env.exec(
+        &["--target", &local_target, "run", "end", "--run", &run],
+        None,
+        &[],
+    );
+    let ended = review_json(&output);
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(ended["ended_at"].is_string());
+    let inputs = env.forge_inputs();
+    let sent = inputs
+        .iter()
+        .map(|(_, body)| body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(sent.contains("CURRENT FINDING"), "{sent}");
+    assert!(sent.contains("CURRENT COMMENT"), "{sent}");
+    assert!(sent.contains(&format!("id={run}/record")), "{sent}");
+    for private in [
+        "OLD PRIVATE FINDING",
+        "UNRELATED PENDING THREAD",
+        "PRIVATE REPLY",
+        "UNRELATED PENDING REPLY",
+        setup.run.as_str(),
+    ] {
+        assert!(!sent.contains(private), "leaked {private}: {sent}");
+    }
+    assert!(env.run(&["status"])["target"] == "gh-42");
+}
+
+#[test]
+fn automatic_publish_failure_preserves_the_saved_run_and_pending_delivery() {
+    use crate::support::forge::{Call, FakeService, Remote};
+    let setup = Setup::reviewed(ORIGIN);
+    let env = &setup.env;
+    let old = crate::support::scenario::start_review(env, &crate::support::scenario::SYNC, false);
+    env.run(&["run", "end", "--run", &old]);
+    let service = github::Github::new();
+    service.sync(&setup, &Remote::new());
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+    service.lose(env, Call::PostInline);
+    auto_push(env);
+    let output = env.exec(&["run", "end", "--run", &setup.run], None, &[]);
+    let ended = review_json(&output);
+    assert!(ended["ended_at"].is_string());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("skipped"));
+    let list = env.run(&["list"]);
+    let finding = crate::support::scenario::thread(&list, &setup.finding(1));
+    assert_eq!(finding["comments"][0]["post"], "posting");
+    assert!(finding["comments"][0]["attempt"].is_string());
+    assert!(env.run(&["status", "--full"])["runs"][0]["ended_at"].is_string());
+    let path = env.state().join("gh-42.json");
+    let mut target: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        target["runs"][0]["publication_target"],
+        "https://github.com/me/repo/pull/42"
+    );
+    target["review"]["attached_at"] = Value::String("2099-01-01T00:00:00Z".into());
+    fs::write(&path, serde_json::to_vec_pretty(&target).unwrap()).unwrap();
+    let retry = env.run(&["publish", "--dry-run"]);
+    let writes = retry["writes"].to_string();
+    assert!(writes.contains(&setup.finding(1)), "{retry}");
+    assert!(!writes.contains(&old), "{retry}");
+    assert!(
+        retry["skipped"].to_string().contains("ended before"),
+        "{retry}"
+    );
+    target["runs"][0]["publication_target"] =
+        Value::String("https://github.com/me/repo/pull/43".into());
+    fs::write(&path, serde_json::to_vec_pretty(&target).unwrap()).unwrap();
+    let different = env.run(&["publish", "--dry-run"]);
+    assert!(
+        !different["writes"].to_string().contains(&setup.finding(1)),
+        "{different}"
+    );
+    assert!(
+        different["skipped"].to_string().contains("ended before"),
+        "{different}"
+    );
+    target["runs"][0]["publication_target"] =
+        Value::String("https://github.com/me/repo/pull/42".into());
+    fs::write(&path, serde_json::to_vec_pretty(&target).unwrap()).unwrap();
+    service.restore(env, Call::PostInline);
+    service.accept(env, Call::PostInline, 500);
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "GET",
+            "repos/me/repo/pulls/42/reviews/500/comments",
+        ],
+        &serde_json::json!([{"id": 501, "body": finding["comments"][0]["sent"]}]).to_string(),
+    );
+    let retried = env.run(&["publish", "--only", &setup.finding(1)]);
+    assert_eq!(retried["posted"][0]["kind"], "review", "{retried}");
+    assert_eq!(
+        retried["posted"][0]["items"][0],
+        format!("{}/c1", setup.finding(1))
+    );
+}
+
+#[test]
+fn offline_run_end_saves_without_automatic_publication() {
+    let setup = Setup::reviewed(ORIGIN);
+    auto_push(&setup.env);
+    let ended = review_json(&setup.env.exec(
+        &["--offline", "run", "end", "--run", &setup.run],
+        None,
+        &[],
+    ));
+    assert!(ended["ended_at"].is_string());
+    assert!(setup.env.forge_calls().is_empty());
+}
+
+#[test]
+fn automatic_publication_failure_obeys_one_deadline() {
+    let setup = Setup::reviewed(ORIGIN);
+    auto_push(&setup.env);
+    let (tool, pid) = slow_tool(&setup.env);
+    let started = Instant::now();
+    let output = setup.env.exec(
+        &["run", "end", "--run", &setup.run],
+        None,
+        &[("AGT_GH_BIN", &tool), ("AGT_SYNC_CAP_MS", "100")],
+    );
+    let ended = review_json(&output);
+    assert!(ended["ended_at"].is_string());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("sync skipped")
+            .count(),
+        1
+    );
     assert_gone(&pid);
 }

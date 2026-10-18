@@ -113,19 +113,30 @@ pub fn run(plan: &Plan, now: i64, signal: bool) -> Outcome {
 
 fn delete(item: &Item, now: i64) -> Result<Removal> {
     match &item.action {
-        Action::Review { dir, key } => {
-            Store::open(Namespace::Reviews)?.try_remove_if(dir, key, |target| expired(target, now))
+        Action::Review { root, dir, key } => Store::at_root(Namespace::Reviews, root.clone())?
+            .try_remove_if(dir, key, |target| expired(target, now)),
+        Action::Issue { root, dir, name } => {
+            Store::at_root(Namespace::Issues, root.clone())?
+                .try_remove_doc_if::<crate::store::issues::Issue>(dir, name, |issue| {
+                    prunable(issue, now)
+                })
         }
-        Action::Issue { dir, name } => Store::open(Namespace::Issues)?
-            .try_remove_doc_if::<crate::store::issues::Issue>(dir, name, |issue| {
-                prunable(issue, now)
-            }),
         Action::Task(task) => crate::task::prune::remove(task, now),
-        Action::Lock { namespace, path } => Store::open(*namespace)?.remove_stray_lock(path),
+        Action::Lock {
+            root,
+            namespace,
+            path,
+        } => Store::at_root(*namespace, root.clone())?.remove_stray_lock(path),
         Action::Backup(backup) => Store::open(Namespace::Reviews)?.remove_backup(backup),
-        Action::LocalRepo { dir, had_targets } => {
-            Store::open(Namespace::Reviews)?.remove_local_repo(dir, now, *had_targets)
-        }
+        Action::LocalRepo {
+            root,
+            dir,
+            had_targets,
+        } => Store::at_root(Namespace::Reviews, root.clone())?.remove_local_repo(
+            dir,
+            now,
+            *had_targets,
+        ),
         Action::Files {
             root,
             days,

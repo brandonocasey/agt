@@ -297,8 +297,8 @@ Cleanup: `agt cleanup --only reviews` (plan) and `--yes` (delete), for every rep
 
 ## Cleanup
 
-`agt cleanup` cleans up after agents in one pass: the whole store (every repository and
-namespace), old cache files and orphan processes. It also lists leftovers for you to remove
+`agt cleanup` checks current and configured repository stores, legacy global stores,
+old cache files and orphan processes. Linked worktrees share one repository store. It also lists leftovers for you to remove
 by hand. By default it changes nothing and prints a JSON plan; `--yes` deletes. `--only`
 limits the pass to `reviews`, `issues`, `tasks`, `backups`, `locks`, `output`, `scratch`,
 `processes` or `manual` (repeat it for several). Before 0.8.0 it was `agt prune`.
@@ -314,7 +314,7 @@ agt cleanup --count                    # leftovers the last --yes run listed
 Store documents are kept 90 days (`retention_days`). The rules:
 
 - `reviews`: the review rule above, applied to every repository, and skipped for a
-  target whose `.<key>.publish.lock` is held. agt records the absolute git common
+  target whose `.<key>.publish.lock` is held. For legacy global stores, agt records the absolute git common
   directory of a `local/<name>-<hash>` repository in `<dir>/.repo.json`, with `last_seen`
   (refreshed by commands that write, at most once a day; a record without it counts from the
   file's modification time). A repository is listed under `local_repos` at any age, with all its
@@ -341,6 +341,8 @@ Store documents are kept 90 days (`retention_days`). The rules:
   stamp in the future does not count as the newest), and
   unfinished `.<namespace>-v<n>-<stamp>.partial` copies (`partial_backups`). Other
   names in the same backups directory belong to other tools and are never touched.
+  Repository schema backups use `agents/backups/repositories/<clone-id>/`; newest-backup
+  protection applies separately per clone and namespace. Legacy-import backups follow the same per-clone retention rules.
 
 Cache files go by age. Each top-level entry goes whole, and only once nothing in it changed
 for the whole period, so a task that is still writing keeps all of its files:
@@ -538,39 +540,32 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 
 ### Auto-sync
 
-`list`, `show` and `status` (the only review commands that just read) sync
-before they read, so a review sees the PR/MR as it is now without a manual
-`sync`. Writes such as `pass end` and `resolve` never sync; `publish` syncs as
-before. It is the same sync as `agt review sync`, so it only reads the forge.
+Review commands stay local by default. Enable `sync.auto_pull` to fetch before
+`list`, `show` and `status`. Enable `sync.auto_push` to publish after `run end`.
+Global settings live in `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's
+`.config/agt.toml` overrides individual fields. See [Issues](#issues) for the table.
 
-- The target has a PR/MR and its `synced_at` is older than `sync.max_age_secs`
-  (default 300): sync it. A fresh one makes no call.
-- The target has none, or its PR/MR is closed or merged: look the branch's PR/MR
-  up, as `sync` does, at most once per max age, so a newer PR/MR of the branch
-  is found. A miss is remembered in `.auto-sync.json` in the repository's store
-  directory (older agt ignores the file), so the reads that follow call
-  nothing. Range and commit targets have no PR/MR to look up.
-- No `origin`, or a host no forge is known for: skipped without a word.
-- The forge failing (`gh`/`glab` missing, not logged in, network, rate limit) or
-  the calls taking longer than 15 seconds in all (the tool is killed) prints
-  `agt: sync skipped (<reason>); showing local data` to stderr, then reads the
-  local data. Stdout and the exit status are what the local read gives. A
-  successful auto-sync prints nothing. A failed attempt is written to
-  `.auto-sync.json` and that sync (the PR/MR, or the branch lookup) is not tried
-  again for the max age, so an offline machine pays the cap and prints the line
-  once, not on every read; a success or an explicit `sync` clears it. A lock held
-  by another auto-sync or by a push or publish of the same review skips the sync the same
-  way instead of waiting. An explicit `agt review sync` takes no sync lock and is never
-  skipped.
-- `--offline`, `AGT_OFFLINE=1` or `auto = false` in the `[sync]` table of
-  `$XDG_CONFIG_HOME/agt/config.toml` keep a read local; see
-  [Issues](#issues) for the table. A config file that cannot be read (an unknown
-  key, a bad value) does not break the read: the skip line carries the config
-  error and the local data follows. `--offline` never reads the file; an
-  explicit `sync` still fails on it.
+Automatic pulls refresh a known PR/MR after `max_age_secs` (default 300).
+Unknown or closed PRs/MRs are looked up at most once per interval. Missing
+origins and unsupported hosts stay local. `.auto-sync.json` remembers failed
+requests and unsuccessful branch lookups.
 
-An explicit `agt review sync` is unchanged: it has no time cap and fails with
-its own errors.
+Automatic publication saves the completed run first. It sends only that run's
+eligible findings, comments and record, excluding unrelated queued content.
+The completed run can attach to an existing PR/MR within the same command.
+Ownership, approval and review-completion checks still apply. agt never creates
+PRs/MRs automatically.
+
+Automatic remote work has a 15-second aggregate limit. Failure prints a warning
+and preserves the successful local operation. Pending publications remain available
+for explicit `publish`; automatic publication never forces conflicts or ownership overrides.
+A push may fetch remote state for reconciliation even with automatic pulls disabled.
+
+`--offline` and `AGT_OFFLINE=1` prohibit automatic and explicit review network calls.
+Explicit `sync` and `publish` otherwise remain deliberate network operations,
+independent of automatic settings. Explicit sync has no automatic time limit.
+An unreadable configuration prevents automatic network work and names its error;
+local reads continue.
 
 ## Publish
 
@@ -660,11 +655,20 @@ its own errors.
 
 ## Store
 
-Files live under `$XDG_STATE_HOME/agents/reviews/` (default
-`~/.local/state/agents/reviews/`), in a directory per repository:
-`<host>/<owner>/<repo>` from the `origin` URL, or
-`local/<name>-<hash>` without one (the hash is from `git hash-object` of the git
-common directory path). Each target is one JSON file, mode 0600, in a 0700
+Review files live in `<main-checkout>/.agt/reviews/`. Linked worktrees use the same
+store automatically, even when commands run from a subdirectory. The stored
+repository identity remains `<host>/<owner>/<repo>` from `origin`, or
+`local/<name>-<hash>` without one. Outside a checkout, or without an available
+non-bare main checkout, issue and review commands fail clearly.
+
+First use imports matching legacy records from `$XDG_STATE_HOME/agents/reviews/`
+and `agents/issues/` (default state root `~/.local/state`). Originals remain intact.
+Imports are locked, backed up globally and marked complete per clone. Existing
+conflicting records stop import instead of being overwritten. Dry-runs inspect
+existing data without importing it. Tasks, session indexes, ports and backups
+remain global. Add `/.agt/` to your global Git ignore; agt does not edit that file.
+
+Each target is one JSON file, mode 0600, in a 0700
 directory. Writes take a per-target lock (`.<key>.lock`), write a temporary
 file in the same directory, fsync it and rename it over the target. Symbolic
 links are refused. After `sync`, the key is `gh-<number>` or `gl-<iid>`. Other JSON
@@ -1046,58 +1050,60 @@ minutes to look at a long job. Exit status: 0 the check passed (`agt wait: done 
 
 ## Issues
 
-`agt issue` keeps GitHub and GitLab issues on your machine. Reads (`list`, `show`,
-`search`, `status`, `find`) use the local copy; when a configured tracker's last
-sync is older than five minutes they run `sync` for it first, and when the host
-cannot be reached they read what is there (see [Auto-sync](#auto-sync-of-issues)).
-`sync` is the only command that reads a host, and it stays read-only on it: every
-write is queued in the local copy and goes out only on `push`, and only for
-trackers with `push = true`. Nothing deletes an issue or a comment or edits
-someone else's comment.
+`agt issue` manages local issues without configuration, credentials or a remote.
+`create` produces a local issue. Notes and local links stay private.
+GitHub/GitLab mirrors and remote publication are optional.
 
-Trackers are listed in `$XDG_CONFIG_HOME/agt/config.toml` (`~/.config` when unset).
-A missing file means no trackers; an unknown key or bad value is an error that
-names the file and the key.
+Global configuration lives in `$XDG_CONFIG_HOME/agt/config.toml` (`~/.config` when unset).
+The main checkout's `.config/agt.toml` overrides fields, including explicit `false`;
+arrays replace inherited arrays. Linked worktrees read the main checkout's configuration.
+No configuration file is required. Unknown keys and invalid values name their file and key.
 
 ```toml
+[sync]
+auto_pull = false           # fetch stale remote data before reads
+auto_push = false           # send changed issues and newly completed review runs
+max_age_secs = 300          # minimum age before an automatic pull
+
+# Optional: select a tracker instead of inferring the supported origin.
 [[issues.tracker]]
 forge = "github"            # or "gitlab"
 host = "github.com"
 repo = "owner/repo"         # GitLab: the full project path
 scope = "involved"          # involved (default) | assigned | all
-since_days = 90             # first sync only; later syncs list from the watermark
-push = false                # writes stay local until this is true
-
-[sync]
-auto = true                 # false keeps every read local
-max_age_secs = 300          # a read syncs when the last sync is older than this
+since_days = 90             # first sync only; later syncs use the watermark
+# push = false              # explicitly prohibit writes for this tracker
 ```
 
-`involved` is what you created, are assigned or (GitHub only) are mentioned in; GitLab
-has no mentions filter, so there it is created or assigned. Credentials come from
-`gh` and `glab`; the config holds none. Issues are stored per tracker under
-`$XDG_STATE_HOME/agents/issues/<tracker>/<number>.json`, where the tracker is
-`gh-<host>-<owner>-<repo>` or `gl-<host>-<group>-<project>`. A tracker is named by
-that key or by `owner/repo` (`--tracker`, global to `agt issue`); an issue by
-`owner/repo#12`, `#12`, `12` or `local-xxxxxx` (not yet created on the host).
+The existing `sync.auto` key remains an alias for `auto_pull`.
+Specifying both names in one file is an error. `push = true` permits writes;
+it never enables automatic publication. Omitted push permissions permit explicit
+commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching
+tracker or supported `origin`. Unrelated global trackers do not participate automatically.
+Missing or ambiguous automatic destinations preserve local data and report the problem.
+
+`involved` includes issues you created, are assigned or (GitHub only) are mentioned in.
+GitLab has no mentions filter. Credentials come from `gh` and `glab`.
+Issues live under `<main-checkout>/.agt/issues/<tracker>/<number-or-local-id>.json`.
+Remote tracker keys are `gh-<host>-<owner>-<repo>` or `gl-<host>-<group>-<project>`.
+Local issues use the local tracker. `--tracker` accepts a key or `owner/repo`;
+issue references accept `owner/repo#12`, `#12`, `12` or `local-xxxxxx`.
 
 ### Auto-sync of issues
 
-Before a read, each tracker in scope (`--tracker` narrows it) whose `synced_at` is
-older than `max_age_secs`, or that never synced, syncs like `agt issue sync`. With
-no tracker configured nothing happens and the output does not change. A failure
-(`gh`/`glab` missing, not logged in, network, rate limit, or the calls together
-taking more than 15 seconds, which kills the tool) prints one line,
-`agt: sync skipped (<reason>); showing local data`, to stderr and reads the local
-copy; stdout and the exit status are the local read's. A successful auto-sync
-prints nothing. A failed sync is written to `.auto-sync.json` in the tracker's
-directory and that tracker is not tried again for `max_age_secs` (no call, no
-line); a success or an explicit `sync` clears it. A config file that cannot be
-read prints the skip line with its error and the read goes on locally. A tracker
-being synced by another auto-sync or pushed is skipped the same way instead of waited
-for. `--offline` (global to `agt issue`),
-`AGT_OFFLINE=1` and `auto = false` keep reads local. `agt issue sync` has no time
-cap and keeps its errors and exit codes.
+Reads (`list`, `show`, `search`, `status`, `find`) stay local unless
+`sync.auto_pull = true`. Enabled pulls refresh applicable trackers when unsynced
+or at least `max_age_secs` old. Failures back off for that interval and print
+`agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
+
+With `sync.auto_push = true`, mutations with a remote representation send only
+the changed issue after saving it. Its pending content is eligible; untouched
+issues remain local. Notes and local links never trigger publication or get sent.
+Automatic failures preserve queued changes. Private data is never included in remote bodies.
+
+Automatic work has a 15-second aggregate limit. Explicit `sync` and `push`
+opt into remote access independently of automatic settings. `--offline` and
+`AGT_OFFLINE=1` block automatic and explicit issue network operations.
 
 | Command | What it does |
 | --- | --- |
@@ -1119,7 +1125,7 @@ Queued writes (`<text>` is read from stdin when it is `-`):
 | `assign <key> <login>...` / `unassign ...` | Assignees. GitLab takes one assignee here. |
 | `label add\|remove <key> <label>...` | Labels. |
 | `link-pr <key> --pr <n\|url>` | A comment `Linked: <url>` and a local link. Sent once. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
-| `create --title T [--body B] [--label L]... [--assignee A]...` | A new issue under a `local-` key. With several trackers pass `--tracker`. |
+| `create --title T [--body B] [--label L]... [--assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. |
 | `edit <key> [--title T] [--body B]` | A new title or body. |
 
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
@@ -1151,6 +1157,6 @@ failure does not make `push` exit non-zero: it is listed under `failed`. A creat
 executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
 canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning and sync age; do not set it otherwise. `AGT_SYNC_CAP_MS` replaces the 15 seconds an auto-sync may take, for the same
-reason. Tests that check local behavior run with `AGT_OFFLINE=1` (`Env::offline`) so reads do not call the fake forge. Tests use temporary
+reason. Default issue/review tests assert local operation; automatic-sync tests opt in explicitly. `AGT_OFFLINE=1` (`Env::offline`) also blocks explicit remote calls. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`. See `AGENTS.md` for the checks.

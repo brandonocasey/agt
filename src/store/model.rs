@@ -150,6 +150,8 @@ pub struct Run {
     pub repair: Vec<CommitPatch>,
     pub reveal: Option<Reveal>,
     pub record: Option<RecordPost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_target: Option<String>,
     /// Usage of the main session's roles (`manual`, `fix`, `main`), from `run end --usage`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage: Vec<RoleUsage>,

@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use super::Options;
+
 use super::render::{body, location, record_head, review_body, short};
 use super::summary::{Covered, summary_body};
 use crate::core::error::{Error, Result};
@@ -153,6 +155,7 @@ pub(super) struct Planner<'a> {
     findings: bool,
     /// `--only`: the thread ids to post; empty means all.
     only: &'a [String],
+    run: Option<&'a str>,
     repo: &'a Repo,
     connection: &'a Connection,
     review: &'a Review,
@@ -310,8 +313,7 @@ impl<'a> Planner<'a> {
         connection: &'a Connection,
         target: &'a Target,
         attempt: &'a str,
-        findings: bool,
-        only: &'a [String],
+        options: &'a Options,
     ) -> Result<Self> {
         let review = target
             .review
@@ -320,8 +322,9 @@ impl<'a> Planner<'a> {
         Ok(Self {
             ctx,
             attempt,
-            findings,
-            only,
+            findings: options.findings,
+            only: &options.only,
+            run: options.run.as_deref(),
             repo: &ctx.repo,
             connection,
             review,
@@ -357,9 +360,15 @@ impl<'a> Planner<'a> {
         let mut expected = Vec::new();
         let mut reviews: Vec<Batch> = Vec::new();
         for thread in &target.threads {
+            if !self.selected_thread(thread) {
+                continue;
+            }
             let Some(first) = thread.comments.first() else {
                 continue;
             };
+            if first.local {
+                continue;
+            }
             if thread.remote.is_some()
                 || thread.deleted_remote
                 || first.remote.is_some()
@@ -701,13 +710,13 @@ impl<'a> Planner<'a> {
     }
 
     fn run_before_pr(&self, target: &Target, run_id: &str) -> Option<Skip> {
+        let run = target.runs.iter().find(|run| run.id == run_id)?;
+        // Retry eligibility MUST name this PR/MR so a later attachment cannot expose earlier runs.
+        if run.publication_target.as_deref() == Some(self.review.url.as_str()) {
+            return None;
+        }
         let attached = self.review.attached_at.as_deref()?;
-        let ended = target
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)?
-            .ended_at
-            .as_deref()?;
+        let ended = run.ended_at.as_deref()?;
         // Timestamps share one fixed-width UTC format, so they order as text.
         (ended < attached).then(|| Skip::BeforeLink {
             run: run_id.to_owned(),
@@ -785,6 +794,9 @@ impl<'a> Planner<'a> {
         let mut writes = Vec::new();
         let mut skipped = Vec::new();
         for thread in &target.threads {
+            if !self.selected_thread(thread) {
+                continue;
+            }
             let Some(remote) = &thread.remote else {
                 continue;
             };
@@ -801,6 +813,9 @@ impl<'a> Planner<'a> {
                 continue;
             }
             for comment in thread.comments.iter().skip(1) {
+                if self.run.is_some_and(|run| !comment_in_run(comment, run)) {
+                    continue;
+                }
                 if comment.local
                     || comment.remote.is_some()
                     || comment.delivery.post == PostState::Posted
@@ -821,10 +836,14 @@ impl<'a> Planner<'a> {
             }
         }
         for thread in &target.threads {
+            if !self.selected_thread(thread) {
+                continue;
+            }
             let (Some(remote), Some(resolved)) = (&thread.remote, thread.resolve_pending) else {
                 continue;
             };
-            if thread.deleted_remote
+            if self.run.is_some()
+                || thread.deleted_remote
                 || self.pre_pr(target, thread).is_some()
                 || self.unnamed(thread).is_some()
                 || (self.foreign_threads().is_some() && !imported(thread))
@@ -895,6 +914,7 @@ impl<'a> Planner<'a> {
         let runs: Vec<&Run> = target
             .runs
             .iter()
+            .filter(|run| self.run.is_none_or(|selected| selected == run.id))
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .collect();
@@ -929,7 +949,27 @@ impl<'a> Planner<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
         let commits = self.pr_commits();
-        let render = |attempt: &str| summary_body(target, &covered, commits.as_deref(), attempt);
+        let mut visible = target.clone();
+        if self.run.is_some() {
+            visible
+                .threads
+                .retain(|thread| self.selected_thread(thread));
+            for thread in &mut visible.threads {
+                thread.comments.retain(|comment| {
+                    !comment.local && self.run.is_none_or(|run| comment_in_run(comment, run))
+                });
+            }
+        }
+        let render = |attempt: &str| {
+            let text = summary_body(&visible, &covered, commits.as_deref(), attempt);
+            match self.run {
+                Some(run) => text.replace(
+                    &markers::agent(markers::SUMMARY_ID, Some(attempt)),
+                    &markers::agent(&format!("{run}/record"), Some(attempt)),
+                ),
+                None => text,
+            }
+        };
         // The posted summary: the comment the latest run's record landed in, when it is one.
         let posted = runs
             .iter()
@@ -942,7 +982,13 @@ impl<'a> Planner<'a> {
                         .sent
                         .as_deref()
                         .and_then(markers::agent_id)
-                        .is_some_and(|id| id == markers::SUMMARY_ID)
+                        .is_some_and(|id| {
+                            id == self
+                                .run
+                                .map(|run| format!("{run}/record"))
+                                .as_deref()
+                                .unwrap_or(markers::SUMMARY_ID)
+                        })
             });
         if let Some(record) = posted.filter(|_| !unposted) {
             // Rendered with the attempt id it was sent with, unchanged text needs no edit.
@@ -984,6 +1030,19 @@ impl<'a> Planner<'a> {
             .or_else(|| self.foreign_threads().filter(|_| !named_approval))
     }
 
+    fn selected_thread(&self, thread: &Thread) -> bool {
+        self.run.is_none_or(|run| {
+            thread
+                .finding
+                .as_ref()
+                .is_some_and(|finding| finding.run == run)
+                || thread
+                    .comments
+                    .first()
+                    .is_some_and(|comment| comment_in_run(comment, run))
+        })
+    }
+
     fn unnamed(&self, thread: &Thread) -> Option<Skip> {
         (!self.only.is_empty() && !self.only.contains(&thread.id)).then_some(Skip::NotNamed)
     }
@@ -1016,6 +1075,10 @@ impl<'a> Planner<'a> {
 /// A thread imported from the host, started by someone else or outside this store.
 pub(super) fn imported(thread: &Thread) -> bool {
     thread.finding.is_none() && thread.comments.first().is_some_and(Comment::is_imported)
+}
+
+fn comment_in_run(comment: &Comment, selected: &str) -> bool {
+    matches!(&comment.author, Author::Agent { run: Some(run), .. } if run == selected)
 }
 
 #[cfg(test)]

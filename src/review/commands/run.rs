@@ -39,6 +39,7 @@ pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
             repair: Vec::new(),
             reveal: None,
             record: None,
+            publication_target: None,
             usage: Vec::new(),
         });
         Ok(id)

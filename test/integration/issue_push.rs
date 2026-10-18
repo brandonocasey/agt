@@ -83,13 +83,6 @@ fn text(body: &Value) -> String {
         .to_owned()
 }
 
-fn pr_url(fake: Fake) -> &'static str {
-    match fake.name() {
-        "github" => "https://github.com/o/r/pull/7",
-        _ => "https://gitlab.com/g/p/-/merge_requests/7",
-    }
-}
-
 fn queue_everything(env: &Env, fake: Fake) {
     fake.assignee_lookups(env, &["ann"]);
     env.issue(&["comment", "1", "Thanks"]);
@@ -129,10 +122,14 @@ fn a_dry_run_renders_every_write_and_sends_none(fake: Fake) {
     );
     assert!(first.ends_with(" -->"), "{first}");
     let second = text(&planned[2]["body"]);
+    let url = if fake.name() == "github" {
+        "https://github.com/o/r/pull/7"
+    } else {
+        "https://gitlab.com/g/p/-/merge_requests/7"
+    };
     assert!(
         second.starts_with(&format!(
-            "Linked: {}\n\n<!-- agent-review id=c2 attempt=at-",
-            pr_url(fake)
+            "Linked: {url}\n\n<!-- agent-review id=c2 attempt=at-"
         )),
         "{second}"
     );
@@ -390,6 +387,8 @@ fn a_created_issue_is_sent_then_known_by_its_number(fake: Fake) {
     env.write_config(&fake.config(true));
     let made = env.issue(&[
         "create",
+        "--tracker",
+        fake.tracker(),
         "--title",
         "Brand new",
         "--body",
@@ -465,6 +464,8 @@ fn lose_a_create(fake: Fake) -> (Env, String) {
     env.write_config(&fake.config(true));
     let made = env.issue(&[
         "create",
+        "--tracker",
+        fake.tracker(),
         "--title",
         "Brand new",
         "--body",
@@ -717,4 +718,135 @@ fn a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_confl
     let report = env.issue(&["push", "--dry-run"]);
     assert!(writes(&report, "conflicts").is_empty(), "{report}");
     assert_eq!(kinds(&writes(&report, "writes")), ["update"]);
+}
+
+#[test]
+fn automatic_create_attaches_one_issue_and_returns_its_canonical_key() {
+    let fake: Fake = &crate::support::issue::Github;
+    let env = Env::new();
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    let unrelated = env.issue(&["create", "--title", "Keep local"]);
+    let other = unrelated["key"].as_str().unwrap();
+    env.issue(&["comment", other, "Unrelated pending comment"]);
+    env.write_config("[sync]\nauto_push = true\n");
+    env.respond(&strs(&fake.user_call()), login_body(fake));
+    env.respond(
+        &strs(&fake.create_call()),
+        &fake.issue_json(&created()).to_string(),
+    );
+    let output = env.issue_exec(
+        &[
+            "create",
+            "--title",
+            "Brand new",
+            "--body",
+            "Text",
+            "--label",
+            "bug",
+        ],
+        "",
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let made: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        made["key"],
+        "o/r#5",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        env.issue_doc("local", other)["comments"][0]["post"],
+        "pending"
+    );
+    assert_eq!(env.forge_writes(fake), [fake.create_call().join(" ")]);
+    let calls = env.forge_calls().len();
+    env.issue(&["note", "5", "Private"]);
+    env.issue(&["link", "5", "--branch", "feat/private"]);
+    env.issue(&["link", "5", "--pr", "7"]);
+    assert_eq!(env.forge_calls().len(), calls);
+    assert_eq!(env.issue_doc(fake.tracker(), "5")["comments"], json!([]));
+}
+
+#[test]
+fn automatic_failure_preserves_local_save_and_explicit_false_denies_network() {
+    let fake: Fake = &crate::support::issue::Github;
+    let env = Env::new();
+    env.write_config(&format!(
+        "{}\n[sync]\nauto_push = true\n",
+        fake.config(false)
+    ));
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    let made = env.issue(&["create", "--title", "Keep me"]);
+    let key = made["key"].as_str().unwrap();
+    assert_eq!(env.issue_doc("local", key)["fields"]["title"], "Keep me");
+    assert!(env.forge_calls().is_empty());
+    env.write_config("[sync]\nauto_push = true\n");
+    env.respond(&strs(&fake.user_call()), login_body(fake));
+    env.fail_call(&strs(&fake.create_call()));
+    let edited = env.issue(&["edit", key, "--title", "Saved despite failure"]);
+    assert_eq!(edited["title"], "Saved despite failure");
+    let saved = env.issue_doc(fake.tracker(), key);
+    assert_eq!(saved["fields"]["title"], "Saved despite failure");
+    assert_eq!(saved["create"]["post"], "posting");
+    env.issue(&["edit", key, "--title", "Retry stays safe"]);
+    assert_eq!(fake.count(&env, &fake.create_call()), 1);
+}
+
+#[test]
+fn manual_push_allows_omitted_permission_and_local_dry_run_writes_no_files() {
+    let fake: Fake = &crate::support::issue::Github;
+    let env = Env::new();
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    let made = env.issue(&[
+        "create",
+        "--title",
+        "Brand new",
+        "--body",
+        "Text",
+        "--label",
+        "bug",
+    ]);
+    let key = made["key"].as_str().unwrap();
+    env.respond(&strs(&fake.user_call()), login_body(fake));
+    let before = env.issue_files();
+    let dry = env.issue(&["push", "--dry-run"]);
+    assert_eq!(env.issue_files(), before);
+    assert_eq!(dry["trackers"][1]["writes"][0]["kind"], "create");
+    assert!(env.forge_writes(fake).is_empty());
+    env.respond(
+        &strs(&fake.create_call()),
+        &fake.issue_json(&created()).to_string(),
+    );
+    env.issue(&["push"]);
+    assert_eq!(env.issue_doc(fake.tracker(), "5")["key"], "o/r#5");
+    assert!(
+        !env.issue_state()
+            .join("local")
+            .join(format!("{key}.json"))
+            .exists()
+    );
+}
+
+#[test]
+fn an_automatic_create_returns_its_identity_when_a_followup_write_fails() {
+    let fake: Fake = &crate::support::issue::Github;
+    let env = Env::new();
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    env.write_config("[sync]\nauto_push = true\n");
+    env.respond(&strs(&fake.user_call()), login_body(fake));
+    env.respond(
+        &strs(&fake.create_call()),
+        &fake.issue_json(&created()).to_string(),
+    );
+    env.fail_call(&strs(&fake.update_call(5)));
+    let made = env.issue(&["create", "--title", "Brand new", "--body", "Text"]);
+    assert_eq!(made["key"], "o/r#5");
+    let saved = env.issue_doc(fake.tracker(), "5");
+    assert_eq!(saved["create"]["post"], "posted");
+    assert_eq!(saved["errors"][0]["what"], "update");
 }

@@ -17,7 +17,7 @@ pub const FIRST_SINCE: &str = "2026-07-19T12%3A00%3A00Z";
 
 impl Env {
     pub fn issue_state(&self) -> PathBuf {
-        self.path("state").join("agents").join("issues")
+        self.repo.join(".agt").join("issues")
     }
 
     pub fn write_config(&self, text: &str) {
@@ -82,6 +82,7 @@ impl Env {
             args,
             "",
             &[
+                ("AGT_OFFLINE", "1"),
                 ("AGT_GH_BIN", "/nonexistent/gh"),
                 ("AGT_GLAB_BIN", "/nonexistent/glab"),
             ],

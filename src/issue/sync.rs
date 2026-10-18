@@ -19,7 +19,11 @@ use crate::store::issues::{Issue, TRACKER_FILE};
 const OVERLAP_SECS: i64 = 300;
 
 pub fn connect(tracker: &Tracker) -> Result<(Box<dyn IssueService>, String)> {
-    let service = (service::kind(tracker.doc.forge).connect_issue)(&tracker.doc.host);
+    let forge = tracker
+        .doc
+        .forge
+        .ok_or_else(|| Error("local tracker has no remote destination".into()))?;
+    let service = (service::kind(forge).connect_issue)(&tracker.doc.host);
     let login = service.login()?;
     Ok((service, login))
 }

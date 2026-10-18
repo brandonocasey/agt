@@ -22,9 +22,10 @@ pub(super) struct Options {
     pub not_own: bool,
     pub findings: bool,
     pub only: Vec<String>,
+    pub run: Option<String>,
 }
 
-pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, options: &Options) -> Result<Value> {
+pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Result<Value> {
     let Options {
         dry_run, not_own, ..
     } = *options;
@@ -52,6 +53,25 @@ pub(super) fn publish(ctx: &Ctx, pr: Option<&str>, options: &Options) -> Result<
         return dry(ctx, &connection, target, options);
     }
     sync::sync_planned(ctx, &connection, plan)?;
+    ctx.selection.target = Some(connection.key.clone());
+    if let Some(selected) = &options.run {
+        let target = load(ctx, &connection)?;
+        let url = target
+            .review
+            .as_ref()
+            .ok_or_else(|| Error("synced target has no PR/MR".into()))?
+            .url
+            .clone();
+        exec::change(ctx, &target, |target| {
+            let run = target
+                .runs
+                .iter_mut()
+                .find(|run| &run.id == selected && run.ended_at.is_some())
+                .ok_or_else(|| Error(format!("completed run {selected} not found")))?;
+            run.publication_target = Some(url);
+            Ok(())
+        })?;
+    }
     // One attempt id per publish: sync claims a marked note only for a write of that attempt.
     let attempt = random_id().replacen("rv-", "at-", 1);
     let mut posted = Vec::new();
@@ -94,14 +114,7 @@ fn planner<'a>(
     attempt: &'a str,
     options: &'a Options,
 ) -> Result<Planner<'a>> {
-    Planner::new(
-        ctx,
-        connection,
-        target,
-        attempt,
-        options.findings,
-        &options.only,
-    )
+    Planner::new(ctx, connection, target, attempt, options)
 }
 
 /// Every payload a publish would send, from an in-memory sync; nothing is written.

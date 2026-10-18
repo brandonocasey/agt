@@ -5,7 +5,7 @@ pub struct Cli {
     /// Only this tracker: its key (`gh-github.com-owner-repo`) or `owner/repo`.
     #[arg(long, global = true, value_name = "KEY")]
     pub tracker: Option<String>,
-    /// Read the local data only: never sync first (also `AGT_OFFLINE=1`).
+    /// Disable all network access (also `AGT_OFFLINE=1`).
     #[arg(long, global = true)]
     pub offline: bool,
     #[command(subcommand)]
@@ -72,7 +72,7 @@ pub enum Command {
     Create(CreateArgs),
     /// Queue a new title or body.
     Edit(EditArgs),
-    /// Send the queued changes to the hosts of the trackers with `push = true`.
+    /// Send queued changes; explicit `push = false` denies a tracker.
     Push {
         /// Show the requests without sending anything.
         #[arg(long)]

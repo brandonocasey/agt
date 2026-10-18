@@ -376,6 +376,24 @@ impl Store {
             if !kind.is_dir() {
                 continue;
             }
+            if name == "repositories" && self.backups == self.agents.join("backups") {
+                for clone in fs::read_dir(entry.path()).map_err(ctx("read clone backups"))? {
+                    let clone = clone.map_err(ctx("read clone backup"))?;
+                    let id = clone.file_name().to_string_lossy().into_owned();
+                    if clone
+                        .file_type()
+                        .map_err(ctx("stat clone backup"))?
+                        .is_dir()
+                        && id.len() == 40
+                        && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    {
+                        let mut store = Self::open(self.namespace)?;
+                        store.backups = clone.path();
+                        found.extend(store.agt_backups()?);
+                    }
+                }
+                continue;
+            }
             let (partial, name) = match name
                 .strip_prefix('.')
                 .and_then(|name| name.strip_suffix(".partial"))
@@ -400,7 +418,11 @@ impl Store {
     /// Deletes a backup unless a backup of its namespace is being made.
     pub fn remove_backup(&self, backup: &Backup) -> Result<Removal> {
         let name = backup.namespace.dir_name();
-        let lock_path = self.backups.with_file_name(format!(".{name}-backup.lock"));
+        let lock_path = backup
+            .path
+            .parent()
+            .unwrap_or(&self.backups)
+            .with_file_name(format!(".{name}-backup.lock"));
         let Some(_lock) = try_lock(&lock_path)? else {
             return Ok(Removal::Busy);
         };

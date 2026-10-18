@@ -208,7 +208,7 @@ fn github_fork_pr_found_in_parent() {
     assert_eq!(synced["target"], "gh-8");
     assert_eq!(synced["review"]["repo"], "up/repo");
     assert_eq!(env.run(&["status"])["target"], "gh-8");
-    assert!(env.state().join("github.com/me/repo/gh-8.json").exists());
+    assert!(env.state().join("gh-8.json").exists());
     assert_read_only(&Github::new(), env);
 }
 
@@ -238,12 +238,12 @@ fn reviews_expire_ninety_days_after_close() {
     assert_eq!(kept["plan"]["reviews"], json!([]));
     let plan = cleanup_reviews(env, &[], &at(59 + 91));
     assert_eq!(
-        plan["plan"]["reviews"][0]["key"], "github.com/me/repo/gh-5",
+        plan["plan"]["reviews"][0]["key"], "gh-5",
         "91 days after the last change"
     );
-    assert!(env.state().join("github.com/me/repo/gh-5.json").exists());
+    assert!(env.state().join("gh-5.json").exists());
     cleanup_reviews(env, &["--yes"], &at(59 + 91));
-    assert!(!env.state().join("github.com/me/repo/gh-5.json").exists());
+    assert!(!env.state().join("gh-5.json").exists());
 }
 
 /// `agt cleanup --only reviews` at `now`, over every repository in the isolated store.

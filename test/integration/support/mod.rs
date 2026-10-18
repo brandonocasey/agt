@@ -31,9 +31,13 @@ impl Env {
         }
         fs::write(
             root.join("gitconfig"),
-            "[user]\n\tname = Tester\n\temail = tester@example.com\n[init]\n\tdefaultBranch = main\n",
+            format!(
+                "[user]\n\tname = Tester\n\temail = tester@example.com\n[init]\n\tdefaultBranch = main\n[core]\n\texcludesFile = {}\n",
+                root.join("gitignore").display()
+            ),
         )
         .unwrap();
+        fs::write(root.join("gitignore"), "/.agt/\n").unwrap();
         let env = Self {
             repo: root.join("repo"),
             root,
@@ -51,7 +55,7 @@ impl Env {
     }
 
     pub fn state(&self) -> PathBuf {
-        self.root.join("state").join("agents").join("reviews")
+        self.repo.join(".agt").join("reviews")
     }
 
     pub fn path(&self, name: &str) -> PathBuf {

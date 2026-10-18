@@ -42,8 +42,8 @@ pub fn run(
 ) -> Result<Value> {
     let mut reports = Vec::new();
     for configured in trackers::configured(config, filter)? {
-        let tracker = trackers::ensure(store, configured)?;
-        if !configured.push {
+        let tracker = trackers::ensure_mode(store, configured, options.dry_run)?;
+        if configured.push == Some(false) {
             if filter.is_some() {
                 return fail(format!(
                     "tracker {} has push = false in the configuration; set it to true to send changes",
@@ -54,6 +54,12 @@ pub fn run(
             continue;
         }
         reports.push(push_tracker(store, &tracker, options)?);
+        if options.dry_run {
+            for mut local in trackers::stored(store, Some("local")).unwrap_or_default() {
+                local.doc = tracker.doc.clone();
+                reports.push(push_tracker(store, &local, options)?);
+            }
+        }
     }
     Ok(json!({ "dry_run": options.dry_run, "trackers": reports }))
 }
@@ -65,6 +71,16 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
         .filter(|issue| merge::has_pending(issue) || (options.force && !issue.conflicts.is_empty()))
         .map(trackers::doc_name)
         .collect();
+    push_names(store, tracker, options, queued, false)
+}
+
+fn push_names(
+    store: &Store,
+    tracker: &Tracker,
+    options: &Options,
+    queued: Vec<String>,
+    automatic: bool,
+) -> Result<Value> {
     let mut pushing = Push {
         store,
         tracker,
@@ -80,6 +96,12 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
     if !queued.is_empty() {
         let _lock = if options.dry_run {
             None
+        } else if automatic {
+            Some(
+                store
+                    .try_publish_lock(&tracker.dir, "push")?
+                    .ok_or_else(|| Error("another agt is pushing issues".into()))?,
+            )
         } else {
             Some(store.publish_lock(&tracker.dir, "push")?)
         };
@@ -399,9 +421,14 @@ impl Push<'_> {
         // Record what the service gets: a close with no reason is sent with its default.
         if let Some((Category::Closed, reason)) = changes.state.as_mut()
             && reason.is_none()
-            && crate::forge::service::kind(self.tracker.doc.forge)
-                .issue_caps
-                .close_reasons
+            && crate::forge::service::kind(
+                self.tracker
+                    .doc
+                    .forge
+                    .ok_or_else(|| Error("local tracker has no remote destination".into()))?,
+            )
+            .issue_caps
+            .close_reasons
         {
             *reason = Some("completed".to_owned());
         }
@@ -524,6 +551,19 @@ fn record_sent(base: &mut Fields, changes: &Changes) {
     if let Some(assignees) = &changes.assignees {
         base.assignees.clone_from(assignees);
     }
+}
+
+pub fn one(store: &Store, tracker: &Tracker, name: &str) -> Result<Value> {
+    push_names(
+        store,
+        tracker,
+        &Options {
+            dry_run: false,
+            force: false,
+        },
+        vec![name.to_owned()],
+        true,
+    )
 }
 
 #[cfg(test)]

@@ -126,8 +126,11 @@ pub fn set_state(
     reason: Option<Reason>,
 ) -> Result<Value> {
     change(store, filter, key, |tracker, issue| {
-        let caps = service::kind(tracker.doc.forge).issue_caps;
-        if reason.is_some() && !caps.close_reasons {
+        let caps = tracker
+            .doc
+            .forge
+            .map(|forge| service::kind(forge).issue_caps);
+        if reason.is_some() && caps.is_some_and(|caps| !caps.close_reasons) {
             return fail("this service takes no close reason");
         }
         issue.fields.state = state;
@@ -135,9 +138,10 @@ pub fn set_state(
             Category::Open => None,
             // The host records `completed` for a close sent without a reason, so the local
             // copy says it too; otherwise the next merge sees a reason both sides "changed".
-            Category::Closed => reason
-                .map(|reason| reason.as_str().to_owned())
-                .or_else(|| caps.close_reasons.then(|| "completed".to_owned())),
+            Category::Closed => reason.map(|reason| reason.as_str().to_owned()).or_else(|| {
+                caps.is_some_and(|caps| caps.close_reasons)
+                    .then(|| "completed".to_owned())
+            }),
         };
         Ok(())
     })
@@ -156,8 +160,11 @@ pub fn assign(
             assignees.extend(logins.iter().cloned());
             assignees.sort();
             assignees.dedup();
-            let caps = service::kind(tracker.doc.forge).issue_caps;
-            if !caps.multi_assignee && assignees.len() > 1 {
+            let caps = tracker
+                .doc
+                .forge
+                .map(|forge| service::kind(forge).issue_caps);
+            if caps.is_some_and(|caps| !caps.multi_assignee) && assignees.len() > 1 {
                 return fail(
                     "this service takes one assignee on an issue; unassign the current one first",
                 );
@@ -210,7 +217,33 @@ pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Valu
 fn pr_link(tracker: &Tracker, arg: &str, source: LinkSource) -> Result<PrLink> {
     let pr = forge::parse_pr(arg)?;
     let doc = &tracker.doc;
-    let kind = service::kind(doc.forge);
+    let forge = match doc.forge {
+        Some(forge) => forge,
+        None => {
+            let Some((host, repo)) = pr.location else {
+                return fail("a local tracker needs a full PR/MR URL");
+            };
+            let forge = if arg.contains("/-/merge_requests/") {
+                crate::store::model::Forge::Gitlab
+            } else {
+                crate::store::model::Forge::Github
+            };
+            let kind = service::kind(forge);
+            return Ok(PrLink {
+                forge,
+                repo: repo.clone(),
+                number: pr.number,
+                url: Some(format!(
+                    "https://{host}/{repo}{}{}",
+                    kind.url_marker, pr.number
+                )),
+                branch: None,
+                state: None,
+                source,
+            });
+        }
+    };
+    let kind = service::kind(forge);
     let repo = match &pr.location {
         Some((host, _)) if !host.eq_ignore_ascii_case(&doc.host) => {
             return fail(format!(
@@ -222,7 +255,7 @@ fn pr_link(tracker: &Tracker, arg: &str, source: LinkSource) -> Result<PrLink> {
         None => doc.repo.clone(),
     };
     Ok(PrLink {
-        forge: doc.forge,
+        forge,
         url: Some(format!(
             "https://{}/{repo}{}{}",
             doc.host, kind.url_marker, pr.number
@@ -292,15 +325,24 @@ pub fn create(
     filter: Option<&str>,
     args: &CreateArgs,
 ) -> Result<Value> {
-    let configured = trackers::configured(config, filter)?;
-    let [configured] = configured.as_slice() else {
-        return fail("several trackers are configured; pass --tracker to say where to create it");
+    let tracker = if filter.is_none() || filter == Some("local") {
+        trackers::local(store)?
+    } else {
+        let configured = trackers::configured(config, filter)?;
+        let [configured] = configured.as_slice() else {
+            return fail(
+                "several trackers are configured; pass --tracker to say where to create it",
+            );
+        };
+        trackers::ensure(store, configured)?
     };
-    let tracker = trackers::ensure(store, configured)?;
     let title = read_text(&args.title, "title", false)?;
     let body = read_text(&args.body, "body", true)?;
-    let caps = service::kind(tracker.doc.forge).issue_caps;
-    if !caps.multi_assignee && args.assignees.len() > 1 {
+    let caps = tracker
+        .doc
+        .forge
+        .map(|forge| service::kind(forge).issue_caps);
+    if caps.is_some_and(|caps| !caps.multi_assignee) && args.assignees.len() > 1 {
         return fail("this service takes one assignee on an issue");
     }
     let now = clock::now()?;

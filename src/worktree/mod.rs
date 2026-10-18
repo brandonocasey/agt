@@ -17,7 +17,7 @@ mod prepare;
 pub mod prune;
 mod remove;
 mod restore;
-mod roots;
+pub(crate) mod roots;
 mod snapshot;
 
 use clap::{Args, Subcommand};

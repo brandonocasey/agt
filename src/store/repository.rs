@@ -1,0 +1,438 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+
+use crate::core::error::{Result, ctx, fail};
+use crate::git::Repo;
+
+use super::{Namespace, Store, copy_tree, create_dir, lock, sync_dir};
+
+impl Store {
+    pub fn open_repo(namespace: Namespace, repo: &Repo, preview: bool) -> Result<Self> {
+        Self::open_repo_mode(namespace, repo, preview, true)
+    }
+
+    pub(crate) fn inspect_repo(namespace: Namespace, repo: &Repo) -> Result<Self> {
+        Self::open_repo_mode(namespace, repo, true, false)
+    }
+
+    fn open_repo_mode(
+        namespace: Namespace,
+        repo: &Repo,
+        preview: bool,
+        legacy: bool,
+    ) -> Result<Self> {
+        if namespace == Namespace::Tasks {
+            return Self::open(namespace);
+        }
+        let main = repo.main_checkout_root()?;
+        let common =
+            fs::canonicalize(repo.common_dir()?).map_err(ctx("resolve repository identity"))?;
+        let identity = sha1_smol::Sha1::from(common.as_os_str().as_encoded_bytes())
+            .digest()
+            .to_string();
+        let global = Self::open(namespace)?;
+        for path in [
+            main.join(".agt"),
+            main.join(".agt").join(namespace.dir_name()),
+        ] {
+            require_directory(&path)?;
+        }
+        let mut store = Self {
+            root: main.join(".agt").join(namespace.dir_name()),
+            backups: global.backups.join("repositories").join(&identity),
+            agents: global.agents.clone(),
+            namespace,
+            schema: namespace.schema(),
+            local: true,
+            fallback: Vec::new(),
+            backed_up: AtomicBool::new(false),
+        };
+        if preview && legacy {
+            store.preview_legacy(&global, repo, &identity)?;
+        } else if !preview {
+            store.import_legacy(&global, repo, &identity)?;
+        }
+        Ok(store)
+    }
+
+    fn preview_legacy(&mut self, global: &Self, repo: &Repo, identity: &str) -> Result<()> {
+        let marker = global
+            .agents
+            .join("repository-imports")
+            .join(identity)
+            .join(format!("{}.done", self.namespace.dir_name()));
+        if !marker.exists() {
+            let records = marker.parent().expect("import marker has parent");
+            let stage = records.join(format!(".{}.stage", self.namespace.dir_name()));
+            let record = records.join(format!("{}.backup", self.namespace.dir_name()));
+            let snapshot = if stage.is_dir() {
+                Some(stage)
+            } else if record.exists() {
+                let name = fs::read_to_string(&record).map_err(ctx("read import backup record"))?;
+                if Path::new(&name).components().count() != 1
+                    || !name.starts_with(&format!("{}-v0-", self.namespace.dir_name()))
+                {
+                    return fail("invalid legacy backup record");
+                }
+                let backup = self.backups.join(name);
+                backup.is_dir().then_some(backup)
+            } else {
+                None
+            };
+            let sources = if let Some(snapshot) = snapshot {
+                match self.namespace {
+                    Namespace::Reviews => vec![(snapshot, PathBuf::new())],
+                    Namespace::Issues => {
+                        let mut sources = Vec::new();
+                        for entry in
+                            fs::read_dir(snapshot).map_err(ctx("read saved import snapshot"))?
+                        {
+                            let entry = entry.map_err(ctx("read saved tracker snapshot"))?;
+                            sources.push((entry.path(), PathBuf::from(entry.file_name())));
+                        }
+                        sources
+                    }
+                    Namespace::Tasks => unreachable!(),
+                }
+            } else {
+                self.legacy_sources(global, repo)?
+            };
+            for (source, relative) in sources {
+                let _locks = inspect_source(&source)?;
+                let destination = self.root.join(relative);
+                check_conflicts(&source, &destination)?;
+                self.fallback.push((destination, source));
+            }
+        }
+        Ok(())
+    }
+
+    fn import_legacy(&self, global: &Self, repo: &Repo, identity: &str) -> Result<()> {
+        let records = global.agents.join("repository-imports").join(identity);
+        create_durable_dir(&records)?;
+        let name = self.namespace.dir_name();
+        let _guard = lock(&records.join(format!(".{name}.lock")))?;
+        let marker = records.join(format!("{name}.done"));
+        if marker.exists() {
+            return Ok(());
+        }
+        let sources = self.legacy_sources(global, repo)?;
+        let mut source_locks = Vec::new();
+        for (source, _) in &sources {
+            source_locks.extend(inspect_source(source)?);
+        }
+        let stage = records.join(format!(".{name}.stage"));
+        let backup_record = records.join(format!("{name}.backup"));
+        if !sources.is_empty() || backup_record.exists() {
+            create_durable_dir(&self.backups)?;
+            let _backup_guard = lock(&self.backups.with_file_name(format!(".{name}-backup.lock")))?;
+            let backup_name = if backup_record.exists() {
+                fs::read_to_string(&backup_record).map_err(ctx("read import backup record"))?
+            } else {
+                let stamp = crate::core::clock::now()?.replace(':', "-");
+                let backup_name = format!("{name}-v0-{stamp}");
+                atomic_write(&backup_record, backup_name.as_bytes())?;
+                backup_name
+            };
+            if Path::new(&backup_name).components().count() != 1
+                || !backup_name.starts_with(&format!("{name}-v0-"))
+            {
+                return fail("invalid legacy backup record");
+            }
+            let backup = self.backups.join(&backup_name);
+            if !backup.exists() {
+                let partial = self.backups.join(format!(".{backup_name}.partial"));
+                if partial.exists() {
+                    fs::remove_dir_all(&partial).map_err(ctx("remove unfinished legacy backup"))?;
+                }
+                for (source, relative) in &sources {
+                    copy_tree(source, &partial.join(relative))?;
+                }
+                fs::rename(&partial, &backup).map_err(ctx("finish legacy backup"))?;
+                sync_dir(&self.backups)?;
+            }
+            if !stage.exists() {
+                let partial = records.join(format!(".{name}.stage.partial"));
+                if partial.exists() {
+                    fs::remove_dir_all(&partial).map_err(ctx("remove unfinished import stage"))?;
+                }
+                copy_tree(&backup, &partial)?;
+                fs::rename(&partial, &stage).map_err(ctx("finish import stage"))?;
+                sync_dir(&records)?;
+            }
+            check_conflicts(&stage, &self.root)?;
+            create_durable_dir(self.root.parent().expect("namespace has parent"))?;
+            // The staged copy MUST remain until the durable marker exists, so an interrupted
+            // merge can resume after checking every destination against the same snapshot.
+            merge(&stage, &self.root)?;
+        }
+        atomic_write(&marker, b"imported\n")?;
+        if stage.exists() {
+            fs::remove_dir_all(&stage).map_err(ctx("remove completed import stage"))?;
+        }
+        Ok(())
+    }
+
+    fn legacy_sources(&self, global: &Self, repo: &Repo) -> Result<Vec<(PathBuf, PathBuf)>> {
+        let mut sources = Vec::new();
+        match self.namespace {
+            Namespace::Reviews => {
+                let source = global.repo_dir(&repo.repo_key()?)?;
+                let mut directory = source.as_path();
+                while directory.starts_with(&global.root) {
+                    require_directory(directory)?;
+                    let Some(parent) = directory.parent() else {
+                        break;
+                    };
+                    directory = parent;
+                }
+                if source.is_dir() {
+                    sources.push((source, PathBuf::new()));
+                }
+            }
+            Namespace::Issues => {
+                require_directory(&global.root)?;
+                if let Ok(entries) = fs::read_dir(&global.root) {
+                    for entry in entries {
+                        let entry = entry.map_err(ctx("read legacy tracker directory"))?;
+                        if entry
+                            .file_type()
+                            .map_err(ctx("stat legacy tracker"))?
+                            .is_symlink()
+                        {
+                            return fail(format!(
+                                "legacy source {} must not be a symbolic link",
+                                entry.path().display()
+                            ));
+                        }
+                    }
+                }
+                if let Some((host, remote)) = repo
+                    .origin_url()?
+                    .as_deref()
+                    .and_then(crate::git::split_remote)
+                {
+                    for dir in global.child_dirs()? {
+                        let path = dir.join("tracker.json");
+                        if fs::symlink_metadata(&path)
+                            .is_ok_and(|meta| meta.file_type().is_symlink())
+                        {
+                            return fail(format!(
+                                "legacy source {} must not be a symbolic link",
+                                path.display()
+                            ));
+                        }
+                        let Some(document) = super::read_document(&path)? else {
+                            continue;
+                        };
+                        if document.get("host").and_then(serde_json::Value::as_str)
+                            == Some(host.as_str())
+                            && document.get("repo").and_then(serde_json::Value::as_str)
+                                == Some(remote.as_str())
+                        {
+                            let relative = dir
+                                .strip_prefix(&global.root)
+                                .map_err(ctx("legacy tracker outside store"))?
+                                .to_path_buf();
+                            sources.push((dir, relative));
+                        }
+                    }
+                }
+            }
+            Namespace::Tasks => unreachable!(),
+        }
+        Ok(sources)
+    }
+
+    pub(crate) fn at_root(namespace: Namespace, root: PathBuf) -> Result<Self> {
+        let mut store = Self::open(namespace)?;
+        store.local = root
+            .file_name()
+            .is_some_and(|name| name == namespace.dir_name())
+            && root
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".agt");
+        store.root = root;
+        Ok(store)
+    }
+}
+
+fn check_conflicts(source: &Path, destination: &Path) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(destination)
+        && !meta.is_dir()
+    {
+        return fail(format!(
+            "legacy import conflict at {}",
+            destination.display()
+        ));
+    }
+    for entry in fs::read_dir(source).map_err(ctx("read import stage"))? {
+        let entry = entry.map_err(ctx("read import stage entry"))?;
+        if entry.file_name().to_string_lossy().ends_with(".lock") {
+            continue;
+        }
+        let dest = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(ctx("stat import stage"))?
+            .is_dir()
+        {
+            check_conflicts(&entry.path(), &dest)?;
+        } else if let Ok(meta) = fs::symlink_metadata(&dest)
+            && (!meta.is_file()
+                || fs::read(&dest).map_err(ctx("read import destination"))?
+                    != fs::read(entry.path()).map_err(ctx("read import source"))?)
+        {
+            return fail(format!("legacy import conflict at {}", dest.display()));
+        }
+    }
+    Ok(())
+}
+
+fn merge(source: &Path, destination: &Path) -> Result<()> {
+    create_durable_dir(destination)?;
+    for entry in fs::read_dir(source).map_err(ctx("read staged import"))? {
+        let entry = entry.map_err(ctx("read staged entry"))?;
+        let dest = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(ctx("stat staged entry"))?
+            .is_dir()
+        {
+            merge(&entry.path(), &dest)?;
+        } else if !dest.exists() {
+            let bytes = fs::read(entry.path()).map_err(ctx("read staged file"))?;
+            atomic_write(&dest, &bytes)?;
+        }
+    }
+    sync_dir(destination)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let parent = path.parent().expect("stored file has parent");
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(ctx("stage imported file"))?;
+    temp.write_all(bytes).map_err(ctx("write imported file"))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(ctx("sync imported file"))?;
+    temp.persist(path).map_err(ctx("persist imported file"))?;
+    sync_dir(parent)
+}
+
+fn require_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_dir() => fail(format!("{} must be a plain directory", path.display())),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(crate::core::error::Error(format!(
+            "stat {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn inspect_source(path: &Path) -> Result<Vec<fs::File>> {
+    let meta = fs::symlink_metadata(path).map_err(ctx("inspect legacy source"))?;
+    if meta.file_type().is_symlink() {
+        return fail(format!(
+            "legacy source {} must not be a symbolic link",
+            path.display()
+        ));
+    }
+    let mut held = Vec::new();
+    if meta.is_dir() {
+        for entry in fs::read_dir(path).map_err(ctx("read legacy source"))? {
+            held.extend(inspect_source(
+                &entry.map_err(ctx("read legacy entry"))?.path(),
+            )?);
+        }
+    } else if meta.is_file()
+        && path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".lock"))
+    {
+        let file = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(ctx("open legacy lock"))?;
+        file.try_lock()
+            .map_err(ctx(format!("legacy source is busy: {}", path.display())))?;
+        held.push(file);
+    } else if !meta.is_file() {
+        return fail(format!(
+            "legacy source {} is not a regular file or directory",
+            path.display()
+        ));
+    }
+    Ok(held)
+}
+
+impl Store {
+    pub(super) fn read_path(&self, path: &Path) -> PathBuf {
+        if path.exists() {
+            return path.to_path_buf();
+        }
+        for (destination, source) in &self.fallback {
+            if let Ok(relative) = path.strip_prefix(destination) {
+                return source.join(relative);
+            }
+        }
+        path.to_path_buf()
+    }
+
+    pub(super) fn read_entries(&self, dir: &Path) -> Result<Vec<fs::DirEntry>> {
+        let mut entries = std::collections::BTreeMap::new();
+        let mut paths = vec![(dir.to_path_buf(), None)];
+        for (destination, source) in &self.fallback {
+            if let Ok(relative) = dir.strip_prefix(destination) {
+                paths.push((source.join(relative), None));
+            } else if destination.parent() == Some(dir) {
+                paths.push((
+                    source
+                        .parent()
+                        .expect("legacy tracker has parent")
+                        .to_path_buf(),
+                    source.file_name(),
+                ));
+            }
+        }
+        for (path, only) in paths {
+            let found = match fs::read_dir(&path) {
+                Ok(found) => found,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return fail(format!("read {}: {error}", path.display())),
+            };
+            for entry in found {
+                let entry = entry.map_err(ctx("read store entry"))?;
+                if only.is_none_or(|only| entry.file_name() == only) {
+                    entries.entry(entry.file_name()).or_insert(entry);
+                }
+            }
+        }
+        Ok(entries.into_values().collect())
+    }
+}
+
+fn create_durable_dir(path: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        missing.push(current.to_path_buf());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    create_dir(path)?;
+    for created in missing {
+        sync_dir(&created)?;
+        if let Some(parent) = created.parent() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}

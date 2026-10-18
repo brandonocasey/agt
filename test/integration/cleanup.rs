@@ -630,18 +630,17 @@ fn agt_records_the_common_dir_of_a_local_repo() {
     prune.env.write("a.txt", "one\n");
     prune.env.commit_all("change");
     prune.env.run(&["run", "start"]);
-    let local = prune.env.state().join("local");
-    let dirs: Vec<_> = fs::read_dir(&local).unwrap().flatten().collect();
-    assert_eq!(dirs.len(), 1);
     let recorded: Value =
-        serde_json::from_slice(&fs::read(dirs[0].path().join(".repo.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(prune.env.state().join(".repo.json")).unwrap()).unwrap();
     let git = prune.env.repo.join(".git");
     assert_eq!(recorded["common_dir"], git.to_string_lossy().as_ref());
     let report = prune.run(&[]);
     assert_eq!(report["plan"]["local_repos"], json!([]));
     assert!(recorded["last_seen"].is_string());
     fs::rename(&git, prune.env.repo.join(".git-moved")).unwrap();
-    let file = dirs[0].path().join(".repo.json");
+    let legacy = prune.agents().join("reviews/local/recorded-aaaaaaaaaaaa");
+    fs::create_dir_all(&legacy).unwrap();
+    let file = legacy.join(".repo.json");
     let seen = |days| {
         let mut record = recorded.clone();
         record["last_seen"] = json!(ago(days));
@@ -1520,4 +1519,284 @@ fn the_manual_report_never_asks_a_remote_and_does_not_list_a_worktree_holding_an
     assert_eq!(report["manual"]["worktrees"], json!([]), "{report}");
     let calls = fs::read_to_string(&log).unwrap();
     assert!(!calls.contains("ls-remote"), "{calls}");
+}
+
+#[test]
+fn repository_storage_imports_once_preserves_sources_and_skips_locks() {
+    let prune = Prune {
+        env: Env::with_branch(),
+    };
+    prune
+        .env
+        .git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
+    let source = prune.target("github.com/owner/repo", "branch-old", 100);
+    let original = fs::read(&source).unwrap();
+    let lock = source.parent().unwrap().join(".branch-old.lock");
+    fs::write(&lock, "live lock").unwrap();
+    prune.env.run(&["list"]);
+    let local = prune.env.state().join("branch-old.json");
+    assert_eq!(fs::read(&local).unwrap(), original);
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(!prune.env.state().join(".branch-old.lock").exists());
+    let clones = prune.agents().join("backups/repositories");
+    let clone = fs::read_dir(clones)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .unwrap()
+        .path();
+    let backup = fs::read_dir(clone)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .unwrap()
+        .path()
+        .join("branch-old.json");
+    assert_eq!(fs::read(backup).unwrap(), original);
+    fs::remove_dir_all(prune.env.repo.join(".agt")).unwrap();
+    prune.env.run(&["list"]);
+    assert!(
+        !local.exists(),
+        "a durable import marker prevents resurrection"
+    );
+}
+
+#[test]
+fn repository_storage_conflict_fails_after_backup_without_overwriting() {
+    let prune = Prune {
+        env: Env::with_branch(),
+    };
+    prune.env.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/owner/repo.git",
+    ]);
+    let source = prune.target("github.com/owner/repo", "branch-old", 100);
+    let local = prune.env.state().join("branch-old.json");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    fs::write(&local, "local content").unwrap();
+    let error = prune.env.fail(&["list"], None);
+    assert!(error.contains("legacy import conflict"), "{error}");
+    assert_eq!(fs::read_to_string(local).unwrap(), "local content");
+    assert!(source.exists());
+    assert!(prune.agents().join("backups/repositories").exists());
+    let original = fs::read(&source).unwrap();
+    fs::write(&source, "changed after backup").unwrap();
+    let records = fs::read_dir(prune.agents().join("repository-imports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::remove_dir_all(records.join(".reviews.stage")).unwrap();
+    fs::create_dir(records.join(".reviews.stage.partial")).unwrap();
+    fs::write(
+        records.join(".reviews.stage.partial/incomplete.json"),
+        "incomplete",
+    )
+    .unwrap();
+    fs::remove_file(prune.env.state().join("branch-old.json")).unwrap();
+    prune.env.run(&["list"]);
+    assert_eq!(
+        fs::read(prune.env.state().join("branch-old.json")).unwrap(),
+        original
+    );
+    assert_eq!(fs::read_to_string(source).unwrap(), "changed after backup");
+}
+
+#[test]
+fn cleanup_discovers_local_state_without_importing_or_removing_agt() {
+    let prune = Prune::new();
+    prune.env.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/owner/repo.git",
+    ]);
+    let source = prune.target("github.com/owner/repo", "branch-old", 100);
+    prune.run(&["--only", "reviews"]);
+    assert!(!prune.env.repo.join(".agt").exists());
+    assert!(!prune.agents().join("repository-imports").exists());
+    let local = prune.env.state().join("branch-old.json");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    fs::copy(&source, &local).unwrap();
+    let report = prune.run(&["--only", "reviews", "--yes"]);
+    assert!(!local.exists(), "{report}");
+    assert!(prune.env.repo.join(".agt").is_dir());
+}
+
+#[test]
+fn repository_storage_is_shared_with_linked_worktrees() {
+    let env = Env::with_branch();
+    let linked = env.path("linked");
+    env.git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+    let started = env.run(&["run", "start"]);
+    let key = started["target"].as_str().unwrap();
+    assert!(env.state().join(format!("{key}.json")).exists());
+    let output = env
+        .agt(&linked)
+        .args(["--target", key, "list"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(list.to_string().contains(key), "{list}");
+    assert!(!linked.join(".agt").exists());
+}
+
+#[test]
+fn cleanup_backup_retention_keeps_newest_for_each_clone() {
+    let prune = Prune::new();
+    let first = "a".repeat(40);
+    let second = "b".repeat(40);
+    let old = prune.backup(&format!("repositories/{first}/reviews-v1-{}", stamp(300)));
+    let newest_first = prune.backup(&format!("repositories/{first}/reviews-v1-{}", stamp(200)));
+    let newest_second = prune.backup(&format!("repositories/{second}/reviews-v1-{}", stamp(400)));
+    prune.run(&["--only", "backups", "--yes"]);
+    assert!(!old.exists());
+    assert!(newest_first.exists());
+    assert!(newest_second.exists());
+}
+
+#[test]
+fn cleanup_configured_and_current_linked_roots_are_deduplicated() {
+    let env = Env::with_branch();
+    let linked = env.path("linked");
+    env.git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+    env.write_config(&format!(
+        "[worktree]\nroots = [{}]\n",
+        serde_json::to_string(&env.repo).unwrap()
+    ));
+    let prune = Prune { env };
+    let source = prune.target("github.com/other/repo", "branch-old", 120);
+    let local = prune.env.state().join("branch-old.json");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    fs::copy(source, &local).unwrap();
+    let output = prune
+        .env
+        .command(BIN, &linked)
+        .args(["cleanup", "--only", "reviews"])
+        .env("AGT_NOW", NOW.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let matching = report["plan"]["reviews"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["path"] == local.to_str().unwrap())
+        .count();
+    assert_eq!(matching, 1, "{report}");
+    assert!(!prune.agents().join("repository-imports").exists());
+}
+
+#[test]
+fn repository_storage_preview_reads_legacy_issues_without_writes() {
+    use crate::support::issue::{Github, IssueFake, Spec};
+    for overlay in [false, true] {
+        let env = Env::new();
+        env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+        env.write_config(&Github.config(true));
+        (&Github as &dyn IssueFake).serve(&env, &[Spec::new(1, "Old title")]);
+        env.issue(&["sync"]);
+        env.issue(&["edit", "1", "--title", "Queued title"]);
+        let local = env.repo.join(".agt/issues");
+        let legacy = env.path("state").join("agents/issues");
+        fs::rename(&local, &legacy).unwrap();
+        fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
+        let before = fs::read(legacy.join(Github.tracker()).join("1.json")).unwrap();
+        if overlay {
+            fs::create_dir_all(local.join(Github.tracker())).unwrap();
+            fs::copy(
+                legacy.join(Github.tracker()).join("tracker.json"),
+                local.join(Github.tracker()).join("tracker.json"),
+            )
+            .unwrap();
+        }
+        let report = env.issue(&["push", "--dry-run"]);
+        assert_eq!(report["dry_run"], true);
+        assert_eq!(
+            report["trackers"][0]["writes"][0]["kind"], "update",
+            "{report}"
+        );
+        assert_eq!(local.exists(), overlay);
+        assert!(!local.join(Github.tracker()).join("1.json").exists());
+        assert!(!env.path("state").join("agents/backups").exists());
+        assert!(!env.path("state").join("agents/repository-imports").exists());
+        assert_eq!(
+            fs::read(legacy.join(Github.tracker()).join("1.json")).unwrap(),
+            before
+        );
+        assert!(env.forge_writes(&Github).is_empty());
+        env.issue(&["list"]);
+        assert_eq!(
+            fs::read(local.join(Github.tracker()).join("1.json")).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(legacy.join(Github.tracker()).join("1.json")).unwrap(),
+            before
+        );
+        let records = fs::read_dir(env.path("state").join("agents/repository-imports"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::remove_file(records.join("issues.done")).unwrap();
+        fs::remove_dir_all(&local).unwrap();
+        fs::write(
+            legacy.join(Github.tracker()).join("1.json"),
+            "changed source",
+        )
+        .unwrap();
+        let resumed = env.issue(&["push", "--dry-run"]);
+        assert_eq!(
+            resumed["trackers"][0]["writes"][0]["kind"], "update",
+            "{resumed}"
+        );
+        assert!(!local.exists());
+        assert!(!records.join("issues.done").exists());
+        assert_eq!(
+            fs::read_to_string(legacy.join(Github.tracker()).join("1.json")).unwrap(),
+            "changed source"
+        );
+    }
+}
+
+#[test]
+fn repository_storage_refuses_busy_and_symbolic_legacy_sources() {
+    let prune = Prune {
+        env: Env::with_branch(),
+    };
+    prune.env.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/owner/repo.git",
+    ]);
+    let source = prune.target("github.com/owner/repo", "branch-old", 100);
+    let lock = source.with_file_name(".branch-old.publish.lock");
+    let guard = File::create(&lock).unwrap();
+    guard.lock().unwrap();
+    let error = prune.env.fail(&["list"], None);
+    assert!(error.contains("legacy source is busy"), "{error}");
+    assert!(!prune.env.state().exists());
+    assert!(!prune.agents().join("backups").exists());
+    drop(guard);
+    fs::remove_file(lock).unwrap();
+    std::os::unix::fs::symlink(&source, source.with_file_name("linked.json")).unwrap();
+    let error = prune.env.fail(&["list"], None);
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(!prune.env.state().exists());
 }

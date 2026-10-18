@@ -26,8 +26,10 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct SyncConfig {
     /// `false` keeps every read local.
-    #[serde(default = "default_auto")]
-    pub auto: bool,
+    #[serde(default, alias = "auto")]
+    pub auto_pull: bool,
+    #[serde(default)]
+    pub auto_push: bool,
     /// A read syncs when the last sync is older than this many seconds.
     #[serde(default = "default_max_age_secs")]
     pub max_age_secs: u64,
@@ -36,14 +38,11 @@ pub struct SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            auto: default_auto(),
+            auto_pull: false,
+            auto_push: false,
             max_age_secs: default_max_age_secs(),
         }
     }
-}
-
-fn default_auto() -> bool {
-    true
 }
 
 fn default_max_age_secs() -> u64 {
@@ -77,9 +76,8 @@ pub struct Tracker {
     pub scope: Scope,
     #[serde(default = "default_since_days")]
     pub since_days: u32,
-    /// Writes stay local until this is true.
     #[serde(default)]
-    pub push: bool,
+    pub push: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -107,6 +105,23 @@ impl Config {
     /// The configuration from the default path, or defaults when the file is missing.
     pub fn load() -> Result<Self> {
         Self::load_from(&path()?)
+    }
+
+    pub fn load_for_repo(repo: &crate::git::Repo) -> Result<Self> {
+        let global = path()?;
+        let local = repo.main_checkout_root()?.join(".config/agt.toml");
+        Self::load_paths(&global, &local)
+    }
+
+    fn load_paths(global: &Path, local: &Path) -> Result<Self> {
+        let mut merged = read_value(global)?;
+        let overrides = read_value(local)?;
+        merge_values(&mut merged, overrides);
+        let config: Self = merged.try_into().map_err(|error: toml::de::Error| {
+            Error(format!("parse {}: {}", local.display(), error.message()))
+        })?;
+        config.validate(local)?;
+        Ok(config)
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
@@ -140,6 +155,42 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+fn read_value(path: &Path) -> Result<toml::Value> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return fail(format!("read {}: {error}", path.display())),
+    };
+    let mut value: toml::Value = toml::from_str(&text)
+        .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
+    let config: Config = value
+        .clone()
+        .try_into()
+        .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
+    config.validate(path)?;
+    if let Some(sync) = value.get_mut("sync").and_then(toml::Value::as_table_mut)
+        && let Some(auto) = sync.remove("auto")
+    {
+        sync.insert("auto_pull".into(), auto);
+    }
+    Ok(value)
+}
+
+fn merge_values(base: &mut toml::Value, overrides: toml::Value) {
+    if let (Some(base), toml::Value::Table(overrides)) = (base.as_table_mut(), &overrides) {
+        for (key, value) in overrides {
+            match base.get_mut(key) {
+                Some(existing) => merge_values(existing, value.clone()),
+                None => {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    } else {
+        *base = overrides;
     }
 }
 
@@ -178,15 +229,65 @@ mod tests {
     }
 
     #[test]
-    fn sync_defaults_to_auto_with_five_minutes() {
+    fn sync_defaults_to_local_with_five_minutes() {
         let (_dir, config) = load("");
         let sync = config.unwrap().sync;
-        assert!(sync.auto);
+        assert!(!sync.auto_pull);
+        assert!(!sync.auto_push);
         assert_eq!(sync.max_age_secs, 300);
         let (_dir, config) = load("[sync]\nauto = false\nmax_age_secs = 60\n");
         let sync = config.unwrap().sync;
-        assert!(!sync.auto);
+        assert!(!sync.auto_pull);
         assert_eq!(sync.max_age_secs, 60);
+    }
+
+    #[test]
+    fn sync_legacy_alias_is_explicit_and_duplicate_aliases_fail() {
+        let (_, config) = load("[sync]\nauto = true\n");
+        assert!(config.unwrap().sync.auto_pull);
+        let (_, config) = load("[sync]\nauto = true\nauto_pull = false\n");
+        assert!(config.unwrap_err().0.contains("duplicate field"));
+    }
+
+    #[test]
+    fn repository_config_overrides_fields_and_replaces_arrays() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        let local = dir.path().join("local.toml");
+        std::fs::write(&global, "[sync]\nauto = true\nauto_push = true\nmax_age_secs = 17\n[worktree]\nroots = [\"a\", \"b\"]\n[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\n").unwrap();
+        std::fs::write(
+            &local,
+            "[sync]\nauto_pull = false\n[worktree]\nroots = [\"c\"]\n[issues]\ntracker = []\n",
+        )
+        .unwrap();
+        let config = Config::load_paths(&global, &local).unwrap();
+        assert!(!config.sync.auto_pull);
+        assert!(config.sync.auto_push);
+        assert_eq!(config.sync.max_age_secs, 17);
+        assert_eq!(config.worktree.roots, Some(vec!["c".into()]));
+        assert!(config.issues.tracker.is_empty());
+        std::fs::write(&local, "[sync]\nauto = false\nauto_pull = true\n").unwrap();
+        assert!(
+            Config::load_paths(&global, &local)
+                .unwrap_err()
+                .0
+                .contains("duplicate field")
+        );
+    }
+
+    #[test]
+    fn invalid_global_fields_name_the_global_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        let local = dir.path().join("local.toml");
+        std::fs::write(
+            &global,
+            "[[issues.tracker]]\nforge = \"github\"\nhost = \"\"\nrepo = \"o/r\"\n",
+        )
+        .unwrap();
+        let error = Config::load_paths(&global, &local).unwrap_err().0;
+        assert!(error.contains("global.toml"), "{error}");
+        assert!(error.contains("host"), "{error}");
     }
 
     #[test]
@@ -221,7 +322,7 @@ mod tests {
         assert_eq!(tracker.forge, TrackerForge::Github);
         assert_eq!(tracker.scope, Scope::Involved);
         assert_eq!(tracker.since_days, 90);
-        assert!(!tracker.push);
+        assert_eq!(tracker.push, None);
     }
 
     #[test]
@@ -237,7 +338,7 @@ mod tests {
         assert_eq!(trackers[0].forge, TrackerForge::Gitlab);
         assert_eq!(trackers[0].scope, Scope::Assigned);
         assert_eq!(trackers[0].since_days, 30);
-        assert!(trackers[0].push);
+        assert_eq!(trackers[0].push, Some(true));
         assert_eq!(trackers[1].scope, Scope::All);
     }
 

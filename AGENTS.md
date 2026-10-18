@@ -1,8 +1,8 @@
 # agt
 
 Rust CLI (one binary, `agt`) whose `agt review` subcommand stores PR/MR-style review threads, runs and reviewer metadata per
-repository under `$XDG_STATE_HOME/agents/reviews/`, and syncs them with GitHub
-and GitLab.
+repository in the main checkout's `.agt/reviews/`, shared by linked worktrees.
+Issues live in `.agt/issues/`. Remote sync with GitHub/GitLab is opt-in.
 
 ## Checks
 
@@ -28,13 +28,16 @@ import a domain module and domain modules never import each other;
 
 ## Auto-sync
 
-`agt issue` and `agt review` reads sync first when the local copy is older than `[sync] max_age_secs`
-(`src/forge/auto.rs` holds the policy, the one stderr line and the 15 s cap; `src/issue/auto.rs` and
-`src/review/commands/auto.rs` decide what to sync). Only the auto path sets a deadline in
-`src/forge/transport.rs`; explicit `sync` has none. Auto-sync only calls what `sync` calls, so it
-stays read-only on the forge, and a failure (or an unreadable config) never fails the read, and is remembered in `.auto-sync.json` so the next reads back off for the max age. A new read command syncs through
-these modules or says why it stays local. Tests that check local behavior run offline
-(`AGT_OFFLINE=1`, `Env::offline`).
+`agt issue` and `agt review` stay local by default. Global TOML configuration lives in
+`$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's `.config/agt.toml` overrides fields.
+`[sync] auto_pull = true` enables stale reads; `auto_push = true` enables publication
+of the changed issue or newly completed review run. `auto` aliases `auto_pull`.
+
+`src/forge/auto.rs` holds shared policy and the 15-second automatic-call deadline.
+`src/issue/auto.rs` and `src/review/commands/auto.rs` choose the eligible records.
+Automatic failures preserve local changes. Private notes/links never leave the machine.
+Explicit remote commands opt in independently; `--offline` and `AGT_OFFLINE=1` block them too.
+Tests must opt in when checking automatic behavior and isolate HOME/XDG/git/forge tools.
 
 ## Release
 

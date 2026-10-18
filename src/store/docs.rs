@@ -3,7 +3,6 @@
 //! changed under the same per-file lock and atomic replace as a target.
 
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -20,19 +19,14 @@ use crate::core::error::Result;
 impl Store {
     /// The directories directly under the namespace root.
     pub fn child_dirs(&self) -> Result<Vec<PathBuf>> {
-        let entries = match fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return fail(format!("read {}: {error}", self.root.display())),
-        };
+        let entries = self.read_entries(&self.root)?;
         let mut dirs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(ctx(format!("read {}", self.root.display())))?;
             let kind = entry
                 .file_type()
                 .map_err(ctx(format!("stat {}", entry.path().display())))?;
             if kind.is_dir() {
-                dirs.push(entry.path());
+                dirs.push(self.root.join(entry.file_name()));
             }
         }
         dirs.sort();
@@ -42,7 +36,7 @@ impl Store {
     pub fn load_doc<T: DeserializeOwned>(&self, dir: &Path, name: &str) -> Result<Option<T>> {
         validate_key(name)?;
         let path = dir.join(format!("{name}.json"));
-        read_document(&path)?
+        read_document(&self.read_path(&path))?
             .map(|document| self.parse_doc(&path, document))
             .transpose()
     }
@@ -50,7 +44,7 @@ impl Store {
     /// Every document of `dir` except the ones named in `skip`, in name order.
     pub fn docs<T: DeserializeOwned>(&self, dir: &Path, skip: &[&str]) -> Result<Vec<T>> {
         let mut docs = Vec::new();
-        for path in doc_paths(dir, skip)? {
+        for path in self.doc_paths(dir, skip)? {
             if let Some(document) = read_document(&path)? {
                 docs.push(self.parse_doc(&path, document)?);
             }
@@ -66,7 +60,7 @@ impl Store {
         skip: &[&str],
     ) -> Result<(Vec<T>, Vec<String>)> {
         let (mut docs, mut unknown) = (Vec::new(), Vec::new());
-        for path in doc_paths(dir, skip)? {
+        for path in self.doc_paths(dir, skip)? {
             let Some(document) = read_document(&path)? else {
                 continue;
             };
@@ -180,27 +174,23 @@ impl Store {
     }
 }
 
-/// The `.json` documents of `dir` that are not hidden or in `skip`, in name order.
-fn doc_paths(dir: &Path, skip: &[&str]) -> Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return fail(format!("read {}: {error}", dir.display())),
-    };
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(stem) = name.strip_suffix(".json") else {
-            continue;
-        };
-        if name.starts_with('.') || skip.contains(&stem) || !entry.path().is_file() {
-            continue;
+impl Store {
+    fn doc_paths(&self, dir: &Path, skip: &[&str]) -> Result<Vec<PathBuf>> {
+        let entries = self.read_entries(dir)?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if name.starts_with('.') || skip.contains(&stem) || !entry.path().is_file() {
+                continue;
+            }
+            paths.push(entry.path());
         }
-        paths.push(entry.path());
+        paths.sort();
+        Ok(paths)
     }
-    paths.sort();
-    Ok(paths)
 }
 
 /// The first field of `document` that `doc` would not write back.

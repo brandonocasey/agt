@@ -527,7 +527,7 @@ fn store_layout_and_permissions() {
         .as_str()
         .unwrap()
         .to_owned();
-    let dir = env.state().join("github.com").join("Owner").join("Repo");
+    let dir = env.state();
     let file = dir.join(format!("{key}.json"));
     assert_eq!(
         fs::metadata(&file).unwrap().permissions().mode() & 0o777,
@@ -559,7 +559,7 @@ fn foreign_documents_in_the_store_are_ignored() {
         .as_str()
         .unwrap()
         .to_owned();
-    let dir = env.state().join("github.com").join("Owner").join("Repo");
+    let dir = env.state();
     fs::write(
         dir.join("issue-gh-7.json"),
         r#"{"version":1,"kind":"issue","key":"issue-gh-7","threads":[]}"#,
@@ -582,13 +582,16 @@ fn foreign_documents_in_the_store_are_ignored() {
 #[test]
 fn local_repo_key_without_remote() {
     let env = Env::with_branch();
-    env.run(&["comment", "--body", "x"]);
-    let local = fs::read_dir(env.state().join("local"))
+    let created = env.run(&["comment", "--body", "x"]);
+    let key = created["target"].as_str().unwrap();
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(env.state().join(format!("{key}.json"))).unwrap())
+            .unwrap();
+    let name = stored["repo"]
+        .as_str()
         .unwrap()
-        .next()
-        .unwrap()
+        .strip_prefix("local/")
         .unwrap();
-    let name = local.file_name().into_string().unwrap();
     let (prefix, hash) = name.rsplit_once('-').unwrap();
     assert_eq!(prefix, "repo");
     assert_eq!(hash.len(), 12);
@@ -626,13 +629,7 @@ fn concurrent_writers_do_not_lose_updates() {
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(ids.len(), writers + 1);
-    let stored = fs::read_dir(env.state().join("local"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let file = fs::read_dir(stored)
+    let file = fs::read_dir(env.state())
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| {
@@ -666,7 +663,17 @@ fn status_writes_nothing() {
 
     let fresh = Env::with_branch();
     fresh.run(&["status"]);
-    assert!(!fresh.state().exists());
+    assert!(
+        fs::read_dir(fresh.state())
+            .into_iter()
+            .flatten()
+            .all(|entry| !entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "json")),
+        "initialization creates no review targets"
+    );
 }
 
 #[test]

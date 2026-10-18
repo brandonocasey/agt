@@ -18,10 +18,19 @@ const PUSH_LOCK: &str = "push";
 /// The failure of a tracker's sync is remembered under this key in the tracker's directory.
 pub(super) const FAILURE_KEY: &str = "sync";
 
-pub fn sync_stale(store: &Store, filter: Option<&str>, offline: bool) -> Result<()> {
-    let Some(policy) = Policy::resolve(offline) else {
+pub fn sync_stale(
+    store: &Store,
+    repo: &crate::git::Repo,
+    filter: Option<&str>,
+    offline: bool,
+) -> Result<()> {
+    let Some(mut policy) = Policy::resolve_for_repo(repo, offline) else {
         return Ok(());
     };
+    if let Err(error) = trackers::destinations(&mut policy.config, repo, filter, true) {
+        auto::skipped(&error.0);
+        return Ok(());
+    }
     // A filter that matches nothing is the read's own error to report.
     let Ok(configured) = trackers::configured(&policy.config, filter) else {
         return Ok(());
@@ -85,4 +94,144 @@ fn sync_one(store: &Store, configured: &Tracker, dir: &std::path::Path) -> Resul
     };
     let tracker = trackers::ensure(store, configured).map_err(Stop::Failed)?;
     sync_tracker(store, tracker).map(drop).map_err(Stop::Failed)
+}
+
+fn destination<'a>(
+    config: &'a crate::core::config::Config,
+    filter: Option<&str>,
+) -> Result<&'a Tracker> {
+    let targets = trackers::configured(config, filter)?;
+    let [target] = targets.as_slice() else {
+        return crate::core::error::fail("several issue destinations; pass --tracker");
+    };
+    if target.push == Some(false) {
+        return crate::core::error::fail("tracker has push = false");
+    }
+    Ok(*target)
+}
+
+fn attach(
+    store: &Store,
+    configured: &Tracker,
+    source: &trackers::Tracker,
+    issue: &crate::store::issues::Issue,
+) -> Result<trackers::Tracker> {
+    let target = trackers::ensure(store, configured)?;
+    let name = trackers::doc_name(issue);
+    store.update_doc(
+        &source.dir,
+        &name,
+        || issue.clone(),
+        |issue| {
+            issue.tracker.clone_from(&target.doc.key);
+            Ok(())
+        },
+    )?;
+    store.attach_issue(&source.dir, &target.dir, &name)?;
+    Ok(target)
+}
+
+pub fn attach_pending(
+    store: &Store,
+    config: &crate::core::config::Config,
+    filter: Option<&str>,
+) -> Result<()> {
+    let locals = trackers::stored(store, Some("local")).unwrap_or_default();
+    if locals.is_empty() {
+        return Ok(());
+    }
+    let target = destination(config, filter)?;
+    for source in locals {
+        for issue in store.docs::<crate::store::issues::Issue>(&source.dir, &[TRACKER_FILE])? {
+            attach(store, target, &source, &issue)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn push_changed(
+    store: &Store,
+    repo: &crate::git::Repo,
+    filter: Option<&str>,
+    offline: bool,
+    value: &mut serde_json::Value,
+) {
+    if auto::is_offline(offline) {
+        return;
+    }
+    let config = match crate::core::config::Config::load_for_repo(repo) {
+        Ok(config) => config,
+        Err(error) => {
+            auto::skipped(&error.0);
+            return;
+        }
+    };
+    if !config.sync.auto_push {
+        return;
+    }
+    let Some(key) = value
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let mut destination_dir = None;
+    let result = auto::attempt(|| {
+        let (source, issue) = trackers::find(store, None, &key)?;
+        let target = if source.doc.forge.is_none() {
+            let mut config = config;
+            trackers::destinations(&mut config, repo, filter, true)?;
+            attach(store, destination(&config, filter)?, &source, &issue)?
+        } else {
+            let target = config.issues.tracker.iter().find(|target| {
+                trackers::tracker_key(trackers::forge_of(target.forge), &target.host, &target.repo)
+                    == source.doc.key
+            });
+            if target.is_some_and(|target| target.push == Some(false)) {
+                return crate::core::error::fail("tracker has push = false");
+            }
+            source
+        };
+        destination_dir = Some(target.dir.clone());
+        let name = trackers::doc_name(&issue);
+        let report = super::push::one(store, &target, &name)?;
+        if report["failed"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            return crate::core::error::fail("issue upload failed; changes remain queued");
+        }
+        let canonical = report["sent"]
+            .as_array()
+            .and_then(|sent| {
+                sent.iter()
+                    .find_map(|item| item.get("number").and_then(serde_json::Value::as_u64))
+            })
+            .map(|number| number.to_string())
+            .unwrap_or(name);
+        store
+            .load_doc::<crate::store::issues::Issue>(&target.dir, &canonical)?
+            .map(|issue| super::view::summary(&issue))
+            .ok_or_else(|| Error("changed issue vanished".into()))
+    });
+    if let Some(updated) = result {
+        *value = updated;
+    } else if let Some(dir) = destination_dir {
+        let saved = store.docs::<crate::store::issues::Issue>(&dir, &[TRACKER_FILE]);
+        if let Ok(saved) = saved
+            && let Some(issue) = saved.iter().find(|issue| {
+                issue.key == key
+                    || issue
+                        .create
+                        .as_ref()
+                        .and_then(|create| create.sent.as_deref())
+                        .and_then(crate::forge::markers::agent_id)
+                        .as_deref()
+                        == Some(key.as_str())
+            })
+        {
+            *value = super::view::summary(issue);
+        }
+    }
 }

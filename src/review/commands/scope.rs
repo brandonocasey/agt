@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
 use crate::git::{CommitInfo, Repo};
-use crate::store::Store;
 use crate::store::model::{Author, CommitPatch, Target, TargetKind, VERSION};
+use crate::store::{Namespace, Store};
 
 use super::{Ctx, Scope, Selection, pass_patch_ids, passes};
 
@@ -52,15 +52,16 @@ impl Ctx {
     }
 
     pub(super) fn new(
-        store: Store,
         selection: Selection,
         read_only: bool,
         scratch_git: bool,
+        preview: bool,
     ) -> Result<Self> {
         let mut repo = Repo::discover()?;
         if scratch_git {
             repo = repo.read_only()?;
         }
+        let store = Store::open_repo(Namespace::Reviews, &repo, preview)?;
         let repo_key = repo.repo_key()?;
         let dir = store.repo_dir(&repo_key)?;
         if !read_only && repo_key.starts_with("local/") {

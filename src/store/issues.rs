@@ -153,7 +153,7 @@ pub struct Issue {
 pub struct TrackerDoc {
     pub version: u32,
     pub key: String,
-    pub forge: Forge,
+    pub forge: Option<Forge>,
     pub host: String,
     pub repo: String,
     pub scope: Scope,
@@ -163,4 +163,67 @@ pub struct TrackerDoc {
     pub watermark: Option<String>,
     pub login: Option<String>,
     pub synced_at: Option<String>,
+}
+
+impl super::Store {
+    pub fn attach_issue(
+        &self,
+        source: &std::path::Path,
+        target: &std::path::Path,
+        name: &str,
+    ) -> crate::core::error::Result<()> {
+        super::validate_key(name)?;
+        let _source = super::lock(&source.join(format!(".{name}.lock")))?;
+        let _target = super::lock(&target.join(format!(".{name}.lock")))?;
+        let destination = target.join(format!("{name}.json"));
+        match std::fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return crate::core::error::fail(format!(
+                    "{} already exists",
+                    destination.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(crate::core::error::Error(format!(
+                    "stat {}: {error}",
+                    destination.display()
+                )));
+            }
+        }
+        std::fs::rename(source.join(format!("{name}.json")), destination)
+            .map_err(crate::core::error::ctx("attach local issue"))?;
+        for directory in [source, target] {
+            std::fs::File::open(directory)
+                .and_then(|file| file.sync_all())
+                .map_err(crate::core::error::ctx("sync attached issue directory"))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn attaching_keeps_a_broken_destination_symlink_and_the_local_issue() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = super::super::Store::at(temp.path(), super::super::Namespace::Issues);
+        let source = temp.path().join("local");
+        let target = temp.path().join("remote");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let file = source.join("local-test.json");
+        std::fs::write(&file, "private issue").unwrap();
+        let destination = target.join("local-test.json");
+        std::os::unix::fs::symlink(temp.path().join("missing"), &destination).unwrap();
+
+        assert!(store.attach_issue(&source, &target, "local-test").is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "private issue");
+        assert!(
+            std::fs::symlink_metadata(destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

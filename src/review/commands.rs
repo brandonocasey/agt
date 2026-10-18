@@ -4,10 +4,10 @@ use crate::core::error::{Error, Result};
 use crate::core::output::Output;
 use crate::git::Repo;
 use crate::review::cli::{Cli, Command, FindingAction, PassAction, RunAction};
+use crate::store::Store;
 use crate::store::model::{
     Pass, Reveal, RoleUsage, Run, Severity, Target, TargetKind, Thread, ThreadType,
 };
-use crate::store::{Namespace, Store};
 
 mod approve;
 mod auto;
@@ -62,7 +62,6 @@ struct Scope {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let store = Store::open(Namespace::Reviews)?;
     let selection = Selection {
         target: cli.target,
         range: cli.range,
@@ -77,7 +76,17 @@ pub fn run(cli: Cli) -> Result<Output> {
     );
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
-    let mut ctx = Ctx::new(store, selection, read_only, scratch_git)?;
+    if crate::forge::auto::is_offline(cli.offline)
+        && matches!(cli.command, Command::Sync { .. } | Command::Publish { .. })
+    {
+        return crate::core::error::fail("offline mode forbids review sync and publish");
+    }
+    let mut ctx = Ctx::new(
+        selection,
+        read_only,
+        scratch_git,
+        matches!(cli.command, Command::Publish { dry_run: true, .. }),
+    )?;
     if let Some(run) = run_hint(&cli.command) {
         ctx.select_run_target(&run)?;
     }
@@ -158,14 +167,20 @@ pub fn run(cli: Cli) -> Result<Output> {
                 None => Vec::new(),
             };
             let mut ended = run_end(&ctx, &run, reveal, head.as_deref(), usage)?;
+            auto::publish_ended(&mut ctx, &run, cli.offline);
             // The status the caller would check next, from a read-only repository so
             // merge checks write no objects.
-            let reader = Ctx::new(
-                Store::open(Namespace::Reviews)?,
-                status_selection,
-                true,
-                true,
-            )?;
+            let mut reader_selection = status_selection;
+            if reader_selection.target.is_some()
+                && let Some(target) = ctx
+                    .store
+                    .targets(&ctx.dir)?
+                    .into_iter()
+                    .find(|target| target.runs.iter().any(|known| known.id == run))
+            {
+                reader_selection.target = Some(target.key);
+            }
+            let reader = Ctx::new(reader_selection, true, true, false)?;
             ended["status"] = brief_status(status(&reader, head.as_deref())?);
             ended
         }
@@ -232,13 +247,14 @@ pub fn run(cli: Cli) -> Result<Output> {
             only,
             pr,
         } => publish::publish(
-            &ctx,
+            &mut ctx,
             pr.as_deref(),
             &publish::Options {
                 dry_run,
                 not_own,
                 findings,
                 only,
+                run: None,
             },
         )?,
     };

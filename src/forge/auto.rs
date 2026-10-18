@@ -27,27 +27,23 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// `None` when the read stays local: `--offline`, `AGT_OFFLINE`, `sync.auto = false`, or a
-    /// configuration that cannot be read, which is reported as a skipped sync because a read
-    /// needs no configuration. A read that stays offline never loads the file.
-    pub fn resolve(offline: bool) -> Option<Self> {
-        if offline || offline_env() {
+    pub fn resolve_for_repo(repo: &crate::git::Repo, offline: bool) -> Option<Self> {
+        if is_offline(offline) {
             return None;
         }
-        let config = match Config::load() {
+        let config = match Config::load_for_repo(repo) {
             Ok(config) => config,
             Err(error) => {
                 skipped(&error.0);
                 return None;
             }
         };
-        if !config.sync.auto {
+        if !config.sync.auto_pull {
             return None;
         }
-        let max_age_secs = config.sync.max_age_secs;
         Some(Self {
+            max_age_secs: config.sync.max_age_secs,
             config,
-            max_age_secs,
         })
     }
 
@@ -119,8 +115,10 @@ pub fn skipped(reason: &str) {
 }
 
 /// `AGT_OFFLINE` set to anything but empty, `0` or `false`.
-fn offline_env() -> bool {
-    std::env::var("AGT_OFFLINE").is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false"))
+pub fn is_offline(offline: bool) -> bool {
+    offline
+        || std::env::var("AGT_OFFLINE")
+            .is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false"))
 }
 
 fn time_cap() -> Duration {
