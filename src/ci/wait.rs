@@ -1,175 +1,258 @@
-//! `agt ci wait`: poll a pipeline until it finishes, then list its failed jobs.
+//! `agt ci wait`: polls required GitHub checks or the GitLab head pipelines of PRs, MRs and
+//! pipelines, and prints one JSON event per line when a target's state first appears or
+//! changes, then a final event.
 
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
-use crate::core::error::Error;
+use super::classify::{State, blocked, failed_checks, is_query_error, is_waiting, status};
+use super::poll::snapshot;
+use super::target::Resolved;
+use crate::core::clock;
 
-use super::api::{Gitlab, RUNNING, display, text, truthy};
-use super::failures::runs_commit;
-use super::table::{Out, table};
-
-const API_RETRIES: u32 = 5;
-
-/// What the last progress line said.
-#[derive(PartialEq)]
-enum Last {
-    Nothing,
-    NoPipeline,
-    Pipeline(String, usize),
+pub struct Options {
+    pub targets: Vec<Resolved>,
+    pub timeout: Duration,
+    pub interval: Duration,
+    pub max_interval: Duration,
 }
 
-/// How the wait ended: the process exit status, with the message to print when it is an error.
-pub enum Done {
-    Status(u8),
-    Error(String, u8),
+static SIGNAL: AtomicI32 = AtomicI32::new(0);
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(signal: i32) {
+    SIGNAL.store(signal, Ordering::SeqCst);
+    CANCEL.store(true, Ordering::SeqCst);
 }
 
-/// Why a poll stopped: a failed API call is retried, anything else ends the wait.
-enum Stop {
-    Api(Error),
-    Fatal(String),
-}
-
-impl From<Error> for Stop {
-    fn from(error: Error) -> Self {
-        Self::Api(error)
+fn install_handlers() {
+    let handler = on_signal as extern "C" fn(i32) as libc::sighandler_t;
+    // SAFETY: the handler only stores to atomics, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
     }
 }
 
-/// `%H:%M:%S` in local time.
-fn clock() -> String {
-    // SAFETY: time(2) accepts a null pointer; localtime_r writes only into `parts`.
-    let parts = unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut parts: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&now, &mut parts);
-        parts
-    };
+fn signal_exit() -> u8 {
+    if SIGNAL.load(Ordering::SeqCst) == libc::SIGINT {
+        130
+    } else {
+        143
+    }
+}
+
+fn cancelled() -> bool {
+    CANCEL.load(Ordering::SeqCst)
+}
+
+fn timestamp() -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let stamp = clock::format(i64::try_from(elapsed.as_secs()).unwrap_or(0));
     format!(
-        "{:02}:{:02}:{:02}",
-        parts.tm_hour, parts.tm_min, parts.tm_sec
+        "{}.{:03}Z",
+        stamp.trim_end_matches('Z'),
+        elapsed.subsec_millis()
     )
 }
 
-pub struct Wait<'a> {
-    pub gitlab: &'a Gitlab,
-    /// A pipeline id, or an MR iid when `merge_request` is set.
-    pub number: u64,
-    pub merge_request: bool,
-    pub sha: Option<&'a str>,
-    pub interval: u64,
-    pub timeout: u64,
+fn write_event(event: Value) {
+    let mut fields = Map::new();
+    fields.insert("at".to_owned(), timestamp().into());
+    if let Value::Object(event) = event {
+        fields.extend(event);
+    }
+    let mut line = Value::Object(fields).to_string();
+    line.push('\n');
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.flush();
 }
 
-fn short(sha: &str) -> String {
-    sha.chars().take(8).collect()
+/// The wait before poll number `attempt` (from 0): the interval, doubling up to the maximum.
+fn backoff(attempt: u32, interval: Duration, max: Duration) -> Duration {
+    interval
+        .saturating_mul(1_u32.checked_shl(attempt).unwrap_or(u32::MAX))
+        .min(max)
 }
 
-pub fn run(wait: &Wait, out: &Out) -> Done {
-    let gitlab = wait.gitlab;
-    let mut number = wait.number;
-    let mut merge_request = wait.merge_request;
-    let pause = || thread::sleep(Duration::from_secs(wait.interval));
-    let deadline = Instant::now() + Duration::from_secs(wait.timeout);
-    let mut last = Last::Nothing;
-    let mut errors = 0;
-    let (pipeline, finals) = loop {
-        if Instant::now() > deadline {
-            return Done::Error(format!("timed out after {}s", wait.timeout), 3);
+fn sleep(duration: Duration) {
+    let until = Instant::now() + duration;
+    while !cancelled() {
+        let now = Instant::now();
+        if now >= until {
+            return;
         }
-        let polled: Result<Option<(Value, Vec<Value>)>, Stop> = (|| {
-            if merge_request {
-                // GitLab updates the MR and its head_pipeline asynchronously after a push;
-                // until then they describe the previous commit. --sha names the commit that
-                // was pushed.
-                let mr = gitlab.get(&format!("{}/merge_requests/{number}", gitlab.base))?;
-                let head = mr.get("head_pipeline").cloned().unwrap_or(Value::Null);
-                let sha = wait
-                    .sha
-                    .map_or_else(|| text(&mr, "sha").to_owned(), str::to_owned);
-                if !truthy(Some(&head)) && wait.sha.is_none() {
-                    return Err(Stop::Fatal(format!("!{number} has no pipeline")));
+        thread::sleep((until - now).min(Duration::from_millis(20)));
+    }
+}
+
+struct Tracked {
+    target: Resolved,
+    /// The head the target is pinned to: its `@SHA`, else the head the first poll read.
+    head: Option<String>,
+    /// The pinned head came from `--sha` and the host may not show it yet.
+    awaiting: bool,
+    /// The last state written.
+    prior: Option<State>,
+    done: bool,
+}
+
+enum Polled {
+    Read(State),
+    /// The deadline passed or the wait was cancelled before the read finished.
+    Interrupted,
+}
+
+/// Reads one target on its own thread, so a hung `gh` or `glab` cannot hold the wait past its
+/// deadline or a signal.
+fn poll(tracked: &mut Tracked, deadline: Instant) -> Polled {
+    let (target, head, awaiting) = (
+        tracked.target.clone(),
+        tracked.head.clone(),
+        tracked.awaiting,
+    );
+    let (send, receive) = channel();
+    thread::spawn(move || {
+        let _ = send.send(snapshot(&target, head, awaiting));
+    });
+    loop {
+        let now = Instant::now();
+        if cancelled() || now >= deadline {
+            return Polled::Interrupted;
+        }
+        match receive.recv_timeout((deadline - now).min(Duration::from_millis(20))) {
+            Ok((state, head)) => {
+                tracked.head = head;
+                if tracked.awaiting && !is_waiting(&state) && !is_query_error(&state) {
+                    tracked.awaiting = false;
                 }
-                let matches = runs_commit(gitlab, &head, &sha)?;
-                errors = 0;
-                if !matches {
-                    if last != Last::NoPipeline {
-                        out.line(&format!(
-                            "{} waiting for a pipeline on {}",
-                            clock(),
-                            short(&sha)
-                        ));
-                        last = Last::NoPipeline;
-                    }
-                    return Ok(None);
-                }
-                number = head.get("id").and_then(Value::as_u64).unwrap_or(0);
-                merge_request = false;
+                return Polled::Read(state);
             }
-            let pipeline = gitlab.get(&format!("{}/pipelines/{number}", gitlab.base))?;
-            let jobs = gitlab.jobs(&Value::from(number))?;
-            errors = 0;
-            let finals = jobs
-                .into_values()
-                .filter_map(|attempts| attempts.last().cloned())
-                .collect();
-            Ok(Some((pipeline, finals)))
-        })();
-        match polled {
-            Err(Stop::Fatal(message)) => return Done::Error(message, 2),
-            Err(Stop::Api(error)) => {
-                errors += 1;
-                eprintln!("agt ci: {error} ({errors}/{API_RETRIES})");
-                if errors >= API_RETRIES {
-                    return Done::Status(2);
-                }
-                pause();
-                continue;
-            }
-            Ok(None) => {
-                pause();
-                continue;
-            }
-            Ok(Some((pipeline, finals))) => {
-                let finals: Vec<Value> = finals;
-                let status = text(&pipeline, "status").to_owned();
-                let done = finals
-                    .iter()
-                    .filter(|job| !RUNNING.contains(&text(job, "status")))
-                    .count();
-                let state = Last::Pipeline(status.clone(), done);
-                if state != last {
-                    out.line(&format!(
-                        "{} {status} ({done}/{} jobs finished) {}",
-                        clock(),
-                        finals.len(),
-                        text(&pipeline, "web_url")
-                    ));
-                    last = state;
-                }
-                if !RUNNING.contains(&status.as_str()) {
-                    break (pipeline, finals);
-                }
-                pause();
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                let mut state = blocked("query_error");
+                state["detail"] = json!("the poll stopped unexpectedly");
+                return Polled::Read(state);
             }
         }
-    };
-    let failed: Vec<Vec<String>> = finals
+    }
+}
+
+/// Writes the final event, with the failed checks of each target, and returns `code`.
+fn finish(tracked: &[Tracked], reason: &str, code: u8) -> u8 {
+    let results: Vec<Value> = tracked
         .iter()
-        .filter(|job| text(job, "status") == "failed" && !truthy(job.get("allow_failure")))
-        .map(|job| {
-            vec![
-                text(job, "name").to_owned(),
-                display(job.get("stage")),
-                text(job, "web_url").to_owned(),
-            ]
+        .map(|tracked| {
+            let state = tracked.prior.clone().unwrap_or_else(|| blocked(reason));
+            let mut fields = Map::new();
+            fields.insert("target".to_owned(), tracked.target.key.clone().into());
+            fields.extend(state.as_object().cloned().unwrap_or_default());
+            fields.insert("failed".to_owned(), failed_checks(&state).into());
+            Value::Object(fields)
         })
         .collect();
-    if !failed.is_empty() {
-        table(out, &["failed job", "stage", "log"], &failed);
+    write_event(json!({"event": "final", "reason": reason, "results": results}));
+    code
+}
+
+fn emit(tracked: &mut Tracked, state: &State) {
+    let text = state.to_string();
+    let previous = tracked.prior.as_ref().map(Value::to_string);
+    if previous.as_deref() == Some(text.as_str()) {
+        return;
     }
-    Done::Status(u8::from(text(&pipeline, "status") != "success"))
+    let mut event = Map::new();
+    event.insert(
+        "event".to_owned(),
+        if previous.is_some() {
+            "change"
+        } else {
+            "initial"
+        }
+        .into(),
+    );
+    event.insert("target".to_owned(), tracked.target.key.clone().into());
+    event.extend(state.as_object().cloned().unwrap_or_default());
+    write_event(Value::Object(event));
+    tracked.prior = Some(state.clone());
+}
+
+/// Polls until every target is complete, one needs action, the deadline passes or a signal
+/// arrives; returns the exit status.
+pub fn run(options: &Options) -> u8 {
+    let deadline = Instant::now() + options.timeout;
+    let mut tracked: Vec<Tracked> = options
+        .targets
+        .iter()
+        .map(|target| Tracked {
+            target: target.clone(),
+            head: target.sha.clone(),
+            awaiting: target.awaiting,
+            prior: None,
+            done: false,
+        })
+        .collect();
+    install_handlers();
+    for attempt in 0.. {
+        if cancelled() {
+            return finish(&tracked, "cancelled", signal_exit());
+        }
+        if Instant::now() >= deadline {
+            return finish(&tracked, "deadline_exceeded", 3);
+        }
+        let mut blocker = false;
+        let mut query_error = false;
+        for entry in tracked.iter_mut().filter(|entry| !entry.done) {
+            let Polled::Read(state) = poll(entry, deadline) else {
+                break;
+            };
+            emit(entry, &state);
+            match status(&state) {
+                "complete" => entry.done = true,
+                "blocked" => {
+                    blocker = true;
+                    query_error |= is_query_error(&state);
+                }
+                _ => {}
+            }
+        }
+        if cancelled() {
+            return finish(&tracked, "cancelled", signal_exit());
+        }
+        if Instant::now() >= deadline {
+            return finish(&tracked, "deadline_exceeded", 3);
+        }
+        if blocker {
+            return finish(&tracked, "action_required", if query_error { 2 } else { 1 });
+        }
+        if tracked.iter().all(|entry| entry.done) {
+            return finish(&tracked, "checks_complete", 0);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sleep(backoff(attempt, options.interval, options.max_interval).min(remaining));
+    }
+    unreachable!("the loop only returns")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doubles_the_wait_up_to_the_maximum() {
+        let wait = |attempt| backoff(attempt, Duration::from_secs(10), Duration::from_secs(35));
+        let delays: Vec<u64> = [0, 1, 2, 3, 40]
+            .iter()
+            .map(|n| wait(*n).as_secs())
+            .collect();
+        assert_eq!(delays, [10, 20, 35, 35, 35]);
+    }
 }

@@ -819,37 +819,39 @@ The integration tests run the Node script too when it is available (set
 `AGT_LEGACY_AGENT_TASK` to its path, or keep the chezmoi source in its usual place; they skip
 without it) to check that each tool reads what the other wrote.
 
-## Watch
-
-`agt watch` polls required checks until they finish, fail or change; it replaces
-the `agent-watch` script with the same arguments, events and exit statuses.
-
-```sh
-agt watch --target OWNER/REPO#PR@HEAD_SHA --target GROUP/PROJECT!IID@HEAD_SHA \
-  [--deadline-seconds N] [--interval-ms N] [--max-interval-ms N]
-```
-
-A GitHub target polls `gh pr view` and `gh pr checks --required`; a GitLab target polls the MR and
-its head pipeline with `glab api`, on `GITLAB_HOST` or `glab config get host`. Stdout gets one JSON
-event per line: `initial` and `change` per target when its state first appears or changes, then one
-`final` event with every result. Defaults: 3600 seconds, a 15 second interval doubling up to 120
-seconds. Exit status: 0 all checks passed or the PR merged, 2 a target needs action (failed or
-cancelled checks, a changed head, a closed PR, a query error), 124 deadline, 64 usage, 130 or 143
-after SIGINT or SIGTERM. `AGT_GH_BIN` and `AGT_GLAB_BIN` replace the tools.
-
 ## CI
 
-`agt ci` is GitLab CI triage, replacing the `gl-ci` script. Both subcommands take `-R group/project`
-(default: the current repository, or the project in a URL) and an MR as `123`, `!123` or a URL.
+`agt ci` waits for PR/MR checks and triages GitLab failures.
 
-- `agt ci failures <mr> [-n N]` lists the failed and retried jobs of the MR's head pipeline, the
-  failing specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the
-  last N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
-  `pending` or `unclear`.
-- `agt ci wait <pipeline|!mr|url> [--sha SHA] [--interval SEC] [--timeout SEC]` polls until the
-  pipeline finishes, then lists its failed jobs. With an MR it first waits for a pipeline on the MR's
-  newest commit or on `--sha`; pass `--sha "$(git rev-parse HEAD)"` right after a push. Exit status:
-  0 success, 1 failed, canceled, skipped or manual, 2 usage or API error, 3 timeout.
+```sh
+agt ci wait TARGET... [--sha SHA] [--timeout SEC] [--interval SEC] [--max-interval SEC]
+agt ci failures <mr> [-n N] [-R group/project]
+```
+
+`wait` takes one or more targets: GitHub `OWNER/REPO#PR[@SHA]`, GitLab `GROUP/PROJECT!IID[@SHA]`,
+a PR or MR URL, `#PR` or `!IID` in the current repository (named by its `origin` remote), and a
+GitLab pipeline id (current repository) or pipeline URL. Without `@SHA` the head read by the first
+poll is pinned, and a later head is a change. `--sha SHA` is for a single PR or MR right after a
+push: the target stays pending (`waiting_for_pipeline`) until the head and, on GitLab, a pipeline
+(or merged-results pipeline) is on that commit.
+
+GitHub targets read the PR and its required checks in one GraphQL query; GitLab targets read the
+MR, its head pipeline and the pipeline's jobs, on `GITLAB_HOST` or `glab config get host`.
+Every call goes through the forge layer (`gh` or `glab`, replaced by `AGT_GH_BIN` and
+`AGT_GLAB_BIN`). Stdout gets one JSON event per line: `initial` and `change` per target when its
+state first appears or changes, then one `final` event with every result and the failed jobs or
+checks of each under `failed`. A result's `reason` is, for instance, `merged`,
+`required_checks_passed`, `checks_pending`, `check_failed`, `check_cancelled`,
+`manual_action_required`, `head_changed`, `closed` or `query_error`. Defaults: 3600 seconds, a
+15 second interval doubling up to 120 seconds. Exit status: 0 all targets passed or merged, 1 a
+target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
+query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
+
+`failures <mr>` is GitLab only (`123`, `!123` or an MR URL; `-R` or the current repository
+names the project). It lists the failed and retried jobs of the MR's head pipeline, the failing
+specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the last
+N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
+`pending` or `unclear`.
 
 ## Sessions
 
@@ -1042,7 +1044,7 @@ failure does not make `push` exit non-zero: it is listed under `failed`. A creat
 
 `AGT_GH_BIN` and `AGT_GLAB_BIN` replace the `gh` and `glab`
 executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
-canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt watch`, and `test/fixtures/ci/*.json` hold the responses and the gl-ci output for `agt ci`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
+canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning; do not set it otherwise. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`. See `AGENTS.md` for the checks.

@@ -85,6 +85,8 @@ pub struct Request {
     pub body: Option<Value>,
     /// Read every page of a list; see [`Pagination::CliPaginate`].
     pub paginate: bool,
+    /// The reply is text, not JSON; the response body is a string.
+    pub raw: bool,
 }
 
 impl Request {
@@ -94,6 +96,7 @@ impl Request {
             endpoint: Endpoint::Rest(path.into()),
             body,
             paginate: false,
+            raw: false,
         }
     }
 
@@ -107,6 +110,7 @@ impl Request {
             endpoint: Endpoint::Graphql(vars),
             body: None,
             paginate: false,
+            raw: false,
         }
     }
 }

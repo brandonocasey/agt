@@ -1,5 +1,6 @@
 mod agt;
 mod ci;
+mod ci_wait;
 mod cleanup;
 mod commands;
 mod issue_push;
@@ -13,7 +14,6 @@ mod support;
 mod sync;
 mod task;
 mod wait;
-mod watch;
 mod worktree;
 mod worktree_create;
 

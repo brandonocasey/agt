@@ -37,47 +37,12 @@ pub fn family(name: &str) -> String {
     SHARD.replace(name, "").into_owned()
 }
 
-/// Python's `str.splitlines`.
-fn split_lines(text: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        let breaks = matches!(
-            c,
-            '\n' | '\r'
-                | '\x0b'
-                | '\x0c'
-                | '\x1c'
-                | '\x1d'
-                | '\x1e'
-                | '\u{85}'
-                | '\u{2028}'
-                | '\u{2029}'
-        );
-        if !breaks {
-            continue;
-        }
-        lines.push(&text[start..at]);
-        let mut end = at + c.len_utf8();
-        if c == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
-            chars.next();
-            end += 1;
-        }
-        start = end;
-    }
-    if start < text.len() {
-        lines.push(&text[start..]);
-    }
-    lines
-}
-
 /// Maps spec to `failed` or `flaky` from a job log.
 pub fn parse_specs(trace: &str, project_path: &str) -> IndexMap<String, &'static str> {
     let mut specs: IndexMap<String, &'static str> = IndexMap::new();
     let mut section: Option<&'static str> = None;
     let prefix = format!("{project_path}/");
-    for raw in split_lines(trace) {
+    for raw in trace.lines() {
         let plain = ANSI.replace_all(raw, "");
         let line = RUNNER_PREFIX.replace(&plain, "");
         let line = line.trim_end_matches('\r');
@@ -137,14 +102,6 @@ mod tests {
         assert_eq!(family("test-x 4/10"), "test-x");
         assert_eq!(family("lint"), "lint");
         assert_eq!(family("build 2"), "build 2");
-    }
-
-    #[test]
-    fn splits_lines_like_python() {
-        assert_eq!(split_lines("a\r\nb\rc\nd"), ["a", "b", "c", "d"]);
-        assert_eq!(split_lines("a\n"), ["a"]);
-        assert_eq!(split_lines("a\n\nb"), ["a", "", "b"]);
-        assert!(split_lines("").is_empty());
     }
 
     #[test]

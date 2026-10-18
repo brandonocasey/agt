@@ -12,6 +12,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/group%2Fproj"
    ],
    "body": "{\"id\": 12, \"path_with_namespace\": \"group/proj\", \"default_branch\": \"main\"}"
@@ -19,6 +21,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/merge_requests/5"
    ],
    "body": "{\"iid\": 5, \"title\": \"Fix login\", \"sha\": \"abcdef0123456789\", \"head_pipeline\": {\"id\": 100, \"status\": \"failed\", \"sha\": \"abcdef0123456789\", \"web_url\": \"https://gitlab.example.com/group/proj/-/pipelines/100\", \"created_at\": \"2026-03-01T10:00:00.000Z\"}}"
@@ -26,14 +30,18 @@
   {
    "args": [
     "api",
-    "projects/12/pipelines/100/jobs?include_retried=true&per_page=100",
-    "--paginate"
+    "-X",
+    "GET",
+    "--paginate",
+    "projects/12/pipelines/100/jobs?include_retried=true&per_page=100"
    ],
    "body": "[{\"id\": 1, \"name\": \"lint\", \"status\": \"failed\", \"stage\": \"lint\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/1\"}, {\"id\": 2, \"name\": \"e2e 1/2\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/2\"}, {\"id\": 3, \"name\": \"e2e 2/2\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/3\"}, {\"id\": 4, \"name\": \"e2e 2/2\", \"status\": \"success\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/4\"}, {\"id\": 5, \"name\": \"slow\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/5\"}]\n[{\"id\": 6, \"name\": \"slow\", \"status\": \"running\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/6\"}, {\"id\": 7, \"name\": \"unit\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/7\"}, {\"id\": 8, \"name\": \"unit\", \"status\": \"canceled\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/8\"}, {\"id\": 9, \"name\": \"docs\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": true, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/9\"}, {\"id\": 10, \"name\": \"build\", \"status\": \"success\", \"stage\": \"build\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/10\"}]"
   },
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/1/trace"
    ],
    "body": "error: lint failed\n"
@@ -41,6 +49,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/2/trace"
    ],
    "body": "2026-03-01T10:00:00.123456Z 01O \u001b[31mRunning 10 tests using 2 workers\u001b[0m\n2026-03-01T10:00:01.123456Z 01O \u001b[31m\u001b[0m\n2026-03-01T10:00:02.123456Z 01O \u001b[31m  3 failed\u001b[0m\n2026-03-01T10:00:03.123456Z 01O \u001b[31m    [chromium] › tests/a.spec.ts:10:5 › login works ─────────────\u001b[0m\n2026-03-01T10:00:04.123456Z 01O \u001b[31m    [chromium] › tests/c.spec.ts:10:5 › checkout ─────────────\u001b[0m\n2026-03-01T10:00:05.123456Z 01O \u001b[31m    [chromium] › tests/d.spec.ts:10:5 › search ─────────────\u001b[0m\n2026-03-01T10:00:06.123456Z 01O \u001b[31m  7 passed (30s)\u001b[0m\n"
@@ -48,6 +58,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/3/trace"
    ],
    "body": "Running 10 tests using 2 workers\n\n  1 failed\n    [chromium] › tests/b.spec.ts:10:5 › cart ─────────────\n  7 passed (30s)\n"
@@ -55,6 +67,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/5/trace"
    ],
    "body": "  ● slow › thing\n\n    expect(received).toBe(expected)\n  ● Console\n"
@@ -62,6 +76,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/7/trace"
    ],
    "body": "Chrome Headless 1.0 (Linux) unit adds FAILED\nExecuted 3 of 4 (1 FAILED)\n"
@@ -69,6 +85,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/9/trace"
    ],
    "body": "nothing useful\n"
@@ -76,6 +94,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/pipelines?ref=main&scope=finished&per_page=4"
    ],
    "body": "[{\"id\": 91, \"status\": \"success\", \"sha\": \"s91\", \"web_url\": \"https://gitlab.example.com/group/proj/-/pipelines/91\", \"created_at\": \"2026-02-28T10:00:00.000Z\"}, {\"id\": 90, \"status\": \"failed\", \"sha\": \"s90\", \"web_url\": \"https://gitlab.example.com/group/proj/-/pipelines/90\", \"created_at\": \"2026-02-20T10:00:00.000Z\"}, {\"id\": 89, \"status\": \"canceled\", \"sha\": \"s89\", \"web_url\": \"https://gitlab.example.com/group/proj/-/pipelines/89\", \"created_at\": \"2026-02-10T10:00:00.000Z\"}, {\"id\": 88, \"status\": \"success\", \"sha\": \"s88\", \"web_url\": \"https://gitlab.example.com/group/proj/-/pipelines/88\", \"created_at\": \"2026-02-01T10:00:00.000Z\"}]"
@@ -83,14 +103,18 @@
   {
    "args": [
     "api",
-    "projects/12/pipelines/91/jobs?include_retried=true&per_page=100",
-    "--paginate"
+    "-X",
+    "GET",
+    "--paginate",
+    "projects/12/pipelines/91/jobs?include_retried=true&per_page=100"
    ],
    "body": "[{\"id\": 32, \"name\": \"e2e 1/2\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/32\"}]\n[{\"id\": 35, \"name\": \"lint\", \"status\": \"success\", \"stage\": \"lint\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/35\"}, {\"id\": 36, \"name\": \"build\", \"status\": \"success\", \"stage\": \"build\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/36\"}]"
   },
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/32/trace"
    ],
    "body": "Running 10 tests using 2 workers\n\n  1 failed\n    [chromium] › tests/d.spec.ts:10:5 › search ─────────────\n  7 passed (30s)\n"
@@ -98,14 +122,18 @@
   {
    "args": [
     "api",
-    "projects/12/pipelines/90/jobs?include_retried=true&per_page=100",
-    "--paginate"
+    "-X",
+    "GET",
+    "--paginate",
+    "projects/12/pipelines/90/jobs?include_retried=true&per_page=100"
    ],
    "body": "[{\"id\": 30, \"name\": \"e2e 1/2\", \"status\": \"failed\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/30\"}, {\"id\": 31, \"name\": \"e2e 1/2\", \"status\": \"success\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/31\"}]\n[{\"id\": 34, \"name\": \"lint\", \"status\": \"failed\", \"stage\": \"lint\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/34\"}, {\"id\": 37, \"name\": \"build\", \"status\": \"success\", \"stage\": \"build\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/37\"}]"
   },
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/30/trace"
    ],
    "body": "Running 10 tests using 2 workers\n\n  2 failed\n    [chromium] › tests/a.spec.ts:10:5 › login works ─────────────\n    [chromium] › tests/d.spec.ts:10:5 › search ─────────────\n  7 passed (30s)\n"
@@ -113,6 +141,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/jobs/34/trace"
    ],
    "body": "lint error again\n"

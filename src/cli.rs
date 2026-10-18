@@ -9,7 +9,6 @@ use crate::review;
 use crate::sessions;
 use crate::task;
 use crate::wait;
-use crate::watch;
 use crate::worktree;
 
 /// Tools for coding agents.
@@ -26,9 +25,7 @@ enum Command {
     Review(Box<review::cli::Cli>),
     /// Durable task records and session search.
     Task(task::cli::Cli),
-    /// Poll PR/MR checks until they finish, fail or change.
-    Watch(watch::Cli),
-    /// GitLab CI triage: failing specs versus the default branch, and waiting for a pipeline.
+    /// Wait for PR/MR checks and pipelines; GitLab failing specs versus the default branch.
     Ci(ci::Cli),
     /// GitHub and GitLab issues, synced locally; writes wait for `push`.
     Issue(issue::Cli),
@@ -46,7 +43,6 @@ pub fn run(cli: Cli) -> Result<Output> {
     match cli.command {
         Command::Review(args) => review::commands::run(*args),
         Command::Task(args) => task::cli::run(args),
-        Command::Watch(args) => watch::run(args),
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
         Command::Cleanup(args) => cleanup::run(args),

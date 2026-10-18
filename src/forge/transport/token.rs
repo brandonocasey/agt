@@ -255,7 +255,9 @@ impl Transport for TokenTransport {
                 ),
             });
         }
-        let body = if text.trim().is_empty() {
+        let body = if request.raw {
+            Value::String(text.into_owned())
+        } else if text.trim().is_empty() {
             Value::Null
         } else {
             serde_json::from_str(&text).map_err(ctx("parse reply"))?

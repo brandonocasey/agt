@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::core::error::{Result, fail};
 
-use super::api::{Gitlab, Jobs, RUNNING, display, parallel, quote, text, truthy};
+use super::api::{Jobs, Project, RUNNING, id_text, parallel, text};
 use super::specs::{family, parse_specs};
 use super::table::{Out, table};
 
@@ -38,7 +38,7 @@ fn has_failed(attempts: &[Value]) -> bool {
 /// Failed attempts per job family in one pipeline. `running` names jobs whose retry has not
 /// finished; `unparsed` names jobs whose failed last attempt shows no failed spec.
 pub fn pipeline_failures(
-    gitlab: &Gitlab,
+    gitlab: &Project,
     by_name: &Jobs,
     families: Option<&HashSet<String>>,
 ) -> Result<IndexMap<String, Entry>> {
@@ -137,26 +137,6 @@ pub fn pipeline_failures(
     Ok(result)
 }
 
-/// Whether the pipeline tested `sha`. Merged-results pipelines run on a merge commit whose
-/// parent is `sha`.
-pub fn runs_commit(gitlab: &Gitlab, pipeline: &Value, sha: &str) -> Result<bool> {
-    let pipeline_sha = text(pipeline, "sha");
-    if !truthy(Some(pipeline)) || pipeline_sha.is_empty() {
-        return Ok(false);
-    }
-    if pipeline_sha == sha {
-        return Ok(true);
-    }
-    let commit = gitlab.get(&format!(
-        "{}/repository/commits/{pipeline_sha}",
-        gitlab.base
-    ))?;
-    Ok(commit
-        .get("parent_ids")
-        .and_then(Value::as_array)
-        .is_some_and(|parents| parents.iter().any(|parent| parent.as_str() == Some(sha))))
-}
-
 fn short(sha: &str) -> String {
     sha.chars().take(8).collect()
 }
@@ -177,22 +157,22 @@ fn verdict_order(verdict: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-pub fn run(gitlab: &Gitlab, iid: u64, count: usize, out: &Out) -> Result<()> {
-    let mr = gitlab.get(&format!("{}/merge_requests/{iid}", gitlab.base))?;
+pub fn run(gitlab: &Project, iid: u64, count: usize, out: &Out) -> Result<()> {
+    let mr = gitlab.merge_request(iid)?;
     let pipeline = mr.get("head_pipeline").cloned().unwrap_or(Value::Null);
-    if !truthy(Some(&pipeline)) {
+    if pipeline.is_null() {
         return fail(format!("!{iid} has no pipeline"));
     }
     let sha = text(&mr, "sha");
     out.line(&format!(
         "!{iid} {}\npipeline {} {} for {}: {}",
         text(&mr, "title"),
-        display(pipeline.get("id")),
+        id_text(&pipeline["id"]),
         text(&pipeline, "status"),
         short(sha),
         text(&pipeline, "web_url")
     ));
-    if !runs_commit(gitlab, &pipeline, sha)? {
+    if !gitlab.runs_commit(&pipeline, sha)? {
         out.line(&format!(
             "⚠ newest commit {} has no pipeline yet; this one is older",
             short(sha)
@@ -211,7 +191,7 @@ pub fn run(gitlab: &Gitlab, iid: u64, count: usize, out: &Out) -> Result<()> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for (name, attempts) in &flagged {
         let last = &attempts[attempts.len() - 1];
-        let note = if truthy(last.get("allow_failure")) && status(last) == "failed" {
+        let note = if last["allow_failure"] == true && status(last) == "failed" {
             " (allowed to fail)"
         } else {
             ""
@@ -228,12 +208,7 @@ pub fn run(gitlab: &Gitlab, iid: u64, count: usize, out: &Out) -> Result<()> {
     let mr_fail = pipeline_failures(gitlab, &flagged, None)?;
     let families: HashSet<String> = mr_fail.keys().cloned().collect();
     // Canceled and skipped pipelines say nothing about tests, so compare completed runs only.
-    let listing = gitlab.get(&format!(
-        "{}/pipelines?ref={}&scope=finished&per_page={}",
-        gitlab.base,
-        quote(&gitlab.default_branch),
-        100.min(count * 2)
-    ))?;
+    let listing = gitlab.finished_pipelines(100.min(count * 2))?;
     let pipelines: Vec<Value> = listing
         .as_array()
         .map(Vec::as_slice)

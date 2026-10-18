@@ -1,6 +1,5 @@
-//! `agt ci`, checked against gl-ci's own output: every `test/fixtures/ci/*.json` holds the fake
-//! GitLab responses of one run, its arguments and the stdout, stderr and exit status the
-//! gl-ci script produced for them (clock times as `HH:MM:SS`, its `gl-ci:` prefix as `agt ci:`).
+//! `agt ci failures`: every `test/fixtures/ci/*.json` holds the fake GitLab responses of one run,
+//! its arguments and the stdout, stderr and exit status expected for them.
 
 use std::fs;
 use std::path::Path;
@@ -10,30 +9,6 @@ use serde_json::Value;
 use crate::support::Env;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/ci");
-
-fn normalize(text: &str) -> String {
-    let mut out = String::new();
-    let bytes: Vec<char> = text.chars().collect();
-    let mut at = 0;
-    while at < bytes.len() {
-        let clock = at + 8 <= bytes.len()
-            && bytes[at..at + 8].iter().enumerate().all(|(i, c)| {
-                if i == 2 || i == 5 {
-                    *c == ':'
-                } else {
-                    c.is_ascii_digit()
-                }
-            });
-        if clock {
-            out.push_str("HH:MM:SS");
-            at += 8;
-        } else {
-            out.push(bytes[at]);
-            at += 1;
-        }
-    }
-    out
-}
 
 fn strings(value: &Value) -> Vec<&str> {
     value
@@ -72,12 +47,12 @@ fn run_case(path: &Path) {
         "{name}: {stderr}"
     );
     assert_eq!(
-        normalize(&String::from_utf8_lossy(&output.stdout)),
+        String::from_utf8_lossy(&output.stdout),
         case["stdout"].as_str().unwrap(),
         "{name}: stdout"
     );
     if let Some(expected) = case["stderr"].as_str() {
-        assert_eq!(normalize(&stderr), expected, "{name}: stderr");
+        assert_eq!(stderr, expected, "{name}: stderr");
     }
 }
 
@@ -149,40 +124,4 @@ fn failures_take_the_host_from_an_mr_url() {
             .all(|call| call.starts_with("gitlab.example.com\t")),
         "{calls:?}"
     );
-}
-
-#[test]
-fn wait_reports_success_failure_and_other_endings() {
-    for name in [
-        "wait-success",
-        "wait-failed",
-        "wait-canceled",
-        "wait-manual",
-        "wait-pipeline-url",
-        "wait-mr-url",
-    ] {
-        case(name);
-    }
-}
-
-#[test]
-fn wait_prints_progress_only_when_it_changes() {
-    case("wait-progress");
-}
-
-#[test]
-fn wait_for_an_mr_waits_for_the_pipeline_of_the_sha() {
-    case("wait-mr-sha");
-    case("wait-mr-no-pipeline");
-}
-
-#[test]
-fn wait_times_out_with_status_3() {
-    case("wait-timeout");
-}
-
-#[test]
-fn wait_gives_up_after_five_api_errors_in_a_row() {
-    case("wait-api-errors");
-    case("wait-bad-target");
 }

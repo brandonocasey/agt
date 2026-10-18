@@ -122,9 +122,7 @@ fn the_pre_0_5_override_names_still_work() {
 }
 
 /// Domain modules, which the foundation modules must not import.
-const DOMAINS: [&str; 7] = [
-    "review", "issue", "watch", "ci", "task", "sessions", "worktree",
-];
+const DOMAINS: [&str; 6] = ["review", "issue", "ci", "task", "sessions", "worktree"];
 const FOUNDATIONS: [&str; 4] = ["core", "store", "git", "forge"];
 
 /// `path` is relative to `src/`. Returns one message per offending line.

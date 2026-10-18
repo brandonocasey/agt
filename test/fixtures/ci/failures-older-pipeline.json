@@ -10,6 +10,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/group%2Fproj"
    ],
    "body": "{\"id\": 12, \"path_with_namespace\": \"group/proj\", \"default_branch\": \"main\"}"
@@ -17,6 +19,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/merge_requests/5"
    ],
    "body": "{\"iid\": 5, \"title\": \"Fix login\", \"sha\": \"fedcba9876543210\", \"head_pipeline\": {\"id\": 100, \"status\": \"success\", \"sha\": \"abcdef0123456789\", \"web_url\": \"https://gitlab.example.com/group/proj/-/pipelines/100\", \"created_at\": \"2026-03-01T10:00:00.000Z\"}}"
@@ -24,6 +28,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/12/repository/commits/abcdef0123456789"
    ],
    "body": "{\"parent_ids\": [\"1111\"]}"
@@ -31,8 +37,10 @@
   {
    "args": [
     "api",
-    "projects/12/pipelines/100/jobs?include_retried=true&per_page=100",
-    "--paginate"
+    "-X",
+    "GET",
+    "--paginate",
+    "projects/12/pipelines/100/jobs?include_retried=true&per_page=100"
    ],
    "body": "[{\"id\": 1, \"name\": \"build\", \"status\": \"success\", \"stage\": \"test\", \"allow_failure\": false, \"web_url\": \"https://gitlab.example.com/group/proj/-/jobs/1\"}]"
   }

@@ -8,6 +8,8 @@
   {
    "args": [
     "api",
+    "-X",
+    "GET",
     "projects/group%2Fproj"
    ],
    "body": "{\"id\": 12, \"path_with_namespace\": \"group/proj\", \"default_branch\": \"main\"}"

@@ -278,6 +278,14 @@ impl CliTransport {
             tool: Tool::Glab,
         }
     }
+
+    /// glab on the host it is configured for, or `GITLAB_HOST` when that is set.
+    pub fn glab_configured() -> Self {
+        Self {
+            cli: Cli::glab_configured(),
+            tool: Tool::Glab,
+        }
+    }
 }
 
 impl Transport for CliTransport {
@@ -291,7 +299,9 @@ impl Transport for CliTransport {
             .transpose()?;
         let output = self.cli.run(&args, input.as_deref())?;
         let name = self.cli.name;
-        let body = if request.paginate {
+        let body = if request.raw {
+            Value::String(String::from_utf8_lossy(&output).into_owned())
+        } else if request.paginate {
             // One JSON array per page.
             let mut items = Vec::new();
             for page in serde_json::Deserializer::from_slice(&output).into_iter::<Value>() {
