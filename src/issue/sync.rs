@@ -92,6 +92,7 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
             Ok(())
         },
     )?;
+    crate::forge::auto::clear_failure(store, &tracker.dir, super::auto::FAILURE_KEY);
     Ok(json!({
         "tracker": tracker.doc.key,
         "listed": listed.len(),

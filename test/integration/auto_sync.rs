@@ -50,6 +50,8 @@ matrix!(
     a_slow_forge_is_killed_at_the_cap,
     a_held_lock_skips_the_issue_sync,
     a_tracker_filter_syncs_only_that_tracker,
+    a_failed_sync_pauses_the_next_reads_for_the_max_age,
+    an_explicit_sync_clears_a_failure,
 );
 
 fn read(env: &Env, now: i64, args: &[&str], more: &[(&str, &str)]) -> Output {
@@ -288,17 +290,77 @@ fn no_configured_tracker_means_no_sync_and_no_output() {
 }
 
 #[test]
-fn a_bad_sync_config_fails_like_the_rest_of_the_config() {
+fn a_bad_config_does_not_break_a_local_read() {
     let env = Env::new();
-    for text in [
-        "[sync]\nbogus = 1\n",
-        "[sync]\nauto = \"yes\"\n",
-        "[sync]\nmax_age_secs = \"soon\"\n",
+    for (text, key) in [
+        ("[sync]\nbogus = 1\n", "bogus"),
+        ("[sync]\nauto = \"yes\"\n", ""),
+        ("[sync]\nmax_age_secs = \"soon\"\n", ""),
     ] {
         env.write_config(text);
-        let error = env.issue_fail(&["list"]);
+        let output = read(&env, STALE, &["list"], &[]);
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(stdout(&output)["count"], 0);
+        let reason = skipped_reason(&output);
+        assert!(
+            reason.contains("config.toml") && reason.contains(key),
+            "{reason}"
+        );
+        // Explicit sync keeps failing on it.
+        let error = env.issue_fail(&["sync"]);
         assert!(error.contains("config.toml"), "{error}");
     }
+}
+
+fn failure_file(env: &Env, fake: Fake) -> String {
+    fs::read_to_string(
+        env.issue_state()
+            .join(fake.tracker())
+            .join(".auto-sync.json"),
+    )
+    .unwrap_or_default()
+}
+
+fn a_failed_sync_pauses_the_next_reads_for_the_max_age(fake: Fake) {
+    let env = changed_on_the_host(fake);
+    let list = fake.list_call("2026-10-10T09%3A55%3A00Z");
+    let list: Vec<&str> = list.iter().map(String::as_str).collect();
+    env.fail_call_with(&list, "HTTP 503: unavailable");
+    let before = env.forge_calls().len();
+    let first = read(&env, STALE, &["list"], &[]);
+    assert!(skipped_reason(&first).contains("503"));
+    let tried = env.forge_calls().len();
+    assert!(tried > before);
+    assert!(failure_file(&env, fake).contains("failures"));
+    // Within the window: no call, no line, the local data.
+    let paused = read(&env, STALE + 299, &["list"], &[]);
+    assert_quiet_success(&paused);
+    assert_eq!(paused.stdout, first.stdout);
+    assert_eq!(env.forge_calls().len(), tried);
+    // After it the host is asked again, and a success forgets the failure.
+    env.pass_call(&list);
+    let later = read(&env, STALE + 301, &["show", "1"], &[]);
+    assert_quiet_success(&later);
+    assert_eq!(title(&later), "Login fails, renamed");
+    assert!(env.forge_calls().len() > tried);
+    assert!(
+        !failure_file(&env, fake).contains("tracker"),
+        "{}",
+        failure_file(&env, fake)
+    );
+}
+
+fn an_explicit_sync_clears_a_failure(fake: Fake) {
+    let env = changed_on_the_host(fake);
+    let list = fake.list_call("2026-10-10T09%3A55%3A00Z");
+    let list: Vec<&str> = list.iter().map(String::as_str).collect();
+    env.fail_call(&list);
+    skipped_reason(&read(&env, STALE, &["list"], &[]));
+    assert!(failure_file(&env, fake).contains("sync"));
+    env.pass_call(&list);
+    let synced = read(&env, STALE + 1, &["sync"], &[]);
+    assert!(synced.status.success());
+    assert!(!failure_file(&env, fake).contains("\"sync\""));
 }
 
 #[test]

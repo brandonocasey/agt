@@ -109,6 +109,11 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     })
 }
 
+/// The store key of the PR/MR `review` is.
+pub(super) fn key_of(review: &Review) -> String {
+    pr_key(review.forge, review.number)
+}
+
 /// The connection to the PR/MR a target was synced with.
 pub(super) fn connection_of(review: &Review) -> Result<Connection> {
     let (service, login) = authenticate(review.forge, &review.host)?;
@@ -373,6 +378,10 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
             ))
         },
     )?;
+    crate::forge::auto::clear_failure(&ctx.store, &ctx.dir, &format!("pr-{key}"));
+    if let Some(branch) = &scope_for_init.branch {
+        crate::forge::auto::clear_failure(&ctx.store, &ctx.dir, &format!("branch-{branch}"));
+    }
     ctx.store.save_account(
         &ctx.dir,
         &Account {

@@ -149,9 +149,12 @@ fn a_failing_forge_leaves_the_local_review_read_and_one_line() {
         stderr.starts_with(SKIPPED) && stderr.ends_with(LOCAL),
         "{stderr}"
     );
-    // A failure is not a miss: the next read tries again.
+    // A failure pauses the lookup for the max age: no call and no line, then it is tried again.
     let calls = env.forge_calls().len();
-    review_now(env, at, &["list"], &[]);
+    let paused = review_now(env, at, &["list"], &[]);
+    assert_eq!(String::from_utf8_lossy(&paused.stderr), "");
+    assert_eq!(env.forge_calls().len(), calls);
+    skipped_reason(&review_now(env, at + 301, &["list"], &[]));
     assert!(env.forge_calls().len() > calls);
 }
 
@@ -240,6 +243,8 @@ fn no_origin_or_an_unknown_host_skips_quietly() {
     let output = review_now(&env, NOW, &["status"], &[]);
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert!(output.status.success());
+    // A skip that tried nothing leaves no lock or memory behind.
+    assert!(!mentions(&env.state(), "auto-sync"));
 }
 
 #[test]
@@ -249,4 +254,149 @@ fn review_writes_do_not_sync() {
     let at = NOW;
     review_json(&review_now(env, at, &["run", "start"], &[]));
     assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn a_failed_lookup_pauses_the_next_reads_for_the_max_age() {
+    let setup = Setup::synced_branch(ORIGIN);
+    let env = &setup.env;
+    // The fake refuses every call it has no answer for.
+    let first = review_now(env, NOW, &["list"], &[]);
+    skipped_reason(&first);
+    let tried = env.forge_calls().len();
+    assert!(tried > 0);
+    for at in [NOW + 1, NOW + 299] {
+        let paused = review_now(env, at, &["list"], &[]);
+        assert_eq!(String::from_utf8_lossy(&paused.stderr), "");
+        assert_eq!(paused.stdout, first.stdout);
+    }
+    assert_eq!(env.forge_calls().len(), tried);
+    let again = review_now(env, NOW + 301, &["list"], &[]);
+    skipped_reason(&again);
+    assert!(env.forge_calls().len() > tried);
+}
+
+#[test]
+fn a_failed_sync_of_a_known_pr_pauses_and_a_success_clears_it() {
+    let setup = unsynced_pr();
+    let env = &setup.env;
+    review_json(&review_now(env, NOW, &["sync"], &[]));
+    // Stale, and the host now fails: the PR queries are answered by nothing.
+    let pull = github::graphql("me", "repo", "42", "PullRequest");
+    let pull: Vec<&str> = pull.iter().map(String::as_str).collect();
+    env.fail_call(&pull);
+    skipped_reason(&review_now(env, NOW + 301, &["status"], &[]));
+    let tried = env.forge_calls().len();
+    let paused = review_now(env, NOW + 400, &["status"], &[]);
+    assert_eq!(String::from_utf8_lossy(&paused.stderr), "");
+    assert_eq!(env.forge_calls().len(), tried);
+    env.pass_call(&pull);
+    let recovered = review_now(env, NOW + 301 + 301, &["status"], &[]);
+    assert_eq!(String::from_utf8_lossy(&recovered.stderr), "");
+    assert!(env.forge_calls().len() > tried);
+}
+
+#[test]
+fn a_bad_config_does_not_break_a_local_review_read() {
+    let setup = Setup::synced_branch(ORIGIN);
+    let env = &setup.env;
+    fs::create_dir_all(env.path("config").join("agt")).unwrap();
+    fs::write(
+        env.path("config").join("agt").join("config.toml"),
+        "[sync]\nbogus = 1\n",
+    )
+    .unwrap();
+    let local = review_now(env, NOW, &["list"], &[("AGT_OFFLINE", "1")]);
+    let output = review_now(env, NOW, &["list"], &[]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, local.stdout);
+    let reason = skipped_reason(&output);
+    assert!(
+        reason.contains("config.toml") && reason.contains("bogus"),
+        "{reason}"
+    );
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn a_newer_pr_of_the_branch_is_found_when_the_stored_one_is_closed() {
+    let setup = Setup::synced_branch(ORIGIN);
+    let env = &setup.env;
+    github::login(env);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"closed"}]"#);
+    github::empty_pr(
+        env,
+        "me/repo",
+        "42",
+        "CLOSED",
+        "\"2026-10-10T00:00:00Z\"",
+        &setup.head,
+        &setup.base,
+    );
+    assert_eq!(
+        review_json(&review_now(env, NOW, &["sync"], &[]))["target"],
+        "gh-42"
+    );
+    // The branch gets a new PR.
+    github::pulls(
+        env,
+        "me/repo",
+        r#"[{"number":42,"state":"closed"},{"number":43,"state":"open"}]"#,
+    );
+    github::empty_pr(
+        env,
+        "me/repo",
+        "43",
+        "OPEN",
+        "null",
+        &setup.head,
+        &setup.base,
+    );
+    let before = lookups(env);
+    let output = review_now(env, NOW + 301, &["status"], &[]);
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(lookups(env), before + 1);
+    let status = env.run_with(&["status"], None, &[("AGT_OFFLINE", "1")]);
+    assert_eq!(status["target"], "gh-43");
+    // Once per window: the open PR is now the stored one and nothing more is asked.
+    let asked = env.forge_calls().len();
+    review_now(env, NOW + 302, &["status"], &[]);
+    assert_eq!(env.forge_calls().len(), asked);
+}
+
+#[test]
+fn a_closed_pr_with_nothing_newer_is_looked_up_once_per_window() {
+    let setup = Setup::synced_branch(ORIGIN);
+    let env = &setup.env;
+    github::login(env);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"closed"}]"#);
+    github::empty_pr(
+        env,
+        "me/repo",
+        "42",
+        "CLOSED",
+        "\"2026-10-10T00:00:00Z\"",
+        &setup.head,
+        &setup.base,
+    );
+    review_json(&review_now(env, NOW, &["sync"], &[]));
+    let before = lookups(env);
+    for at in [NOW + 1, NOW + 60, NOW + 299] {
+        let output = review_now(env, at, &["status"], &[]);
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    }
+    assert_eq!(lookups(env), before + 1);
+    review_now(env, NOW + 301, &["status"], &[]);
+    assert_eq!(lookups(env), before + 2);
+}
+
+/// Whether a file under `root` has `needle` in its name.
+fn mentions(root: &Path, needle: &str) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    entries.map(|entry| entry.unwrap().path()).any(|path| {
+        path.file_name().unwrap().to_string_lossy().contains(needle)
+            || (path.is_dir() && mentions(&path, needle))
+    })
 }

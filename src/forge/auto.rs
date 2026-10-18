@@ -2,12 +2,17 @@
 //! domains decide what to sync; this module decides whether to, how long a forge call may take
 //! and what a failure looks like. A failed auto-sync never fails the read.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::core::clock;
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::forge::transport;
+use crate::store::Store;
+
+/// Entries of the lookup file older than this are of no use to any max age worth setting.
+pub const DAY: i64 = 24 * 60 * 60;
 
 /// How long all forge calls of one command may take together.
 const TIME_CAP: Duration = Duration::from_secs(15);
@@ -22,21 +27,28 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// `None` when the read stays local: `--offline`, `AGT_OFFLINE` or `sync.auto = false`. A
-    /// read that stays local never loads the configuration.
-    pub fn resolve(offline: bool) -> Result<Option<Self>> {
+    /// `None` when the read stays local: `--offline`, `AGT_OFFLINE`, `sync.auto = false`, or a
+    /// configuration that cannot be read, which is reported as a skipped sync because a read
+    /// needs no configuration. A read that stays offline never loads the file.
+    pub fn resolve(offline: bool) -> Option<Self> {
         if offline || offline_env() {
-            return Ok(None);
+            return None;
         }
-        let config = Config::load()?;
+        let config = match Config::load() {
+            Ok(config) => config,
+            Err(error) => {
+                skipped(&error.0);
+                return None;
+            }
+        };
         if !config.sync.auto {
-            return Ok(None);
+            return None;
         }
         let max_age_secs = config.sync.max_age_secs;
-        Ok(Some(Self {
+        Some(Self {
             config,
             max_age_secs,
-        }))
+        })
     }
 
     /// Whether something last synced at `synced_at` is due for another sync. A time that cannot
@@ -52,6 +64,35 @@ impl Policy {
     /// Whether a lookup that found nothing at `checked_at` still holds.
     pub fn is_recent(&self, checked_at: Option<&str>) -> Result<bool> {
         Ok(!self.is_stale(checked_at)?)
+    }
+
+    /// Whether the sync named `key` in `dir` failed less than the max age ago, so it is not
+    /// tried again yet.
+    pub fn backed_off(&self, store: &Store, dir: &Path, key: &str) -> Result<bool> {
+        let failed = store.load_lookups(dir).failures.get(key).cloned();
+        self.is_recent(failed.as_deref())
+    }
+}
+
+/// Remembers that the sync named `key` in `dir` failed now. Best effort: a store that cannot be
+/// written only means the next read tries again.
+pub fn record_failure(store: &Store, dir: &Path, key: &str) {
+    let Ok(now) = clock::now_secs() else {
+        return;
+    };
+    let mut lookups = store.load_lookups(dir);
+    lookups
+        .failures
+        .retain(|_, at| clock::parse(at).is_ok_and(|at| (0..DAY).contains(&(now - at))));
+    lookups.failures.insert(key.to_owned(), clock::format(now));
+    let _ = store.save_lookups(dir, &lookups);
+}
+
+/// Forgets a failure of the sync named `key`, after the sync worked.
+pub fn clear_failure(store: &Store, dir: &Path, key: &str) {
+    let mut lookups = store.load_lookups(dir);
+    if lookups.failures.remove(key).is_some() {
+        let _ = store.save_lookups(dir, &lookups);
     }
 }
 

@@ -440,15 +440,7 @@ fn a_missing_config_or_unknown_tracker_is_an_error_naming_the_file() {
         error.contains("config.toml") && error.contains("bogus"),
         "{error}"
     );
-    let error = env.issue_fail(&["list"]);
-    assert!(
-        error.contains("config.toml") && error.contains("bogus"),
-        "a read that may sync reads the config: {error}"
-    );
-    let offline = env.issue_exec(&["list"], "", &[("AGT_OFFLINE", "1")]);
-    assert!(offline.status.success());
-    let listed: Value = serde_json::from_slice(&offline.stdout).unwrap();
-    assert_eq!(listed["count"], 0, "an offline read needs no config");
+    assert_eq!(env.issue(&["list"])["count"], 0, "reading needs no config");
 }
 
 #[test]

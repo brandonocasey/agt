@@ -21,7 +21,7 @@ const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);
 const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
 const ACCOUNT_FILE: &str = ".account.json";
 const REPO_FILE: &str = ".repo.json";
-const LOOKUP_FILE: &str = ".pr-lookups.json";
+const LOOKUP_FILE: &str = ".auto-sync.json";
 
 /// Files left out of a read, each as its key and the warning that says why.
 pub type LeftOut = Vec<(String, String)>;
@@ -47,13 +47,16 @@ pub struct Account {
     pub login: String,
 }
 
-/// The branches `agt review` last asked the forge for a PR/MR and found none, each with when,
-/// so reads ask again only after a while. Older agt ignores the file, which is why this is not
-/// a field of the target.
+/// What auto-sync remembers beside the documents it syncs: the branches it last asked the forge
+/// for a PR/MR and found none, and what it last failed to sync, each with when, so reads ask
+/// again only after a while. Older agt ignores the file, which is why this is not a field of
+/// the target or tracker.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Lookups {
     #[serde(default)]
     pub misses: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub failures: std::collections::BTreeMap<String, String>,
 }
 
 /// A store area with its own directory and schema version, so a change to one cannot break
