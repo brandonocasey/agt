@@ -353,14 +353,21 @@ fn restore_warns_when_the_branch_moved_and_refuses_an_existing_path() {
     f.env.git(&["switch", "-q", "feat"]);
     f.env.write("more.txt", "m");
     f.env.commit_all("moved");
+    let tip = f.env.git(&["rev-parse", "feat"]);
     f.env.git(&["switch", "-q", "main"]);
 
     let restored = f.json(&["restore", &id]);
     let warning = restored["warnings"][0].as_str().unwrap();
     assert!(
-        warning.contains("moved") && warning.contains(&feature),
+        warning.contains("moved") && warning.contains(&feature) && warning.contains(&tip),
         "{warning}"
     );
+    // Detached at the snapshot's parent: the newer commit is not shown as reverted changes.
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
+    assert!(!f.wt.join("more.txt").exists());
+    assert!(!wgit(&f.env, &f.wt, &["status", "--porcelain"]).contains("more.txt"));
+    assert_eq!(f.env.git(&["rev-parse", "feat"]), tip);
     assert_eq!(
         fs::read_to_string(f.wt.join("a.txt")).unwrap(),
         "a changed\n"
@@ -368,10 +375,9 @@ fn restore_warns_when_the_branch_moved_and_refuses_an_existing_path() {
     f.refuses(&f.env.repo, &["restore", &id], "already exists");
 
     let elsewhere = f.env.path("trees").join("again");
-    // The branch is now checked out in the first restore, so a second one is detached.
     let second = f.json(&["restore", &id, "--path", &elsewhere.to_string_lossy()]);
     let warning = second["warnings"][0].as_str().unwrap();
-    assert!(warning.contains("another worktree"), "{warning}");
+    assert!(warning.contains("moved"), "{warning}");
     assert_eq!(wgit(&f.env, &elsewhere, &["rev-parse", "HEAD"]), feature);
     assert_eq!(
         fs::read_to_string(elsewhere.join("a.txt")).unwrap(),

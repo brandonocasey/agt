@@ -63,13 +63,14 @@ pub fn run(cli: Cli) -> Result<Output> {
                     ));
                     repo.git(&["worktree", "add", "--detach", &target_text, &record.head])?;
                 }
-                Some(tip) => {
-                    if tip != record.head {
-                        warnings.push(format!(
-                            "branch {branch} moved from {} to {tip} since the backup",
-                            record.head
-                        ));
-                    }
+                Some(tip) if tip != record.head => {
+                    warnings.push(format!(
+                        "branch {branch} moved from {} to {tip} since the backup; restored detached at {}",
+                        record.head, record.head
+                    ));
+                    repo.git(&["worktree", "add", "--detach", &target_text, &record.head])?;
+                }
+                Some(_) => {
                     repo.git(&["worktree", "add", &target_text, branch])?;
                 }
             }
