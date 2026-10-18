@@ -96,6 +96,14 @@ pub fn write(dir: &Path, record: &Record) -> Result<()> {
     fs::write(dir.join(FILE), text).map_err(ctx(format!("write {}", dir.join(FILE).display())))
 }
 
+/// Whether any repository's backups already use `id`: ids are looked up across all of them.
+pub fn id_taken(id: &str) -> bool {
+    let Ok(repos) = root().and_then(|root| fs::read_dir(&root).map_err(ctx("read backups"))) else {
+        return false;
+    };
+    repos.flatten().any(|repo| repo.path().join(id).exists())
+}
+
 /// Every backup with its directory, oldest first.
 fn all() -> Result<Vec<(Record, PathBuf)>> {
     let mut found = Vec::new();

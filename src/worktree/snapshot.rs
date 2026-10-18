@@ -47,6 +47,7 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
         .find(|(id, dir)| {
             let reference = format!("{REF_PREFIX}{id}");
             !dir.exists()
+                && !backup::id_taken(id)
                 && shared
                     .git_opt(&["rev-parse", "--verify", "--quiet", &reference])
                     .is_ok_and(|found| found.is_none())

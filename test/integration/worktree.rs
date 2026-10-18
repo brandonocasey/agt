@@ -1031,3 +1031,51 @@ fn a_worktree_name_that_is_no_ref_name_still_backs_up_and_restores() {
     assert_eq!(fs::read_to_string(odd.join("note.txt")).unwrap(), "note\n");
 }
 
+#[test]
+fn backup_ids_are_unique_across_repositories() {
+    let f = Fixture::new();
+    let other = f.env.path("other-repo");
+    fs::create_dir_all(&other).unwrap();
+    wgit(&f.env, &other, &["init", "-q", "-b", "main"]);
+    fs::write(other.join("x"), "x").unwrap();
+    wgit(&f.env, &other, &["add", "-A"]);
+    wgit(&f.env, &other, &["commit", "-q", "-m", "x"]);
+    let tree = f.env.path("other-trees/feat");
+    wgit(
+        &f.env,
+        &other,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat",
+            &tree.to_string_lossy(),
+        ],
+    );
+
+    // The same minute and the same worktree name in two repositories.
+    let run = |dir: &Path, path: &Path| -> Value {
+        let output = f
+            .env
+            .command(BIN, dir)
+            .env("AGT_NOW", "1790000000")
+            .args(["worktree", "remove", &path.to_string_lossy(), "--yes"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let first = run(&f.env.repo, &f.wt);
+    let second = run(&other, &tree);
+    assert_ne!(first["id"], second["id"], "{first} {second}");
+    for removed in [&first, &second] {
+        let id = removed["id"].as_str().unwrap();
+        assert_eq!(f.json(&["backups", "show", id])["id"], id);
+    }
+}
+
