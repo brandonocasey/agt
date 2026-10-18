@@ -336,3 +336,34 @@ fn a_codex_process_gets_its_session_only_when_the_rollout_is_unambiguous() {
         "{none}"
     );
 }
+
+#[test]
+fn a_missing_price_file_leaves_cost_null_with_one_warning() {
+    let env = Env::new();
+    let first = Proc::sleep("sleep", &env.repo);
+    let second = Proc::sleep("sleep", &env.repo);
+    for proc in [&first, &second] {
+        record(
+            &env,
+            proc.pid(),
+            &proc_start(proc.pid()),
+            json!({ "cwd": env.repo, "status": "busy" }),
+        );
+        transcript(
+            &env,
+            &format!("sess-{}", proc.pid()),
+            &[call("m1", "claude-opus-4-8", 10, 20, 30)],
+        );
+    }
+    let mut command = ps(&env, &["--json"]);
+    command.env("AGT_PRICES", env.path("no-such-prices.json"));
+    let output = command.output().unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{error}");
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let found = parsed["agents"].as_array().unwrap();
+    for proc in [&first, &second] {
+        assert!(row(found, proc.pid())["usd"].is_null());
+    }
+    assert_eq!(error.matches("warning").count(), 1, "{error}");
+}

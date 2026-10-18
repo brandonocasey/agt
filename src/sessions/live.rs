@@ -32,6 +32,7 @@ pub struct Cli {
 pub fn run(cli: Cli) -> Result<Output> {
     let now = clock::now_secs()?;
     let mut rows: Vec<Value> = Vec::new();
+    let mut warned = false;
     for live in agents::live() {
         let record = &live.record;
         let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
@@ -48,7 +49,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             "session": text("sessionId"),
             "note": null,
         });
-        spend(&mut row)?;
+        spend(&mut row, &mut warned);
         place(&mut row, &live.cwd);
         rows.push(row);
     }
@@ -64,7 +65,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             &proc,
             shared.get(proc.cwd.as_deref().unwrap_or(Path::new(""))),
         );
-        spend(&mut row)?;
+        spend(&mut row, &mut warned);
         if let Some(cwd) = &proc.cwd {
             place(&mut row, cwd);
         }
@@ -118,8 +119,18 @@ fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>) -> Value {
     row
 }
 
-/// Adds model, context tokens and cost from the session's transcripts.
-fn spend(row: &mut Value) -> Result<()> {
+/// Adds model, context tokens and cost from the session's transcripts. When they or the price
+/// file cannot be read the cost stays `null` and the first such failure is warned about.
+fn spend(row: &mut Value, warned: &mut bool) {
+    if let Err(error) = try_spend(row)
+        && !*warned
+    {
+        eprintln!("warning: cost left unpriced: {error}");
+        *warned = true;
+    }
+}
+
+fn try_spend(row: &mut Value) -> Result<()> {
     row["model"] = Value::Null;
     row["context_tokens"] = Value::Null;
     row["usd"] = Value::Null;
