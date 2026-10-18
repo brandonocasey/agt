@@ -153,7 +153,7 @@ impl Repo {
         let scratch = tempfile::tempdir().map_err(ctx("create temporary output directory"))?;
         let path = scratch.path().join("out");
         let out = fs::File::create(&path).map_err(ctx("create temporary output"))?;
-        let ssh = self.batch_ssh_command();
+        let ssh = self.batch_ssh_command(args);
         let mut child = Command::new("git")
             .current_dir(&self.root)
             .args(["--no-optional-locks"])
@@ -200,10 +200,24 @@ impl Repo {
     /// The ssh command a remote check uses: the user's own (`GIT_SSH_COMMAND`, `core.sshCommand`,
     /// `GIT_SSH`, in git's order of precedence) with batch mode and a connect timeout added, or
     /// plain ssh with them. `GIT_SSH` is a program path git runs without a shell, so it is quoted.
-    fn batch_ssh_command(&self) -> String {
+    /// `core.sshCommand` is read with the `--git-dir` and `--work-tree` of `args`, as the command
+    /// itself resolves the repository: a stray `core.worktree` would otherwise fail the read.
+    fn batch_ssh_command(&self, args: &[&str]) -> String {
+        let mut config: Vec<&str> = Vec::new();
+        let mut rest = args.iter();
+        while let Some(&flag) = rest.next() {
+            match (flag, rest.clone().next()) {
+                ("--git-dir" | "--work-tree", Some(&value)) => {
+                    config.extend([flag, value]);
+                    rest.next();
+                }
+                _ => break,
+            }
+        }
+        config.extend(["config", "core.sshCommand"]);
         let nonempty = |value: Option<String>| value.filter(|command| !command.is_empty());
         let own = nonempty(std::env::var("GIT_SSH_COMMAND").ok())
-            .or_else(|| nonempty(self.git_opt(&["config", "core.sshCommand"]).ok().flatten()))
+            .or_else(|| nonempty(self.git_opt(&config).ok().flatten()))
             .or_else(|| {
                 nonempty(std::env::var("GIT_SSH").ok())
                     .map(|program| format!("'{}'", program.replace('\'', "'\\''")))

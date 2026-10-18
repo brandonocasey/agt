@@ -1942,6 +1942,62 @@ fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
     }
 }
 
+#[test]
+fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
+    let (f, sub) = with_unheld_tag();
+    wgit(
+        &f.env,
+        &sub,
+        &["config", "core.sshCommand", "deploy-ssh -i key"],
+    );
+    // A clone left behind by `git rm` of a submodule: core.worktree points at a deleted directory.
+    let gitdir = wgit(&f.env, &sub, &["rev-parse", "--absolute-git-dir"]);
+    wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "drop the submodule"]);
+    let config = Path::new(&gitdir).join("config");
+    wgit(
+        &f.env,
+        &f.env.repo,
+        &[
+            "config",
+            "--file",
+            &config.to_string_lossy(),
+            "core.worktree",
+            "../gone",
+        ],
+    );
+    let bin = f.env.path("recording-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let record = f.env.path("ls-remote-env");
+    let real = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    // A git that, asked to ls-remote, records its environment and advertises nothing.
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*ls-remote*) env > '{}' ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
+        record.display(),
+        real.trim()
+    );
+    let wrapper = bin.join("git");
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let mut run = f.env.command(BIN, &f.env.repo);
+    run.env("PATH", path)
+        .env_remove("GIT_SSH_COMMAND")
+        .env_remove("GIT_SSH")
+        .args(["worktree", "remove", &f.wt.to_string_lossy()]);
+    run.output().unwrap();
+    let seen = fs::read_to_string(&record).unwrap();
+    let line = "GIT_SSH_COMMAND=deploy-ssh -i key -o BatchMode=yes -o ConnectTimeout=5";
+    assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
+}
+
 /// A `PATH` whose git, asked to ls-remote, starts a child (as ssh is) and then hangs, and the
 /// file that child's pid lands in.
 fn hanging_ls_remote(f: &Fixture) -> (String, PathBuf) {
