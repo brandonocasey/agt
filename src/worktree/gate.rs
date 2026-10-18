@@ -212,19 +212,227 @@ fn plumbing(gitdir: &Path, args: &[&str]) -> Result<String> {
     Repo::at(gitdir).git(&all)
 }
 
-/// Whether `commit` is on a remote-tracking branch of the repository at `gitdir` or in one of
-/// the clones in `elsewhere` (git directories or work trees).
-fn held_elsewhere(gitdir: &Path, elsewhere: &[PathBuf], commit: &str) -> Result<bool> {
-    if !plumbing(gitdir, &["branch", "-r", "--contains", commit])?.is_empty() {
-        return Ok(true);
+/// A ref of a repository, with the commit it leads to (none for a tag of a blob or tree).
+struct Tip {
+    reference: String,
+    object: String,
+    commit: Option<String>,
+}
+
+/// Every ref of the repository at `gitdir`, with its commit.
+fn tips(gitdir: &Path) -> Result<Vec<Tip>> {
+    let listing = plumbing(
+        gitdir,
+        &[
+            "for-each-ref",
+            "--format=%(objecttype) %(*objecttype) %(objectname) %(*objectname) %(refname)",
+        ],
+    )?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let [kind, peeled_kind, object, peeled, reference] = fields[..] else {
+                return None;
+            };
+            let commit = match (kind, peeled_kind) {
+                ("commit", _) => Some(object.to_owned()),
+                ("tag", "commit") => Some(peeled.to_owned()),
+                // A tag of a tag: rev-list peels it.
+                ("tag", "tag") => Some(object.to_owned()),
+                _ => None,
+            };
+            Some(Tip {
+                reference: reference.to_owned(),
+                object: object.to_owned(),
+                commit,
+            })
+        })
+        .collect())
+}
+
+/// The commits reachable from `roots` and from no remote-tracking branch, in one `rev-list`.
+fn beyond_remotes(gitdir: &Path, roots: &[&str], remotes: &[String]) -> Result<Vec<String>> {
+    if roots.is_empty() {
+        return Ok(Vec::new());
     }
-    let spec = format!("{commit}^{{commit}}");
-    for clone in elsewhere {
-        if clone.is_dir() && Repo::at(clone).object_exists(&spec).unwrap_or(false) {
-            return Ok(true);
+    let mut input = String::new();
+    for root in roots {
+        input.push_str(root);
+        input.push('\n');
+    }
+    for remote in remotes {
+        input.push('^');
+        input.push_str(remote);
+        input.push('\n');
+    }
+    let dir = gitdir.to_string_lossy();
+    let output = Repo::at(gitdir).checked(
+        &[
+            "--git-dir",
+            &dir,
+            "--work-tree",
+            &dir,
+            "rev-list",
+            "--stdin",
+        ],
+        Some(input.into_bytes()),
+        &[],
+    )?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The commits of `commits` that none of the clones in `elsewhere` (git directories or work
+/// trees) has, each looked up with one `cat-file --batch-check`.
+fn missing_elsewhere(elsewhere: &[PathBuf], commits: Vec<String>) -> Vec<String> {
+    let mut missing = commits;
+    for clone in elsewhere.iter().filter(|clone| clone.is_dir()) {
+        if missing.is_empty() {
+            break;
+        }
+        let input = missing.join("\n") + "\n";
+        let Ok(output) = Repo::at(clone).checked(
+            &["cat-file", "--batch-check"],
+            Some(input.into_bytes()),
+            &[],
+        ) else {
+            continue;
+        };
+        let answers = String::from_utf8_lossy(&output).into_owned();
+        let absent: HashSet<&str> = answers
+            .lines()
+            .filter(|line| line.ends_with(" missing"))
+            .filter_map(|line| line.split(' ').next())
+            .collect();
+        missing.retain(|commit| absent.contains(commit.as_str()));
+    }
+    missing
+}
+
+/// The tags the first remote of the repository advertises, as ref name and object id; an error
+/// when there is no remote, it cannot be reached, or it takes too long.
+fn advertised_tags(gitdir: &Path) -> Result<Vec<(String, String)>> {
+    let remotes = plumbing(gitdir, &["remote"])?;
+    let remote = remotes
+        .lines()
+        .find(|name| *name == "origin")
+        .or_else(|| remotes.lines().next())
+        .ok_or_else(|| crate::core::error::Error("it has no remote".to_owned()))?;
+    let dir = gitdir.to_string_lossy();
+    let output = Repo::at(gitdir).git_within(
+        &[
+            "--git-dir",
+            &dir,
+            "--work-tree",
+            &dir,
+            "ls-remote",
+            "--tags",
+            remote,
+        ],
+        10,
+    )?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(object, reference)| (reference.to_owned(), object.to_owned()))
+        .collect())
+}
+
+/// Refuses when a ref of the repository at `gitdir`, or its HEAD, leads to a commit that no
+/// remote-tracking branch, no clone in `elsewhere` and (for a tag) no remote has.
+fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf]) -> Result<()> {
+    let all = tips(gitdir)?;
+    if all.iter().any(|tip| tip.reference == "refs/stash") {
+        return fail(format!("{name} has a stash; apply or drop it first"));
+    }
+    let remotes: Vec<String> = all
+        .iter()
+        .filter(|tip| tip.reference.starts_with("refs/remotes/"))
+        .filter_map(|tip| tip.commit.clone())
+        .collect();
+    let head = plumbing(
+        gitdir,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    )
+    .ok()
+    .filter(|head| !head.is_empty());
+    let mut roots: Vec<(String, String)> = all
+        .iter()
+        .filter(|tip| !tip.reference.starts_with("refs/remotes/"))
+        .filter_map(|tip| Some((tip.reference.clone(), tip.commit.clone()?)))
+        .collect();
+    if let Some(head) = &head {
+        roots.push(("HEAD".to_owned(), head.clone()));
+    }
+    let commits: Vec<&str> = roots.iter().map(|(_, commit)| commit.as_str()).collect();
+    let unheld = missing_elsewhere(elsewhere, beyond_remotes(gitdir, &commits, &remotes)?);
+    if unheld.is_empty() {
+        return Ok(());
+    }
+    let unheld: HashSet<String> = unheld.into_iter().collect();
+    let leads_to_unheld = |roots: &[(String, String)]| -> Result<Option<String>> {
+        let commits: Vec<&str> = roots.iter().map(|(_, commit)| commit.as_str()).collect();
+        let reach: HashSet<String> = beyond_remotes(gitdir, &commits, &remotes)?
+            .into_iter()
+            .filter(|commit| unheld.contains(commit))
+            .collect();
+        Ok(roots
+            .iter()
+            .find(|(_, commit)| reach.contains(commit))
+            .map(|(reference, _)| reference.clone())
+            // A root whose own commit is held but that still reaches an unheld one.
+            .or_else(|| (!reach.is_empty()).then(|| roots[0].0.clone())))
+    };
+    // A tag that the remote advertises is held there, whatever the branches say.
+    let mut failure = String::new();
+    let tags: Vec<&Tip> = all
+        .iter()
+        .filter(|tip| tip.reference.starts_with("refs/tags/") && tip.commit.is_some())
+        .collect();
+    let mut kept = roots.clone();
+    if tags.iter().any(|tip| {
+        tip.commit
+            .as_ref()
+            .is_some_and(|commit| unheld.contains(commit))
+    }) {
+        match advertised_tags(gitdir) {
+            Ok(advertised) => {
+                let held: HashSet<&str> = tags
+                    .iter()
+                    .filter(|tip| {
+                        advertised.iter().any(|(reference, object)| {
+                            *reference == tip.reference && *object == tip.object
+                        })
+                    })
+                    .map(|tip| tip.reference.as_str())
+                    .collect();
+                kept.retain(|(reference, _)| !held.contains(reference.as_str()));
+            }
+            Err(error) => failure = format!(" (the remote could not tell: {})", error.0),
         }
     }
-    Ok(false)
+    let Some(reference) = leads_to_unheld(&kept)? else {
+        return Ok(());
+    };
+    if reference == "HEAD" {
+        return fail(format!(
+            "{name} is on no remote-tracking branch and is not in the main checkout's clone; push it first"
+        ));
+    }
+    let what = match (
+        reference.strip_prefix("refs/heads/"),
+        reference.strip_prefix("refs/tags/"),
+    ) {
+        (Some(branch), _) => format!("the local branch {branch}"),
+        (_, Some(tag)) => format!("the tag {tag}"),
+        _ => format!("the ref {reference}"),
+    };
+    fail(format!(
+        "{name} has {what} that is on no remote-tracking branch and is not in the main checkout's clone{failure}; push it first"
+    ))
 }
 
 /// Refuses when the repository at `gitdir` (work tree `workdir`, if it has one) holds anything
@@ -243,43 +451,7 @@ fn holds_nothing_unique(
             ));
         }
     }
-    let refs = plumbing(
-        gitdir,
-        &["for-each-ref", "--format=%(objectname) %(refname)"],
-    )?;
-    for line in refs.lines() {
-        let Some((tip, reference)) = line.split_once(' ') else {
-            continue;
-        };
-        if reference.starts_with("refs/remotes/") {
-            continue;
-        }
-        if reference == "refs/stash" {
-            return fail(format!("{name} has a stash; apply or drop it first"));
-        }
-        if !held_elsewhere(gitdir, elsewhere, tip)? {
-            let what = match reference.strip_prefix("refs/heads/") {
-                Some(branch) => format!("the local branch {branch}"),
-                None => format!("the ref {reference}"),
-            };
-            return fail(format!(
-                "{name} has {what} that is on no remote-tracking branch and is not in the main checkout's clone; push it first"
-            ));
-        }
-    }
-    let head = plumbing(
-        gitdir,
-        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-    )
-    .ok()
-    .filter(|head| !head.is_empty());
-    if let Some(head) = head
-        && !held_elsewhere(gitdir, elsewhere, &head)?
-    {
-        return fail(format!(
-            "{name} is on no remote-tracking branch and is not in the main checkout's clone; push it first"
-        ));
-    }
+    commits_held(name, gitdir, elsewhere)?;
     let worktrees = plumbing(gitdir, &["worktree", "list", "--porcelain"])?;
     if worktrees
         .lines()

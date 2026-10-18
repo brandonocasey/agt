@@ -144,6 +144,42 @@ impl Repo {
         Ok(output.stdout)
     }
 
+    /// Runs `git args` and returns its output, giving up after `seconds`. For commands that
+    /// talk to a remote, which must not hang a plan; it never prompts for credentials.
+    pub fn git_within(&self, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
+        let scratch = tempfile::tempdir().map_err(ctx("create temporary output directory"))?;
+        let path = scratch.path().join("out");
+        let out = fs::File::create(&path).map_err(ctx("create temporary output"))?;
+        let mut child = Command::new("git")
+            .current_dir(&self.root)
+            .args(["--no-optional-locks"])
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .stdout(out)
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(ctx("run git"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        loop {
+            match child.try_wait().map_err(ctx("wait for git"))? {
+                Some(status) if status.success() => {
+                    return fs::read(&path).map_err(ctx("read git output"));
+                }
+                Some(_) => return fail(format!("git {} failed", args.join(" "))),
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return fail(format!(
+                        "git {} took longer than {seconds}s",
+                        args.join(" ")
+                    ));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
     pub fn git(&self, args: &[&str]) -> Result<String> {
         text(self.checked(args, None, &[])?)
     }

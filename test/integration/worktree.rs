@@ -1434,3 +1434,55 @@ fn an_untracked_file_outside_the_sparse_cone_is_in_the_backup() {
         "todo\n"
     );
 }
+
+/// Gives the submodule's upstream a release commit that no branch holds, tagged `tag`, and
+/// fetches it into the worktree's clone.
+fn upstream_release_tag(f: &Fixture, sub: &Path, tag: &str) -> PathBuf {
+    let origin = f.env.path("sub-origin");
+    wgit(&f.env, &origin, &["checkout", "-q", "--detach"]);
+    fs::write(origin.join("release.txt"), "release\n").unwrap();
+    wgit(&f.env, &origin, &["add", "-A"]);
+    wgit(&f.env, &origin, &["commit", "-q", "-m", "release"]);
+    wgit(&f.env, &origin, &["tag", tag]);
+    let branch = wgit(
+        &f.env,
+        &origin,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    );
+    wgit(
+        &f.env,
+        &origin,
+        &["checkout", "-q", branch.lines().next().unwrap()],
+    );
+    wgit(&f.env, sub, &["fetch", "-q", "--tags", "origin"]);
+    origin
+}
+
+#[test]
+fn an_upstream_tag_on_a_commit_no_branch_holds_does_not_block_a_clean_submodule() {
+    let (f, sub) = with_submodule();
+    upstream_release_tag(&f, &sub, "v1.0");
+    // A tag of a blob holds no commit and must not break the check.
+    let blob = wgit(&f.env, &sub, &["hash-object", "-w", "lib.txt"]);
+    wgit(&f.env, &sub, &["tag", "blob-tag", &blob]);
+    let wt = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+}
+
+#[test]
+fn a_tag_the_remote_cannot_vouch_for_blocks_removal_and_is_named() {
+    let (f, sub) = with_submodule();
+    let origin = upstream_release_tag(&f, &sub, "v1.0");
+    fs::remove_dir_all(origin.join(".git")).unwrap();
+    refuses_both_ways(&f, "v1.0");
+}
+
+#[test]
+fn a_local_tag_the_remote_does_not_have_blocks_removal() {
+    let (f, sub) = with_submodule();
+    unpushed_branch(&f, &sub, "tmp");
+    let tip = wgit(&f.env, &sub, &["rev-parse", "tmp"]);
+    wgit(&f.env, &sub, &["branch", "-D", "tmp"]);
+    wgit(&f.env, &sub, &["tag", "mine", &tip]);
+    refuses_both_ways(&f, "mine");
+}
