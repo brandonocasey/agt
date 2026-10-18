@@ -1486,3 +1486,60 @@ fn a_local_tag_the_remote_does_not_have_blocks_removal() {
     wgit(&f.env, &sub, &["tag", "mine", &tip]);
     refuses_both_ways(&f, "mine");
 }
+
+#[test]
+fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
+    let (f, sub) = with_submodule();
+    let head = wgit(&f.env, &sub, &["rev-parse", "HEAD"]);
+    let stdin: String = (0..500)
+        .map(|index| format!("create refs/tags/t{index} {head}\n"))
+        .collect();
+    let mut update = f
+        .env
+        .command("git", &sub)
+        .args(["update-ref", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut update.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
+    assert!(update.wait().unwrap().success());
+
+    // A `git` in front of the real one that counts how often it is run.
+    let bin = f.env.path("counting-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let count = f.env.path("git-runs");
+    let real = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho . >> '{}'\nexec '{}' \"$@\"\n",
+            count.display(),
+            real.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let output = f
+        .env
+        .command(BIN, &f.env.repo)
+        .env("PATH", path)
+        .args(["worktree", "remove", &f.wt.to_string_lossy()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runs = fs::read_to_string(&count).unwrap().lines().count();
+    assert!(runs < 150, "{runs} git processes for 500 tags");
+}
