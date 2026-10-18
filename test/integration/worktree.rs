@@ -980,3 +980,26 @@ fn ignored_files_in_a_submodule_block_removal_unless_disposable() {
     fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
     refuses_both_ways(&f, ".env");
 }
+
+#[test]
+fn a_populated_submodule_stays_protected_after_it_is_deinitialized_in_the_main_checkout() {
+    let (f, sub) = with_submodule();
+    // The main checkout has the submodule too, as it does when the worktree is made from it.
+    let allow = ["-c", "protocol.file.allow=always"];
+    f.env.git(&["merge", "-q", "feat"]);
+    let mut update = allow.to_vec();
+    update.extend(["submodule", "update", "--init"]);
+    f.env.git(&update);
+    fs::write(sub.join("lib.txt"), "uncommitted edit\n").unwrap();
+    let wt = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "uncommitted");
+
+    // The shared config forgets the submodule, so the worktree's copy now reads as `-`.
+    f.env.git(&["submodule", "deinit", "-f", "mod"]);
+    assert!(sub.join(".git").exists());
+    refuses_both_ways(&f, "uncommitted");
+    assert_eq!(
+        fs::read_to_string(sub.join("lib.txt")).unwrap(),
+        "uncommitted edit\n"
+    );
+}

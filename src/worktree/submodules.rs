@@ -26,7 +26,7 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
     let repo = Repo::at(worktree);
     let status = repo.git(&["submodule", "status", "--recursive"])?;
     for line in status.lines() {
-        let Some(prefix) = line.chars().next().filter(|c| *c != '-') else {
+        let Some(prefix) = line.chars().next() else {
             continue;
         };
         // `<sha> <path>` with an optional ` (<describe>)`; the path may hold spaces.
@@ -38,6 +38,20 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
             None => rest,
         };
         let name = format!("submodule {path} at {commit}");
+        // A `-` line is not initialized in the shared configuration, yet its directory may hold
+        // a populated clone, as after `git submodule deinit` in the main checkout.
+        let populated = worktree.join(path).join(".git").exists();
+        if prefix == '-' && !populated {
+            continue;
+        }
+        if prefix == '-' && Repo::at(worktree.join(path)).head()? != commit {
+            return fail(format!(
+                "{name} is not at the commit the worktree records; check it in or reset it first"
+            ));
+        }
+        if prefix == '-' {
+            check(&worktree.join(path), &main.join(path))?;
+        }
         if prefix == '+' || prefix == 'U' {
             return fail(format!(
                 "{name} is not at the commit the worktree records; check it in or reset it first"
