@@ -6,6 +6,7 @@ mod backup;
 mod cleanup;
 mod create;
 mod disposable;
+mod gate;
 mod idle;
 mod info;
 mod landed;
@@ -18,7 +19,6 @@ mod remove;
 mod restore;
 mod roots;
 mod snapshot;
-mod submodules;
 
 use clap::{Args, Subcommand};
 use serde_json::Value;

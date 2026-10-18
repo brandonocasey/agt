@@ -3,11 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use super::gate;
 use super::info::{self, Entry};
 use super::landed::{Scene, recent};
-use super::nested;
 use super::roots;
-use super::submodules;
 use crate::core::error::Result;
 use crate::core::{agents, clock};
 use crate::git::Repo;
@@ -68,8 +67,7 @@ fn idle(scene: &Scene, entry: &Entry, main: &Path) -> Result<bool> {
         return Ok(false);
     }
     Ok(info::unsaved(&entry.path)? == 0
-        && nested::find(&entry.path).is_ok_and(|inside| inside.is_empty())
-        && submodules::check(&entry.path, main).is_ok()
+        && gate::check(&entry.path, main).is_ok()
         && agents::live_in(&entry.path).is_none()
         && !recent(&entry.path, clock::now_secs()?)?)
 }

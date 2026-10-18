@@ -2,29 +2,33 @@
 //! does not track as a submodule. A snapshot stores one only as a gitlink and removing the
 //! worktree deletes its history, so none may be removed.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::core::error::{Result, ctx, fail};
+use crate::core::error::{Result, ctx};
 use crate::git::Repo;
 
-/// The nested repositories under `root`, as sorted `/`-separated paths relative to it. Ignored
-/// and disposable directories are searched too; registered submodules are not descended into.
-pub fn find(root: &Path) -> Result<Vec<String>> {
-    let registered = submodule_paths(root)?;
-    let mut found = Vec::new();
-    descend(root, "", &registered, &mut found)?;
-    found.sort();
-    Ok(found)
+/// A directory with a `.git` of its own somewhere under a worktree.
+pub struct Found {
+    pub dir: PathBuf,
+    /// Its path relative to the worktree, `/`-separated.
+    pub rel: String,
+    /// The root of the repository whose files contain it: the worktree, or the submodule
+    /// above it.
+    pub parent: PathBuf,
+    /// Whether `.gitmodules` of that repository lists it.
+    pub registered: bool,
 }
 
-/// Refuses when the worktree at `root` holds a nested repository, naming each path.
-pub fn check(root: &Path) -> Result<()> {
-    let found = find(root)?;
-    if found.is_empty() {
-        return Ok(());
-    }
-    fail(reason(&found))
+/// Every repository under `root`, registered submodules and nested ones alike, at any depth:
+/// ignored and disposable directories are searched, and so are the submodules themselves.
+pub fn repositories(root: &Path) -> Result<Vec<Found>> {
+    let mut found = Vec::new();
+    let mut cache = HashMap::new();
+    descend(root, "", root, &mut cache, &mut found)?;
+    found.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok(found)
 }
 
 /// Why a worktree with the nested repositories `found` must stay.
@@ -35,7 +39,7 @@ pub fn reason(found: &[String]) -> String {
     )
 }
 
-fn submodule_paths(root: &Path) -> Result<Vec<String>> {
+pub fn submodule_paths(root: &Path) -> Result<Vec<String>> {
     if !root.join(".gitmodules").is_file() {
         return Ok(Vec::new());
     }
@@ -56,7 +60,13 @@ fn submodule_paths(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-fn descend(dir: &Path, rel: &str, registered: &[String], found: &mut Vec<String>) -> Result<()> {
+fn descend(
+    dir: &Path,
+    rel: &str,
+    parent: &Path,
+    cache: &mut HashMap<PathBuf, Vec<String>>,
+    found: &mut Vec<Found>,
+) -> Result<()> {
     for child in fs::read_dir(dir).map_err(ctx(format!("read {}", dir.display())))? {
         let child = child.map_err(ctx(format!("read {}", dir.display())))?;
         let name = child.file_name().to_string_lossy().into_owned();
@@ -69,13 +79,24 @@ fn descend(dir: &Path, rel: &str, registered: &[String], found: &mut Vec<String>
         }
         let path = format!("{rel}{name}");
         let child = child.path();
+        let mut owner = parent.to_owned();
         if child.join(".git").exists() {
-            if !registered.contains(&path) {
-                found.push(path);
+            if !cache.contains_key(parent) {
+                cache.insert(parent.to_owned(), submodule_paths(parent)?);
             }
-            continue;
+            let inside = child.strip_prefix(parent).map_or_else(
+                |_| String::new(),
+                |inside| inside.to_string_lossy().into_owned(),
+            );
+            found.push(Found {
+                dir: child.clone(),
+                rel: path.clone(),
+                parent: parent.to_owned(),
+                registered: cache[parent].contains(&inside),
+            });
+            owner = child.clone();
         }
-        descend(&child, &format!("{path}/"), registered, found)?;
+        descend(&child, &format!("{path}/"), &owner, cache, found)?;
     }
     Ok(())
 }

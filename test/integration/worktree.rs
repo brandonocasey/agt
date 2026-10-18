@@ -1107,3 +1107,90 @@ fn a_worktree_on_an_unborn_branch_is_listed_and_not_removed() {
     f.refuses(&f.env.repo, &["remove", &path, "--yes"], "no commit yet");
     assert!(orphan.exists());
 }
+
+/// Commits in the submodule on a new branch and returns to the recorded commit, so only the
+/// branch holds the work.
+fn unpushed_branch(f: &Fixture, sub: &Path, branch: &str) {
+    wgit(&f.env, sub, &["switch", "-q", "-c", branch]);
+    fs::write(sub.join(format!("{branch}.txt")), "n\n").unwrap();
+    wgit(&f.env, sub, &["add", "-A"]);
+    wgit(&f.env, sub, &["commit", "-q", "-m", "unpushed work"]);
+    wgit(&f.env, sub, &["checkout", "-q", "--detach", "HEAD~1"]);
+}
+
+/// The submodule's clone under the worktree's git directory.
+fn clone_of(f: &Fixture, sub: &Path) -> PathBuf {
+    PathBuf::from(wgit(&f.env, sub, &["rev-parse", "--absolute-git-dir"]))
+}
+
+#[test]
+fn a_clone_left_behind_by_deinit_or_rm_in_the_worktree_still_blocks_removal() {
+    for route in ["deinit", "rm", "rm-cached"] {
+        let (f, sub) = with_submodule();
+        unpushed_branch(&f, &sub, "keep");
+        let clone = clone_of(&f, &sub);
+        match route {
+            "deinit" => wgit(&f.env, &f.wt, &["submodule", "deinit", "-f", "mod"]),
+            "rm" => {
+                wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
+                wgit(&f.env, &f.wt, &["commit", "-q", "-m", "drop the submodule"])
+            }
+            _ => wgit(&f.env, &f.wt, &["rm", "-q", "--cached", "mod"]),
+        };
+        assert!(clone.exists(), "{route}");
+        let wt = f.wt.to_string_lossy().into_owned();
+        f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "keep");
+        assert!(clone.exists(), "{route}");
+    }
+}
+
+#[test]
+fn a_nested_repository_inside_a_submodule_disposable_directory_blocks_removal() {
+    let (f, sub) = with_submodule();
+    ignore_in(&f, &sub, "node_modules/");
+    let nested = sub.join("node_modules/pkg");
+    nest(&f.env, &nested);
+    refuses_both_ways(&f, "mod/node_modules/pkg");
+}
+
+#[test]
+fn untracked_files_in_a_submodule_block_removal_whatever_status_is_configured_to_show() {
+    let (f, sub) = with_submodule();
+    wgit(&f.env, &sub, &["config", "status.showUntrackedFiles", "no"]);
+    fs::write(sub.join("notes.txt"), "notes\n").unwrap();
+    refuses_both_ways(&f, "uncommitted");
+}
+
+#[test]
+fn a_submodule_tag_a_linked_worktree_or_an_unfinished_operation_blocks_removal() {
+    let (f, sub) = with_submodule();
+    unpushed_branch(&f, &sub, "tmp");
+    let tip = wgit(&f.env, &sub, &["rev-parse", "tmp"]);
+    wgit(&f.env, &sub, &["branch", "-D", "tmp"]);
+    wgit(&f.env, &sub, &["tag", "kept-tag", &tip]);
+    refuses_both_ways(&f, "kept-tag");
+    wgit(&f.env, &sub, &["tag", "-d", "kept-tag"]);
+
+    let linked = f.env.path("sub-linked");
+    wgit(
+        &f.env,
+        &sub,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+    );
+    refuses_both_ways(&f, "worktree");
+    wgit(
+        &f.env,
+        &sub,
+        &["worktree", "remove", "--force", &linked.to_string_lossy()],
+    );
+
+    let head = wgit(&f.env, &sub, &["rev-parse", "HEAD"]);
+    fs::write(clone_of(&f, &sub).join("MERGE_HEAD"), format!("{head}\n")).unwrap();
+    refuses_both_ways(&f, "in progress");
+}

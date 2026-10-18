@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::idle::Cwds;
 use super::info::{self, Entry};
-use super::{nested, snapshot, submodules};
+use super::{gate, snapshot};
 use crate::core::agents;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
@@ -40,8 +40,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         return fail(format!("{} is in use: {why}", path.display()));
     }
     let warnings = cwds.own_in(&path);
-    submodules::check(&path, &main)?;
-    nested::check(&path)?;
+    gate::check(&path, &main)?;
 
     let (modified, untracked) = info::dirty(&path)?;
     if !cli.yes {
@@ -66,7 +65,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Backs `entry` up, then removes its worktree; the caller has checked that it may go.
 pub(super) fn removal(main: &Path, path: &Path, entry: &Entry) -> Result<Value> {
-    nested::check(path)?;
+    gate::check(path, main)?;
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
