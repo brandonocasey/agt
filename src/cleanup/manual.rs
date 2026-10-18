@@ -5,21 +5,20 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Value, json};
 
 use super::files::measure;
 use crate::core::error::{Error, Result, ctx};
 use crate::store::{Namespace, Store};
+use crate::worktree::prune;
 
-const WORKTREE_IDLE_SECS: i64 = 3 * 86_400;
 const COUNT_PREFIX: &str = "<!-- count: ";
 
 pub const SECTIONS: [(&str, &str); 5] = [
     (
         "worktrees",
-        "Merged, clean worktrees older than 3 days. Remove with the command shown. Never rm.",
+        "Merged, clean worktrees. Remove with the command shown. Never rm.",
     ),
     (
         "branches",
@@ -46,49 +45,6 @@ fn home() -> Result<PathBuf> {
         .ok_or_else(|| Error("HOME is not set".into()))
 }
 
-/// `git -C <dir> <args>`, its trimmed stdout when it succeeds.
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    output.status.success().then(|| {
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_owned()
-    })
-}
-
-/// Repositories at `~/projects/<owner>/<name>` (or `~/Projects`, once if they are the same
-/// directory) with a `.git` directory.
-fn repos() -> Result<Vec<PathBuf>> {
-    let home = home()?;
-    let mut found = Vec::new();
-    for root in ["projects", "Projects"] {
-        let Ok(owners) = fs::read_dir(home.join(root)) else {
-            continue;
-        };
-        for owner in owners.flatten() {
-            let Ok(names) = fs::read_dir(owner.path()) else {
-                continue;
-            };
-            for name in names.flatten() {
-                let repo = name.path();
-                if repo.join(".git").is_dir()
-                    && let Ok(real) = fs::canonicalize(&repo)
-                {
-                    found.push(real);
-                }
-            }
-        }
-    }
-    found.sort();
-    found.dedup();
-    Ok(found)
-}
-
 /// A word the shell reads back unchanged: as is when it holds only safe characters, else in
 /// single quotes. Branch names come from other people's PRs and may hold `;` or `$(`.
 fn quote(word: &str) -> String {
@@ -100,96 +56,32 @@ fn quote(word: &str) -> String {
     }
 }
 
-fn base(repo: &Path) -> String {
-    git(
-        repo,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .filter(|base| !base.is_empty())
-    .unwrap_or_else(|| "origin/main".into())
-}
-
-fn worktrees(repo: &Path, base: &str, now: i64, found: &mut Vec<Candidate>) {
-    let Some(list) = git(repo, &["worktree", "list", "--porcelain"]) else {
-        return;
-    };
-    let inside = repo.join(".worktrees");
-    for line in list.lines() {
-        let Some(path) = line.strip_prefix("worktree ") else {
-            continue;
-        };
-        let worktree = PathBuf::from(path);
-        if !worktree.starts_with(&inside) || !worktree.join(".git").exists() {
-            continue;
-        }
-        let merged = Command::new("git")
-            .arg("-C")
-            .arg(&worktree)
-            .args(["merge-base", "--is-ancestor", "HEAD", base])
-            .output()
-            .is_ok_and(|output| output.status.success());
-        let clean = git(&worktree, &["--no-optional-locks", "status", "--porcelain"])
-            .is_some_and(|status| status.is_empty());
-        if !merged || !clean {
-            continue;
-        }
-        let mut newest = git(&worktree, &["log", "-1", "--format=%ct"])
-            .and_then(|stamp| stamp.parse().ok())
-            .unwrap_or(0);
-        if let Some(git_dir) = git(&worktree, &["rev-parse", "--absolute-git-dir"]) {
-            for name in ["HEAD", "index"] {
-                // Only the file itself: a tree walk of the git dir would be slow and pointless.
-                if let Ok(meta) = fs::symlink_metadata(Path::new(&git_dir).join(name))
-                    && let Ok(time) = meta.modified()
-                    && let Ok(elapsed) = time.duration_since(std::time::UNIX_EPOCH)
-                {
-                    newest = newest.max(i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX));
-                }
-            }
-        }
-        if now - newest >= WORKTREE_IDLE_SECS {
-            found.push(Candidate {
+/// Merged worktrees and branches under the configured roots, each with the command that
+/// removes it.
+fn merged(found: &mut Vec<Candidate>) -> Result<()> {
+    let mut branches = Vec::new();
+    for work in prune::candidates()? {
+        let repo = quote(&work.repo.display().to_string());
+        match (work.worktree, work.branch) {
+            (Some(path), _) => found.push(Candidate {
                 section: "worktrees",
                 item: format!(
-                    "git -C {} worktree remove {}",
-                    quote(&repo.display().to_string()),
-                    quote(&worktree.display().to_string())
+                    "agt worktree remove {} --yes",
+                    quote(&path.display().to_string())
                 ),
-            });
+            }),
+            (None, Some(branch)) => branches.push(Candidate {
+                section: "branches",
+                item: format!(
+                    "cd {repo} && agt worktree cleanup --yes  # branch {}",
+                    quote(&branch)
+                ),
+            }),
+            (None, None) => {}
         }
     }
-}
-
-fn branches(repo: &Path, base: &str, found: &mut Vec<Candidate>) {
-    let checked: Vec<String> = git(repo, &["worktree", "list", "--porcelain"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| line.strip_prefix("branch refs/heads/"))
-        .map(str::to_owned)
-        .collect();
-    let Some(merged) = git(
-        repo,
-        &["branch", "--merged", base, "--format=%(refname:short)"],
-    ) else {
-        return;
-    };
-    for branch in merged.lines().filter(|branch| !branch.is_empty()) {
-        // `(HEAD detached at …)` is not a branch.
-        if branch.starts_with('(')
-            || matches!(branch, "main" | "master" | "develop")
-            || checked.iter().any(|b| b == branch)
-        {
-            continue;
-        }
-        found.push(Candidate {
-            section: "branches",
-            item: format!(
-                "git -C {} branch -d {}",
-                quote(&repo.display().to_string()),
-                quote(branch)
-            ),
-        });
-    }
+    found.append(&mut branches);
+    Ok(())
 }
 
 /// Everything in the backups directory except agt's own backups, which the `backups` kind
@@ -322,42 +214,9 @@ fn playwright_in(root: &Path, found: &mut Vec<Candidate>) {
     }
 }
 
-pub fn candidates(now: i64) -> Result<Vec<Candidate>> {
-    let repos = repos()?;
-    // Each repository costs several git runs; look at them in parallel, in repository order.
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut per_repo: Vec<(usize, Vec<Candidate>, Vec<Candidate>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(repo) = repos.get(index) else { break };
-                        let base = base(repo);
-                        let (mut trees, mut merged) = (Vec::new(), Vec::new());
-                        worktrees(repo, &base, now, &mut trees);
-                        branches(repo, &base, &mut merged);
-                        done.push((index, trees, merged));
-                    }
-                    done
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().unwrap_or_default())
-            .collect()
-    });
-    per_repo.sort_by_key(|(index, _, _)| *index);
+pub fn candidates() -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
-    let mut merged = Vec::new();
-    for (_, trees, branches) in per_repo {
-        found.extend(trees);
-        merged.extend(branches);
-    }
-    found.extend(merged);
+    merged(&mut found)?;
     backups(&mut found)?;
     let home = home()?;
     codex_releases(&home, &mut found);

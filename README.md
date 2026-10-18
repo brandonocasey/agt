@@ -365,10 +365,12 @@ still running 10 seconds later, each only while its pid still has the planned st
 Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such as
 `/bin/sleep`, so those are never found there.
 
-`manual` lists what cleanup never deletes, in `manual` by section: `worktrees` (merged,
-clean worktrees in `.worktrees/` untouched for 3 days) and `branches` (merged local
-branches, not `main`, `master` or `develop` and not checked out), as commands, for repositories at
-`~/projects/<owner>/<name>` or `~/Projects/<owner>/<name>`; `backups` (everything in the
+`manual` lists what cleanup never deletes, in `manual` by section: `worktrees` (linked worktrees
+whose HEAD is already in the default branch, clean, unlocked, with no live agent session, as
+`agt worktree remove <path> --yes`) and `branches` (local branches in the default branch, not
+protected and not checked out, as `cd <repo> && agt worktree cleanup --yes  # branch <name>`), for
+the repositories under the `agt worktree` roots; this is local ancestry only, with no network and no
+`lsof`. `backups` (everything in the
 backups directory but agt's own, largest first); `codex_releases` (all but the current
 and the one before it); and `playwright` (superseded browser builds, in
 `$PLAYWRIGHT_BROWSERS_PATH`, else `~/Library/Caches/ms-playwright` and the cache root's
@@ -902,7 +904,7 @@ find an exact session beyond `--max-files`.
 ## Worktrees
 
 `agt worktree` creates git worktrees on the newest default base, installs their dependencies,
-gives each a dev-server port, lists them, removes one after backing it up, and restores a backup.
+gives each a dev-server port, lists them, removes one after backing it up, sweeps away landed work, and restores a backup.
 Output is JSON.
 
 ```sh
@@ -911,6 +913,7 @@ agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lock
 agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
 agt worktree remove PATH [--yes]            # without --yes: print the plan, change nothing
+agt worktree cleanup [--all] [--yes] [--offline] [--dirty]  # remove landed worktrees, delete landed branches
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
 agt worktree backups                        # list backups
 agt worktree backups show ID
@@ -925,6 +928,12 @@ roots = ["~/Projects/*/*", "~/projects/*/*"]
 ```
 
 `remove` refuses the main checkout, a locked worktree, a path that is not a linked worktree, a worktree that holds the current directory, a worktree where a live Claude Code session runs (`~/.claude*/sessions/<pid>.json` with a `cwd` inside it, a running pid and a matching `procStart`), and a worktree with an initialized submodule that is off its recorded commit, dirty, or on no remote-tracking branch and not in the main checkout's clone. With `--yes` it first snapshots, then runs `git worktree remove --force` and `git worktree prune`. It never deletes the branch.
+
+`cleanup` finds work that already landed in the default branch and removes it: in the current repository, or with `--all` in every repository under the roots. Without `--yes` it prints the plan (`plan: true`; per repository `remove`, `delete`, `kept` and `warnings`, each candidate with its `verdict`, `evidence` and the exact `action`) and changes nothing except fetching PR heads into the object store. With `--yes` the lists are `removed` (`path`, backup `id` and `ref`), `deleted` (`branch`, `tip`, `verdict`, `evidence`, `restore`: the `git branch <name> <tip>` that brings it back), `kept` (`branch` or `path`, `verdict`, `reason`) and `warnings`. It never touches the default branch, the main checkout's branch, the current branch or the worktree holding the current directory, and it never deletes a remote branch, pushes, closes a PR, resets or discards files.
+
+A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or `origin` is neither GitHub nor GitLab, the repository's PRs/MRs for that source branch are listed (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. An open PR gives `open` (kept, even when an older PR merged); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from `origin` and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). The forge host is found from `origin` as `agt review` finds it, without its `hosts.json`.
+
+A linked worktree whose branch is `merged` or `squash-merged`, or whose detached HEAD is in the default branch, is removed first, exactly as `remove --yes` does (snapshot backup, then `git worktree remove --force` once), and then its branch is deleted. It is kept when it is locked, missing, holds a submodule `remove` would refuse, has a live Claude Code session in it (as `remove`), or any process with its current directory inside it (`lsof -a -d cwd -Fpn` on macOS, `/proc/*/cwd` on Linux; when that cannot be read the worktree is kept and the reason says so). It is also kept as `dirty` when it has modified tracked files or untracked files that are not disposable, unless `--dirty` is passed; the snapshot preserves them either way. A kept worktree keeps its branch.
 
 The snapshot is a commit of the whole working tree (tracked changes plus untracked, non-ignored files) with the worktree's HEAD as parent, built in a temporary index and pinned at `refs/agt/backups/<id>`, so the commits outlive the branch. Ignored files that are not disposable (`.env*`, credentials, notes) are copied with their modes. Disposable paths are skipped: `node_modules/`, `.venv/`, `vendor/`, `target/`, `dist/`, `build/`, `coverage/`, `*.log`, `*.tsbuildinfo`, `.DS_Store`, editor swap files and `.cache/agents/scratch/`.
 

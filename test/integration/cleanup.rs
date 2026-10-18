@@ -1195,14 +1195,16 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     let repo_path = repo.canonicalize().unwrap();
     assert_eq!(
         manual["branches"],
-        json!([format!("git -C {} branch -d done", repo_path.display())])
+        json!([format!(
+            "cd {} && agt worktree cleanup --yes  # branch done",
+            repo_path.display()
+        )])
     );
-    // Merged and clean; the clock is 30 days past its last use. Its branch is checked out.
+    // Merged and clean. Its branch is checked out, so only the worktree is listed.
     assert_eq!(
         manual["worktrees"],
         json!([format!(
-            "git -C {} worktree remove {}",
-            repo_path.display(),
+            "agt worktree remove {} --yes",
             repo_path.join(".worktrees/busy").display()
         )])
     );
@@ -1234,7 +1236,7 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     let saved = PathBuf::from(report["manual_report"].as_str().unwrap());
     let text = fs::read_to_string(&saved).unwrap();
     assert!(text.contains("<!-- count: 5 -->"), "{text}");
-    assert!(text.contains("branch -d done"));
+    assert!(text.contains("agt worktree cleanup --yes  # branch done"));
     assert_eq!(
         count(&prune),
         format!("agt: 5 cleanup candidates in {}\n", saved.display())
