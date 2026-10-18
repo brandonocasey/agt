@@ -10,7 +10,7 @@ use crate::forge::{self, encode};
 use crate::git::{Repo, split_remote};
 use crate::store::model::Forge;
 
-const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url state mergedAt baseRefName headRefName headRefOid isCrossRepository}}}}";
+const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository}}}}";
 
 /// The forge repository `origin` points at.
 pub struct Origin {
@@ -32,6 +32,9 @@ pub enum State {
 pub struct Pull {
     pub number: u64,
     pub url: String,
+    pub title: String,
+    /// When it was closed, as the forge wrote it.
+    pub closed_at: Option<String>,
     pub state: State,
     pub base: String,
     pub head_branch: String,
@@ -141,6 +144,8 @@ fn github_pull(node: &Value) -> Result<Pull> {
             .as_u64()
             .ok_or_else(|| Error("a GitHub pull request has no number".into()))?,
         url: forge::text(node, "/url").unwrap_or_default(),
+        title: forge::text(node, "/title").unwrap_or_default(),
+        closed_at: forge::text(node, "/closedAt"),
         state,
         base: forge::text(node, "/baseRefName").unwrap_or_default(),
         head_branch: forge::text(node, "/headRefName").unwrap_or_default(),
@@ -166,6 +171,8 @@ fn gitlab_pull(node: &Value) -> Result<Pull> {
             .as_u64()
             .ok_or_else(|| Error("a GitLab merge request has no iid".into()))?,
         url: forge::text(node, "/web_url").unwrap_or_default(),
+        title: forge::text(node, "/title").unwrap_or_default(),
+        closed_at: forge::text(node, "/closed_at"),
         state,
         base: forge::text(node, "/target_branch").unwrap_or_default(),
         head_branch: forge::text(node, "/source_branch").unwrap_or_default(),

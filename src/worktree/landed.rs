@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value, json};
+
 use super::info::{self, Entry};
 use crate::core::error::Result;
 use crate::forge::landed::{Origin, State};
@@ -42,12 +44,16 @@ impl Verdict {
 pub struct Finding {
     pub verdict: Verdict,
     pub evidence: String,
+    /// Fields that join the row of a kept branch: the closed PR/MR's `head`, `title` and
+    /// `closed_at`, else null.
+    pub details: Value,
 }
 
 fn finding(verdict: Verdict, evidence: impl Into<String>) -> Finding {
     Finding {
         verdict,
         evidence: evidence.into(),
+        details: Value::Null,
     }
 }
 
@@ -216,13 +222,19 @@ impl Scene {
             ));
         }
         if let Some(closed) = pulls.iter().find(|pull| pull.state == State::Closed) {
-            return Ok(finding(
+            let mut found = finding(
                 Verdict::Closed,
                 format!(
                     "PR #{} was closed without merging: {}",
                     closed.number, closed.url
                 ),
-            ));
+            );
+            found.details = json!({
+                "head": closed.head_sha,
+                "title": closed.title,
+                "closed_at": closed.closed_at,
+            });
+            return Ok(found);
         }
         let note = match foreign {
             Some(number) => format!("only the cross-repository PR #{number} merged"),

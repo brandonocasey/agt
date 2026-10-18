@@ -105,11 +105,13 @@ fn sweep(repo: &Repo, cli: &Cli, cwds: &mut Cwds) -> Result<Report> {
             Finding {
                 verdict: Verdict::Merged,
                 evidence: format!("detached HEAD is an ancestor of {}", scene.name),
+                details: Value::Null,
             }
         } else {
             Finding {
                 verdict: Verdict::Unmerged,
                 evidence: format!("detached HEAD is not an ancestor of {}", scene.name),
+                details: Value::Null,
             }
         };
         let subject = Subject {
@@ -162,13 +164,19 @@ fn kept(subject: &Subject, path: Option<&PathBuf>, reason: &str) -> Value {
 }
 
 fn kept_as(verdict: &str, subject: &Subject, path: Option<&PathBuf>, reason: &str) -> Value {
-    json!({
+    let mut row = json!({
         "branch": subject.branch,
         "path": path,
         "tip": subject.tip,
         "verdict": verdict,
         "reason": reason,
-    })
+    });
+    if let Some(details) = subject.finding.details.as_object() {
+        row.as_object_mut()
+            .expect("a row is an object")
+            .extend(details.clone());
+    }
+    row
 }
 
 /// Removes (or plans to remove) the worktree of a landed subject. `false` when it is kept.

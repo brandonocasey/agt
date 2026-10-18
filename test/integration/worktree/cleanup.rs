@@ -159,8 +159,10 @@ fn pull(number: u64, state: &str, base: &str, branch: &str, head: &str, cross: b
     json!({
         "number": number,
         "url": format!("https://github.com/acme/app/pull/{number}"),
+        "title": format!("Title of {number}"),
         "state": state,
         "mergedAt": (state == "MERGED").then_some("2026-01-01T00:00:00Z"),
+        "closedAt": (state == "CLOSED").then_some("2026-02-03T04:05:06Z"),
         "baseRefName": base,
         "headRefName": branch,
         "headRefOid": head,
@@ -306,6 +308,10 @@ fn open_closed_and_cross_repository_pull_requests_keep_the_branch() {
     assert_eq!(site.kept(&report, "open")["verdict"], "open");
     let closed = site.kept(&report, "closed");
     assert_eq!(closed["verdict"], "closed");
+    assert_eq!(closed["head"], site.tip("closed").as_str());
+    assert_eq!(closed["title"], "Title of 5");
+    assert_eq!(closed["closed_at"], "2026-02-03T04:05:06Z");
+    assert!(site.kept(&report, "open").get("title").is_none());
     let reason = closed["reason"].as_str().unwrap();
     assert!(
         reason.contains("#5") && reason.contains("/pull/5"),
@@ -658,4 +664,40 @@ fn main_master_and_develop_are_protected_by_name() {
     assert_eq!(report["deleted"][0]["branch"], "other");
     assert_eq!(report["deleted"].as_array().unwrap().len(), 1);
     assert_eq!(site.branches(), ["develop", "main", "master"]);
+}
+
+#[test]
+fn a_closed_gitlab_merge_request_row_carries_head_title_and_closed_at() {
+    let site = Site::at("git@gitlab.com:acme/app.git");
+    site.branch("shelved");
+    let head = site.tip("shelved");
+    let mr = json!([{
+        "iid": 7,
+        "web_url": "https://gitlab.com/acme/app/-/merge_requests/7",
+        "title": "Shelve it",
+        "state": "closed",
+        "merged_at": null,
+        "closed_at": "2026-03-04T05:06:07Z",
+        "target_branch": "main",
+        "source_branch": "shelved",
+        "sha": head,
+        "source_project_id": 10,
+        "target_project_id": 10,
+    }]);
+    site.env.respond(
+        &[
+            "api",
+            "-X",
+            "GET",
+            "--paginate",
+            "projects/acme%2Fapp/merge_requests?source_branch=shelved&state=all&per_page=100",
+        ],
+        &mr.to_string(),
+    );
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "shelved");
+    assert_eq!(row["verdict"], "closed");
+    assert_eq!(row["head"], head.as_str());
+    assert_eq!(row["title"], "Shelve it");
+    assert_eq!(row["closed_at"], "2026-03-04T05:06:07Z");
 }
