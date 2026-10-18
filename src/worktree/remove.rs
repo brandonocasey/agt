@@ -3,6 +3,7 @@ use std::path::Path;
 use clap::Args;
 use serde_json::{Value, json};
 
+use super::idle::Cwds;
 use super::info::{self, Entry};
 use super::{nested, snapshot, submodules};
 use crate::core::agents;
@@ -28,6 +29,9 @@ pub fn run(cli: Cli) -> Result<Output> {
         .or_else(|_| fail(format!("{} is not a linked worktree", path.display())))?;
     let main = info::real(&listing[0].path)?;
     let entry = refuse(&listing, &path, &main)?;
+    if let Some(why) = Cwds::default().busy(&path) {
+        return fail(format!("{} is in use: {why}", path.display()));
+    }
     submodules::check(&path, &main)?;
     nested::check(&path)?;
 

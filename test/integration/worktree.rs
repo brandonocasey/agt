@@ -744,3 +744,26 @@ fn the_calling_session_does_not_block_its_own_removal_but_another_does() {
     // Without CLAUDE_PID it is another live session.
     f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "session");
 }
+
+#[test]
+fn a_process_with_its_directory_inside_the_worktree_blocks_removal() {
+    let f = Fixture::new();
+    let wt = f.wt.to_string_lossy().into_owned();
+    let child = Reaped(
+        std::process::Command::new("sleep")
+            .arg("60")
+            .current_dir(&f.wt)
+            .spawn()
+            .unwrap(),
+    );
+    // Give lsof or /proc time to see the child's directory.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let pid = child.0.id().to_string();
+    for args in [vec!["remove", &wt], vec!["remove", &wt, "--yes"]] {
+        let output = f.agt(&f.env.repo, &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(&pid) && error.contains("sleep"), "{error}");
+    }
+    assert!(f.wt.join("feature.txt").exists());
+}

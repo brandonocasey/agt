@@ -1,8 +1,11 @@
-//! Whether any process has its current directory inside a worktree.
+//! Whether any process other than agt and its ancestors has its current directory inside a
+//! worktree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::core::agents;
 
 /// The current directories of all processes, read once on first use.
 #[derive(Default)]
@@ -16,19 +19,22 @@ impl Cwds {
             Ok(all) => all
                 .iter()
                 .find(|(_, cwd)| cwd.starts_with(root))
-                .map(|(pid, cwd)| format!("process {pid} runs in {}", cwd.display())),
+                .map(|(pid, cwd)| {
+                    let command = agents::read(*pid).map_or_else(|| "?".to_owned(), |p| p.comm);
+                    format!("process {pid} ({command}) runs in {}", cwd.display())
+                }),
         }
     }
 }
 
 fn read() -> Result<Vec<(i32, PathBuf)>, String> {
-    let me = std::process::id().cast_signed();
+    let own = agents::lineage();
     let mut all = if cfg!(target_os = "linux") {
         proc_cwds()?
     } else {
         lsof_cwds()?
     };
-    all.retain(|(pid, _)| *pid != me);
+    all.retain(|(pid, _)| !own.contains(pid));
     Ok(all)
 }
 
