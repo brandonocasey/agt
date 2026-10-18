@@ -817,3 +817,20 @@ fn restore_detaches_when_the_branch_is_checked_out_in_another_worktree() {
         "a changed\n"
     );
 }
+
+#[test]
+fn a_relative_restore_path_means_the_callers_directory() {
+    let f = Fixture::new();
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let cwd = f.env.path("elsewhere");
+    fs::create_dir_all(&cwd).unwrap();
+
+    let output = f.agt(&cwd, &["restore", &id, "--path", "back"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(cwd.join("back/feature.txt").exists());
+    assert!(!f.env.repo.join("back").exists());
+}

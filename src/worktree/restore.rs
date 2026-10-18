@@ -20,7 +20,13 @@ pub struct Cli {
 
 pub fn run(cli: Cli) -> Result<Output> {
     let (record, dir) = backup::find(&cli.id)?;
-    let target = cli.path.unwrap_or_else(|| record.worktree.clone());
+    // Git runs in the repository, so a relative `--path` must mean the caller's directory.
+    let target = match cli.path {
+        Some(path) => {
+            std::path::absolute(&path).map_err(ctx(format!("resolve {}", path.display())))?
+        }
+        None => record.worktree.clone(),
+    };
     if target.exists() {
         return fail(format!("{} already exists", target.display()));
     }
