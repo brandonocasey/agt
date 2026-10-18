@@ -1389,3 +1389,48 @@ fn a_worktree_named_with_repeated_lock_endings_backs_up_and_restores() {
     let restored = f.json(&["restore", id]);
     assert_eq!(restored["warnings"], json!([]));
 }
+
+/// A worktree whose branch has `d1/a`, `d2/b` and `d3/c`, set to the sparse cone `d1 d2`.
+fn sparse_fixture() -> Fixture {
+    let f = Fixture::new();
+    for (dir, name) in [("d1", "a"), ("d2", "b"), ("d3", "c")] {
+        fs::create_dir_all(f.wt.join(dir)).unwrap();
+        fs::write(f.wt.join(dir).join(name), format!("{name}\n")).unwrap();
+    }
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "dirs"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &["sparse-checkout", "set", "--cone", "d1", "d2"],
+    );
+    f
+}
+
+#[test]
+fn an_edit_outside_a_narrowed_sparse_cone_is_in_the_backup() {
+    let f = sparse_fixture();
+    fs::write(f.wt.join("d2/b"), "mine\n").unwrap();
+    // Narrowing keeps the edited file on disk, outside the patterns.
+    wgit(&f.env, &f.wt, &["sparse-checkout", "set", "--cone", "d1"]);
+    assert!(f.wt.join("d2/b").exists());
+    assert!(!f.wt.join("d3/c").exists());
+    let removed = f.remove();
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    wgit(&f.env, &f.wt, &["sparse-checkout", "disable"]);
+    assert_eq!(fs::read_to_string(f.wt.join("d2/b")).unwrap(), "mine\n");
+    assert_eq!(fs::read_to_string(f.wt.join("d3/c")).unwrap(), "c\n");
+}
+
+#[test]
+fn an_untracked_file_outside_the_sparse_cone_is_in_the_backup() {
+    let f = sparse_fixture();
+    fs::create_dir_all(f.wt.join("notes")).unwrap();
+    fs::write(f.wt.join("notes/todo.md"), "todo\n").unwrap();
+    let removed = f.remove();
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(
+        fs::read_to_string(f.wt.join("notes/todo.md")).unwrap(),
+        "todo\n"
+    );
+}

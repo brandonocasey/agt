@@ -350,7 +350,27 @@ impl Repo {
         let (_scratch, temp_index) = self.scratch_index()?;
         self.unhide(&temp_index)?;
         let env = [("GIT_INDEX_FILE", temp_index.as_path())];
-        self.checked(&["add", "-A"], None, &env)?;
+        // `--sparse` (git 2.35) makes add take files outside the sparse-checkout patterns too.
+        let sparse = self.exec(&["add", "--sparse", "-A"], None, &env)?;
+        if !sparse.status.success() {
+            let stderr = String::from_utf8_lossy(&sparse.stderr);
+            if !(stderr.contains("unknown option") || stderr.contains("usage:")) {
+                return fail(format!("git add --sparse -A failed: {}", stderr.trim()));
+            }
+            // An older git cannot add paths outside the patterns: take what it can, then
+            // refuse if the tree is not the working tree, rather than lose an edit.
+            self.checked(&["add", "-A"], None, &env)?;
+            let tree = text(self.checked(&["write-tree"], None, &env)?)?;
+            let lost = self.checked(&["diff-files", "--name-only", "-z"], None, &env)?;
+            if let Some(name) = lost.split(|byte| *byte == 0).find(|name| !name.is_empty()) {
+                return fail(format!(
+                    "{} is outside the sparse-checkout patterns and this git ({}) cannot back it up; widen the patterns with `git sparse-checkout add` or upgrade to git 2.35",
+                    String::from_utf8_lossy(name),
+                    self.git(&["--version"])?
+                ));
+            }
+            return Ok(tree);
+        }
         text(self.checked(&["write-tree"], None, &env)?)
     }
 
