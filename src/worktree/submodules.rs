@@ -15,9 +15,13 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
         let Some(prefix) = line.chars().next().filter(|c| *c != '-') else {
             continue;
         };
-        let mut fields = line[prefix.len_utf8()..].split_whitespace();
-        let (Some(commit), Some(path)) = (fields.next(), fields.next()) else {
+        // `<sha> <path>` with an optional ` (<describe>)`; the path may hold spaces.
+        let Some((commit, rest)) = line[prefix.len_utf8()..].trim().split_once(' ') else {
             continue;
+        };
+        let path = match rest.rfind(" (").filter(|_| rest.ends_with(')')) {
+            Some(end) => &rest[..end],
+            None => rest,
         };
         let name = format!("submodule {path} at {commit}");
         if prefix == '+' || prefix == 'U' {

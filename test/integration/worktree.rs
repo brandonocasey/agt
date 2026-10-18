@@ -589,6 +589,16 @@ fn a_submodule_whose_name_has_a_space_is_registered() {
 }
 
 #[test]
+fn a_submodule_whose_path_has_a_space_can_be_checked() {
+    let f = Fixture::new();
+    add_submodule(&f, "spaced", "lib dir");
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["plan"], true);
+    f.remove();
+    assert!(!f.wt.exists());
+}
+
+#[test]
 fn listing_never_rewrites_a_worktree_index() {
     let f = Fixture::new();
     let index = PathBuf::from(wgit(
