@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -145,16 +146,25 @@ impl Repo {
     }
 
     /// Runs `git args` and returns its output, giving up after `seconds`. For commands that
-    /// talk to a remote, which must not hang a plan; it never prompts for credentials.
+    /// talk to a remote, which must not hang or ask anything: no credential prompt of any kind
+    /// (git, ssh, askpass helpers, credential managers), ssh in batch mode with a connect
+    /// timeout, and git in its own process group so that a timeout kills ssh with it.
     pub fn git_within(&self, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
         let scratch = tempfile::tempdir().map_err(ctx("create temporary output directory"))?;
         let path = scratch.path().join("out");
         let out = fs::File::create(&path).map_err(ctx("create temporary output"))?;
+        let ssh = self.batch_ssh_command();
         let mut child = Command::new("git")
             .current_dir(&self.root)
             .args(["--no-optional-locks"])
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "false")
+            .env("SSH_ASKPASS", "false")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .env("GCM_INTERACTIVE", "never")
+            .env("GIT_SSH_COMMAND", ssh)
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(Stdio::null())
@@ -168,6 +178,11 @@ impl Repo {
                 }
                 Some(_) => return fail(format!("git {} failed", args.join(" "))),
                 None if std::time::Instant::now() >= deadline => {
+                    // The group, not just git: ssh would otherwise outlive agt.
+                    if let Ok(pid) = i32::try_from(child.id()) {
+                        // SAFETY: kill(2) with a negative pid signals only that process group.
+                        unsafe { libc::kill(-pid, libc::SIGKILL) };
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     return fail(format!(
@@ -178,6 +193,30 @@ impl Repo {
                 None => std::thread::sleep(std::time::Duration::from_millis(20)),
             }
         }
+    }
+
+    /// The ssh command a remote check uses: the user's own (`GIT_SSH_COMMAND`, `GIT_SSH`,
+    /// `core.sshCommand`, in git's order of precedence) with batch mode and a connect timeout
+    /// added, or plain ssh with them.
+    fn batch_ssh_command(&self) -> String {
+        let own = std::env::var("GIT_SSH_COMMAND")
+            .ok()
+            .filter(|command| !command.is_empty())
+            .or_else(|| {
+                std::env::var("GIT_SSH")
+                    .ok()
+                    .filter(|command| !command.is_empty())
+            })
+            .or_else(|| {
+                self.git_opt(&["config", "core.sshCommand"])
+                    .ok()
+                    .flatten()
+                    .filter(|command| !command.is_empty())
+            });
+        format!(
+            "{} -o BatchMode=yes -o ConnectTimeout=5",
+            own.as_deref().unwrap_or("ssh")
+        )
     }
 
     pub fn git(&self, args: &[&str]) -> Result<String> {

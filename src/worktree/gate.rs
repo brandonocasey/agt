@@ -348,6 +348,14 @@ fn missing_elsewhere(elsewhere: &[PathBuf], commits: Vec<String>) -> Vec<String>
     missing
 }
 
+/// Seconds a remote check may take: 10, or `AGT_LS_REMOTE_TIMEOUT`.
+fn remote_timeout() -> u64 {
+    std::env::var("AGT_LS_REMOTE_TIMEOUT")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or(10)
+}
+
 /// The tags the first remote of the repository advertises, as ref name and object id; an error
 /// when there is no remote, it cannot be reached, or it takes too long.
 fn advertised_tags(gitdir: &Path) -> Result<Vec<(String, String)>> {
@@ -368,7 +376,7 @@ fn advertised_tags(gitdir: &Path) -> Result<Vec<(String, String)>> {
             "--tags",
             remote,
         ],
-        10,
+        remote_timeout(),
     )?;
     Ok(String::from_utf8_lossy(&output)
         .lines()

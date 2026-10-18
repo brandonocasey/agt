@@ -1696,3 +1696,88 @@ fn a_submodule_at_a_remote_advertised_tag_commit_on_no_branch_does_not_block_rem
         );
     }
 }
+
+/// A worktree whose submodule has a tag on a commit that only its clone has, so the gate
+/// asks the remote. Returns the fixture.
+fn with_unheld_tag() -> (Fixture, PathBuf) {
+    let (f, sub) = with_submodule();
+    unpushed_branch(&f, &sub, "tmp");
+    let tip = wgit(&f.env, &sub, &["rev-parse", "tmp"]);
+    wgit(&f.env, &sub, &["branch", "-D", "tmp"]);
+    wgit(&f.env, &sub, &["tag", "mine", &tip]);
+    (f, sub)
+}
+
+#[test]
+fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
+    for (own, expect) in [
+        (None, "ssh -o BatchMode=yes -o ConnectTimeout=5"),
+        (
+            Some("my-ssh -v"),
+            "my-ssh -v -o BatchMode=yes -o ConnectTimeout=5",
+        ),
+    ] {
+        let (f, _sub) = with_unheld_tag();
+        // A git that, asked to ls-remote, records its environment, starts a child that would
+        // outlive it (as ssh does) and then hangs.
+        let bin = f.env.path("hanging-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let (record, child_pid) = (f.env.path("ls-remote-env"), f.env.path("child-pid"));
+        let real = String::from_utf8(
+            std::process::Command::new("which")
+                .arg("git")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n*ls-remote*)\n  env > '{}'\n  sleep 60 &\n  echo $! > '{}'\n  sleep 60\n  ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
+            record.display(),
+            child_pid.display(),
+            real.trim()
+        );
+        let wrapper = bin.join("git");
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let mut command = f.env.command(BIN, &f.env.repo);
+        command
+            .env("PATH", path)
+            .env("AGT_LS_REMOTE_TIMEOUT", "1")
+            .env("GIT_ASKPASS", "/bin/would-block")
+            .env("SSH_ASKPASS", "/bin/would-block")
+            .args(["worktree", "remove", &f.wt.to_string_lossy()]);
+        match own {
+            Some(own) => command.env("GIT_SSH_COMMAND", own),
+            None => command.env_remove("GIT_SSH_COMMAND"),
+        };
+        let started = std::time::Instant::now();
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(started.elapsed().as_secs() < 8, "{:?}", started.elapsed());
+        let seen = fs::read_to_string(&record).unwrap();
+        for line in [
+            "GIT_TERMINAL_PROMPT=0",
+            "GIT_ASKPASS=false",
+            "SSH_ASKPASS=false",
+            "SSH_ASKPASS_REQUIRE=never",
+            "GCM_INTERACTIVE=never",
+            &format!("GIT_SSH_COMMAND={expect}"),
+        ] {
+            assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
+        }
+        let pid = fs::read_to_string(&child_pid).unwrap().trim().to_owned();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if alive {
+            let _ = std::process::Command::new("kill").arg(&pid).status();
+        }
+        assert!(!alive, "the child of the timed-out git is still running");
+    }
+}
