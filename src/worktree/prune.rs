@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use super::info::{self, Entry};
 use super::landed::{Scene, recent};
+use super::nested;
 use super::roots;
 use crate::core::error::Result;
 use crate::core::{agents, clock};
@@ -66,6 +67,7 @@ fn idle(scene: &Scene, entry: &Entry) -> Result<bool> {
         return Ok(false);
     }
     Ok(info::unsaved(&entry.path)? == 0
+        && nested::find(&entry.path)?.is_empty()
         && agents::live_in(&entry.path).is_none()
         && !recent(&entry.path, clock::now_secs()?)?)
 }

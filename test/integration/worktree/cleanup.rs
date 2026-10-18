@@ -636,3 +636,16 @@ fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
     assert!(!wt.exists());
     assert_eq!(site.branches(), ["main"]);
 }
+
+#[test]
+fn main_master_and_develop_are_protected_by_name() {
+    let site = Site::new();
+    site.env.git(&["branch", "develop"]);
+    site.env.git(&["branch", "master"]);
+    site.env.git(&["branch", "other"]);
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(report["deleted"][0]["branch"], "other");
+    assert_eq!(report["deleted"].as_array().unwrap().len(), 1);
+    assert_eq!(site.branches(), ["develop", "main", "master"]);
+}

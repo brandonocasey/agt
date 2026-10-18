@@ -1174,6 +1174,9 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     git(&["commit", "-q", "--allow-empty", "-m", "one"]);
     git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     git(&["branch", "done"]);
+    // Long-lived names stay protected even when merged.
+    git(&["branch", "develop"]);
+    git(&["branch", "master"]);
     git(&["branch", "busy"]);
     git(&["worktree", "add", "-q", ".worktrees/busy", "busy"]);
     let releases = home.join(".codex/packages/standalone/releases");

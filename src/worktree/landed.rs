@@ -95,10 +95,11 @@ impl Scene {
             .is_some_and(|held| info::real(path).is_ok_and(|real| real == held))
     }
 
-    /// The default branch, the main checkout's branch and the branch of the worktree that
-    /// holds the current directory.
+    /// The default branch, `main`, `master` and `develop` by name, the main checkout's branch
+    /// and the branch of the worktree that holds the current directory.
     pub fn protected(&self, branch: &str) -> bool {
         branch == self.name
+            || ["main", "master", "develop"].contains(&branch)
             || self.main().branch.as_deref() == Some(branch)
             || self
                 .entries

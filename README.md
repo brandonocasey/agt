@@ -368,7 +368,7 @@ Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such a
 `manual` lists what cleanup never deletes, in `manual` by section: `worktrees` (linked worktrees
 whose HEAD is already in the default branch, clean, unlocked, untouched for 3 days (see `agt worktree cleanup`) and with no live agent session, as
 `agt worktree remove <path> --yes`) and `branches` (local branches in the default branch, not
-protected and not checked out, as `cd <repo> && agt worktree cleanup --yes  # branch <name>`), for
+protected and not checked out, as `git -C <repo> branch -d <name>`), for
 the repositories under the `agt worktree` roots; this is local ancestry only, with no network and no
 `lsof`. `backups` (everything in the
 backups directory but agt's own, largest first); `codex_releases` (all but the current
