@@ -91,6 +91,9 @@ impl Env {
             .env("AGT_CLEANUP_TMP", self.root.join("tmp"))
             .env("AGT_CLEANUP_PID", "0")
             .env_remove("CLAUDE_CONFIG_DIR")
+            // A test run inside a Claude Code session would make every process it spawns
+            // that session's own, which `agt worktree` ignores.
+            .env_remove("CLAUDE_PID")
             .env_remove("PLAYWRIGHT_BROWSERS_PATH");
         if self.offline {
             command.env("AGT_OFFLINE", "1");
