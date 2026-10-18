@@ -219,7 +219,14 @@ fn workdir_of(clone: &Path) -> Option<PathBuf> {
         .git_opt(&["config", "--file", "config", "core.worktree"])
         .ok()
         .flatten()?;
-    fs::canonicalize(clone.join(configured)).ok()
+    let workdir = fs::canonicalize(clone.join(configured)).ok()?;
+    // The path may hold other files by now (a vendored directory in place of the submodule,
+    // say): then git there finds the superproject, and the clone has no files to check.
+    let found = Repo::at(&workdir)
+        .git(&["rev-parse", "--absolute-git-dir"])
+        .ok()?;
+    let same = fs::canonicalize(&found).ok()? == fs::canonicalize(clone).ok()?;
+    same.then_some(workdir)
 }
 
 /// `git <args>` against the repository whose git directory is `gitdir`, even when its

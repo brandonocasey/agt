@@ -1611,3 +1611,20 @@ fn a_stale_gitmodules_entry_over_tracked_files_does_not_block_removal() {
     f.json(&["remove", &wt, "--yes"]);
     assert!(!f.wt.exists());
 }
+
+#[test]
+fn a_leftover_clone_whose_path_holds_vendored_files_is_not_checked_as_the_superproject() {
+    let (f, _sub) = with_submodule();
+    wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "drop the submodule"]);
+    fs::create_dir_all(f.wt.join("mod")).unwrap();
+    fs::write(f.wt.join("mod/vendored.c"), "int x;\n").unwrap();
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "vendor it"]);
+    // An untracked file at the top: the snapshot holds it, so it must not refuse.
+    fs::write(f.wt.join("todo.txt"), "todo\n").unwrap();
+    let wt = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    f.json(&["remove", &wt, "--yes"]);
+    assert!(!f.wt.exists());
+}
