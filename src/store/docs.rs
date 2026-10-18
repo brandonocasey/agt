@@ -85,6 +85,30 @@ impl Store {
         init: impl FnOnce() -> T,
         change: impl FnOnce(&mut T) -> Result<R>,
     ) -> Result<R> {
+        self.update_doc_with(dir, name, || Ok(init()), change)
+    }
+
+    pub fn update_existing_doc<T: Serialize + DeserializeOwned, R>(
+        &self,
+        dir: &Path,
+        name: &str,
+        change: impl FnOnce(&mut T) -> Result<R>,
+    ) -> Result<R> {
+        self.update_doc_with(
+            dir,
+            name,
+            || fail(format!("{name} moved or was removed; retry the command")),
+            change,
+        )
+    }
+
+    fn update_doc_with<T: Serialize + DeserializeOwned, R>(
+        &self,
+        dir: &Path,
+        name: &str,
+        init: impl FnOnce() -> Result<T>,
+        change: impl FnOnce(&mut T) -> Result<R>,
+    ) -> Result<R> {
         validate_key(name)?;
         create_dir(dir)?;
         let _lock = lock(&dir.join(format!(".{name}.lock")))?;
@@ -101,7 +125,7 @@ impl Store {
                 }
                 doc
             }
-            None => init(),
+            None => init()?,
         };
         let result = change(&mut doc)?;
         self.backup_before_migration(&path)?;

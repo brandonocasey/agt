@@ -118,11 +118,10 @@ fn attach(
 ) -> Result<trackers::Tracker> {
     let target = trackers::ensure(store, configured)?;
     let name = trackers::doc_name(issue);
-    store.update_doc(
+    store.update_existing_doc(
         &source.dir,
         &name,
-        || issue.clone(),
-        |issue| {
+        |issue: &mut crate::store::issues::Issue| {
             issue.tracker.clone_from(&target.doc.key);
             Ok(())
         },
@@ -137,12 +136,13 @@ pub fn attach_pending(
     filter: Option<&str>,
 ) -> Result<()> {
     let locals = trackers::stored(store, Some("local")).unwrap_or_default();
-    if locals.is_empty() {
-        return Ok(());
-    }
-    let target = destination(config, filter)?;
+    let mut target = None;
     for source in locals {
         for issue in store.docs::<crate::store::issues::Issue>(&source.dir, &[TRACKER_FILE])? {
+            let target = match target {
+                Some(target) => target,
+                None => *target.insert(destination(config, filter)?),
+            };
             attach(store, target, &source, &issue)?;
         }
     }

@@ -49,17 +49,12 @@ fn change(
     let (tracker, issue) = trackers::find(store, filter, key)?;
     let now = clock::now()?;
     let name = doc_name(&issue);
-    let updated = store.update_doc(
-        &tracker.dir,
-        &name,
-        || issue.clone(),
-        |issue| {
-            edit(&tracker, issue)?;
-            issue.fields.normalize();
-            issue.updated_at.clone_from(&now);
-            Ok(issue.clone())
-        },
-    )?;
+    let updated = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
+        edit(&tracker, issue)?;
+        issue.fields.normalize();
+        issue.updated_at.clone_from(&now);
+        Ok(issue.clone())
+    })?;
     Ok(summary(&updated))
 }
 

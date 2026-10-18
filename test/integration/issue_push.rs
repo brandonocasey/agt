@@ -850,3 +850,131 @@ fn an_automatic_create_returns_its_identity_when_a_followup_write_fails() {
     assert_eq!(saved["create"]["post"], "posted");
     assert_eq!(saved["errors"][0]["what"], "update");
 }
+
+#[test]
+fn empty_local_tracker_does_not_require_an_attachment_destination() {
+    let github: Fake = &crate::support::issue::Github;
+    let gitlab: Fake = &crate::support::issue::Gitlab;
+    let env = Env::new();
+    let made = env.issue(&[
+        "create",
+        "--title",
+        "Brand new",
+        "--body",
+        "Text",
+        "--label",
+        "bug",
+    ]);
+    let key = made["key"].as_str().unwrap();
+    env.write_config(&github.config(true));
+    env.respond(&strs(&github.user_call()), login_body(github));
+    env.respond(
+        &strs(&github.create_call()),
+        &github.issue_json(&created()).to_string(),
+    );
+    env.issue(&["push"]);
+    assert!(
+        !env.issue_state()
+            .join("local")
+            .join(format!("{key}.json"))
+            .exists()
+    );
+    env.write_config(&format!("{}\n{}", github.config(true), gitlab.config(true)));
+    github.serve(&env, &[]);
+    gitlab.serve(&env, &[]);
+    let github_writes_before = env.forge_writes(github);
+    let gitlab_writes_before = env.forge_writes(gitlab);
+    let report = env.issue(&["push"]);
+    assert_eq!(report["trackers"].as_array().unwrap().len(), 2);
+    assert!(env.issue_state().join("local/tracker.json").exists());
+    assert_eq!(env.forge_writes(github), github_writes_before);
+    assert_eq!(env.forge_writes(gitlab), gitlab_writes_before);
+    env.issue(&["create", "--title", "Still pending"]);
+    assert!(
+        env.issue_fail(&["push"])
+            .contains("several issue destinations")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_edit_waiting_for_attachment_does_not_recreate_the_source() {
+    waiting_issue_mutation_does_not_recreate_the_source(false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_attachment_waiting_for_another_attachment_does_not_recreate_the_source() {
+    waiting_issue_mutation_does_not_recreate_the_source(true);
+}
+
+#[cfg(target_os = "linux")]
+fn waiting_issue_mutation_does_not_recreate_the_source(attach: bool) {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let env = Env::new();
+    let made = env.issue(&["create", "--title", "Move me"]);
+    let key = made["key"].as_str().unwrap();
+    let source = env.issue_state().join("local");
+    let target = env.issue_state().join("gh-github.com-o-r");
+    env.write_config(&crate::support::issue::Github.config(true));
+    std::fs::create_dir_all(&target).unwrap();
+    let guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(source.join(format!(".{key}.lock")))
+        .unwrap();
+    guard.lock().unwrap();
+    let destination_guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target.join(format!(".{key}.lock")))
+        .unwrap();
+    destination_guard.lock().unwrap();
+    let args = if attach {
+        vec!["issue", "push"]
+    } else {
+        vec!["issue", "edit", key, "--title", "Edited"]
+    };
+    let mut child = env
+        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .args(args)
+        .env("AGT_OFFLINE", if attach { "0" } else { "1" })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let locks = std::fs::read_to_string("/proc/locks").unwrap();
+        if locks.lines().any(|line| {
+            line.contains("->")
+                && line
+                    .split_whitespace()
+                    .any(|word| word == child.id().to_string())
+        }) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("mutation did not wait for the source lock");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let path = source.join(format!("{key}.json"));
+    let destination = target.join(format!("{key}.json"));
+    std::fs::rename(&path, &destination).unwrap();
+    drop(destination_guard);
+    drop(guard);
+    let output = child.wait_with_output().unwrap();
+    assert!(!path.exists(), "waiting edit recreated the attached issue");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("retry"));
+    let moved: Value = serde_json::from_slice(&std::fs::read(destination).unwrap()).unwrap();
+    assert_eq!(moved["fields"]["title"], "Move me");
+}

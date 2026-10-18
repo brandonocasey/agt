@@ -625,6 +625,36 @@ fn offline_run_end_saves_without_automatic_publication() {
 }
 
 #[test]
+fn automatic_publication_skips_a_held_publish_lock() {
+    let setup = Setup::reviewed(ORIGIN);
+    let env = &setup.env;
+    github::login(env);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+    auto_push(env);
+    let lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(env.state().join(".gh-42.publish.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let (release, waiting) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _ = waiting.recv_timeout(Duration::from_secs(3));
+        drop(lock);
+    });
+    let output = env.exec(&["run", "end", "--run", &setup.run], None, &[]);
+    let _ = release.send(());
+    holder.join().unwrap();
+    let ended = review_json(&output);
+    assert!(ended["ended_at"].is_string());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("publish is busy"));
+    assert_eq!(env.forge_calls().len(), 2);
+    assert!(env.run(&["status", "--full"])["runs"][0]["ended_at"].is_string());
+}
+
+#[test]
 fn automatic_publication_failure_obeys_one_deadline() {
     let setup = Setup::reviewed(ORIGIN);
     auto_push(&setup.env);

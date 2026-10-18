@@ -147,7 +147,10 @@ impl Store {
                     fs::remove_dir_all(&partial).map_err(ctx("remove unfinished legacy backup"))?;
                 }
                 for (source, relative) in &sources {
-                    copy_tree(source, &partial.join(relative))?;
+                    snapshot_source(source, &partial.join(relative))?;
+                }
+                for (source, relative) in &sources {
+                    validate_snapshot(source, &partial.join(relative))?;
                 }
                 fs::rename(&partial, &backup).map_err(ctx("finish legacy backup"))?;
                 sync_dir(&self.backups)?;
@@ -361,7 +364,12 @@ fn inspect_source(path: &Path) -> Result<Vec<fs::File>> {
             .map_err(ctx("open legacy lock"))?;
         file.try_lock()
             .map_err(ctx(format!("legacy source is busy: {}", path.display())))?;
-        held.push(file);
+        if matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".sync.publish.lock" | ".push.publish.lock")
+        ) {
+            held.push(file);
+        }
     } else if !meta.is_file() {
         return fail(format!(
             "legacy source {} is not a regular file or directory",
@@ -369,6 +377,102 @@ fn inspect_source(path: &Path) -> Result<Vec<fs::File>> {
         ));
     }
     Ok(held)
+}
+
+fn document_locks(path: &Path) -> Result<Vec<fs::File>> {
+    let mut held = Vec::new();
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(held);
+    };
+    for suffix in ["lock", "publish.lock"] {
+        if suffix == "publish.lock" && matches!(stem, "sync" | "push") {
+            continue;
+        }
+        let lock = path.with_file_name(format!(".{stem}.{suffix}"));
+        match fs::symlink_metadata(&lock) {
+            Ok(meta) if !meta.is_file() => return fail("legacy lock must be a regular file"),
+            Ok(_) => {
+                let file = fs::File::options()
+                    .read(true)
+                    .write(true)
+                    .open(&lock)
+                    .map_err(ctx("open legacy lock"))?;
+                file.try_lock()
+                    .map_err(ctx(format!("legacy source is busy: {}", lock.display())))?;
+                held.push(file);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(crate::core::error::Error(format!(
+                    "inspect legacy lock: {error}"
+                )));
+            }
+        }
+    }
+    Ok(held)
+}
+
+// Documents MUST be copied under their own locks; tracker-wide locks remain held by the caller.
+// The completed snapshot MUST be validated before it becomes the immutable import backup.
+fn snapshot_source(source: &Path, destination: &Path) -> Result<()> {
+    create_durable_dir(destination)?;
+    for entry in fs::read_dir(source).map_err(ctx("read legacy snapshot source"))? {
+        let entry = entry.map_err(ctx("read legacy snapshot entry"))?;
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).map_err(ctx("inspect legacy snapshot entry"))?;
+        let dest = destination.join(entry.file_name());
+        if meta.is_dir() {
+            snapshot_source(&path, &dest)?;
+        } else if !meta.is_file() {
+            return fail(format!(
+                "legacy source {} must be a regular file or directory, not a symbolic link",
+                path.display()
+            ));
+        } else if !entry.file_name().to_string_lossy().ends_with(".lock") {
+            let _locks = document_locks(&path)?;
+            let bytes = fs::read(&path).map_err(ctx("read legacy snapshot document"))?;
+            atomic_write(&dest, &bytes)?;
+        }
+    }
+    sync_dir(destination)
+}
+
+fn validate_snapshot(source: &Path, snapshot: &Path) -> Result<()> {
+    let entries = |dir: &Path| -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(dir).map_err(ctx("read legacy snapshot validation"))? {
+            let entry = entry.map_err(ctx("read legacy validation entry"))?;
+            if !entry.file_name().to_string_lossy().ends_with(".lock") {
+                paths.push(PathBuf::from(entry.file_name()));
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    };
+    let names = entries(source)?;
+    if names != entries(snapshot)? {
+        return fail("legacy source changed during snapshot; retry");
+    }
+    for name in names {
+        let path = source.join(&name);
+        let saved = snapshot.join(name);
+        let meta = fs::symlink_metadata(&path).map_err(ctx("inspect legacy validation source"))?;
+        if meta.is_dir() && saved.is_dir() {
+            validate_snapshot(&path, &saved)?;
+        } else if meta.is_file() && saved.is_file() {
+            let _locks = document_locks(&path)?;
+            if fs::read(&path).map_err(ctx("read legacy validation source"))?
+                != fs::read(&saved).map_err(ctx("read legacy validation snapshot"))?
+            {
+                return fail("legacy source changed during snapshot; retry");
+            }
+        } else {
+            return fail(
+                "legacy source changed during snapshot or contains a symbolic link; retry",
+            );
+        }
+    }
+    Ok(())
 }
 
 impl Store {

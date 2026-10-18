@@ -35,6 +35,12 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
     let connection = sync::connect(ctx, pr)?;
     let _publish_lock = if dry_run {
         None
+    } else if options.run.is_some() {
+        Some(
+            ctx.store
+                .try_publish_lock(&ctx.dir, &connection.key)?
+                .ok_or_else(|| Error("publish is busy".into()))?,
+        )
     } else {
         Some(ctx.store.publish_lock(&ctx.dir, &connection.key)?)
     };

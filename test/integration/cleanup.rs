@@ -1775,6 +1775,70 @@ fn repository_storage_preview_reads_legacy_issues_without_writes() {
 }
 
 #[test]
+fn repository_storage_imports_many_locked_issues_with_low_descriptor_limit() {
+    use crate::support::issue::{Github, IssueFake, Spec};
+    let env = Env::new();
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    env.write_config(&Github.config(true));
+    let specs: Vec<_> = (1..=300)
+        .map(|number| Spec::new(number, "Legacy issue"))
+        .collect();
+    (&Github as &dyn IssueFake).serve(&env, &specs);
+    env.issue(&["sync"]);
+    let local = env.repo.join(".agt/issues");
+    let legacy = env.path("state").join("agents/issues");
+    fs::rename(&local, &legacy).unwrap();
+    fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
+    for number in 1..=300 {
+        File::create(
+            legacy
+                .join(Github.tracker())
+                .join(format!(".{number}.lock")),
+        )
+        .unwrap();
+    }
+    for args in [vec!["issue", "push", "--dry-run"], vec!["issue", "list"]] {
+        let output = env
+            .command("sh", &env.repo)
+            .args(["-c", "ulimit -n 128 && exec \"$@\"", "sh", BIN])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if args.contains(&"--dry-run") {
+            assert!(!local.exists());
+            assert!(!env.path("state").join("agents/repository-imports").exists());
+            assert!(!env.path("state").join("agents/backups").exists());
+        }
+    }
+    let records = fs::read_dir(env.path("state").join("agents/repository-imports"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(records.join("issues.done").is_file());
+    assert!(!records.join(".issues.stage").exists());
+    let backup_name = fs::read_to_string(records.join("issues.backup")).unwrap();
+    let identity = records.file_name().unwrap();
+    let backup = env
+        .path("state")
+        .join("agents/backups/repositories")
+        .join(identity)
+        .join(backup_name);
+    for number in 1..=300 {
+        let relative = PathBuf::from(Github.tracker()).join(format!("{number}.json"));
+        let original = fs::read(legacy.join(&relative)).unwrap();
+        assert_eq!(fs::read(local.join(&relative)).unwrap(), original);
+        assert_eq!(fs::read(backup.join(&relative)).unwrap(), original);
+    }
+}
+
+#[test]
 fn repository_storage_refuses_busy_and_symbolic_legacy_sources() {
     let prune = Prune {
         env: Env::with_branch(),
