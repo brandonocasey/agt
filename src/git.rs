@@ -195,23 +195,16 @@ impl Repo {
         }
     }
 
-    /// The ssh command a remote check uses: the user's own (`GIT_SSH_COMMAND`, `GIT_SSH`,
-    /// `core.sshCommand`, in git's order of precedence) with batch mode and a connect timeout
-    /// added, or plain ssh with them.
+    /// The ssh command a remote check uses: the user's own (`GIT_SSH_COMMAND`, `core.sshCommand`,
+    /// `GIT_SSH`, in git's order of precedence) with batch mode and a connect timeout added, or
+    /// plain ssh with them. `GIT_SSH` is a program path git runs without a shell, so it is quoted.
     fn batch_ssh_command(&self) -> String {
-        let own = std::env::var("GIT_SSH_COMMAND")
-            .ok()
-            .filter(|command| !command.is_empty())
+        let nonempty = |value: Option<String>| value.filter(|command| !command.is_empty());
+        let own = nonempty(std::env::var("GIT_SSH_COMMAND").ok())
+            .or_else(|| nonempty(self.git_opt(&["config", "core.sshCommand"]).ok().flatten()))
             .or_else(|| {
-                std::env::var("GIT_SSH")
-                    .ok()
-                    .filter(|command| !command.is_empty())
-            })
-            .or_else(|| {
-                self.git_opt(&["config", "core.sshCommand"])
-                    .ok()
-                    .flatten()
-                    .filter(|command| !command.is_empty())
+                nonempty(std::env::var("GIT_SSH").ok())
+                    .map(|program| format!("'{}'", program.replace('\'', "'\\''")))
             });
         format!(
             "{} -o BatchMode=yes -o ConnectTimeout=5",

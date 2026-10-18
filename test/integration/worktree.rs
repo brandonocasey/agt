@@ -1797,6 +1797,75 @@ fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
 }
 
 #[test]
+fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
+    let cases = [
+        // core.sshCommand (a deploy key) beats GIT_SSH.
+        (
+            None,
+            Some("deploy-ssh -i key"),
+            Some("/opt/env ssh/wrapper"),
+            "deploy-ssh -i key -o BatchMode=yes -o ConnectTimeout=5",
+        ),
+        // GIT_SSH_COMMAND beats both.
+        (
+            Some("own-ssh"),
+            Some("deploy-ssh -i key"),
+            Some("/opt/env ssh/wrapper"),
+            "own-ssh -o BatchMode=yes -o ConnectTimeout=5",
+        ),
+        // GIT_SSH alone is a program path: one quoted word, even with a space or a quote.
+        (
+            None,
+            None,
+            Some("/opt/it's ssh/wrapper"),
+            "'/opt/it'\\''s ssh/wrapper' -o BatchMode=yes -o ConnectTimeout=5",
+        ),
+    ];
+    for (command, configured, program, expect) in cases {
+        let (f, sub) = with_unheld_tag();
+        if let Some(configured) = configured {
+            wgit(&f.env, &sub, &["config", "core.sshCommand", configured]);
+        }
+        let bin = f.env.path("recording-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let record = f.env.path("ls-remote-env");
+        let real = String::from_utf8(
+            std::process::Command::new("which")
+                .arg("git")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        // A git that, asked to ls-remote, records its environment and advertises nothing.
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n*ls-remote*) env > '{}' ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
+            record.display(),
+            real.trim()
+        );
+        let wrapper = bin.join("git");
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let mut run = f.env.command(BIN, &f.env.repo);
+        run.env("PATH", path)
+            .args(["worktree", "remove", &f.wt.to_string_lossy()]);
+        match command {
+            Some(command) => run.env("GIT_SSH_COMMAND", command),
+            None => run.env_remove("GIT_SSH_COMMAND"),
+        };
+        match program {
+            Some(program) => run.env("GIT_SSH", program),
+            None => run.env_remove("GIT_SSH"),
+        };
+        assert_eq!(run.output().unwrap().status.code(), Some(1));
+        let seen = fs::read_to_string(&record).unwrap();
+        let line = format!("GIT_SSH_COMMAND={expect}");
+        assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
+    }
+}
+
+#[test]
 fn a_disabled_sparse_checkout_restores_without_a_warning_and_keeps_its_config() {
     let f = sparse_fixture();
     wgit(&f.env, &f.wt, &["sparse-checkout", "disable"]);
