@@ -55,13 +55,17 @@ pub fn run(cli: Cli) -> Result<Output> {
     let mut cwds = Cwds::default();
     let mut rows = Vec::new();
     for repo in repos {
-        let main = info::main_checkout(&repo)?.path;
-        let report = match sweep(&repo, &cli, &mut cwds) {
-            Ok(report) => report,
-            Err(error) if cli.all => Report {
-                warnings: vec![error.to_string()],
-                ..Report::default()
-            },
+        let swept = info::main_checkout(&repo)
+            .and_then(|main| sweep(&repo, &cli, &mut cwds).map(|report| (main.path, report)));
+        let (main, report) = match swept {
+            Ok(done) => done,
+            Err(error) if cli.all => (
+                repo.root().to_owned(),
+                Report {
+                    warnings: vec![error.to_string()],
+                    ..Report::default()
+                },
+            ),
             Err(error) => return Err(error),
         };
         let (removed, deleted) = if cli.yes {

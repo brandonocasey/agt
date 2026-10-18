@@ -578,3 +578,42 @@ fn listing_never_rewrites_a_worktree_index() {
     assert_eq!(plan["plan"], true);
     assert_eq!(fs::read(&index).unwrap(), before);
 }
+
+#[test]
+fn list_all_warns_about_an_unreadable_repository_and_lists_the_rest() {
+    let f = Fixture::new();
+    let broken = f.env.path("home/code/broken");
+    fs::create_dir_all(broken.join(".git")).unwrap();
+    let good = f.env.path("home/code/good");
+    fs::create_dir_all(good.parent().unwrap()).unwrap();
+    f.env.git(&[
+        "clone",
+        "-q",
+        &f.env.repo.to_string_lossy(),
+        &good.to_string_lossy(),
+    ]);
+    wgit(
+        &f.env,
+        &good,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "o",
+            &f.env.path("trees/o").to_string_lossy(),
+        ],
+    );
+    fs::create_dir_all(f.env.path("config/agt")).unwrap();
+    fs::write(
+        f.env.path("config/agt/config.toml"),
+        "[worktree]\nroots = [\"~/code/*\"]\n",
+    )
+    .unwrap();
+    let all = f.json(&["list", "--all"]);
+    let rows = all["worktrees"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{all}");
+    let warnings = all["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{all}");
+    assert!(warnings[0].as_str().unwrap().contains("broken"), "{all}");
+}

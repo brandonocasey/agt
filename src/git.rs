@@ -47,6 +47,10 @@ impl Repo {
         }
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn discover() -> Result<Self> {
         let output = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])

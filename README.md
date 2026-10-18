@@ -911,7 +911,7 @@ pid is not listed. A row has `pid`, `name`, `kind`, `status` as Claude Code wrot
 records with `waiting`, such as `dialog open`), `cwd`, `repository` (the main checkout), `branch`,
 `worktree` (the linked worktree holding `cwd`, else `null`), `session`, and from the session's
 transcripts `model` and `context_tokens` of the last call of the main agent and `usd` spent so far,
-subagents included. `usd` is `null` when the price file lists none of the session's models, and
+subagents included. `usd` is `null` when the price file lists none of the session's models or cannot be read (one warning on stderr, the agents are still listed), and
 `unpriced_calls` counts calls it does not list. The table shows `unpriced` then, and `12.34+` for a
 partial sum. `--json` prints `{"agents": [...]}`.
 
@@ -941,7 +941,7 @@ agt worktree backups show ID
 agt worktree backups rm ID [--yes]          # delete the backup's ref and directory
 ```
 
-`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it), and `agents`: the live Claude Code sessions whose working directory is inside it, each with `pid`, `name`, `status` and `session` (the sessions `agt ps` lists). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml`; globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
+`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it), and `agents`: the live Claude Code sessions whose working directory is inside it, each with `pid`, `name`, `status` and `session` (the sessions `agt ps` lists). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml` (a repository it cannot read becomes an entry of `warnings` and the rest are still listed, as `cleanup --all` does); globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
 
 ```toml
 [worktree]

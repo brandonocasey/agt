@@ -24,15 +24,30 @@ pub fn run(cli: Cli) -> Result<Output> {
     };
     let live = agents::live();
     let mut rows: Vec<Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for repo in repos {
-        let entries = info::entries(&repo)?;
-        let default = default_branch(&repo)?;
-        for entry in entries.iter().skip(1) {
-            let mut row = describe(&repo, entry, default.as_ref())?;
-            row["repository"] = json!(entries[0].path);
-            row["agents"] = agents_in(&live, &entry.path);
-            rows.push(row);
+        match rows_of(&repo, &live) {
+            Ok(found) => rows.extend(found),
+            Err(error) if cli.all => {
+                warnings.push(format!("{}: {error}", repo.root().display()));
+            }
+            Err(error) => return Err(error),
         }
     }
-    Ok(Output::Json(json!({ "worktrees": rows })))
+    Ok(Output::Json(
+        json!({ "worktrees": rows, "warnings": warnings }),
+    ))
+}
+
+fn rows_of(repo: &Repo, live: &[agents::Live]) -> Result<Vec<Value>> {
+    let entries = info::entries(repo)?;
+    let default = default_branch(repo)?;
+    let mut rows = Vec::new();
+    for entry in entries.iter().skip(1) {
+        let mut row = describe(repo, entry, default.as_ref())?;
+        row["repository"] = json!(entries[0].path);
+        row["agents"] = agents_in(live, &entry.path);
+        rows.push(row);
+    }
+    Ok(rows)
 }

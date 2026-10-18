@@ -599,3 +599,40 @@ fn a_nested_repository_keeps_its_worktree_even_with_dirty() {
         assert_eq!(site.branches(), ["main", "wip"]);
     }
 }
+
+#[test]
+fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
+    let site = Site::new();
+    let wt = site.branch("done");
+    site.env.git(&["merge", "-q", "done"]);
+    let broken = site.env.path("home/code/broken");
+    fs::create_dir_all(broken.join(".git")).unwrap();
+    let config = site.env.path("config/agt");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!(
+            "[worktree]\nroots = [\"{}\", \"{}\"]\n",
+            broken.display(),
+            site.env.repo.display()
+        ),
+    )
+    .unwrap();
+
+    let output = site.agt_in(&site.env.path("home"), &["--all", "--yes"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = report["repositories"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{report}");
+    let bad = rows
+        .iter()
+        .find(|row| row["repository"].as_str().unwrap().ends_with("broken"))
+        .unwrap();
+    assert_eq!(bad["warnings"].as_array().unwrap().len(), 1, "{report}");
+    assert!(!wt.exists());
+    assert_eq!(site.branches(), ["main"]);
+}
