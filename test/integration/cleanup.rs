@@ -2,6 +2,7 @@
 //! `AGT_NOW` override, so no test waits.
 
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
@@ -1435,4 +1436,88 @@ fn manual_report_skips_a_worktree_whose_submodule_holds_a_stash() {
     git(&done.join("mod"), &["stash", "push", "-q"]);
     let report = prune.run_at(later(), &["--only", "manual"]);
     assert_eq!(report["manual"]["worktrees"], json!([]));
+}
+
+/// A `git` in front of the real one that records every command line it is given.
+fn recording_git(prune: &Prune) -> (String, PathBuf) {
+    let bin = prune.env.path("recording-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let log = prune.env.path("git-calls");
+    let real = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    (path, log)
+}
+
+#[test]
+fn the_manual_report_never_asks_a_remote_and_does_not_list_a_worktree_holding_an_unheld_tag() {
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    let origin = prune.env.path("sub-origin");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&origin).unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", dir)
+            .args(["-c", "protocol.file.allow=always"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&origin, &["init", "-q", "-b", "main"]);
+    git(&origin, &["commit", "-q", "--allow-empty", "-m", "lib"]);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "one"]);
+    git(
+        &repo,
+        &["submodule", "add", "-q", &origin.to_string_lossy(), "mod"],
+    );
+    git(&repo, &["commit", "-q", "-m", "add submodule"]);
+    git(
+        &repo,
+        &["worktree", "add", "-q", ".worktrees/done", "-b", "done"],
+    );
+    let done = repo.join(".worktrees/done");
+    git(&done, &["submodule", "update", "--init", "-q"]);
+    // A tag on a commit that only this clone has.
+    let sub = done.join("mod");
+    git(&sub, &["commit", "-q", "--allow-empty", "-m", "local only"]);
+    git(&sub, &["tag", "mine"]);
+    git(&sub, &["checkout", "-q", "--detach", "HEAD~1"]);
+
+    let (path, log) = recording_git(&prune);
+    let output = prune
+        .env
+        .command(BIN, &prune.env.repo)
+        .arg("cleanup")
+        .args(["--only", "manual"])
+        .env("AGT_NOW", later().to_string())
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["manual"]["worktrees"], json!([]), "{report}");
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(!calls.contains("ls-remote"), "{calls}");
 }

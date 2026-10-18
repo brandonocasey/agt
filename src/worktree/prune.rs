@@ -66,8 +66,9 @@ fn idle(scene: &Scene, entry: &Entry, main: &Path) -> Result<bool> {
     if entry.locked || !entry.path.exists() || scene.holds_cwd(&entry.path) {
         return Ok(false);
     }
-    Ok(info::unsaved(&entry.path)? == 0
-        && gate::check(&entry.path, main).is_ok()
+    // The cheap checks first, and the gate without the network: the report must stay offline.
+    Ok(!recent(&entry.path, clock::now_secs()?)?
         && agents::live_in(&entry.path).is_none()
-        && !recent(&entry.path, clock::now_secs()?)?)
+        && info::unsaved(&entry.path)? == 0
+        && gate::check_offline(&entry.path, main).is_ok())
 }

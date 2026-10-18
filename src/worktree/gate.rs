@@ -29,6 +29,16 @@ const UNFINISHED: [&str; 8] = [
 /// Refuses, naming the repository and the reason, when removing the worktree at `worktree`
 /// would delete work that exists nowhere else.
 pub fn check(worktree: &Path, main: &Path) -> Result<()> {
+    check_with(worktree, main, true)
+}
+
+/// [`check`] without the network: a tag that no local commit holds counts as unheld, so the
+/// answer is never more permissive than [`check`]'s.
+pub fn check_offline(worktree: &Path, main: &Path) -> Result<()> {
+    check_with(worktree, main, false)
+}
+
+fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     worktree_state(worktree)?;
     let found = nested::repositories(worktree)?;
     let strays: Vec<String> = found
@@ -66,7 +76,7 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
         if let Ok(inside) = gitdir.strip_prefix(&worktree_modules) {
             elsewhere.push(main_modules.join(inside));
         }
-        holds_nothing_unique(&name, &gitdir, Some(&sub.dir), &elsewhere)?;
+        holds_nothing_unique(&name, &gitdir, Some(&sub.dir), &elsewhere, online)?;
     }
     for clone in clones(&worktree_modules) {
         let canonical = fs::canonicalize(&clone).unwrap_or_else(|_| clone.clone());
@@ -79,7 +89,7 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
             elsewhere.push(main_modules.join(inside));
         }
         let workdir = workdir_of(&clone);
-        holds_nothing_unique(&name, &clone, workdir.as_deref(), &elsewhere)?;
+        holds_nothing_unique(&name, &clone, workdir.as_deref(), &elsewhere, online)?;
     }
     Ok(())
 }
@@ -369,7 +379,7 @@ fn advertised_tags(gitdir: &Path) -> Result<Vec<(String, String)>> {
 
 /// Refuses when a ref of the repository at `gitdir`, or its HEAD, leads to a commit that no
 /// remote-tracking branch, no clone in `elsewhere` and (for a tag) no remote has.
-fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf]) -> Result<()> {
+fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf], online: bool) -> Result<()> {
     let all = tips(gitdir)?;
     if all.iter().any(|tip| tip.reference == "refs/stash") {
         return fail(format!("{name} has a stash; apply or drop it first"));
@@ -426,7 +436,12 @@ fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf]) -> Result<()> 
             .as_ref()
             .is_some_and(|commit| unheld.contains(commit))
     }) {
-        match advertised_tags(gitdir) {
+        let asked = if online {
+            advertised_tags(gitdir)
+        } else {
+            fail("offline")
+        };
+        match asked {
             Ok(advertised) => {
                 let held: HashSet<&str> = tags
                     .iter()
@@ -476,6 +491,7 @@ fn holds_nothing_unique(
     gitdir: &Path,
     workdir: Option<&Path>,
     elsewhere: &[PathBuf],
+    online: bool,
 ) -> Result<()> {
     for marker in UNFINISHED {
         if gitdir.join(marker).exists() {
@@ -485,7 +501,7 @@ fn holds_nothing_unique(
             ));
         }
     }
-    commits_held(name, gitdir, elsewhere)?;
+    commits_held(name, gitdir, elsewhere, online)?;
     let worktrees = plumbing(gitdir, &["worktree", "list", "--porcelain"])?;
     if worktrees
         .lines()

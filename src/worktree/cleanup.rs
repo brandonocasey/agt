@@ -336,7 +336,12 @@ fn blocker(
     if let Err(error) = refuse(&scene.entries, &real, main) {
         return Ok(Some((None, error.to_string())));
     }
-    if let Err(error) = gate::check(&real, main) {
+    let gated = if cli.offline {
+        gate::check_offline(&real, main)
+    } else {
+        gate::check(&real, main)
+    };
+    if let Err(error) = gated {
         return Ok(Some((None, error.to_string())));
     }
     if let Some(reason) = cwds.busy(&real) {
