@@ -1,4 +1,5 @@
 mod agt;
+mod auto_sync;
 mod ci;
 mod ci_wait;
 mod cleanup;

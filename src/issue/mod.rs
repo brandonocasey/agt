@@ -1,6 +1,8 @@
-//! `agt issue`: GitHub and GitLab issues kept locally. Reads are local; `sync` fetches; every
-//! write is queued in the local copy and sent by `push`.
+//! `agt issue`: GitHub and GitLab issues kept locally. Reads are local, after an auto-sync of
+//! the trackers whose last sync is older than `sync.max_age_secs` (see [`auto`]); `sync` fetches;
+//! every write is queued in the local copy and sent by `push`.
 
+mod auto;
 mod cli;
 mod local;
 mod merge;
@@ -24,6 +26,16 @@ use crate::store::{Namespace, Store};
 pub fn run(cli: Cli) -> Result<Output> {
     let store = Store::open(Namespace::Issues)?;
     let filter = cli.tracker.as_deref();
+    if matches!(
+        cli.command,
+        Command::List(_)
+            | Command::Show { .. }
+            | Command::Search { .. }
+            | Command::Status
+            | Command::Find(_)
+    ) {
+        auto::sync_stale(&store, filter, cli.offline)?;
+    }
     let value = match &cli.command {
         Command::Sync => sync::run(&store, &Config::load()?, filter)?,
         Command::List(args) => view::list(&store, filter, args)?,

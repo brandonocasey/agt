@@ -1,4 +1,5 @@
 pub mod anchors;
+pub mod auto;
 #[cfg(test)]
 mod contract;
 pub mod github;

@@ -19,6 +19,7 @@ pub struct Env {
     _temp: TempDir,
     root: PathBuf,
     pub repo: PathBuf,
+    offline: bool,
 }
 
 impl Env {
@@ -37,9 +38,16 @@ impl Env {
             repo: root.join("repo"),
             root,
             _temp: temp,
+            offline: false,
         };
         env.git(&["init", "-q", "-b", "main"]);
         env
+    }
+
+    /// Every command of this environment runs with `AGT_OFFLINE=1`, so reads stay local.
+    pub fn offline(mut self) -> Self {
+        self.offline = true;
+        self
     }
 
     pub fn state(&self) -> PathBuf {
@@ -76,12 +84,17 @@ impl Env {
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
             .env_remove("GITLAB_HOST")
             .env_remove("AGT_NOW")
+            .env_remove("AGT_OFFLINE")
+            .env_remove("AGT_SYNC_CAP_MS")
             // `agt cleanup` must see only this environment: its cache, its tmp, no processes.
             .env("XDG_CACHE_HOME", self.root.join("cache"))
             .env("AGT_CLEANUP_TMP", self.root.join("tmp"))
             .env("AGT_CLEANUP_PID", "0")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("PLAYWRIGHT_BROWSERS_PATH");
+        if self.offline {
+            command.env("AGT_OFFLINE", "1");
+        }
         command
     }
 

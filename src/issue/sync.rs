@@ -33,7 +33,7 @@ pub fn run(store: &Store, config: &Config, filter: Option<&str>) -> Result<Value
     Ok(json!({ "trackers": reports }))
 }
 
-fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
+pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
     let (service, login) = connect(&tracker)?;
     let now = clock::now()?;
     let since = match &tracker.doc.watermark {

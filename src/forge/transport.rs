@@ -4,8 +4,11 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{ErrorKind, Write};
-use std::process::{Command, Stdio};
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -152,6 +155,101 @@ pub enum Tool {
     Glab,
 }
 
+/// When the forge calls of the current command must be done. Only the auto-sync of a read sets
+/// it; explicit commands run without a cap.
+static DEADLINE: Mutex<Option<(Instant, Duration)>> = Mutex::new(None);
+
+/// Caps the forge calls started from now on at `limit` in total, until [`clear_deadline`].
+pub fn set_deadline(limit: Duration) {
+    if let Ok(mut deadline) = DEADLINE.lock() {
+        *deadline = Some((Instant::now() + limit, limit));
+    }
+}
+
+pub fn clear_deadline() {
+    if let Ok(mut deadline) = DEADLINE.lock() {
+        *deadline = None;
+    }
+}
+
+fn deadline() -> Option<(Instant, Duration)> {
+    DEADLINE.lock().ok().and_then(|deadline| *deadline)
+}
+
+/// Makes the child a process group of its own when a deadline is set, so a timeout can kill what
+/// the tool started as well.
+fn grouped(command: &mut Command) -> &mut Command {
+    if deadline().is_some() {
+        command.process_group(0);
+    }
+    command
+}
+
+fn timed_out(name: &str, limit: Duration) -> TransportError {
+    TransportError::new(format!("{name} timed out after {}s", limit.as_secs()))
+}
+
+fn reader<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = match pipe {
+            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+            None => Ok(bytes),
+        };
+        let _ = send.send(read);
+    });
+    receive
+}
+
+/// Waits for `child` and collects its output. With a deadline set, a child still running at it
+/// is killed with its process group, and its output is abandoned.
+fn finish(mut child: Child, name: &str) -> std::result::Result<Output, TransportError> {
+    let wrap = |error: std::io::Error| TransportError::new(format!("run {name}: {error}"));
+    let Some((deadline, limit)) = deadline() else {
+        return child.wait_with_output().map_err(wrap);
+    };
+    let stdout = reader(child.stdout.take());
+    let stderr = reader(child.stderr.take());
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(wrap)? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            kill_group(&child);
+            let _ = child.wait();
+            return Err(timed_out(name, limit));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let collect = |pipe: &std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
+        match pipe.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(bytes) => bytes.map_err(wrap),
+            // The tool left a process holding its output open.
+            Err(_) => Err(timed_out(name, limit)),
+        }
+    };
+    let stdout = collect(&stdout)?;
+    let stderr = collect(&stderr)?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn kill_group(child: &Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: `kill` takes plain integers and touches no memory. The child leads its own
+        // group, which only it and what it started belong to.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 /// A CLI process: `gh` or `glab` with its environment.
 pub struct Cli {
     program: OsString,
@@ -202,18 +300,25 @@ impl Cli {
         input: Option<&[u8]>,
     ) -> std::result::Result<Vec<u8>, TransportError> {
         let name = self.name;
-        let mut child = Command::new(&self.program)
-            .args(args)
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(ctx(format!("run {name}")))?;
+        if let Some((deadline, limit)) = deadline()
+            && Instant::now() >= deadline
+        {
+            return Err(timed_out(name, limit));
+        }
+        let mut child = grouped(
+            Command::new(&self.program)
+                .args(args)
+                .envs(self.env.iter().map(|(key, value)| (key, value))),
+        )
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(ctx(format!("run {name}")))?;
         // Input is written from another thread so a tool that exits before reading it shows
         // its own error, not a broken pipe, and a large reply cannot fill the pipe.
         let writer = match (input, child.stdin.take()) {
@@ -223,9 +328,7 @@ impl Cli {
             }
             _ => None,
         };
-        let output = child
-            .wait_with_output()
-            .map_err(ctx(format!("run {name}")))?;
+        let output = finish(child, name)?;
         let wrote = writer.map(std::thread::JoinHandle::join);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

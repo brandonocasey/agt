@@ -393,6 +393,13 @@ impl Store {
         lock(&dir.join(format!(".{key}.publish.lock")))
     }
 
+    /// Like [`Store::publish_lock`], but gives up with `None` when another process holds it.
+    pub fn try_publish_lock(&self, dir: &Path, key: &str) -> Result<Option<File>> {
+        validate_key(key)?;
+        create_dir(dir)?;
+        try_lock(&dir.join(format!(".{key}.publish.lock")))
+    }
+
     /// Runs `change` on the target under its lock and writes the result atomically. A missing
     /// target starts from `init`.
     pub fn update<R>(

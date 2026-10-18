@@ -162,7 +162,8 @@ fn link_pr_queues_a_comment_and_a_local_link_once(fake: Fake) {
 }
 
 fn create_queues_a_local_issue_that_takes_more_changes(fake: Fake) {
-    let env = Env::new();
+    // Local behavior: the tracker is configured but never synced, and no read may call a host.
+    let env = Env::new().offline();
     env.write_config(&fake.config(true));
     let created = env.issue(&[
         "create",

@@ -211,7 +211,7 @@ impl Transport for TokenTransport {
     fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
         let token = self.auth.token(&self.host)?;
         let config = self.config(request, &token)?;
-        let mut child = Command::new(&self.program)
+        let mut child = super::grouped(&mut Command::new(&self.program))
             // `-q` first, or curl reads ~/.curlrc, which could redirect the request or log it.
             .args([
                 "-q",
@@ -230,7 +230,7 @@ impl Transport for TokenTransport {
             .map_err(ctx("run curl"))?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let writer = std::thread::spawn(move || stdin.write_all(config.as_bytes()));
-        let output = child.wait_with_output().map_err(ctx("run curl"))?;
+        let output = super::finish(child, "curl")?;
         let _ = writer.join();
         if !output.status.success() {
             return Err(TransportError::new(format!(

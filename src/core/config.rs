@@ -17,6 +17,37 @@ pub struct Config {
     pub issues: Issues,
     #[serde(default)]
     pub worktree: Worktree,
+    #[serde(default)]
+    pub sync: SyncConfig,
+}
+
+/// When a read pulls from the forge first.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncConfig {
+    /// `false` keeps every read local.
+    #[serde(default = "default_auto")]
+    pub auto: bool,
+    /// A read syncs when the last sync is older than this many seconds.
+    #[serde(default = "default_max_age_secs")]
+    pub max_age_secs: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            auto: default_auto(),
+            max_age_secs: default_max_age_secs(),
+        }
+    }
+}
+
+fn default_auto() -> bool {
+    true
+}
+
+fn default_max_age_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
@@ -144,6 +175,31 @@ mod tests {
         let config = Config::load_from(&dir.path().join("agt").join("config.toml")).unwrap();
         assert_eq!(config, Config::default());
         assert!(config.issues.tracker.is_empty());
+    }
+
+    #[test]
+    fn sync_defaults_to_auto_with_five_minutes() {
+        let (_dir, config) = load("");
+        let sync = config.unwrap().sync;
+        assert!(sync.auto);
+        assert_eq!(sync.max_age_secs, 300);
+        let (_dir, config) = load("[sync]\nauto = false\nmax_age_secs = 60\n");
+        let sync = config.unwrap().sync;
+        assert!(!sync.auto);
+        assert_eq!(sync.max_age_secs, 60);
+    }
+
+    #[test]
+    fn sync_refuses_unknown_keys_and_bad_values() {
+        for text in [
+            "[sync]\nbogus = 1\n",
+            "[sync]\nauto = \"yes\"\n",
+            "[sync]\nmax_age_secs = -1\n",
+        ] {
+            let (_dir, config) = load(text);
+            let error = config.unwrap_err().0;
+            assert!(error.contains("config.toml"), "{error}");
+        }
     }
 
     #[test]

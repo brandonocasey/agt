@@ -5,6 +5,9 @@ pub struct Cli {
     /// Only this tracker: its key (`gh-github.com-owner-repo`) or `owner/repo`.
     #[arg(long, global = true, value_name = "KEY")]
     pub tracker: Option<String>,
+    /// Read the local data only: never sync first (also `AGT_OFFLINE=1`).
+    #[arg(long, global = true)]
+    pub offline: bool,
     #[command(subcommand)]
     pub command: Command,
 }
