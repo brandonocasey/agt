@@ -576,3 +576,26 @@ fn a_worktree_quiet_for_4_days_is_removed() {
     assert!(!wt.exists());
     assert_eq!(report["removed"][0]["branch"], "fresh");
 }
+
+#[test]
+fn a_nested_repository_keeps_its_worktree_even_with_dirty() {
+    let site = Site::new();
+    let wt = site.branch("wip");
+    site.env.git(&["merge", "-q", "wip"]);
+    let nested = wt.join("vendor/lib");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("lib.txt"), "lib").unwrap();
+    site.git(&nested, &["init", "-q"]);
+    site.git(&nested, &["add", "-A"]);
+    site.git(&nested, &["commit", "-q", "-m", "lib"]);
+
+    for args in [&["--yes"][..], &["--yes", "--dirty"]] {
+        let report = site.run(args);
+        let row = site.kept(&report, "wip");
+        let reason = row["reason"].as_str().unwrap();
+        assert!(reason.contains("vendor/lib"), "{row}");
+        assert!(reason.contains("nested"), "{row}");
+        assert!(nested.join(".git").exists());
+        assert_eq!(site.branches(), ["main", "wip"]);
+    }
+}

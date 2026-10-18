@@ -507,3 +507,55 @@ fn list_names_the_live_sessions_inside_each_worktree() {
     let listed = f.json(&["list"]);
     assert_eq!(listed["worktrees"][0]["agents"], json!([]));
 }
+
+/// Makes `dir` a git repository of its own (an untracked nested repository for its parent).
+fn nest(env: &Env, dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("lib.txt"), "lib\n").unwrap();
+    wgit(env, dir, &["init", "-q"]);
+    wgit(env, dir, &["add", "-A"]);
+    wgit(env, dir, &["commit", "-q", "-m", "lib"]);
+}
+
+#[test]
+fn a_nested_repository_blocks_removal_in_plan_and_yes_alike() {
+    let f = Fixture::new();
+    nest(&f.env, &f.wt.join("vendor/lib"));
+    nest(&f.env, &f.wt.join("tools/deep/clone"));
+    nest(&f.env, &f.wt.join("node_modules/pkg"));
+    let path = f.wt.to_string_lossy().into_owned();
+    for args in [vec!["remove", &path], vec!["remove", &path, "--yes"]] {
+        let output = f.agt(&f.env.repo, &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        for nested in ["vendor/lib", "tools/deep/clone", "node_modules/pkg"] {
+            assert!(error.contains(nested), "{nested}: {error}");
+        }
+    }
+    assert!(f.wt.join("vendor/lib/.git").exists());
+    assert!(f.wt.join("node_modules/pkg/.git").exists());
+    assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+}
+
+#[test]
+fn a_registered_submodule_is_not_a_nested_repository() {
+    let f = Fixture::new();
+    let sub = f.env.path("sub-origin");
+    nest(&f.env, &sub);
+    wgit(
+        &f.env,
+        &f.wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &sub.to_string_lossy(),
+            "mod",
+        ],
+    );
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "add submodule"]);
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["plan"], true);
+}

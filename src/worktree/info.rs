@@ -195,7 +195,9 @@ pub fn dirty(root: &Path) -> Result<(usize, usize)> {
 pub fn unsaved(root: &Path) -> Result<usize> {
     Ok(status(root)?
         .iter()
-        .filter(|(untracked, path)| !*untracked || !is_disposable(path))
+        .filter(|(untracked, path)| {
+            !*untracked || !is_disposable(path) || root.join(path).join(".git").exists()
+        })
         .count())
 }
 

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::idle::Cwds;
 use super::landed::{Finding, Scene, Verdict, recent};
 use super::remove::{refuse, removal};
-use super::{info, roots, submodules};
+use super::{info, nested, roots, submodules};
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::core::output::Output;
@@ -243,6 +243,10 @@ fn blocker(
     }
     if let Err(error) = submodules::check(&real, main) {
         return Ok(Some((None, error.to_string())));
+    }
+    let inside = nested::find(&real)?;
+    if !inside.is_empty() {
+        return Ok(Some((None, nested::reason(&inside))));
     }
     if let Some(reason) = cwds.busy(&real) {
         return Ok(Some((None, reason)));

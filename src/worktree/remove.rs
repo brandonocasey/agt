@@ -4,7 +4,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::info::{self, Entry};
-use super::{snapshot, submodules};
+use super::{nested, snapshot, submodules};
 use crate::core::agents;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
@@ -29,6 +29,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let main = info::real(&listing[0].path)?;
     let entry = refuse(&listing, &path, &main)?;
     submodules::check(&path, &main)?;
+    nested::check(&path)?;
 
     let (modified, untracked) = info::dirty(&path)?;
     if !cli.yes {
@@ -50,6 +51,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Backs `entry` up, then removes its worktree; the caller has checked that it may go.
 pub(super) fn removal(main: &Path, path: &Path, entry: &Entry) -> Result<Value> {
+    nested::check(path)?;
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
