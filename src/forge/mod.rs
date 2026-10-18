@@ -4,6 +4,7 @@ mod contract;
 pub mod github;
 pub mod gitlab;
 pub mod issue;
+pub mod landed;
 pub mod markers;
 pub mod service;
 pub mod transport;
