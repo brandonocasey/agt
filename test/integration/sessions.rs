@@ -1,7 +1,6 @@
-//! `agt sessions` on fixture transcripts. The expected files are what the `agent-sessions`
-//! script printed for the same fixtures, so Claude Code reports stay byte for byte the same.
-//! `test/fixtures/sessions/generate.py` writes the fixtures; groups that span files have equal
-//! examples and distinct counts, so the expected output holds in any directory order.
+//! `agt sessions` on fixture transcripts. `test/fixtures/sessions/generate.py` writes the
+//! fixtures; groups that span files have equal examples and distinct counts, so the expected
+//! output holds in any directory order.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,7 +53,7 @@ fn expected(name: &str) -> String {
 }
 
 #[test]
-fn claude_reports_match_the_script() {
+fn claude_reports_print_the_expected_tables() {
     let env = Env::new();
     for (args, name) in [
         ("cost", "cost"),

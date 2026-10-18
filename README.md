@@ -858,9 +858,8 @@ N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-exi
 ## Sessions
 
 `agt sessions` reports on Claude Code transcripts (`~/.claude*/projects`)
-and Codex rollouts (`~/.codex/sessions`, `~/.codex/archived_sessions`). It replaces the
-`agent-sessions` script: for Claude Code transcripts it prints byte for byte what the script
-printed, and the integration tests compare against the script's output.
+and Codex rollouts (`~/.codex/sessions`, `~/.codex/archived_sessions`). Reports are text
+tables; `cost --json` prints indented JSON with `rows`, `unpriced` and `fast_calls`.
 
 ```sh
 agt sessions cost [--by agent,model,project,session,file,harness] [--json] [FILE...]
@@ -877,8 +876,7 @@ Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `
 (scratch and probe projects are skipped otherwise), `--root DIR` (repeatable), `--top N` (25) and
 `--harness all|claude|codex`. `cost --session ID` takes the full session id and prints that one
 session's cost so far from its transcript and its subagents' (it ignores the other options).
-A transcript last changed before the start date is not read, and one in a scratch project is
-counted as skipped only when it is in range. A root named with `--root` can hold either harness; a file whose
+A transcript last changed before the start date is not read. A root named with `--root` can hold either harness; a file whose
 first line is a Codex `session_meta` is read as Codex. Prices come from
 `~/.config/agents/model-prices.json`, or the file `AGT_PRICES` names; models it does not list are
 reported as unpriced.

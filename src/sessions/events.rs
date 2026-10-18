@@ -8,8 +8,9 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::core::transcripts::Transcript;
+use crate::core::transcripts::json::{get, head, key, text, truthy};
 use crate::sessions::Scope;
-use crate::sessions::py::{self, get, key, text, truthy};
+use crate::sessions::fmt;
 use crate::sessions::source::transcripts;
 use crate::sessions::spend::short_project;
 
@@ -86,16 +87,11 @@ fn tool_errors<'a>(scope: &Scope, found: &'a [Transcript]) -> Vec<Failure<'a>> {
                             .into_iter()
                             .map(|name| get(&input, name))
                             .find(|value| truthy(value))
-                            .map_or_else(|| py::dumps(&input), shown);
-                        let name = match block.get("name") {
-                            Some(Value::String(name)) => name.clone(),
-                            Some(Value::Null) => "None".into(),
-                            Some(other) => other.to_string(),
-                            None => "?".into(),
-                        };
+                            .map_or_else(|| input.to_string(), shown);
+                        let name = block.get("name").and_then(Value::as_str).unwrap_or("?");
                         uses.insert(
                             key(get(block, "id")),
-                            (name, py::head(&summary, 100).to_owned()),
+                            (name.to_owned(), head(&summary, 100).to_owned()),
                         );
                     }
                     "tool_result" if truthy(get(block, "is_error")) => {
@@ -122,9 +118,7 @@ fn tool_errors<'a>(scope: &Scope, found: &'a [Transcript]) -> Vec<Failure<'a>> {
 /// The kind of permission denial `text` reports, or `None` for an ordinary error.
 fn denial_kind(text: &str) -> Option<String> {
     // A command that ran and failed is an error even when its output says "Permission denied".
-    if text
-        .trim_start_matches(py::is_space)
-        .starts_with("Exit code")
+    if text.trim_start().starts_with("Exit code")
         || (!text.contains("denied")
             && !text.contains("rejected")
             && !text.contains("doesn't want to proceed"))
@@ -134,7 +128,7 @@ fn denial_kind(text: &str) -> Option<String> {
     for (pattern, label) in DENIALS.iter() {
         if let Some(found) = pattern.captures(text) {
             return Some(match found.get(1) {
-                Some(reason) => format!("{label}: {}", py::strip(reason.as_str())),
+                Some(reason) => format!("{label}: {}", reason.as_str().trim()),
                 None => (*label).to_owned(),
             });
         }
@@ -153,7 +147,7 @@ fn grouped(out: &mut String, rows: Vec<(String, String, String, String)>, top: u
         let entry = groups.entry(group).or_default();
         entry.0 += 1;
         entry.1.insert(session);
-        let day = py::head(&timestamp, 10);
+        let day = head(&timestamp, 10);
         if day > entry.2.as_str() {
             entry.2 = day.to_owned();
         }
@@ -174,12 +168,12 @@ fn grouped(out: &mut String, rows: Vec<(String, String, String, String)>, top: u
                 count.to_string(),
                 sessions.len().to_string(),
                 last.clone(),
-                py::head(group, 90).to_owned(),
-                py::head(example, 70).replace('\n', " "),
+                head(group, 90).to_owned(),
+                head(example, 70).replace('\n', " "),
             ]
         })
         .collect();
-    py::table(
+    fmt::table(
         out,
         &["count", "sessions", "last", "group", "example"],
         &rows,
@@ -196,7 +190,7 @@ pub fn errors(scope: &Scope) -> String {
         let cleaned = ERROR_TAG.replace_all(&failure.text, "");
         let mut lines: Vec<&str> = cleaned
             .split('\n')
-            .map(py::strip)
+            .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
         if lines.is_empty() {
@@ -211,7 +205,7 @@ pub fn errors(scope: &Scope) -> String {
         let group = format!(
             "{}: {}",
             failure.tool,
-            py::head(&DIGITS.replace_all(&first, "#"), 80)
+            head(&DIGITS.replace_all(&first, "#"), 80)
         );
         rows.push((
             group,
@@ -278,15 +272,10 @@ static PUNCTUATION: LazyLock<Regex> =
 
 /// Text the person typed, or `None` for tool results and injected harness content.
 fn user_text(record: &Value) -> Option<String> {
-    let entrypoint = match get(record, "entrypoint") {
-        Value::String(text) => text.clone(),
-        Value::Null if record.get("entrypoint").is_some() => "None".into(),
-        other => other.to_string(),
-    };
     if text(record, "type") != "user"
         || truthy(get(record, "isMeta"))
         || truthy(get(record, "isCompactSummary"))
-        || entrypoint.starts_with("sdk")
+        || text(record, "entrypoint").starts_with("sdk")
     {
         return None;
     }
@@ -309,7 +298,7 @@ fn user_text(record: &Value) -> Option<String> {
         Value::String(text) => text.clone(),
         _ => return None,
     };
-    let content = py::strip(&content);
+    let content = content.trim();
     if content.is_empty() {
         return None;
     }
@@ -318,10 +307,10 @@ fn user_text(record: &Value) -> Option<String> {
             .captures(content)
             .map(|found| found[1].to_owned())
             .unwrap_or_default();
-        return Some(py::strip(&format!("{} {arguments}", &command[1])).to_owned());
+        return Some(format!("{} {arguments}", &command[1]).trim().to_owned());
     }
     if let Some(bash) = BASH_INPUT.captures(content) {
-        return Some(format!("! {}", py::strip(&bash[1])));
+        return Some(format!("! {}", bash[1].trim()));
     }
     if content.starts_with('<') || content.starts_with("Caveat:") {
         return None;
@@ -355,7 +344,7 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
         transcript.records(&scope.since_iso, |record| {
             if let Some(typed) = user_text(record) {
                 messages.push((
-                    py::head(text(record, "timestamp"), 10).to_owned(),
+                    head(text(record, "timestamp"), 10).to_owned(),
                     transcript.project.clone(),
                     transcript.session.clone(),
                     typed,
@@ -369,7 +358,7 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
             let flat = typed.replace('\t', " ").replace('\n', " \\n ");
             out.push_str(&format!(
                 "{day}\t{project}\t{session}\t{}\n",
-                py::head(&flat, width)
+                head(&flat, width)
             ));
         }
         return out;
@@ -378,7 +367,7 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
     let mut short: IndexMap<String, Seen> = IndexMap::new();
     let mut normalized: IndexMap<String, Seen> = IndexMap::new();
     for (day, project, session, typed) in &messages {
-        let flat = py::split(typed).collect::<Vec<_>>().join(" ");
+        let flat = typed.split_whitespace().collect::<Vec<_>>().join(" ");
         if flat.starts_with("[Request interrupted") {
             let label = if flat.contains("tool use") {
                 "interrupt (tool use)"
@@ -404,7 +393,7 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
             }
         }
         let lower = flat.to_lowercase();
-        if py::split(&flat).count() <= 3 {
+        if flat.split_whitespace().count() <= 3 {
             short
                 .entry(lower.clone())
                 .or_default()
@@ -433,11 +422,11 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
                 seen.len().to_string(),
                 sessions(seen).to_string(),
                 last_day(seen),
-                py::head(reply, 60).to_owned(),
+                head(reply, 60).to_owned(),
             ]
         })
         .collect();
-    py::table(&mut out, &["count", "sessions", "last", "reply"], &table);
+    fmt::table(&mut out, &["count", "sessions", "last", "reply"], &table);
     out.push_str("\nSame prompt in 3 or more sessions:\n");
     let mut repeated: Vec<(String, Seen)> = normalized
         .into_iter()
@@ -452,11 +441,11 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
                 seen.len().to_string(),
                 sessions(seen).to_string(),
                 last_day(seen),
-                py::head(prompt, 70).to_owned(),
+                head(prompt, 70).to_owned(),
             ]
         })
         .collect();
-    py::table(&mut out, &["count", "sessions", "last", "prompt"], &table);
+    fmt::table(&mut out, &["count", "sessions", "last", "prompt"], &table);
     out
 }
 

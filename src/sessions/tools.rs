@@ -9,9 +9,10 @@ use serde_json::{Value, json};
 
 use crate::core::error::Result;
 use crate::core::transcripts::Kind;
+use crate::core::transcripts::json::{count, get, head, key, object, text, truthy};
 use crate::sessions::Scope;
+use crate::sessions::fmt::{self, grouped, tok};
 use crate::sessions::prices::Prices;
-use crate::sessions::py::{self, count, fixed, get, grouped, key, object, text, tok, truthy};
 use crate::sessions::source::transcripts;
 use crate::sessions::spend::short_project;
 
@@ -23,12 +24,12 @@ static PREAMBLE: LazyLock<Regex> = LazyLock::new(|| {
 fn tool_key(name: &str, input: &Value) -> String {
     if name == "Bash" {
         let command = text(input, "command");
-        let command = PREAMBLE.replace(py::strip(command), "");
-        let Some(first) = py::split(&command).next() else {
+        let command = PREAMBLE.replace(command.trim(), "");
+        let Some(first) = command.split_whitespace().next() else {
             return "Bash".into();
         };
         let base = first.rsplit('/').next().unwrap_or(first);
-        return format!("Bash:{}", py::head(base, 20));
+        return format!("Bash:{}", head(base, 20));
     }
     if name == "Read" {
         let path = text(input, "file_path");
@@ -48,7 +49,7 @@ fn tool_key(name: &str, input: &Value) -> String {
 /// About four characters per token; an image counts 1,600.
 fn est_tokens(content: &Value) -> f64 {
     match content {
-        Value::String(text) => py::chars(text) as f64 / 4.0,
+        Value::String(text) => text.chars().count() as f64 / 4.0,
         Value::Array(blocks) => {
             blocks
                 .iter()
@@ -56,12 +57,12 @@ fn est_tokens(content: &Value) -> f64 {
                 .fold(0.0, |sum, block| {
                     sum + match text(block, "type") {
                         "image" => 1600.0,
-                        "text" => py::chars(text(block, "text")) as f64 / 4.0,
-                        _ => py::chars(&py::dumps(block)) as f64 / 4.0,
+                        "text" => text(block, "text").chars().count() as f64 / 4.0,
+                        _ => block.to_string().chars().count() as f64 / 4.0,
                     }
                 })
         }
-        other if truthy(other) => py::chars(&py::dumps(other)) as f64 / 4.0,
+        other if truthy(other) => other.to_string().chars().count() as f64 / 4.0,
         _ => 0.0,
     }
 }
@@ -99,7 +100,7 @@ pub fn tools(scope: &Scope) -> String {
                 for block in get(message, "content").as_array().into_iter().flatten() {
                     if text(block, "type") == "tool_use" {
                         let input = get(block, "input");
-                        let tokens = py::chars(&py::dumps(get(block, "input"))) as f64 / 4.0;
+                        let tokens = input.to_string().chars().count() as f64 / 4.0;
                         pending.insert(
                             key(get(block, "id")),
                             (tool_key(text(block, "name"), input), tokens),
@@ -133,8 +134,8 @@ pub fn tools(scope: &Scope) -> String {
     let attributed = rows.iter().fold(0.0, |sum, (_, row)| sum + row.2);
     let base = if grand == 0.0 { 1.0 } else { grand };
     let mut out = format!(
-        "Tool inputs and results carry {}% of estimated cost since {}\n",
-        fixed(100.0 * attributed / base, 0),
+        "Tool inputs and results carry {:.0}% of estimated cost since {}\n",
+        100.0 * attributed / base,
         scope.since
     );
     let table: Vec<Vec<String>> = rows
@@ -144,12 +145,12 @@ pub fn tools(scope: &Scope) -> String {
             vec![
                 name.clone(),
                 calls.to_string(),
-                py::int(result / *calls as f64),
-                fixed(100.0 * cost / base, 1),
+                format!("{}", (result / *calls as f64).trunc() as i64),
+                format!("{:.1}", 100.0 * cost / base),
             ]
         })
         .collect();
-    py::table(
+    fmt::table(
         &mut out,
         &["tool", "calls", "avg result tok", "share %"],
         &table,
@@ -168,7 +169,7 @@ fn parse_ts(stamp: &str) -> Option<i128> {
     let mut parts = whole.split(':').map(|part| part.parse::<i64>().ok());
     let (hour, minute) = (parts.next()??, parts.next()??);
     let second = parts.next().flatten().unwrap_or(0);
-    let micros: i64 = format!("{:0<6}", py::head(fraction, 6)).parse().ok()?;
+    let micros: i64 = format!("{:0<6}", head(fraction, 6)).parse().ok()?;
     let offset = match zone {
         "" | "Z" | "z" => 0,
         _ => {
@@ -226,7 +227,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
                         })
                         .unwrap_or_default();
                     last_tool = Some(
-                        format!("{}: {}", text(block, "name"), py::head(&detail, 60))
+                        format!("{}: {}", text(block, "name"), head(&detail, 60))
                             .replace('\n', " "),
                     );
                 }
@@ -293,7 +294,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
                         worst.push((
                             elapsed / 60.0,
                             written,
-                            py::head(stamp, 16).to_owned(),
+                            head(stamp, 16).to_owned(),
                             transcript.project.clone(),
                             transcript.session.clone(),
                             transcript.agent.clone(),
@@ -308,7 +309,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
             });
         });
     }
-    let shown = gap.map_or_else(|| "5".to_owned(), py::float_repr);
+    let shown = gap.map_or_else(|| "5".to_owned(), |gap| gap.to_string());
     let mut out = format!(
         "Gaps over {shown} min: {gaps}; cache expired in {expired}; rewritten {} tokens, about ${} (as 5m writes)\n",
         tok(rewrite_tokens as f64),
@@ -319,13 +320,13 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
         .into_iter()
         .map(|((agent, project), tokens)| vec![agent, short_project(&project), tok(tokens as f64)])
         .collect();
-    py::table(&mut out, &["agent", "project", "rewrite tok"], &rows);
+    fmt::table(&mut out, &["agent", "project", "rewrite tok"], &rows);
     out.push_str("\nTool running before the expired gap:\n");
     let rows: Vec<Vec<String>> = most_common(cause, scope.top)
         .into_iter()
         .map(|(tool, times)| vec![times.to_string(), tool])
         .collect();
-    py::table(&mut out, &["count", "tool"], &rows);
+    fmt::table(&mut out, &["count", "tool"], &rows);
     out.push_str("\nLargest rewrites:\n");
     worst.sort_by_key(|item| std::cmp::Reverse(item.1));
     let rows: Vec<Vec<String>> = worst
@@ -334,7 +335,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
         .map(|(minutes, tokens, time, project, session, agent)| {
             vec![
                 time,
-                fixed(minutes, 0),
+                format!("{minutes:.0}"),
                 tok(tokens as f64),
                 agent,
                 short_project(&project),
@@ -342,7 +343,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
             ]
         })
         .collect();
-    py::table(
+    fmt::table(
         &mut out,
         &[
             "time",
@@ -357,7 +358,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
     Ok(out)
 }
 
-/// `Counter.most_common(n)`: highest first, ties in insertion order.
+/// The `n` highest counts, ties in insertion order.
 pub fn most_common<K>(counts: IndexMap<K, i64>, n: usize) -> Vec<(K, i64)> {
     let mut items: Vec<(K, i64)> = counts.into_iter().collect();
     items.sort_by_key(|item| std::cmp::Reverse(item.1));

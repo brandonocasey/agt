@@ -1,68 +1,68 @@
 {
- "rows": [
-  {
-   "agent": "main",
-   "model": "claude-sonnet-4-6",
-   "calls": 3,
-   "tool_calls": 3,
-   "input_tokens": 250011,
-   "cache_creation_input_tokens": 4000,
-   "cache_read_input_tokens": 1000,
-   "output_tokens": 90,
-   "usd": 1.5168,
-   "usd_input": 1.5,
-   "usd_write": 0.015,
-   "usd_read": 0.0003,
-   "usd_output": 0.0014
+  "rows": [
+    {
+      "agent": "main",
+      "model": "claude-sonnet-4-6",
+      "calls": 3,
+      "tool_calls": 3,
+      "input_tokens": 250011,
+      "cache_creation_input_tokens": 4000,
+      "cache_read_input_tokens": 1000,
+      "output_tokens": 90,
+      "usd": 1.5168,
+      "usd_input": 1.5,
+      "usd_write": 0.015,
+      "usd_read": 0.0003,
+      "usd_output": 0.0014
+    },
+    {
+      "agent": "main",
+      "model": "claude-opus-4-8",
+      "calls": 5,
+      "tool_calls": 4,
+      "input_tokens": 24,
+      "cache_creation_input_tokens": 53900,
+      "cache_read_input_tokens": 20100,
+      "output_tokens": 494,
+      "usd": 0.512,
+      "usd_input": 0.0002,
+      "usd_write": 0.4244,
+      "usd_read": 0.0601,
+      "usd_output": 0.0274
+    },
+    {
+      "agent": "explorer",
+      "model": "claude-sonnet-4-6",
+      "calls": 4,
+      "tool_calls": 3,
+      "input_tokens": 12,
+      "cache_creation_input_tokens": 20150,
+      "cache_read_input_tokens": 16000,
+      "output_tokens": 570,
+      "usd": 0.0889,
+      "usd_input": 0.0,
+      "usd_write": 0.0756,
+      "usd_read": 0.0048,
+      "usd_output": 0.0086
+    },
+    {
+      "agent": "main",
+      "model": "claude-mystery-1",
+      "calls": 1,
+      "tool_calls": 0,
+      "input_tokens": 100,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 10,
+      "usd": 0.0,
+      "usd_input": 0.0,
+      "usd_write": 0.0,
+      "usd_read": 0.0,
+      "usd_output": 0.0
+    }
+  ],
+  "unpriced": {
+    "claude-mystery-1": 1
   },
-  {
-   "agent": "main",
-   "model": "claude-opus-4-8",
-   "calls": 5,
-   "tool_calls": 4,
-   "input_tokens": 24,
-   "cache_creation_input_tokens": 53900,
-   "cache_read_input_tokens": 20100,
-   "output_tokens": 494,
-   "usd": 0.512,
-   "usd_input": 0.0002,
-   "usd_write": 0.4244,
-   "usd_read": 0.0601,
-   "usd_output": 0.0274
-  },
-  {
-   "agent": "explorer",
-   "model": "claude-sonnet-4-6",
-   "calls": 4,
-   "tool_calls": 3,
-   "input_tokens": 12,
-   "cache_creation_input_tokens": 20150,
-   "cache_read_input_tokens": 16000,
-   "output_tokens": 570,
-   "usd": 0.0889,
-   "usd_input": 0.0,
-   "usd_write": 0.0756,
-   "usd_read": 0.0048,
-   "usd_output": 0.0086
-  },
-  {
-   "agent": "main",
-   "model": "claude-mystery-1",
-   "calls": 1,
-   "tool_calls": 0,
-   "input_tokens": 100,
-   "cache_creation_input_tokens": 0,
-   "cache_read_input_tokens": 0,
-   "output_tokens": 10,
-   "usd": 0,
-   "usd_input": 0,
-   "usd_write": 0,
-   "usd_read": 0,
-   "usd_output": 0
-  }
- ],
- "unpriced": {
-  "claude-mystery-1": 1
- },
- "fast_calls": 1
+  "fast_calls": 1
 }

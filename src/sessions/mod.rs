@@ -1,10 +1,9 @@
 //! `agt sessions`: cost, context, tool, cache, error and friction reports from Claude Code and
-//! Codex transcripts. Claude Code reports print what the `agent-sessions` script printed; Codex
-//! rollouts are read as Claude Code records (see `codex`).
+//! Codex transcripts.
 
 mod events;
+mod fmt;
 mod prices;
-mod py;
 mod source;
 mod spend;
 mod tools;
@@ -154,7 +153,7 @@ fn make(tm: &mut libc::tm) -> i64 {
     unsafe { libc::mktime(tm) }
 }
 
-/// `(datetime.now() - timedelta(days)).strftime('%Y-%m-%d')`: local wall-clock days back.
+/// The local date `days` days before `now`, as `YYYY-MM-DD`.
 fn days_back(now: i64, days: i64) -> String {
     let mut tm = local(now);
     tm.tm_mday -= days as libc::c_int;

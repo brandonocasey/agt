@@ -1,7 +1,7 @@
 """Writes the Claude Code transcripts and price file in test/fixtures/sessions.
 
 Usage: python3 generate.py test/fixtures/sessions, then add the gpt-test-1 price the Codex
-fixtures use. The expected files are agent-sessions output for --root projects --since 2026-02-15.
+fixtures use. The expected files are `agt sessions` output for --root projects --since 2026-02-15, checked by hand.
 """
 import json, os, sys
 root = sys.argv[1]

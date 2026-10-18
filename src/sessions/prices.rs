@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use crate::core::error::{Error, Result};
-use crate::sessions::py::{count, get, text};
+use crate::core::transcripts::json::{count, get, text};
 
 pub struct Prices {
     models: Map<String, Value>,
@@ -21,12 +21,11 @@ pub struct Parts {
 }
 
 impl Parts {
-    /// The parts in the script's order: input, write, read, output.
+    /// The parts in the order input, write, read, output.
     pub fn values(self) -> [f64; 4] {
         [self.input, self.write, self.read, self.output]
     }
 
-    /// `sum(parts.values())`.
     pub fn total(self) -> f64 {
         self.values().iter().fold(0.0, |sum, value| sum + value)
     }

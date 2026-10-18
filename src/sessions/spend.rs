@@ -5,11 +5,12 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 
-use crate::core::error::{Result, fail};
+use crate::core::error::{Result, ctx, fail};
+use crate::core::transcripts::json::{count, tail, text};
 use crate::core::transcripts::session_files;
 use crate::sessions::Scope;
+use crate::sessions::fmt::{self, grouped, median, round, tok};
 use crate::sessions::prices::Prices;
-use crate::sessions::py::{self, count, fixed, grouped, text, tok};
 use crate::sessions::source::transcripts;
 
 const USAGE_KEYS: [&str; 4] = [
@@ -20,42 +21,19 @@ const USAGE_KEYS: [&str; 4] = [
 ];
 const BY_KEYS: [&str; 6] = ["agent", "model", "project", "session", "file", "harness"];
 
-/// A sum that stays the integer 0 until a priced response adds to it, as the script's
-/// `Counter` did, so JSON prints `0` rather than `0.0` for a group with no priced calls.
-#[derive(Clone, Copy, Default)]
-struct Usd(Option<f64>);
-
-impl Usd {
-    fn add(&mut self, value: f64) {
-        self.0 = Some(self.0.unwrap_or(0.0) + value);
-    }
-
-    fn value(self) -> f64 {
-        self.0.unwrap_or(0.0)
-    }
-
-    fn rounded(self) -> Self {
-        Self(self.0.map(|value| py::round(value, 4)))
-    }
-
-    fn json(self) -> Value {
-        self.0.map_or(json!(0), |value| json!(value))
-    }
-}
-
 #[derive(Default)]
 struct Group {
     calls: i64,
     tools: i64,
     tokens: [i64; 4],
-    parts: Option<[f64; 4]>,
+    /// USD for input, cache writes, cache reads and output.
+    usd: [f64; 4],
 }
 
 struct Row {
     key: Vec<String>,
     group: Group,
-    usd: Usd,
-    parts: [Usd; 4],
+    usd: f64,
 }
 
 pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
@@ -92,8 +70,7 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
             match prices.usd(&call.model, &call.usage) {
                 None => *unpriced.entry(call.model.clone()).or_default() += 1,
                 Some(parts) => {
-                    let sums = group.parts.get_or_insert([0.0; 4]);
-                    for (sum, value) in sums.iter_mut().zip(parts.values()) {
+                    for (sum, value) in group.usd.iter_mut().zip(parts.values()) {
                         *sum += value;
                     }
                 }
@@ -102,24 +79,13 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
     }
     let mut rows: Vec<Row> = groups
         .into_iter()
-        .map(|(key, group)| {
-            let mut usd = Usd::default();
-            let mut parts = [Usd::default(); 4];
-            if let Some(sums) = group.parts {
-                for (part, sum) in parts.iter_mut().zip(sums) {
-                    usd.add(sum);
-                    part.add(sum);
-                }
-            }
-            Row {
-                key,
-                group,
-                usd: usd.rounded(),
-                parts: parts.map(Usd::rounded),
-            }
+        .map(|(key, mut group)| {
+            let usd = round(group.usd.iter().sum(), 4);
+            group.usd = group.usd.map(|part| round(part, 4));
+            Row { key, group, usd }
         })
         .collect();
-    rows.sort_by(|a, b| b.usd.value().total_cmp(&a.usd.value()));
+    rows.sort_by(|a, b| b.usd.total_cmp(&a.usd));
     if as_json {
         let rows: Vec<Value> = rows
             .iter()
@@ -133,24 +99,22 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
                 for (name, total) in USAGE_KEYS.iter().zip(row.group.tokens) {
                     object.insert((*name).to_owned(), json!(total));
                 }
-                object.insert("usd".into(), row.usd.json());
+                object.insert("usd".into(), json!(row.usd));
                 for (name, part) in ["usd_input", "usd_write", "usd_read", "usd_output"]
                     .iter()
-                    .zip(row.parts)
+                    .zip(row.group.usd)
                 {
-                    object.insert((*name).to_owned(), part.json());
+                    object.insert((*name).to_owned(), json!(part));
                 }
                 Value::Object(object)
             })
             .collect();
-        let unpriced: Map<String, Value> = unpriced
-            .into_iter()
-            .map(|(model, calls)| (model, json!(calls)))
-            .collect();
         let report = json!({"rows": rows, "unpriced": unpriced, "fast_calls": fast});
-        return Ok(py::dumps_indented(&report) + "\n");
+        let mut text = serde_json::to_string_pretty(&report).map_err(ctx("serialize report"))?;
+        text.push('\n');
+        return Ok(text);
     }
-    let total = rows.iter().fold(0.0, |sum, row| sum + row.usd.value());
+    let total: f64 = rows.iter().map(|row| row.usd).sum();
     let grand = if total == 0.0 { 1.0 } else { total };
     let mut out = format!("Total ${} since {}", grouped(total, 2), scope.since);
     if let Some(project) = &scope.project {
@@ -165,25 +129,22 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
         .iter()
         .take(scope.top)
         .map(|row| {
-            let usd = row.usd.value();
-            let share = |part: Usd| {
-                let base = if usd == 0.0 { 1.0 } else { usd };
-                fixed(100.0 * part.value() / base, 0)
-            };
+            let base = if row.usd == 0.0 { 1.0 } else { row.usd };
+            let share = |part: f64| format!("{:.0}", 100.0 * part / base);
             let mut cells: Vec<String> = row
                 .key
                 .iter()
-                .map(|value| py::tail(value, 60).to_owned())
+                .map(|value| tail(value, 60).to_owned())
                 .collect();
             cells.push(row.group.calls.to_string());
             cells.extend(row.group.tokens.map(|tokens| tok(tokens as f64)));
-            cells.push(grouped(usd, 2));
-            cells.push(fixed(100.0 * usd / grand, 1));
-            cells.extend([row.parts[1], row.parts[2], row.parts[3]].map(share));
+            cells.push(grouped(row.usd, 2));
+            cells.push(format!("{:.1}", 100.0 * row.usd / grand));
+            cells.extend([row.group.usd[1], row.group.usd[2], row.group.usd[3]].map(share));
             cells
         })
         .collect();
-    py::table(&mut out, &headers, &table);
+    fmt::table(&mut out, &headers, &table);
     if rows.len() > scope.top {
         out.push_str(&format!(
             "({} more groups; --top raises the limit)\n",
@@ -191,10 +152,13 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
         ));
     }
     if !unpriced.is_empty() {
-        let unpriced: Vec<(String, i64)> = unpriced.into_iter().collect();
+        let unpriced: Vec<String> = unpriced
+            .into_iter()
+            .map(|(model, calls)| format!("{model}: {calls}"))
+            .collect();
         out.push_str(&format!(
             "Unpriced models (add them to the price file): {}\n",
-            py::counts_repr(&unpriced)
+            unpriced.join(", ")
         ));
     }
     if fast > 0 {
@@ -248,9 +212,12 @@ pub fn session(id: &str, as_json: bool) -> Result<String> {
         for (name, total) in USAGE_KEYS.iter().zip(cost.tokens) {
             object.insert((*name).to_owned(), json!(total));
         }
-        object.insert("usd".into(), json!(py::round(cost.usd, 4)));
+        object.insert("usd".into(), json!(round(cost.usd, 4)));
         object.insert("unpriced_calls".into(), json!(cost.unpriced_calls));
-        return Ok(py::dumps_indented(&Value::Object(object)) + "\n");
+        let mut text = serde_json::to_string_pretty(&Value::Object(object))
+            .map_err(ctx("serialize report"))?;
+        text.push('\n');
+        return Ok(text);
     }
     let [input, write, read, output] = cost.tokens.map(|tokens| tok(tokens as f64));
     let mut line = format!(
@@ -305,21 +272,21 @@ pub fn agents(scope: &Scope) -> Result<String> {
         .iter()
         .map(|(agent, runs)| {
             let median: Vec<f64> = (0..4)
-                .map(|index| py::median(runs.iter().map(|run| run[index]).collect()))
+                .map(|index| median(runs.iter().map(|run| run[index]).collect()))
                 .collect();
             vec![
                 agent.clone(),
                 runs.len().to_string(),
                 tok(median[0]),
                 tok(median[1]),
-                py::int(median[2]),
-                fixed(median[3], 2),
+                format!("{}", median[2].trunc() as i64),
+                format!("{:.2}", median[3]),
                 grouped(total(runs), 2),
             ]
         })
         .collect();
     let mut out = String::new();
-    py::table(
+    fmt::table(
         &mut out,
         &[
             "agent",
