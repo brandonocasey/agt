@@ -417,8 +417,10 @@ fn reports_merged_and_closed_pull_requests() {
 
 #[test]
 fn reports_no_checks_unknown_checks_failures_and_cancellation() {
+    let mut optional = run_node("optional", "COMPLETED", Some("SUCCESS"));
+    optional["isRequired"] = json!(false);
     let cases = [
-        (vec![], "no_required_checks"),
+        (vec![optional], "no_required_checks"),
         (
             vec![run_node("test", "COMPLETED", Some("MYSTERY"))],
             "unknown_check_state",
@@ -1053,4 +1055,24 @@ fn a_rate_limit_is_transient() {
         ),
     ]);
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+}
+
+#[test]
+fn an_empty_rollup_is_pending_right_after_the_wait_starts() {
+    let outcome = run(&[
+        step("PullChecks", &open(&[])),
+        step(
+            "PullChecks",
+            &open(&[run_node("test", "COMPLETED", Some("SUCCESS"))]),
+        ),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(
+        reasons(&outcome),
+        [
+            "checks_pending",
+            "required_checks_passed",
+            "checks_complete"
+        ]
+    );
 }

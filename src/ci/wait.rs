@@ -105,6 +105,8 @@ struct Tracked {
     done: bool,
     /// Failed polls in a row that repeating may fix.
     transient_failures: u32,
+    /// Unix seconds when the wait began.
+    started: i64,
 }
 
 /// Transient failures in a row after which a target is reported as a query error.
@@ -126,9 +128,10 @@ fn poll(tracked: &mut Tracked, deadline: Instant) -> Polled {
         tracked.head.clone(),
         tracked.awaiting,
     );
+    let waited = clock::now_secs().map_or(0, |now| (now - tracked.started).max(0));
     let (send, receive) = channel();
     thread::spawn(move || {
-        let _ = send.send(snapshot(&target, head, awaiting));
+        let _ = send.send(snapshot(&target, head, awaiting, waited));
     });
     loop {
         let now = Instant::now();
@@ -204,6 +207,7 @@ fn emit(tracked: &mut Tracked, state: &State) {
 /// arrives; returns the exit status.
 pub fn run(options: &Options) -> u8 {
     let deadline = Instant::now() + options.timeout;
+    let started = clock::now_secs().unwrap_or(0);
     let mut tracked: Vec<Tracked> = options
         .targets
         .iter()
@@ -214,6 +218,7 @@ pub fn run(options: &Options) -> u8 {
             prior: None,
             done: false,
             transient_failures: 0,
+            started,
         })
         .collect();
     install_handlers();

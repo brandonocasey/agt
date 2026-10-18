@@ -80,7 +80,13 @@ fn normalize_checks(checks: &[Value]) -> Vec<Value> {
 pub struct Head<'a> {
     pub expected: &'a str,
     pub awaiting: bool,
+    /// Seconds since the wait began.
+    pub waited_secs: i64,
 }
+
+/// Seconds after a wait begins during which a head with no checks at all is still pending:
+/// right after a push the rollup can be empty before any check run exists.
+const ROLLUP_GRACE_SECS: i64 = 120;
 
 fn head_mismatch(head: &Head, observed: &Value, url: &Value) -> State {
     if head.awaiting {
@@ -97,7 +103,9 @@ fn head_mismatch(head: &Head, observed: &Value, url: &Value) -> State {
     )
 }
 
-pub fn classify(head: &Head, view: &Value, checks: &[Value]) -> State {
+/// The state of a PR from its `view`, the `rollup` size (every check, required or not) and its
+/// required `checks`.
+pub fn classify(head: &Head, view: &Value, rollup: usize, checks: &[Value]) -> State {
     let url = &view["url"];
     let state_text = &view["state"];
     if !view["headRefOid"].is_string() || !state_text.is_string() {
@@ -125,6 +133,9 @@ pub fn classify(head: &Head, view: &Value, checks: &[Value]) -> State {
     }
     let normalized = normalize_checks(checks);
     if normalized.is_empty() {
+        if rollup == 0 && head.waited_secs < ROLLUP_GRACE_SECS {
+            return with("pending", "checks_pending", json!({"checks": []}));
+        }
         return with("blocked", "no_required_checks", json!({"checks": []}));
     }
     let incomplete = normalized.iter().any(|check| {
@@ -306,4 +317,41 @@ pub fn failed_checks(state: &State) -> Vec<Value> {
         })
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reason_at(waited_secs: i64, rollup: usize) -> (String, String) {
+        let head = Head {
+            expected: "abc",
+            awaiting: false,
+            waited_secs,
+        };
+        let view = json!({"headRefOid": "abc", "state": "OPEN", "url": "u"});
+        let state = classify(&head, &view, rollup, &[]);
+        (status(&state).to_owned(), reason(&state).to_owned())
+    }
+
+    #[test]
+    fn an_empty_rollup_is_pending_for_the_first_two_minutes_only() {
+        assert_eq!(reason_at(0, 0), ("pending".into(), "checks_pending".into()));
+        assert_eq!(
+            reason_at(119, 0),
+            ("pending".into(), "checks_pending".into())
+        );
+        assert_eq!(
+            reason_at(120, 0),
+            ("blocked".into(), "no_required_checks".into())
+        );
+    }
+
+    #[test]
+    fn a_rollup_with_checks_but_none_required_is_no_required_checks_at_once() {
+        assert_eq!(
+            reason_at(0, 2),
+            ("blocked".into(), "no_required_checks".into())
+        );
+    }
 }

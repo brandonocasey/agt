@@ -56,11 +56,12 @@ pub fn snapshot(
     target: &Resolved,
     head: Option<String>,
     awaiting: bool,
+    waited_secs: i64,
 ) -> (State, Option<String>, bool) {
     let result = match target.platform {
-        Platform::Github => github(target, head.clone(), awaiting),
+        Platform::Github => github(target, head.clone(), awaiting, waited_secs),
         Platform::Gitlab if target.pipeline => pipeline(target).map(|state| (state, head.clone())),
-        Platform::Gitlab => gitlab(target, head.clone(), awaiting),
+        Platform::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs),
     };
     match result {
         Ok((state, head)) => (state, head, false),
@@ -73,12 +74,17 @@ pub fn snapshot(
 
 type Polled = Result<(State, Option<String>), TransportError>;
 
-fn github(target: &Resolved, head: Option<String>, awaiting: bool) -> Polled {
+fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
     let github = Github::new(Box::new(CliTransport::gh(&target.host)));
     let pull = github.pull_checks(&target.repo, target.number)?;
     let head = head.or_else(|| pull.view["headRefOid"].as_str().map(str::to_owned));
     let expected = head.as_deref().unwrap_or("");
-    let state = classify(&Head { expected, awaiting }, &pull.view, &pull.checks);
+    let head_state = Head {
+        expected,
+        awaiting,
+        waited_secs,
+    };
+    let state = classify(&head_state, &pull.view, pull.rollup, &pull.checks);
     Ok((state, head))
 }
 
@@ -90,13 +96,17 @@ fn pipeline(target: &Resolved) -> Result<State, TransportError> {
     Ok(classify_pipeline(&pipeline, &jobs))
 }
 
-fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool) -> Polled {
+fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
     let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
     let base = base_of_path(&target.repo);
     let mr = gitlab.merge_request(&base, target.number)?;
     let head = head.or_else(|| mr["sha"].as_str().map(str::to_owned));
     let expected = head.as_deref().unwrap_or("");
-    let pending = Head { expected, awaiting };
+    let pending = Head {
+        expected,
+        awaiting,
+        waited_secs,
+    };
     let id = &mr["head_pipeline"]["id"];
     if awaiting && mr["state"] == "opened" {
         let caught_up =

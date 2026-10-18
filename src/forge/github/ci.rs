@@ -16,6 +16,8 @@ pub struct Pull {
     /// `name`, `state`, `bucket` (`pass`, `fail`, `pending`, `skipping` or `cancel`),
     /// `description`, `link`, `workflow` and `event` of each.
     pub checks: Vec<Value>,
+    /// How many checks and statuses the rollup holds, required or not.
+    pub rollup: usize,
 }
 
 fn bucket(status: &str, conclusion: &str) -> String {
@@ -85,6 +87,7 @@ impl Github {
             .ok_or_else(|| TransportError::new(format!("not an owner/repo: {repo}")))?;
         let mut cursor: Option<String> = None;
         let mut checks = Vec::new();
+        let mut rollup = 0;
         loop {
             let mut vars = vec![
                 Var::text("owner", owner),
@@ -106,6 +109,7 @@ impl Github {
             let nodes = contexts
                 .and_then(|contexts| contexts["nodes"].as_array())
                 .map_or(&[][..], Vec::as_slice);
+            rollup += nodes.len();
             checks.extend(nodes.iter().filter_map(check));
             let next = contexts
                 .filter(|contexts| contexts["pageInfo"]["hasNextPage"] == true)
@@ -124,6 +128,7 @@ impl Github {
                     "headRefOid": pull["headRefOid"],
                 }),
                 checks,
+                rollup,
             });
         }
     }

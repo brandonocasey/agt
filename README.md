@@ -836,7 +836,7 @@ state first appears or changes, then one `final` event with every result and the
 checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 `required_checks_passed`, `checks_pending`, `check_failed`, `check_cancelled`,
 `manual_action_required`, `head_changed`, `closed` or `query_error`. Defaults: 3600 seconds, a
-15 second interval doubling up to 120 seconds. Exit status: 0 all targets passed or merged, 1 a
+15 second interval doubling up to 120 seconds. A GitHub head whose status check rollup holds no checks at all is `checks_pending` during the first 120 seconds of the wait (right after a push the checks may not exist yet) and `no_required_checks` after; a rollup that has checks but none required is `no_required_checks` at once. Exit status: 0 all targets passed or merged, 1 a
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
 query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 
