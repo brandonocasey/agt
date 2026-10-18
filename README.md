@@ -663,6 +663,8 @@ non-bare main checkout, issue and review commands fail clearly.
 
 First use imports matching legacy records from `$XDG_STATE_HOME/agents/reviews/`
 and `agents/issues/` (default state root `~/.local/state`). Originals remain intact.
+Imports install a saved snapshot. Writes through older versions after that snapshot
+stay in the legacy store. This includes writes overlapping import.
 Imports are locked, backed up globally and marked complete per clone. Existing
 conflicting records stop import instead of being overwritten. Dry-runs inspect
 existing data without importing it. Tasks, session indexes, ports and backups
