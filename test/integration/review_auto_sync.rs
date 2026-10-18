@@ -400,3 +400,37 @@ fn mentions(root: &Path, needle: &str) -> bool {
             || (path.is_dir() && mentions(&path, needle))
     })
 }
+
+#[test]
+fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() {
+    let setup = Setup::synced_branch(ORIGIN);
+    let env = &setup.env;
+    github::login(env);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"closed"}]"#);
+    github::empty_pr(
+        env,
+        "me/repo",
+        "42",
+        "CLOSED",
+        "\"2026-10-10T00:00:00Z\"",
+        &setup.head,
+        &setup.base,
+    );
+    review_json(&review_now(env, NOW, &["sync"], &[]));
+    // Past the max age both the branch lookup and the sync of PR 42 are due.
+    let (tool, pid) = slow_tool(env);
+    let started = Instant::now();
+    let output = review_now(
+        env,
+        NOW + 301,
+        &["status"],
+        &[("AGT_GH_BIN", &tool), ("AGT_SYNC_CAP_MS", "1500")],
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("sync skipped").count(), 1, "{stderr}");
+    // One deadline for the whole read: two caps would take 3 s.
+    assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+    assert_gone(&pid);
+}

@@ -36,25 +36,47 @@ pub(super) fn sync_stale(ctx: &Ctx, offline: bool) -> Result<()> {
         (None, Some(branch)) => Some(branch),
         _ => None,
     };
-    if let Some(branch) = look
-        && lookup_due(ctx, &policy, branch)?
-        && auto::attempt(|| look_up(ctx, branch, known.map(|review| review.number))) == Some(true)
-    {
+    let look_up_due = match look {
+        Some(branch) => lookup_due(ctx, &policy, branch)?,
+        None => false,
+    };
+    let sync_due = match known {
+        Some(review) => {
+            policy.is_stale(Some(&review.synced_at))?
+                && !policy.backed_off(
+                    &ctx.store,
+                    &ctx.dir,
+                    &format!("pr-{}", sync::key_of(review)),
+                )?
+        }
+        None => false,
+    };
+    if !look_up_due && !sync_due {
         return Ok(());
     }
-    if let Some(review) = known {
-        let key = sync::key_of(review);
-        let failure = format!("pr-{key}");
-        if policy.is_stale(Some(&review.synced_at))?
-            && !policy.backed_off(&ctx.store, &ctx.dir, &failure)?
-        {
-            auto::attempt(|| {
-                locked(ctx, Some(&key), &failure, |_| {
-                    Ok(Some(sync::connection_of(review)?))
-                })
-            });
+    // One deadline and at most one skip line for the whole read: a failed lookup does not stop
+    // the sync of the known PR/MR, and the first failure is the one reported.
+    auto::attempt(|| {
+        let mut first: Option<Error> = None;
+        if let (true, Some(branch)) = (look_up_due, look) {
+            match look_up(ctx, branch, known.map(|review| review.number)) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => first = Some(error),
+            }
         }
-    }
+        if let (true, Some(review)) = (sync_due, known) {
+            let key = sync::key_of(review);
+            let failure = format!("pr-{key}");
+            let synced = locked(ctx, Some(&key), &failure, |_| {
+                Ok(Some(sync::connection_of(review)?))
+            });
+            if let Err(error) = synced {
+                first.get_or_insert(error);
+            }
+        }
+        first.map_or(Ok(()), Err)
+    });
     Ok(())
 }
 
