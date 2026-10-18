@@ -156,6 +156,16 @@ impl Repo {
         Ok(Some(text(output.stdout)?).filter(|value| !value.is_empty()))
     }
 
+    /// The exit code of `git <args>` (`None` when a signal ended it) and its stderr, for the
+    /// commands whose codes mean more than failure.
+    pub fn probe(&self, args: &[&str]) -> Result<(Option<i32>, String)> {
+        let output = self.exec(args, None, &[])?;
+        Ok((
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+
     pub fn succeeds(&self, args: &[&str]) -> Result<bool> {
         Ok(self.exec(args, None, &[])?.status.success())
     }

@@ -95,8 +95,8 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 /// Whether `origin` has `branch`, as `refs/remotes/origin/<branch>`. A branch pushed after the
-/// last fetch is fetched on its own first; "no such ref" means a new branch, and any other
-/// failure is an error rather than a silent new branch.
+/// last fetch is fetched on its own first; a ref origin does not have means a new branch, and
+/// any failure to ask is an error rather than a silent new branch.
 fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
     let tracking = format!("refs/remotes/origin/{branch}");
     let known = || repo.succeeds(&["show-ref", "--verify", "--quiet", &tracking]);
@@ -106,14 +106,21 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
     if !repo.succeeds(&["remote", "get-url", "origin"])? {
         return Ok(false);
     }
-    let spec = format!("+refs/heads/{branch}:{tracking}");
-    match repo.git(&["fetch", "--quiet", "--no-tags", "origin", &spec]) {
-        Ok(_) => known(),
-        Err(error) if error.to_string().contains("couldn't find remote ref") => Ok(false),
-        Err(error) => fail(format!(
-            "cannot tell whether {branch} exists on origin: {error}; pass --base to start a new branch anyway"
-        )),
+    // `ls-remote --exit-code` exits 2 when the ref is absent and otherwise non-zero only on
+    // failure, whatever the language of git's messages.
+    let heads = format!("refs/heads/{branch}");
+    match repo.probe(&["ls-remote", "--exit-code", "origin", &heads])? {
+        (Some(0), _) => {}
+        (Some(2), _) => return Ok(false),
+        (_, error) => {
+            return fail(format!(
+                "cannot tell whether {branch} exists on origin: {error}; pass --base to start a new branch anyway"
+            ));
+        }
     }
+    let spec = format!("+{heads}:{tracking}");
+    repo.git(&["fetch", "--quiet", "--no-tags", "origin", &spec])?;
+    known()
 }
 
 fn target(repo: &Repo, cli: &Cli) -> Result<PathBuf> {
