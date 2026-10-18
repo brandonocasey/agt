@@ -72,10 +72,7 @@ fn merged(found: &mut Vec<Candidate>) -> Result<()> {
             }),
             (None, Some(branch)) => branches.push(Candidate {
                 section: "branches",
-                item: format!(
-                    "cd {repo} && agt worktree cleanup --yes  # branch {}",
-                    quote(&branch)
-                ),
+                item: format!("git -C {repo} branch -d {}", quote(&branch)),
             }),
             (None, None) => {}
         }
