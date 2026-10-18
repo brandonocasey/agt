@@ -17,8 +17,12 @@ struct Proc(Child);
 
 impl Proc {
     fn sleep(program: &str, dir: &Path) -> Self {
+        Self::run(program, &["60"], dir)
+    }
+
+    fn run(program: &str, args: &[&str], dir: &Path) -> Self {
         let child = Command::new(program)
-            .arg("60")
+            .args(args)
             .current_dir(dir)
             .stdin(Stdio::null())
             .spawn()
@@ -264,21 +268,28 @@ fn only_records_of_running_processes_count_and_busy_sessions_sort_first() {
     assert!(table.contains("waits for: dialog open"), "{table}");
 }
 
-/// A `codex` process: a copy of `sleep` under that name, run in `dir`.
+/// A `codex` process: a copy of the `agt` test binary under that name, waiting in `dir` for a
+/// file that never appears. A copy of a system binary such as `sleep` is killed on macOS, which
+/// refuses to run a platform binary outside its own path.
 fn codex(env: &Env, name: &str, dir: &Path) -> Proc {
     let bin: PathBuf = env.path(name);
     fs::create_dir_all(&bin).unwrap();
     let program = bin.join("codex");
-    fs::copy(which("sleep"), &program).unwrap();
-    Proc::sleep(&program.to_string_lossy(), dir)
-}
-
-fn which(name: &str) -> PathBuf {
-    ["/bin", "/usr/bin"]
-        .iter()
-        .map(|dir| Path::new(dir).join(name))
-        .find(|path| path.exists())
-        .unwrap()
+    fs::copy(BIN, &program).unwrap();
+    let never = env.path("never-created");
+    Proc::run(
+        &program.to_string_lossy(),
+        &[
+            "wait",
+            "--max",
+            "60",
+            "--",
+            "test",
+            "-e",
+            &never.to_string_lossy(),
+        ],
+        dir,
+    )
 }
 
 fn rollout(env: &Env, file: &str, id: &str, cwd: &Path, subagent: bool) {
