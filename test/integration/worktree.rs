@@ -1543,3 +1543,71 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
     let runs = fs::read_to_string(&count).unwrap().lines().count();
     assert!(runs < 150, "{runs} git processes for 500 tags");
 }
+
+const ALLOW_FILE: [&str; 2] = ["-c", "protocol.file.allow=always"];
+
+#[test]
+fn files_in_an_uninitialized_submodule_of_a_submodule_block_removal() {
+    let f = Fixture::new();
+    let inner = f.env.path("inner-origin");
+    nest(&f.env, &inner);
+    let outer = f.env.path("outer-origin");
+    nest(&f.env, &outer);
+    let inner_url = inner.to_string_lossy().into_owned();
+    let mut add = ALLOW_FILE.to_vec();
+    add.extend(["submodule", "add", "-q", &inner_url, "inner"]);
+    wgit(&f.env, &outer, &add);
+    wgit(&f.env, &outer, &["commit", "-q", "-m", "add inner"]);
+    let outer_url = outer.to_string_lossy().into_owned();
+    let mut add = ALLOW_FILE.to_vec();
+    add.extend(["submodule", "add", "-q", &outer_url, "outer"]);
+    wgit(&f.env, &f.wt, &add);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "add outer"]);
+    let wt = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    fs::create_dir_all(f.wt.join("outer/inner")).unwrap();
+    fs::write(f.wt.join("outer/inner/notes.md"), "mine\n").unwrap();
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "outer/inner");
+    assert!(f.wt.join("outer/inner/notes.md").exists());
+}
+
+#[test]
+fn files_in_a_gitlink_directory_no_gitmodules_entry_names_block_removal() {
+    let f = Fixture::new();
+    let head = wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},lib"),
+        ],
+    );
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "gitlink"]);
+    fs::create_dir_all(f.wt.join("lib")).unwrap();
+    let wt = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    fs::write(f.wt.join("lib/notes.md"), "mine\n").unwrap();
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "lib");
+    assert!(f.wt.join("lib/notes.md").exists());
+}
+
+#[test]
+fn a_stale_gitmodules_entry_over_tracked_files_does_not_block_removal() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.wt.join("vendored")).unwrap();
+    fs::write(f.wt.join("vendored/vendored.c"), "int x;\n").unwrap();
+    fs::write(
+        f.wt.join(".gitmodules"),
+        "[submodule \"vendored\"]\n\tpath = vendored\n\turl = https://example.invalid/v.git\n",
+    )
+    .unwrap();
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "stale entry"]);
+    let wt = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    f.json(&["remove", &wt, "--yes"]);
+    assert!(!f.wt.exists());
+}

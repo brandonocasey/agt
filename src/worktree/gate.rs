@@ -48,6 +48,9 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
     .join("modules");
     let worktree_modules = git_dir.join("modules");
     let mut seen = HashSet::new();
+    let mut roots = vec![worktree.to_path_buf()];
+    roots.extend(found.iter().map(|sub| sub.dir.clone()));
+    unfilled_submodules(&roots)?;
     for sub in found {
         let name = format!("submodule {}", sub.rel);
         let gitdir = PathBuf::from(Repo::at(&sub.dir).git(&["rev-parse", "--absolute-git-dir"])?);
@@ -131,30 +134,46 @@ fn worktree_state(worktree: &Path) -> Result<()> {
             ));
         }
     }
-    unfilled_submodules(worktree)
+    Ok(())
 }
 
-/// A submodule directory that is not initialized yet holds files: git lists none of them and
-/// the backup keeps none.
-fn unfilled_submodules(worktree: &Path) -> Result<()> {
-    for path in nested::submodule_paths(worktree)? {
-        let dir = worktree.join(&path);
-        if dir.join(".git").exists() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut names: Vec<String> = entries
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        if !names.is_empty() {
-            return fail(format!(
-                "submodule {path} is not initialized but holds files the backup does not keep: {}; move them first",
-                names.join(", ")
-            ));
+/// A gitlink directory that is not initialized holds files: git lists none of them and the
+/// backup keeps none. The gitlinks are the 160000 entries of each repository in `roots`, so
+/// submodules of submodules count and a `.gitmodules` entry over ordinary files does not.
+fn unfilled_submodules(roots: &[PathBuf]) -> Result<()> {
+    for root in roots {
+        let listing = Repo::at(root).checked(&["ls-files", "--stage", "-z"], None, &[])?;
+        for entry in listing.split(|byte| *byte == 0) {
+            let entry = String::from_utf8_lossy(entry);
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            if !meta.starts_with("160000 ") {
+                continue;
+            }
+            let dir = root.join(path);
+            if dir.join(".git").exists() {
+                continue;
+            }
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut names: Vec<String> = entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            if !names.is_empty() {
+                let shown = dir
+                    .strip_prefix(&roots[0])
+                    .unwrap_or(&dir)
+                    .to_string_lossy()
+                    .into_owned();
+                return fail(format!(
+                    "submodule {shown} is not initialized but holds files the backup does not keep: {}; move them first",
+                    names.join(", ")
+                ));
+            }
         }
     }
     Ok(())
