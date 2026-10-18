@@ -443,6 +443,8 @@ fn linked() -> (Env, PathBuf, PathBuf) {
 #[test]
 fn a_failed_install_with_the_main_lockfile_offers_a_clone() {
     let (env, tools, worktree) = linked();
+    // The clone has something to copy only when the main checkout has a `node_modules`.
+    fs::create_dir_all(env.repo.join("node_modules/dep")).unwrap();
     let output = prepare_output(&env, &tools, &worktree, &["prepare"], "npm ci");
     assert_eq!(output.status.code(), Some(1));
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -740,4 +742,72 @@ fn a_branch_origin_does_not_have_still_starts_new_and_an_unreachable_origin_is_a
     // --base starts the new branch without asking origin.
     let value = agt_json(&env, &env.repo, &["create", "unknowable", "--base", "main"]);
     assert_eq!(value["base"]["commit"], first.as_str());
+}
+
+/// A main checkout with `package-lock.json` and `uv.lock` committed and a linked worktree.
+fn linked_with_uv(node_modules: bool) -> (Env, PathBuf, PathBuf) {
+    let env = Env::new();
+    let tools = fake_tools(&env);
+    let main = env.repo.clone();
+    fs::write(main.join("package-lock.json"), "{}").unwrap();
+    fs::write(main.join("uv.lock"), "lock").unwrap();
+    commit(&env, &main, "package.json", "{}");
+    if node_modules {
+        fs::create_dir_all(main.join("node_modules/dep")).unwrap();
+    }
+    let value = agt_json(&env, &main, &["create", "feat"]);
+    (env, tools, PathBuf::from(value["path"].as_str().unwrap()))
+}
+
+#[test]
+fn a_failed_non_node_install_never_offers_a_clone() {
+    let (env, tools, worktree) = linked_with_uv(true);
+    let output = prepare_output(&env, &tools, &worktree, &["prepare"], "uv sync");
+    assert_eq!(output.status.code(), Some(1));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let steps = value["steps"].as_array().unwrap();
+    let uv = steps
+        .iter()
+        .find(|s| s["command"] == "uv sync --frozen")
+        .unwrap();
+    assert_eq!(uv["ok"], false);
+    assert!(uv.get("clone_available").is_none(), "{uv}");
+    assert_eq!(value["clone_available"], false);
+
+    // A failed node install is not cloneable either when the main checkout has no node_modules.
+    let (env, tools, worktree) = linked_with_uv(false);
+    let output = prepare_output(&env, &tools, &worktree, &["prepare"], "npm ci");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["clone_available"], false);
+}
+
+#[test]
+fn clone_deps_still_runs_the_other_installs_and_fails_when_one_fails() {
+    let (env, tools, worktree) = linked_with_uv(true);
+    let value = prepared(&env, &tools, &worktree, &["prepare", "--clone-deps"]);
+    assert_eq!(value["deps_from"], "clone");
+    let commands: Vec<&str> = value["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        commands,
+        ["npm run prepare --if-present", "uv sync --frozen"]
+    );
+    assert!(worktree.join("node_modules/dep").is_dir());
+
+    let (env, tools, worktree) = linked_with_uv(true);
+    let output = prepare_output(
+        &env,
+        &tools,
+        &worktree,
+        &["prepare", "--clone-deps"],
+        "uv sync",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["deps_from"], "clone");
 }

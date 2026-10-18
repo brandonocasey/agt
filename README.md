@@ -1020,11 +1020,14 @@ exists and `mise` is on PATH, then one install per lockfile in the root: `packag
 `uv.lock` `uv sync --frozen`; `poetry.lock` `poetry install`; `Cargo.lock` `cargo fetch --locked`;
 `go.sum` `go mod download`. Each step reports its command, `exit`, `duration_ms` and `log`
 (under `$XDG_CACHE_HOME/agents/output/`); the exit status is 1 when a step fails. Dependency
-directories are never symlinked. When an install fails and the lockfile is byte-identical to the
-main checkout's, the step and the report carry `clone_available: true`. `--clone-deps` copies
-every `node_modules` of the main checkout (nested ones too) copy-on-write (`cp -cR` on macOS,
-`cp --reflink=auto -R` on Linux) instead of installing, then runs `npm run prepare --if-present`
-when there is a `package-lock.json`, and reports `deps_from: "clone"`.
+directories are never symlinked. When a node install (`npm`, `pnpm`, `yarn` or `bun`) fails, its lockfile is byte-identical to the
+main checkout's and the main checkout has a `node_modules`, the step and the report carry
+`clone_available: true`; no other install offers a clone, because a clone copies only
+`node_modules`. `--clone-deps` copies every `node_modules` of the main checkout (nested ones too)
+copy-on-write (`cp -cR` on macOS, `cp --reflink=auto -R` on Linux) instead of the node installs,
+then runs `npm run prepare --if-present` when there is a `package-lock.json`; the other installs
+(`uv`, `poetry`, `cargo`, `go`) still run and are reported, so `ok` is false when any step fails.
+It reports `deps_from: "clone"`.
 
 `agt worktree port [PATH] [--env]` gives a worktree a stable TCP port for its dev server. The
 first call picks a free port between 10000 and 32767 (below the OS ephemeral ranges) and records

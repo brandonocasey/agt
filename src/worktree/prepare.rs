@@ -55,18 +55,28 @@ pub(super) fn prepare(dir: &Path, clone_deps: bool) -> Result<(Value, bool)> {
         if root.join("package-lock.json").exists() {
             commands.push((words(&["npm", "run", "prepare", "--if-present"]), None));
         }
-    } else {
-        commands.extend(
-            installs(&root)
-                .into_iter()
-                .map(|(file, cmd)| (cmd, Some(file))),
-        );
     }
+    // A clone replaces only the node installs; every other install still runs.
+    commands.extend(
+        installs(&root)
+            .into_iter()
+            .filter(|(file, _)| !clone_deps || !is_node_lockfile(file))
+            .map(|(file, cmd)| (cmd, Some(file))),
+    );
     let mut clone_available = false;
     for (index, (command, lockfile)) in commands.iter().enumerate() {
         let mut step = run_step(&root, command, index)?;
         let failed = step["ok"] != true;
-        if failed && lockfile.is_some_and(|file| !same && identical(&main, &root, file)) {
+        // A clone copies `node_modules` only, so it is offered for a failed node install whose
+        // lockfile the main checkout shares and whose `node_modules` it has.
+        if failed
+            && lockfile.is_some_and(|file| {
+                !same
+                    && is_node_lockfile(file)
+                    && identical(&main, &root, file)
+                    && has_node_modules(&main)
+            })
+        {
             step["clone_available"] = json!(true);
             clone_available = true;
         }
@@ -139,6 +149,19 @@ fn modern_yarn(root: &Path) -> bool {
 fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+}
+
+/// The lockfiles of the installs that fill a `node_modules`.
+fn is_node_lockfile(file: &str) -> bool {
+    matches!(
+        file,
+        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lock" | "bun.lockb"
+    )
+}
+
+fn has_node_modules(main: &Path) -> bool {
+    let mut found = Vec::new();
+    find_modules(main, Path::new(""), &mut found).is_ok() && !found.is_empty()
 }
 
 fn identical(main: &Path, root: &Path, file: &str) -> bool {
