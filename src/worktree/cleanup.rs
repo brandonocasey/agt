@@ -35,6 +35,42 @@ pub struct Cli {
     /// Also remove worktrees where something changed in the last 3 days.
     #[arg(long)]
     recent: bool,
+    /// Act only on this branch or worktree path (repeatable). Each must still qualify as
+    /// the plan said; a named row that does not is reported as skipped, and an unnamed
+    /// row is never touched.
+    #[arg(long, value_name = "BRANCH-OR-PATH")]
+    only: Vec<String>,
+}
+
+/// The rows `--only` names.
+struct Only {
+    names: Vec<String>,
+    /// Each name read as a path, resolved when it exists.
+    paths: Vec<PathBuf>,
+}
+
+impl Only {
+    fn new(names: &[String]) -> Self {
+        let paths = names
+            .iter()
+            .map(|name| std::fs::canonicalize(name).unwrap_or_else(|_| PathBuf::from(name)))
+            .collect();
+        Self {
+            names: names.to_vec(),
+            paths,
+        }
+    }
+
+    /// The indexes of the names that name a row with this `branch` or worktree `path`.
+    fn hits(&self, branch: Option<&str>, path: Option<&Path>) -> Vec<usize> {
+        let real = path.and_then(|path| info::real(path).ok());
+        (0..self.names.len())
+            .filter(|index| {
+                branch == Some(self.names[*index].as_str())
+                    || real.as_ref() == Some(&self.paths[*index])
+            })
+            .collect()
+    }
 }
 
 /// What a sweep of one repository found.
@@ -44,6 +80,8 @@ struct Report {
     delete: Vec<Value>,
     kept: Vec<Value>,
     warnings: Vec<String>,
+    /// The indexes of the `--only` names that matched a row of this repository.
+    hit: Vec<usize>,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -52,11 +90,14 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         vec![Repo::discover()?]
     };
+    let only = Only::new(&cli.only);
+    let mut hit = vec![false; cli.only.len()];
     let mut cwds = Cwds::default();
     let mut rows = Vec::new();
     for repo in repos {
-        let swept = info::main_checkout(&repo)
-            .and_then(|main| sweep(&repo, &cli, &mut cwds).map(|report| (main.path, report)));
+        let swept = info::main_checkout(&repo).and_then(|main| {
+            sweep(&repo, &cli, &only, &mut cwds).map(|report| (main.path, report))
+        });
         let (main, report) = match swept {
             Ok(done) => done,
             Err(error) if cli.all => (
@@ -68,6 +109,9 @@ pub fn run(cli: Cli) -> Result<Output> {
             ),
             Err(error) => return Err(error),
         };
+        for index in &report.hit {
+            hit[*index] = true;
+        }
         let (removed, deleted) = if cli.yes {
             ("removed", "deleted")
         } else {
@@ -77,18 +121,34 @@ pub fn run(cli: Cli) -> Result<Output> {
             "repository": main,
             removed: report.remove,
             deleted: report.delete,
-            "kept": report.kept,
+            // A named row that does not qualify is skipped; without `--only` it is kept.
+            if cli.only.is_empty() { "kept" } else { "skipped" }: report.kept,
             "warnings": report.warnings,
         }));
     }
     let mut out = json!({ "plan": !cli.yes, "repositories": rows });
+    if !cli.only.is_empty() {
+        let unmatched: Vec<Value> = cli
+            .only
+            .iter()
+            .zip(&hit)
+            .filter(|(_, hit)| !**hit)
+            .map(|(name, _)| {
+                json!({
+                    "name": name,
+                    "reason": "no candidate branch or worktree has this name or path (it may be protected, unknown or already gone)",
+                })
+            })
+            .collect();
+        out["skipped"] = json!(unmatched);
+    }
     if !cli.yes {
         out["next"] = json!("pass --yes to remove and delete");
     }
     Ok(Output::Json(out))
 }
 
-fn sweep(repo: &Repo, cli: &Cli, cwds: &mut Cwds) -> Result<Report> {
+fn sweep(repo: &Repo, cli: &Cli, only: &Only, cwds: &mut Cwds) -> Result<Report> {
     let mut report = Report::default();
     let Some(scene) = Scene::read(repo)? else {
         report.warnings.push("no default branch found".into());
@@ -98,7 +158,21 @@ fn sweep(repo: &Repo, cli: &Cli, cwds: &mut Cwds) -> Result<Report> {
     let main = info::real(&scene.main().path)?;
     let shared = Repo::at(&main);
     for entry in scene.entries.iter().skip(1).filter(|e| e.branch.is_none()) {
+        let named = only.hits(None, Some(&entry.path));
+        if !cli.only.is_empty() && named.is_empty() {
+            continue;
+        }
+        report.hit.extend(named);
         if scene.holds_cwd(&entry.path) {
+            if !cli.only.is_empty() {
+                report.kept.push(json!({
+                    "branch": null,
+                    "path": entry.path,
+                    "tip": entry.head,
+                    "verdict": null,
+                    "reason": "the current directory is inside it; run from elsewhere",
+                }));
+            }
             continue;
         }
         let verdict = if scene.contains(repo, &entry.head)? {
@@ -128,6 +202,14 @@ fn sweep(repo: &Repo, cli: &Cli, cwds: &mut Cwds) -> Result<Report> {
         }
     }
     for (branch, tip) in scene.branches(repo)? {
+        let named = only.hits(
+            Some(&branch),
+            scene.worktree_of(&branch).map(|e| e.path.as_path()),
+        );
+        if !cli.only.is_empty() && named.is_empty() {
+            continue;
+        }
+        report.hit.extend(named);
         let finding = scene.judge(repo, origin.as_ref(), &branch, &tip)?;
         let subject = Subject {
             branch: Some(&branch),

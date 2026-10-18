@@ -701,3 +701,72 @@ fn a_closed_gitlab_merge_request_row_carries_head_title_and_closed_at() {
     assert_eq!(row["title"], "Shelve it");
     assert_eq!(row["closed_at"], "2026-03-04T05:06:07Z");
 }
+
+fn full(site: &Site, args: &[&str]) -> Value {
+    let output = site.agt_in(&site.env.repo, args);
+    assert!(
+        output.status.success(),
+        "agt worktree cleanup {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn only_acts_on_the_named_rows_and_skips_the_rest_with_a_reason() {
+    let site = Site::new();
+    let a = site.branch("a");
+    let b = site.branch("b");
+    let dirty = site.branch("dirty");
+    for name in ["a", "b", "dirty"] {
+        site.env.git(&["merge", "-q", name]);
+    }
+    fs::write(dirty.join("dirty"), "changed").unwrap();
+
+    // The plan lists the named row alone and changes nothing.
+    let plan = full(&site, &["--only", "a"]);
+    let row = &plan["repositories"][0];
+    assert_eq!(row["remove"].as_array().unwrap().len(), 1, "{plan}");
+    assert_eq!(row["remove"][0]["branch"], "a");
+    assert_eq!(row["delete"].as_array().unwrap().len(), 1, "{plan}");
+    assert!(a.exists() && b.exists());
+
+    // A path names a row too; a named row that no longer qualifies is skipped, and a name that
+    // matches no row is reported.
+    let report = full(
+        &site,
+        &[
+            "--yes",
+            "--only",
+            "a",
+            "--only",
+            "dirty",
+            "--only",
+            "no-such-branch",
+        ],
+    );
+    let row = &report["repositories"][0];
+    assert_eq!(row["removed"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(row["removed"][0]["branch"], "a");
+    assert_eq!(row["deleted"][0]["branch"], "a");
+    assert_eq!(row["skipped"][0]["branch"], "dirty");
+    assert!(
+        row["skipped"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("dirty"),
+        "{report}"
+    );
+    assert!(row.get("kept").is_none());
+    assert_eq!(report["skipped"][0]["name"], "no-such-branch");
+    assert!(!a.exists());
+    // Unnamed rows are never touched.
+    assert!(b.exists() && dirty.exists());
+    assert_eq!(site.branches(), ["b", "dirty", "main"]);
+
+    let report = full(&site, &["--yes", "--only", b.to_str().unwrap()]);
+    assert_eq!(report["repositories"][0]["removed"][0]["branch"], "b");
+    assert_eq!(report["skipped"], json!([]));
+    assert!(!b.exists() && dirty.exists());
+    assert_eq!(site.branches(), ["dirty", "main"]);
+}
