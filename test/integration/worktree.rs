@@ -1781,3 +1781,45 @@ fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
         assert!(!alive, "the child of the timed-out git is still running");
     }
 }
+
+#[test]
+fn a_disabled_sparse_checkout_restores_without_a_warning_and_keeps_its_config() {
+    let f = sparse_fixture();
+    wgit(&f.env, &f.wt, &["sparse-checkout", "disable"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &["config", "--worktree", "user.email", "me@example.test"],
+    );
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert_eq!(restored["sparse_checkout"], false);
+    assert!(f.wt.join("d3/c").exists());
+    assert_eq!(
+        wgit(&f.env, &f.wt, &["config", "--worktree", "user.email"]),
+        "me@example.test"
+    );
+}
+
+#[test]
+fn per_worktree_config_of_a_never_sparse_worktree_is_restored() {
+    let f = Fixture::new();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    wgit(
+        &f.env,
+        &f.wt,
+        &["config", "--worktree", "user.email", "me@example.test"],
+    );
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert_eq!(
+        wgit(&f.env, &f.wt, &["config", "--worktree", "user.email"]),
+        "me@example.test"
+    );
+}

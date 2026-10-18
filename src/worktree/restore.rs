@@ -106,7 +106,10 @@ fn reapply_sparse(
     target: &std::path::Path,
     warnings: &mut Vec<String>,
 ) -> bool {
-    if !saved.join("info/sparse-checkout").is_file() {
+    if !snapshot::SAVED_GIT_FILES
+        .iter()
+        .any(|name| saved.join(name).is_file())
+    {
         return false;
     }
     let repo = Repo::at(target);
@@ -114,7 +117,7 @@ fn reapply_sparse(
         return false;
     };
     let git_dir = PathBuf::from(git_dir);
-    let attempt = || -> Result<()> {
+    let attempt = || -> Result<bool> {
         // Per-worktree config only counts when the repository reads it.
         repo.git(&["config", "extensions.worktreeConfig", "true"])?;
         for name in snapshot::SAVED_GIT_FILES {
@@ -128,11 +131,19 @@ fn reapply_sparse(
             }
             fs::copy(&from, &to).map_err(ctx(format!("restore {}", to.display())))?;
         }
-        repo.git(&["sparse-checkout", "reapply"])?;
-        Ok(())
+        // A config git cannot read is an error here, not an unset setting.
+        repo.git(&["config", "--list"])?;
+        // `sparse-checkout disable` leaves the patterns file and turns the setting off.
+        let sparse = repo
+            .git_opt(&["config", "--get", "--type=bool", "core.sparseCheckout"])?
+            .is_some_and(|value| value == "true");
+        if sparse {
+            repo.git(&["sparse-checkout", "reapply"])?;
+        }
+        Ok(sparse)
     };
     match attempt() {
-        Ok(()) => true,
+        Ok(sparse) => sparse,
         Err(error) => {
             // A half-copied config would break every git command in the worktree.
             for name in snapshot::SAVED_GIT_FILES {
