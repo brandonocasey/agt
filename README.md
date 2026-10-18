@@ -661,6 +661,9 @@ repository identity remains `<host>/<owner>/<repo>` from `origin`, or
 `local/<name>-<hash>` without one. Outside a checkout, or without an available
 non-bare main checkout, issue and review commands fail clearly.
 
+Git's common directory holds a private `agt-repository-id` shared by linked worktrees.
+It keeps migration and backup ownership stable when the checkout moves.
+
 First use imports matching legacy records from `$XDG_STATE_HOME/agents/reviews/`
 and `agents/issues/` (default state root `~/.local/state`). Originals remain intact.
 Imports install a saved snapshot. Writes through older versions after that snapshot

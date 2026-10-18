@@ -794,9 +794,6 @@ impl<'a> Planner<'a> {
         let mut writes = Vec::new();
         let mut skipped = Vec::new();
         for thread in &target.threads {
-            if !self.selected_thread(thread) {
-                continue;
-            }
             let Some(remote) = &thread.remote else {
                 continue;
             };
@@ -808,7 +805,11 @@ impl<'a> Planner<'a> {
             } else {
                 self.held(thread)
             };
-            if let Some(reason) = held.or_else(|| self.pre_pr(target, thread)) {
+            let before_pr = || match self.run {
+                Some(run) => self.run_before_pr(target, run),
+                None => self.pre_pr(target, thread),
+            };
+            if let Some(reason) = held.or_else(before_pr) {
                 skipped.push(Skipped::new(&thread.id, reason));
                 continue;
             }

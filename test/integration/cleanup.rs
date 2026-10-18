@@ -1864,3 +1864,118 @@ fn repository_storage_refuses_busy_and_symbolic_legacy_sources() {
     assert!(error.contains("symbolic link"), "{error}");
     assert!(!prune.env.state().exists());
 }
+
+#[test]
+fn repository_storage_identity_survives_relocation_after_private_edits() {
+    use crate::support::issue::{Github, IssueFake, Spec};
+    let mut env = Env::with_branch();
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    env.write_config(&Github.config(true));
+    (&Github as &dyn IssueFake).serve(&env, &[Spec::new(1, "Legacy issue")]);
+    env.issue(&["sync"]);
+    let legacy = env.path("state").join("agents/issues");
+    fs::rename(env.repo.join(".agt/issues"), &legacy).unwrap();
+    fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
+    env.issue(&["list"]);
+    env.issue(&["note", "1", "Private relocation note"]);
+    let review = env.run(&["run", "start"]);
+    let review_key = review["target"].as_str().unwrap();
+    let records = env.path("state").join("agents/repository-imports");
+    let backups = env.path("state").join("agents/backups/repositories");
+    let before_records = fs::read_dir(&records).unwrap().count();
+    let before_backups = fs::read_dir(&backups).unwrap().count();
+    let moved = env.path("moved-repo");
+    fs::rename(&env.repo, &moved).unwrap();
+    env.repo = moved;
+    env.issue(&["list"]);
+    let shown = env.issue(&["show", "1"]);
+    assert!(
+        shown.to_string().contains("Private relocation note"),
+        "{shown}"
+    );
+    let reviews = env.run(&["list"]);
+    assert!(reviews.to_string().contains(review_key), "{reviews}");
+    assert_eq!(fs::read_dir(records).unwrap().count(), before_records);
+    assert_eq!(fs::read_dir(backups).unwrap().count(), before_backups);
+    assert!(legacy.join(Github.tracker()).join("1.json").exists());
+}
+
+#[test]
+fn repository_storage_identity_is_private_shared_and_validated() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let env = Env::with_branch();
+    let identity = env.repo.join(".git/agt-repository-id");
+    let lock = env.repo.join(".git/.agt-repository-id.lock");
+    let preview = env
+        .command(BIN, &env.repo)
+        .args(["cleanup", "--only", "reviews"])
+        .output()
+        .unwrap();
+    assert!(preview.status.success());
+    assert!(!identity.exists());
+    assert!(!lock.exists());
+    env.run(&["list"]);
+    let original = fs::read(&identity).unwrap();
+    assert_eq!(original.len(), 40);
+    assert_eq!(
+        fs::metadata(&identity).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&lock).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let linked = env.path("linked-id");
+    env.git(&[
+        "worktree",
+        "add",
+        "-b",
+        "linked-id",
+        linked.to_str().unwrap(),
+    ]);
+    assert!(env.agt(&linked).args(["list"]).status().unwrap().success());
+    assert_eq!(fs::read(&identity).unwrap(), original);
+    assert_eq!(
+        fs::read_dir(env.path("state").join("agents/repository-imports"))
+            .unwrap()
+            .count(),
+        1
+    );
+    let saved = env.path("saved-id");
+    fs::rename(&identity, &saved).unwrap();
+    symlink(&saved, &identity).unwrap();
+    assert!(env.fail(&["list"], None).contains("must be a regular file"));
+    assert_eq!(fs::read(&saved).unwrap(), original);
+    fs::remove_file(&identity).unwrap();
+    fs::create_dir(&identity).unwrap();
+    assert!(env.fail(&["list"], None).contains("must be a regular file"));
+    fs::remove_dir(&identity).unwrap();
+    fs::write(&identity, "../unsafe").unwrap();
+    assert!(
+        env.fail(&["list"], None)
+            .contains("invalid repository identity")
+    );
+    assert_eq!(fs::read_to_string(&identity).unwrap(), "../unsafe");
+}
+
+#[test]
+fn repository_storage_reused_checkout_path_gets_a_new_identity() {
+    let mut env = Env::with_branch();
+    env.run(&["list"]);
+    let original_path = env.repo.clone();
+    let first = fs::read(original_path.join(".git/agt-repository-id")).unwrap();
+    let moved = env.path("first-clone");
+    fs::rename(&original_path, &moved).unwrap();
+    fs::create_dir(&original_path).unwrap();
+    env.git(&["init", "-q", "-b", "main"]);
+    env.git(&["commit", "-q", "--allow-empty", "-m", "New clone"]);
+    env.run(&["list"]);
+    let second = fs::read(original_path.join(".git/agt-repository-id")).unwrap();
+    assert_ne!(first, second);
+    env.repo = moved;
+    env.run(&["list"]);
+    assert_eq!(
+        fs::read(env.repo.join(".git/agt-repository-id")).unwrap(),
+        first
+    );
+}

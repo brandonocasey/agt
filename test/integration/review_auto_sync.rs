@@ -541,6 +541,120 @@ fn automatic_publish_attaches_and_sends_only_the_completed_run() {
 }
 
 #[test]
+fn automatic_publish_sends_current_run_replies_on_imported_threads() {
+    auto_publish_remote_reply(false);
+}
+
+#[test]
+fn automatic_publish_sends_current_run_replies_on_published_findings() {
+    auto_publish_remote_reply(true);
+}
+
+fn auto_publish_remote_reply(published_finding: bool) {
+    use crate::support::forge::{Call, Comment, FakeService, Remote};
+
+    let setup = if published_finding {
+        Setup::reviewed(ORIGIN)
+    } else {
+        Setup::synced_branch(ORIGIN)
+    };
+    let env = &setup.env;
+    let service = github::Github::new();
+    let mut remote = Remote::new();
+    remote.thread(
+        "PRRT_old",
+        false,
+        3,
+        vec![Comment::new(301, "alice", "REMOTE PARENT")],
+    );
+    service.sync(&setup, &remote);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+    let (thread, remote_thread) = if published_finding {
+        service.land_findings(&setup);
+        let path = env.state().join("gh-42.json");
+        let mut target: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let parent_run = target["runs"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|run| run["id"] == setup.run)
+            .unwrap();
+        parent_run["ended_at"] = "2000-01-01T00:00:00Z".into();
+        parent_run
+            .as_object_mut()
+            .unwrap()
+            .remove("publication_target");
+        fs::write(path, serde_json::to_vec_pretty(&target).unwrap()).unwrap();
+        (setup.finding(1), "PRRT_f1")
+    } else {
+        env.run(&["sync"]);
+        ("gh-t301".to_owned(), "PRRT_old")
+    };
+    let current = env.run(&["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (body, run, private) in [
+        ("OLD RUN REPLY", Some(setup.run.as_str()), false),
+        ("UNATTRIBUTED REPLY", None, false),
+        ("PRIVATE CURRENT REPLY", Some(current.as_str()), true),
+        ("CURRENT REMOTE REPLY", Some(current.as_str()), false),
+    ] {
+        let mut args = vec!["reply", &thread, "--body", body];
+        if let Some(run) = run {
+            args.extend([
+                "--run",
+                run,
+                "--model",
+                "m1",
+                "--effort",
+                "xhigh",
+                "--harness",
+                "codex",
+            ]);
+        }
+        if private {
+            args.push("--local");
+        }
+        env.run(&args);
+    }
+    service.accept(env, Call::Reply(remote_thread), 801);
+    service.accept(env, Call::PostNote, 601);
+    auto_push(env);
+    let output = env.exec(&["run", "end", "--run", &current], None, &[]);
+    review_json(&output);
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sent = env
+        .forge_inputs()
+        .iter()
+        .map(|(_, body)| body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(sent.contains("CURRENT REMOTE REPLY"), "{sent}");
+    for private in [
+        "OLD RUN REPLY",
+        "UNATTRIBUTED REPLY",
+        "PRIVATE CURRENT REPLY",
+    ] {
+        assert!(!sent.contains(private), "leaked {private}: {sent}");
+        let list = env.run(&["list"]);
+        let conversation = crate::support::scenario::thread(&list, &thread);
+        let comment = conversation["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|comment| comment["body"] == private)
+            .unwrap();
+        assert!(comment["remote"].is_null(), "{comment}");
+        assert_ne!(comment["post"], "posted", "{comment}");
+    }
+}
+
+#[test]
 fn automatic_publish_failure_preserves_the_saved_run_and_pending_delivery() {
     use crate::support::forge::{Call, FakeService, Remote};
     let setup = Setup::reviewed(ORIGIN);

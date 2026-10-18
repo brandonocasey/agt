@@ -28,9 +28,7 @@ impl Store {
         let main = repo.main_checkout_root()?;
         let common =
             fs::canonicalize(repo.common_dir()?).map_err(ctx("resolve repository identity"))?;
-        let identity = sha1_smol::Sha1::from(common.as_os_str().as_encoded_bytes())
-            .digest()
-            .to_string();
+        let identity = repository_identity(&common, preview)?;
         let global = Self::open(namespace)?;
         for path in [
             main.join(".agt"),
@@ -260,6 +258,77 @@ impl Store {
         store.root = root;
         Ok(store)
     }
+}
+
+fn read_repository_identity(path: &Path) -> Result<Option<String>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            return fail(format!("{} must be a regular file", path.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).map_err(ctx("inspect repository identity")),
+    }
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(ctx("open repository identity"))?;
+    if !file
+        .metadata()
+        .map_err(ctx("stat repository identity"))?
+        .is_file()
+    {
+        return fail(format!("{} must be a regular file", path.display()));
+    }
+    let mut identity = String::new();
+    file.take(41)
+        .read_to_string(&mut identity)
+        .map_err(ctx("read repository identity"))?;
+    if identity.len() != 40
+        || !identity
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return fail(format!("invalid repository identity in {}", path.display()));
+    }
+    Ok(Some(identity))
+}
+
+fn repository_identity(common: &Path, preview: bool) -> Result<String> {
+    let path = common.join("agt-repository-id");
+    if let Some(identity) = read_repository_identity(&path)? {
+        if !preview {
+            sync_dir(common)?;
+        }
+        return Ok(identity);
+    }
+    if preview {
+        // An uninitialized clone MUST inspect legacy data without creating an identity or lock.
+        return Ok("uninitialized".to_owned());
+    }
+    let _guard = lock(&common.join(".agt-repository-id.lock"))?;
+    if let Some(identity) = read_repository_identity(&path)? {
+        sync_dir(common)?;
+        return Ok(identity);
+    }
+    let identity = sha1_smol::Sha1::from(crate::core::random::token("repo-", 32))
+        .digest()
+        .to_string();
+    use std::io::Write;
+    let mut temp =
+        tempfile::NamedTempFile::new_in(common).map_err(ctx("stage repository identity"))?;
+    temp.write_all(identity.as_bytes())
+        .map_err(ctx("write repository identity"))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(ctx("sync repository identity"))?;
+    temp.persist_noclobber(&path)
+        .map_err(ctx("persist repository identity"))?;
+    sync_dir(common)?;
+    Ok(identity)
 }
 
 fn check_conflicts(source: &Path, destination: &Path) -> Result<()> {
