@@ -15,6 +15,9 @@ const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 struct Site {
     env: Env,
     bare: PathBuf,
+    /// How many days past the real time the run's clock is; worktrees made by a test are
+    /// quiet for 3 days only once this is past 3.
+    days_on: i64,
 }
 
 impl Site {
@@ -33,7 +36,11 @@ impl Site {
         env.git(&["config", &format!("url.{}.insteadOf", bare.display()), url]);
         env.git(&["push", "-q", "origin", "main"]);
         env.git(&["remote", "set-head", "origin", "main"]);
-        Self { env, bare }
+        Self {
+            env,
+            bare,
+            days_on: 4,
+        }
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> String {
@@ -78,8 +85,14 @@ impl Site {
     }
 
     fn agt_in(&self, dir: &Path, args: &[&str]) -> Output {
+        let real = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now = i64::try_from(real).unwrap() + self.days_on * 86_400;
         self.env
             .command(BIN, dir)
+            .env("AGT_NOW", now.to_string())
             .args(["worktree", "cleanup"])
             .args(args)
             .output()
@@ -527,4 +540,39 @@ fn all_sweeps_every_configured_repository() {
     assert_eq!(report["repository"], site.env.repo.to_str().unwrap());
     assert_eq!(report["removed"][0]["path"], wt.to_str().unwrap());
     assert_eq!(site.branches(), ["main"]);
+}
+
+/// A worktree on a new branch at the default tip, as `agt worktree create` leaves it.
+fn fresh(site: &Site) -> PathBuf {
+    let wt = site.env.path("trees/fresh");
+    site.env
+        .git(&["worktree", "add", "-q", "-b", "fresh", wt.to_str().unwrap()]);
+    wt
+}
+
+#[test]
+fn a_worktree_changed_in_the_last_3_days_is_recent_unless_recent_is_passed() {
+    let mut site = Site::new();
+    let wt = fresh(&site);
+    site.days_on = 0;
+
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "fresh");
+    assert_eq!(row["verdict"], "recent");
+    assert!(wt.exists());
+    assert_eq!(site.branches(), ["fresh", "main"]);
+
+    let report = site.run(&["--yes", "--recent"]);
+    assert!(!wt.exists());
+    assert_eq!(report["removed"][0]["branch"], "fresh");
+    assert_eq!(site.branches(), ["main"]);
+}
+
+#[test]
+fn a_worktree_quiet_for_4_days_is_removed() {
+    let site = Site::new();
+    let wt = fresh(&site);
+    let report = site.run(&["--yes"]);
+    assert!(!wt.exists());
+    assert_eq!(report["removed"][0]["branch"], "fresh");
 }

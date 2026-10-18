@@ -366,7 +366,7 @@ Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such a
 `/bin/sleep`, so those are never found there.
 
 `manual` lists what cleanup never deletes, in `manual` by section: `worktrees` (linked worktrees
-whose HEAD is already in the default branch, clean, unlocked, with no live agent session, as
+whose HEAD is already in the default branch, clean, unlocked, untouched for 3 days (see `agt worktree cleanup`) and with no live agent session, as
 `agt worktree remove <path> --yes`) and `branches` (local branches in the default branch, not
 protected and not checked out, as `cd <repo> && agt worktree cleanup --yes  # branch <name>`), for
 the repositories under the `agt worktree` roots; this is local ancestry only, with no network and no
@@ -913,7 +913,7 @@ agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lock
 agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
 agt worktree remove PATH [--yes]            # without --yes: print the plan, change nothing
-agt worktree cleanup [--all] [--yes] [--offline] [--dirty]  # remove landed worktrees, delete landed branches
+agt worktree cleanup [--all] [--yes] [--offline] [--dirty] [--recent]  # remove landed worktrees, delete landed branches
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
 agt worktree backups                        # list backups
 agt worktree backups show ID
@@ -933,7 +933,7 @@ roots = ["~/Projects/*/*", "~/projects/*/*"]
 
 A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or `origin` is neither GitHub nor GitLab, the repository's PRs/MRs for that source branch are listed (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. An open PR gives `open` (kept, even when an older PR merged); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from `origin` and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). The forge host is found from `origin` as `agt review` finds it, without its `hosts.json`.
 
-A linked worktree whose branch is `merged` or `squash-merged`, or whose detached HEAD is in the default branch, is removed first, exactly as `remove --yes` does (snapshot backup, then `git worktree remove --force` once), and then its branch is deleted. It is kept when it is locked, missing, holds a submodule `remove` would refuse, has a live Claude Code session in it (as `remove`), or any process with its current directory inside it (`lsof -a -d cwd -Fpn` on macOS, `/proc/*/cwd` on Linux; when that cannot be read the worktree is kept and the reason says so). It is also kept as `dirty` when it has modified tracked files or untracked files that are not disposable, unless `--dirty` is passed; the snapshot preserves them either way. A kept worktree keeps its branch.
+A linked worktree whose branch is `merged` or `squash-merged`, or whose detached HEAD is in the default branch, is removed first, exactly as `remove --yes` does (snapshot backup, then `git worktree remove --force` once), and then its branch is deleted. It is kept when it is locked, missing, holds a submodule `remove` would refuse, has a live Claude Code session in it (as `remove`), or any process with its current directory inside it (`lsof -a -d cwd -Fpn` on macOS, `/proc/*/cwd` on Linux; when that cannot be read the worktree is kept and the reason says so). It is kept as `recent` when anything in it changed in the last 3 days (its HEAD commit time, the mtime of its git dir's `HEAD`, `index` or `logs/HEAD`, or of any tracked or untracked non-ignored file), so a worktree just made by `create` survives, unless `--recent` is passed. It is also kept as `dirty` when it has modified tracked files or untracked files that are not disposable, unless `--dirty` is passed; the snapshot preserves them either way. A kept worktree keeps its branch.
 
 The snapshot is a commit of the whole working tree (tracked changes plus untracked, non-ignored files) with the worktree's HEAD as parent, built in a temporary index and pinned at `refs/agt/backups/<id>`, so the commits outlive the branch. Ignored files that are not disposable (`.env*`, credentials, notes) are copied with their modes. Disposable paths are skipped: `node_modules/`, `.venv/`, `vendor/`, `target/`, `dist/`, `build/`, `coverage/`, `*.log`, `*.tsbuildinfo`, `.DS_Store`, editor swap files and `.cache/agents/scratch/`.
 

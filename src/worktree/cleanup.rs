@@ -8,9 +8,10 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::idle::Cwds;
-use super::landed::{Finding, Scene, Verdict};
+use super::landed::{Finding, Scene, Verdict, recent};
 use super::remove::{refuse, removal};
 use super::{info, roots, submodules};
+use crate::core::clock;
 use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::forge::landed::Origin;
@@ -31,6 +32,9 @@ pub struct Cli {
     /// Also remove worktrees with uncommitted work; the snapshot backup keeps it.
     #[arg(long)]
     dirty: bool,
+    /// Also remove worktrees where something changed in the last 3 days.
+    #[arg(long)]
+    recent: bool,
 }
 
 /// What a sweep of one repository found.
@@ -150,11 +154,15 @@ struct Subject<'a> {
 }
 
 fn kept(subject: &Subject, path: Option<&PathBuf>, reason: &str) -> Value {
+    kept_as(subject.finding.verdict.as_str(), subject, path, reason)
+}
+
+fn kept_as(verdict: &str, subject: &Subject, path: Option<&PathBuf>, reason: &str) -> Value {
     json!({
         "branch": subject.branch,
         "path": path,
         "tip": subject.tip,
-        "verdict": subject.finding.verdict.as_str(),
+        "verdict": verdict,
         "reason": reason,
     })
 }
@@ -170,8 +178,11 @@ fn remove_worktree(
     report: &mut Report,
 ) -> Result<bool> {
     let path = &entry.path;
-    if let Some(reason) = blocker(scene, entry, main, cli, cwds)? {
-        report.kept.push(kept(subject, Some(path), &reason));
+    if let Some((verdict, reason)) = blocker(scene, entry, main, cli, cwds)? {
+        let verdict = verdict.unwrap_or(subject.finding.verdict.as_str());
+        report
+            .kept
+            .push(kept_as(verdict, subject, Some(path), &reason));
         return Ok(false);
     }
     let real = info::real(path)?;
@@ -219,26 +230,36 @@ fn blocker(
     main: &Path,
     cli: &Cli,
     cwds: &mut Cwds,
-) -> Result<Option<String>> {
+) -> Result<Option<(Option<&'static str>, String)>> {
     if !entry.path.exists() {
-        return Ok(Some(
+        return Ok(Some((
+            None,
             "the directory is missing; run git worktree prune".into(),
-        ));
+        )));
     }
     let real = info::real(&entry.path)?;
     if let Err(error) = refuse(&scene.entries, &real, main) {
-        return Ok(Some(error.to_string()));
+        return Ok(Some((None, error.to_string())));
     }
     if let Err(error) = submodules::check(&real, main) {
-        return Ok(Some(error.to_string()));
+        return Ok(Some((None, error.to_string())));
     }
     if let Some(reason) = cwds.busy(&real) {
-        return Ok(Some(reason));
+        return Ok(Some((None, reason)));
+    }
+    if !cli.recent && recent(&real, clock::now_secs()?)? {
+        return Ok(Some((
+            Some("recent"),
+            "something in it changed in the last 3 days; pass --recent to remove it anyway".into(),
+        )));
     }
     let unsaved = info::unsaved(&real)?;
     if unsaved > 0 && !cli.dirty {
-        return Ok(Some(format!(
-            "dirty: {unsaved} modified or untracked files; pass --dirty to remove it after a snapshot backup"
+        return Ok(Some((
+            None,
+            format!(
+                "dirty: {unsaved} modified or untracked files; pass --dirty to remove it after a snapshot backup"
+            ),
         )));
     }
     Ok(None)

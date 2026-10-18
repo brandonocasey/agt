@@ -266,3 +266,46 @@ impl Scene {
         }
     }
 }
+
+/// How long a worktree must sit untouched before cleanup removes it.
+const QUIET_SECS: i64 = 3 * 86_400;
+
+/// Whether anything in the worktree changed in the last 3 days before `now`: its HEAD commit,
+/// its git dir's HEAD, index or HEAD log, or a tracked or untracked non-ignored file.
+pub fn recent(path: &Path, now: i64) -> Result<bool> {
+    let repo = Repo::at(path);
+    let since = |secs: i64| now - secs < QUIET_SECS;
+    let committed = repo.git(&["log", "-1", "--format=%ct", "HEAD"])?;
+    if committed.parse().is_ok_and(since) {
+        return Ok(true);
+    }
+    let touched = |file: &Path| {
+        std::fs::symlink_metadata(file)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|age| since(i64::try_from(age.as_secs()).unwrap_or(i64::MAX)))
+    };
+    let git_dir = PathBuf::from(repo.git(&["rev-parse", "--absolute-git-dir"])?);
+    if ["HEAD", "index", "logs/HEAD"]
+        .iter()
+        .any(|name| touched(&git_dir.join(name)))
+    {
+        return Ok(true);
+    }
+    let listing = repo.checked(
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        None,
+        &[],
+    )?;
+    Ok(listing
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .any(|name| touched(&path.join(String::from_utf8_lossy(name).as_ref()))))
+}
