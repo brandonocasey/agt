@@ -14,6 +14,7 @@ pub struct Entry {
     pub head: String,
     pub branch: Option<String>,
     pub locked: bool,
+    pub bare: bool,
 }
 
 /// Every worktree of the repository; the first is the main checkout.
@@ -27,6 +28,7 @@ pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
                 head: String::new(),
                 branch: None,
                 locked: false,
+                bare: false,
             });
         } else if let Some(entry) = found.last_mut() {
             if let Some(head) = line.strip_prefix("HEAD ") {
@@ -35,15 +37,33 @@ pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
                 entry.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).into());
             } else if line == "locked" || line.starts_with("locked ") {
                 entry.locked = true;
+            } else if line == "bare" {
+                entry.bare = true;
             }
         }
     }
     Ok(found)
 }
 
-/// The default branch's name and its ref: the branch `origin/HEAD` names, else `main`, else
-/// `master`, as a local branch when it exists and as `origin/<name>` otherwise.
-pub fn default_branch(repo: &Repo) -> Result<Option<(String, String)>> {
+/// The main checkout: the first entry of `git worktree list`.
+pub fn main_checkout(repo: &Repo) -> Result<Entry> {
+    entries(repo)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error("git worktree list printed nothing".into()))
+}
+
+/// The root of the work tree that contains `dir`.
+pub fn toplevel(dir: &Path) -> Result<PathBuf> {
+    let root = Repo::at(dir)
+        .git(&["rev-parse", "--show-toplevel"])
+        .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))?;
+    Ok(PathBuf::from(root))
+}
+
+/// The names the default branch may have, best first: the branch `origin/HEAD` names, `main`,
+/// `master`.
+pub fn default_names(repo: &Repo) -> Result<Vec<String>> {
     let mut names = Vec::new();
     if let Some(remote) = repo.git_opt(&[
         "symbolic-ref",
@@ -54,7 +74,13 @@ pub fn default_branch(repo: &Repo) -> Result<Option<(String, String)>> {
         names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
     }
     names.extend(["main".to_owned(), "master".to_owned()]);
-    for name in names {
+    Ok(names)
+}
+
+/// The default branch's name and its ref: the first of [`default_names`] that exists, as a
+/// local branch when it does and as `origin/<name>` otherwise.
+pub fn default_branch(repo: &Repo) -> Result<Option<(String, String)>> {
+    for name in default_names(repo)? {
         for reference in [
             format!("refs/heads/{name}"),
             format!("refs/remotes/origin/{name}"),
@@ -131,8 +157,8 @@ fn walk(root: &Path, rel: &str, found: &mut Ignored) -> Result<()> {
     Ok(())
 }
 
-/// Modified tracked (staged or not, deleted) and untracked, non-ignored file counts.
-pub fn dirty(root: &Path) -> Result<(usize, usize)> {
+/// What `git status` lists: whether each path is untracked, and the path.
+fn status(root: &Path) -> Result<Vec<(bool, String)>> {
     let out = Repo::at(root).checked(
         &[
             "status",
@@ -144,15 +170,32 @@ pub fn dirty(root: &Path) -> Result<(usize, usize)> {
         None,
         &[],
     )?;
-    let (mut modified, mut untracked) = (0, 0);
-    for entry in out.split(|byte| *byte == 0).filter(|e| e.len() > 3) {
-        if entry.starts_with(b"??") {
-            untracked += 1;
-        } else {
-            modified += 1;
-        }
-    }
-    Ok((modified, untracked))
+    Ok(out
+        .split(|byte| *byte == 0)
+        .filter(|e| e.len() > 3)
+        .map(|entry| {
+            (
+                entry.starts_with(b"??"),
+                String::from_utf8_lossy(&entry[3..]).into_owned(),
+            )
+        })
+        .collect())
+}
+
+/// Modified tracked (staged or not, deleted) and untracked, non-ignored file counts.
+pub fn dirty(root: &Path) -> Result<(usize, usize)> {
+    let listed = status(root)?;
+    let untracked = listed.iter().filter(|(untracked, _)| *untracked).count();
+    Ok((listed.len() - untracked, untracked))
+}
+
+/// Modified tracked files and untracked files that are not disposable: what removing the
+/// worktree would only keep in its snapshot.
+pub fn unsaved(root: &Path) -> Result<usize> {
+    Ok(status(root)?
+        .iter()
+        .filter(|(untracked, path)| !*untracked || !is_disposable(path))
+        .count())
 }
 
 /// One worktree as `agt worktree list` prints it.

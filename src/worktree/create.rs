@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use serde_json::{Value, json};
 
+use super::info::{self, default_names, main_checkout};
 use super::{emit, port, prepare};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::output::Output;
@@ -30,62 +31,11 @@ pub struct Cli {
     port: bool,
 }
 
-/// One entry of `git worktree list --porcelain`.
-pub(super) struct Entry {
-    pub path: PathBuf,
-    pub branch: Option<String>,
-    pub bare: bool,
-}
-
 /// The default branch of one remote (fetched just now) or of this repository.
 struct Candidate {
     remote: Option<String>,
     branch: String,
     commit: String,
-}
-
-pub(super) fn list(repo: &Repo) -> Result<Vec<Entry>> {
-    let listing = repo.git(&["worktree", "list", "--porcelain"])?;
-    listing
-        .split("\n\n")
-        .filter(|block| !block.trim().is_empty())
-        .map(|block| {
-            let mut entry = Entry {
-                path: PathBuf::new(),
-                branch: None,
-                bare: false,
-            };
-            for line in block.lines() {
-                if let Some(path) = line.strip_prefix("worktree ") {
-                    entry.path = PathBuf::from(path);
-                } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-                    entry.branch = Some(branch.to_owned());
-                } else if line == "bare" {
-                    entry.bare = true;
-                }
-            }
-            if entry.path.as_os_str().is_empty() {
-                return fail("git worktree list printed an entry without a path");
-            }
-            Ok(entry)
-        })
-        .collect()
-}
-
-/// The main checkout: the first entry of `git worktree list`.
-pub(super) fn main_checkout(repo: &Repo) -> Result<Entry> {
-    list(repo)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error("git worktree list printed nothing".into()))
-}
-
-/// The root of the work tree that contains `dir`.
-pub(super) fn toplevel(dir: &Path) -> Result<PathBuf> {
-    let root = Repo::at(dir)
-        .git(&["rev-parse", "--show-toplevel"])
-        .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))?;
-    Ok(PathBuf::from(root))
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -102,7 +52,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             "{branch} exists; --base applies to a new branch only"
         ));
     }
-    let checked_out = list(&repo)?
+    let checked_out = info::entries(&repo)?
         .into_iter()
         .find(|entry| entry.branch.as_deref() == Some(branch));
     let mut value = match checked_out {
@@ -211,10 +161,7 @@ fn candidates(repo: &Repo) -> Result<Vec<Candidate>> {
             commit: repo.git(&["rev-parse", "FETCH_HEAD"]).map_err(named)?,
         });
     }
-    let named = repo
-        .git_opt(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?
-        .and_then(|name| name.strip_prefix("refs/remotes/origin/").map(str::to_owned));
-    for name in named.into_iter().chain(["main".into(), "master".into()]) {
+    for name in default_names(repo)? {
         let spec = format!("refs/heads/{name}^{{commit}}");
         if let Some(commit) = repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec])? {
             found.push(Candidate {

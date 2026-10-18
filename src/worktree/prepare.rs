@@ -10,8 +10,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use clap::Args;
 use serde_json::{Value, json};
 
-use super::create::{main_checkout, toplevel};
 use super::emit;
+use super::info::{main_checkout, toplevel};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::output::Output;
 use crate::git::Repo;

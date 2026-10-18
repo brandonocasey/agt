@@ -35,7 +35,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Some(path) => path,
         None => std::env::current_dir().map_err(ctx("read the current directory"))?,
     };
-    let (path, port) = assign(&super::create::toplevel(&dir)?)?;
+    let (path, port) = assign(&super::info::toplevel(&dir)?)?;
     if cli.env {
         return Ok(Output::Text(format!("PORT={port}\n")));
     }
