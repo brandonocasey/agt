@@ -1803,6 +1803,21 @@ fn a_disabled_sparse_checkout_restores_without_a_warning_and_keeps_its_config() 
 }
 
 #[test]
+fn an_ignored_file_in_an_out_of_cone_directory_survives_restore() {
+    let f = sparse_fixture();
+    wgit(&f.env, &f.wt, &["sparse-checkout", "set", "--cone", "d1"]);
+    fs::create_dir_all(f.wt.join("d2")).unwrap();
+    fs::write(f.wt.join("d2/.env"), "SECRET=1\n").unwrap();
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["sparse_checkout"], true, "{restored}");
+    assert_eq!(
+        fs::read_to_string(f.wt.join("d2/.env")).unwrap(),
+        "SECRET=1\n"
+    );
+}
+
+#[test]
 fn per_worktree_config_of_a_never_sparse_worktree_is_restored() {
     let f = Fixture::new();
     wgit(

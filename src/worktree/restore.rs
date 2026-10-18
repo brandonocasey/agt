@@ -85,8 +85,10 @@ pub fn run(cli: Cli) -> Result<Output> {
 
     let target = info::real(&target)?;
     apply(&target, &record.snapshot)?;
-    snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
+    // Before the ignored files come back: a cone reapply deletes an out-of-cone directory
+    // that holds only ignored files.
     let sparse = reapply_sparse(&dir.join(snapshot::SAVED_GIT_DIR), &target, &mut warnings);
+    snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
     Ok(Output::Json(json!({
         "sparse_checkout": sparse,
         "restored": target,
