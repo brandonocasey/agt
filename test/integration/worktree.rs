@@ -982,6 +982,20 @@ fn ignored_files_in_a_submodule_block_removal_unless_disposable() {
 }
 
 #[test]
+fn an_untracked_os_junk_file_in_a_submodule_does_not_block_removal_but_other_files_do() {
+    let (f, sub) = with_submodule();
+    let wt = f.wt.to_string_lossy().into_owned();
+    fs::write(sub.join(".DS_Store"), "x").unwrap();
+    fs::write(sub.join("Thumbs.db"), "x").unwrap();
+    fs::create_dir_all(sub.join("dir")).unwrap();
+    fs::write(sub.join("dir/desktop.ini"), "x").unwrap();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+
+    fs::write(sub.join("dir/notes.txt"), "real work\n").unwrap();
+    refuses_both_ways(&f, "uncommitted");
+}
+
+#[test]
 fn a_populated_submodule_stays_protected_after_it_is_deinitialized_in_the_main_checkout() {
     let (f, sub) = with_submodule();
     // The main checkout has the submodule too, as it does when the worktree is made from it.

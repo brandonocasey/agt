@@ -534,15 +534,30 @@ fn holds_nothing_unique(
         return Ok(());
     };
     let work = Repo::at(workdir);
-    let dirty = work.git(&[
-        "-c",
-        "status.showUntrackedFiles=all",
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
-    ])?;
-    if !dirty.is_empty() {
+    let dirty = work.checked(
+        &[
+            "-c",
+            "status.showUntrackedFiles=all",
+            "status",
+            "--porcelain",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+        None,
+        &[],
+    )?;
+    // An untracked file the operating system recreates (a Finder `.DS_Store`) is no work, as
+    // at the top level; every other entry, tracked or not, counts.
+    let real = dirty
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| {
+            let path = String::from_utf8_lossy(entry.get(3..).unwrap_or_default());
+            !(entry.starts_with(b"?? ") && is_os_junk(path.rsplit('/').next().unwrap_or("")))
+        });
+    if real {
         return fail(format!("{name} has uncommitted changes"));
     }
     let ignored = info::ignored(workdir)?.copy;
