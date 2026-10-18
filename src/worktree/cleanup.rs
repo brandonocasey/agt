@@ -280,6 +280,7 @@ fn remove_worktree(
         return Ok(false);
     }
     let real = info::real(path)?;
+    report.warnings.extend(cwds.own_in(&real));
     let action = format!(
         "snapshot backup, then git worktree remove --force {}",
         real.display()

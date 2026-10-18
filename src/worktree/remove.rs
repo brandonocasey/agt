@@ -29,9 +29,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         .or_else(|_| fail(format!("{} is not a linked worktree", path.display())))?;
     let main = info::real(&listing[0].path)?;
     let entry = refuse(&listing, &path, &main)?;
-    if let Some(why) = Cwds::default().busy(&path) {
+    let mut cwds = Cwds::default();
+    if let Some(why) = cwds.busy(&path) {
         return fail(format!("{} is in use: {why}", path.display()));
     }
+    let warnings = cwds.own_in(&path);
     submodules::check(&path, &main)?;
     nested::check(&path)?;
 
@@ -46,11 +48,14 @@ pub fn run(cli: Cli) -> Result<Output> {
             "snapshot_files": modified + untracked,
             "copied_ignored": ignored.copy,
             "skipped_disposable": ignored.skipped,
+            "warnings": warnings,
             "next": "pass --yes to back up and remove",
         })));
     }
 
-    Ok(Output::Json(removal(&main, &path, entry)?))
+    let mut done = removal(&main, &path, entry)?;
+    done["warnings"] = json!(warnings);
+    Ok(Output::Json(done))
 }
 
 /// Backs `entry` up, then removes its worktree; the caller has checked that it may go.

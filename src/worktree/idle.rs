@@ -1,5 +1,5 @@
-//! Whether any process other than agt and its ancestors has its current directory inside a
-//! worktree.
+//! Whether any process other than agt, its ancestors and the calling session's own processes
+//! has its current directory inside a worktree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,22 +9,63 @@ use crate::core::agents;
 
 /// The current directories of all processes, read once on first use.
 #[derive(Default)]
-pub struct Cwds(Option<Result<Vec<(i32, PathBuf)>, String>>);
+pub struct Cwds {
+    all: Option<Result<Vec<(i32, PathBuf)>, String>>,
+    /// The calling session's other processes, read when one is found inside a worktree.
+    session: Option<Vec<i32>>,
+}
 
 impl Cwds {
-    /// Why `root` is not idle: a process in it, or the reason this cannot be checked.
+    /// Why `root` is not idle: a process in it that is not the calling session's, or the
+    /// reason this cannot be checked.
     pub fn busy(&mut self, root: &Path) -> Option<String> {
-        match self.0.get_or_insert_with(read) {
-            Err(why) => Some(format!("cannot check running processes: {why}")),
-            Ok(all) => all
+        let inside = match self.inside(root) {
+            Err(why) => return Some(format!("cannot check running processes: {why}")),
+            Ok(inside) => inside,
+        };
+        let session = self.session_tree(&inside);
+        inside
+            .iter()
+            .find(|(pid, _)| !session.contains(pid))
+            .map(|(pid, cwd)| describe(*pid, cwd))
+    }
+
+    /// The calling session's own processes inside `root`, which do not block it: stop them
+    /// before removing it.
+    pub fn own_in(&mut self, root: &Path) -> Vec<String> {
+        let Ok(inside) = self.inside(root) else {
+            return Vec::new();
+        };
+        let session = self.session_tree(&inside);
+        inside
+            .iter()
+            .filter(|(pid, _)| session.contains(pid))
+            .map(|(pid, cwd)| format!("{} (of the calling session)", describe(*pid, cwd)))
+            .collect()
+    }
+
+    fn inside(&mut self, root: &Path) -> Result<Vec<(i32, PathBuf)>, String> {
+        match self.all.get_or_insert_with(read) {
+            Err(why) => Err(why.clone()),
+            Ok(all) => Ok(all
                 .iter()
-                .find(|(_, cwd)| cwd.starts_with(root))
-                .map(|(pid, cwd)| {
-                    let command = agents::read(*pid).map_or_else(|| "?".to_owned(), |p| p.comm);
-                    format!("process {pid} ({command}) runs in {}", cwd.display())
-                }),
+                .filter(|(_, cwd)| cwd.starts_with(root))
+                .cloned()
+                .collect()),
         }
     }
+
+    fn session_tree(&mut self, inside: &[(i32, PathBuf)]) -> &[i32] {
+        if inside.is_empty() {
+            return &[];
+        }
+        self.session.get_or_insert_with(agents::session_tree)
+    }
+}
+
+fn describe(pid: i32, cwd: &Path) -> String {
+    let command = agents::read(pid).map_or_else(|| "?".to_owned(), |p| p.comm);
+    format!("process {pid} ({command}) runs in {}", cwd.display())
 }
 
 fn read() -> Result<Vec<(i32, PathBuf)>, String> {

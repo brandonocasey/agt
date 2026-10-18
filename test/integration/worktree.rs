@@ -834,3 +834,66 @@ fn a_relative_restore_path_means_the_callers_directory() {
     assert!(cwd.join("back/feature.txt").exists());
     assert!(!f.env.repo.join("back").exists());
 }
+
+#[test]
+fn the_calling_sessions_own_processes_do_not_block_removal_but_others_do() {
+    let f = Fixture::new();
+    let wt = f.wt.to_string_lossy().into_owned();
+    // A fake session: a shell outside the worktree whose child has its directory inside it,
+    // as a task server or a tool shell of a Claude Code session does.
+    let session = Reaped(
+        std::process::Command::new("sh")
+            .args(["-c", "cd \"$1\" && sleep 30 & wait", "sh", &wt])
+            .current_dir(&f.env.repo)
+            .spawn()
+            .unwrap(),
+    );
+    record_session(&f, session.0.id(), &f.env.repo);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let remove = |args: &[&str]| {
+        f.env
+            .command(BIN, &f.env.repo)
+            .env("CLAUDE_PID", session.0.id().to_string())
+            .args(["worktree", "remove"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let output = remove(&[&wt]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warnings = plan["warnings"].as_array().unwrap();
+    // The shell forks a subshell that holds the directory too.
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("(sleep)")),
+        "{plan}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.as_str().unwrap().contains("calling session")),
+        "{plan}"
+    );
+
+    // A process of nobody's session still blocks.
+    let stranger = Reaped(
+        std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&f.wt)
+            .spawn()
+            .unwrap(),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let output = remove(&[&wt, "--yes"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains(&stranger.0.id().to_string()), "{error}");
+    assert!(f.wt.exists());
+}

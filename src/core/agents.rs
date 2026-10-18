@@ -363,6 +363,42 @@ pub fn lineage() -> Vec<i32> {
     pids
 }
 
+/// The processes below the calling Claude Code session: every descendant of an ancestor of
+/// agt that has a live session record, or of `CLAUDE_PID` when set. Its task servers and
+/// shells live there; agt's own ancestors are not in the list.
+pub fn session_tree() -> Vec<i32> {
+    let lineage = lineage();
+    let live_pids: Vec<i32> = live().into_iter().map(|session| session.pid).collect();
+    let mut found: Vec<i32> = lineage
+        .iter()
+        .copied()
+        .filter(|pid| live_pids.contains(pid))
+        .collect();
+    let claude: Option<i32> = std::env::var("CLAUDE_PID")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    found.extend(claude);
+    if found.is_empty() {
+        return found;
+    }
+    let table: Vec<(i32, i32)> = pids()
+        .into_iter()
+        .filter_map(read)
+        .map(|proc| (proc.pid, proc.ppid))
+        .collect();
+    let mut next = 0;
+    while next < found.len() {
+        let parent = found[next];
+        next += 1;
+        for (pid, ppid) in &table {
+            if *ppid == parent && !found.contains(pid) {
+                found.push(*pid);
+            }
+        }
+    }
+    found
+}
+
 /// The pids of the calling session: this process, its ancestors and `CLAUDE_PID` when set.
 pub fn own_pids() -> Vec<i32> {
     let mut pids = lineage();
