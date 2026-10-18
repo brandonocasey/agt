@@ -114,6 +114,7 @@ fn build(
 
     let ignored = info::ignored(&entry.path)?;
     copy_files(&entry.path, &dir.join("files"), &ignored.copy, 0o700)?;
+    save_git_files(&entry.path, &dir.join(SAVED_GIT_DIR))?;
     let record = Record {
         id,
         repository: main.to_owned(),
@@ -132,6 +133,35 @@ fn build(
         dir: dir.to_owned(),
         changed,
     })
+}
+
+/// Where a backup keeps the per-worktree git files that `git worktree remove` deletes.
+pub const SAVED_GIT_DIR: &str = "worktree-git";
+
+/// The per-worktree files of the worktree's git directory: its sparse-checkout patterns and
+/// its own config (which holds the sparse-checkout settings).
+pub const SAVED_GIT_FILES: [&str; 2] = ["info/sparse-checkout", "config.worktree"];
+
+/// Copies the per-worktree git files that exist from the git directory of the worktree at
+/// `worktree` into `to`.
+fn save_git_files(worktree: &Path, to: &Path) -> Result<()> {
+    let git_dir = PathBuf::from(Repo::at(worktree).git(&["rev-parse", "--absolute-git-dir"])?);
+    for name in SAVED_GIT_FILES {
+        let source = git_dir.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        let target = to.join(name);
+        if let Some(parent) = target.parent() {
+            make_dir(parent, 0o700)?;
+        }
+        fs::copy(&source, &target).map_err(ctx(format!(
+            "copy {} to {}",
+            source.display(),
+            target.display()
+        )))?;
+    }
+    Ok(())
 }
 
 /// `name` as part of a ref: every run of characters git refuses in a ref name (space, `~`,

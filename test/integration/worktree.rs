@@ -1628,3 +1628,41 @@ fn a_leftover_clone_whose_path_holds_vendored_files_is_not_checked_as_the_superp
     f.json(&["remove", &wt, "--yes"]);
     assert!(!f.wt.exists());
 }
+
+#[test]
+fn restore_reapplies_the_sparse_checkout_and_says_so() {
+    let f = sparse_fixture();
+    let removed = f.remove();
+    let id = removed["id"].as_str().unwrap();
+    let saved = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("worktree-git");
+    assert!(saved.join("info/sparse-checkout").is_file());
+    let restored = f.json(&["restore", id]);
+    assert_eq!(restored["sparse_checkout"], true, "{restored}");
+    assert_eq!(restored["warnings"], json!([]));
+    assert_eq!(wgit(&f.env, &f.wt, &["sparse-checkout", "list"]), "d1\nd2");
+    assert!(f.wt.join("d2/b").exists());
+    assert!(!f.wt.join("d3").exists());
+}
+
+#[test]
+fn restore_of_a_full_checkout_does_not_mention_sparse_checkout() {
+    let f = Fixture::new();
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["sparse_checkout"], false);
+}
+
+#[test]
+fn a_sparse_checkout_that_cannot_be_reapplied_still_restores_with_a_warning() {
+    let f = sparse_fixture();
+    let removed = f.remove();
+    let saved = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("worktree-git");
+    fs::write(saved.join("config.worktree"), "[core\n").unwrap();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["sparse_checkout"], false);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("worktree-git"), "{warning}");
+    // The worktree is usable, as a full checkout.
+    assert_eq!(fs::read_to_string(f.wt.join("d3/c")).unwrap(), "c\n");
+    wgit(&f.env, &f.wt, &["status", "--porcelain"]);
+}

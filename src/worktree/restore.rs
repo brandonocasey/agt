@@ -86,7 +86,9 @@ pub fn run(cli: Cli) -> Result<Output> {
     let target = info::real(&target)?;
     apply(&target, &record.snapshot)?;
     snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
+    let sparse = reapply_sparse(&dir.join(snapshot::SAVED_GIT_DIR), &target, &mut warnings);
     Ok(Output::Json(json!({
+        "sparse_checkout": sparse,
         "restored": target,
         "id": record.id,
         "branch": record.branch,
@@ -94,6 +96,56 @@ pub fn run(cli: Cli) -> Result<Output> {
         "copied_ignored": record.copied.len(),
         "warnings": warnings,
     })))
+}
+
+/// Puts the saved sparse-checkout patterns and per-worktree config back into the restored
+/// worktree and reapplies them; true when it did. A failure is a warning naming the saved
+/// files, not an error: the worktree is restored, as a full checkout.
+fn reapply_sparse(
+    saved: &std::path::Path,
+    target: &std::path::Path,
+    warnings: &mut Vec<String>,
+) -> bool {
+    if !saved.join("info/sparse-checkout").is_file() {
+        return false;
+    }
+    let repo = Repo::at(target);
+    let Ok(git_dir) = repo.git(&["rev-parse", "--absolute-git-dir"]) else {
+        return false;
+    };
+    let git_dir = PathBuf::from(git_dir);
+    let attempt = || -> Result<()> {
+        // Per-worktree config only counts when the repository reads it.
+        repo.git(&["config", "extensions.worktreeConfig", "true"])?;
+        for name in snapshot::SAVED_GIT_FILES {
+            let from = saved.join(name);
+            if !from.is_file() {
+                continue;
+            }
+            let to = git_dir.join(name);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
+            }
+            fs::copy(&from, &to).map_err(ctx(format!("restore {}", to.display())))?;
+        }
+        repo.git(&["sparse-checkout", "reapply"])?;
+        Ok(())
+    };
+    match attempt() {
+        Ok(()) => true,
+        Err(error) => {
+            // A half-copied config would break every git command in the worktree.
+            for name in snapshot::SAVED_GIT_FILES {
+                let _ = fs::remove_file(git_dir.join(name));
+            }
+            warnings.push(format!(
+                "could not reapply the sparse checkout ({}); the worktree is a full checkout, the saved patterns are in {}",
+                error.0,
+                saved.display()
+            ));
+            false
+        }
+    }
 }
 
 /// `path` with its parent directory resolved, so a path that no longer exists still compares
