@@ -103,10 +103,17 @@ struct Tracked {
     /// The last state written.
     prior: Option<State>,
     done: bool,
+    /// Failed polls in a row that repeating may fix.
+    transient_failures: u32,
 }
+
+/// Transient failures in a row after which a target is reported as a query error.
+const TRANSIENT_LIMIT: u32 = 5;
 
 enum Polled {
     Read(State),
+    /// A transient failure to try again, with nothing to report.
+    Retry,
     /// The deadline passed or the wait was cancelled before the read finished.
     Interrupted,
 }
@@ -129,8 +136,16 @@ fn poll(tracked: &mut Tracked, deadline: Instant) -> Polled {
             return Polled::Interrupted;
         }
         match receive.recv_timeout((deadline - now).min(Duration::from_millis(20))) {
-            Ok((state, head)) => {
+            Ok((state, head, transient)) => {
                 tracked.head = head;
+                tracked.transient_failures = if transient {
+                    tracked.transient_failures + 1
+                } else {
+                    0
+                };
+                if transient && tracked.transient_failures < TRANSIENT_LIMIT {
+                    return Polled::Retry;
+                }
                 if tracked.awaiting && !is_waiting(&state) && !is_query_error(&state) {
                     tracked.awaiting = false;
                 }
@@ -198,6 +213,7 @@ pub fn run(options: &Options) -> u8 {
             awaiting: target.awaiting,
             prior: None,
             done: false,
+            transient_failures: 0,
         })
         .collect();
     install_handlers();
@@ -211,8 +227,10 @@ pub fn run(options: &Options) -> u8 {
         let mut blocker = false;
         let mut query_error = false;
         for entry in tracked.iter_mut().filter(|entry| !entry.done) {
-            let Polled::Read(state) = poll(entry, deadline) else {
-                break;
+            let state = match poll(entry, deadline) {
+                Polled::Read(state) => state,
+                Polled::Retry => continue,
+                Polled::Interrupted => break,
             };
             emit(entry, &state);
             match status(&state) {

@@ -838,7 +838,7 @@ push: the target stays pending (`waiting_for_pipeline`) until the head and, on G
 GitHub targets read the PR and its required checks in one GraphQL query; GitLab targets read the
 MR, its head pipeline and the pipeline's jobs, on `GITLAB_HOST` or `glab config get host`.
 Every call goes through the forge layer (`gh` or `glab`, replaced by `AGT_GH_BIN` and
-`AGT_GLAB_BIN`). Stdout gets one JSON event per line: `initial` and `change` per target when its
+`AGT_GLAB_BIN`). A timeout, a 5xx, a rate limit or a failed spawn is retried with the normal backoff and becomes a `query_error` after 5 in a row for a target; authentication and permission errors fail at once. Stdout gets one JSON event per line: `initial` and `change` per target when its
 state first appears or changes, then one `final` event with every result and the failed jobs or
 checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 `required_checks_passed`, `checks_pending`, `check_failed`, `check_cancelled`,
@@ -846,6 +846,8 @@ checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 15 second interval doubling up to 120 seconds. Exit status: 0 all targets passed or merged, 1 a
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
 query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
+
+Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
 `failures <mr>` is GitLab only (`123`, `!123` or an MR URL; `-R` or the current repository
 names the project). It lists the failed and retried jobs of the MR's head pipeline, the failing

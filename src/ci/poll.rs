@@ -11,12 +11,25 @@ use crate::forge::gitlab::Gitlab;
 use crate::forge::gitlab::ci::base_of_path;
 use crate::forge::transport::{CliTransport, TransportError};
 
-/// A blocked state for a read that failed, named by what the host or tool said.
-fn failure(error: &TransportError) -> State {
+/// Whether repeating the read may succeed: a rate limit, a timeout, a server error or a failure
+/// with no HTTP status (the tool or network). Authentication and permission errors are not.
+fn transient(error: &TransportError) -> bool {
+    match error.status {
+        Some(status) => matches!(status, 408 | 425 | 429) || status >= 500,
+        None => true,
+    }
+}
+
+/// A blocked state for a read that failed, named by what the host or tool said, and whether
+/// the failure is transient.
+fn failure(error: &TransportError) -> (State, bool) {
     let detail = error.message.trim();
     let normalized = detail.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|word| normalized.contains(word));
-    let reason = if error.status == Some(401) || has(&["auth", "login", "token", "credential"]) {
+    let rate_limited = error.status == Some(429);
+    let reason = if rate_limited {
+        "query_error"
+    } else if error.status == Some(401) || has(&["auth", "login", "token", "credential"]) {
         "authentication_error"
     } else if error.status == Some(403)
         || has(&[
@@ -32,7 +45,8 @@ fn failure(error: &TransportError) -> State {
     };
     let mut state = blocked(reason);
     state["detail"] = json!(detail);
-    state
+    let retry = reason == "query_error" && transient(error);
+    (state, retry)
 }
 
 /// The state of `target` and the head it is pinned to: the one it was given or, when it had
@@ -42,13 +56,19 @@ pub fn snapshot(
     target: &Resolved,
     head: Option<String>,
     awaiting: bool,
-) -> (State, Option<String>) {
+) -> (State, Option<String>, bool) {
     let result = match target.platform {
         Platform::Github => github(target, head.clone(), awaiting),
         Platform::Gitlab if target.pipeline => pipeline(target).map(|state| (state, head.clone())),
         Platform::Gitlab => gitlab(target, head.clone(), awaiting),
     };
-    result.unwrap_or_else(|error| (failure(&error), head))
+    match result {
+        Ok((state, head)) => (state, head, false),
+        Err(error) => {
+            let (state, retry) = failure(&error);
+            (state, head, retry)
+        }
+    }
 }
 
 type Polled = Result<(State, Option<String>), TransportError>;
@@ -129,7 +149,7 @@ mod tests {
             status,
             message: message.to_owned(),
         };
-        let reason = |status, message: &str| failure(&error(status, message))["reason"].clone();
+        let reason = |status, message: &str| failure(&error(status, message)).0["reason"].clone();
         assert_eq!(
             reason(Some(401), "gh api failed: nope"),
             "authentication_error"
@@ -144,5 +164,16 @@ mod tests {
             "permission_error"
         );
         assert_eq!(reason(Some(500), "gh api failed: boom"), "query_error");
+        assert_eq!(
+            reason(Some(429), "rate limit exceeded for token"),
+            "query_error"
+        );
+        let retried = |status, message: &str| failure(&error(status, message)).1;
+        assert!(retried(Some(500), "boom"));
+        assert!(retried(Some(429), "rate limit"));
+        assert!(retried(None, "run gh: No such file"));
+        assert!(!retried(Some(404), "Not Found"));
+        assert!(!retried(Some(401), "nope"));
+        assert!(!retried(Some(403), "forbidden"));
     }
 }

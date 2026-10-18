@@ -1002,3 +1002,55 @@ fn pull_request_and_merge_request_arguments_may_be_urls_or_local() {
     assert_eq!(url.status, 0, "{}", url.stderr);
     assert_eq!(url.events[0]["target"], "owner/repo#42");
 }
+
+fn bad_gateway() -> Step {
+    failing("PullChecks", "gh: Bad Gateway (HTTP 502)", 1)
+}
+
+#[test]
+fn four_transient_failures_then_success_end_normally() {
+    let mut steps: Vec<Step> = (0..4).map(|_| bad_gateway()).collect();
+    steps.push(step(
+        "PullChecks",
+        &open(&[run_node("test", "COMPLETED", Some("SUCCESS"))]),
+    ));
+    let outcome = run(&steps);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "final"]);
+}
+
+#[test]
+fn the_count_resets_after_a_successful_poll() {
+    let pending = open(&[run_node("test", "IN_PROGRESS", None)]);
+    let mut steps: Vec<Step> = (0..4).map(|_| bad_gateway()).collect();
+    steps.push(step("PullChecks", &pending));
+    steps.extend((0..4).map(|_| bad_gateway()));
+    steps.push(step(
+        "PullChecks",
+        &open(&[run_node("test", "COMPLETED", Some("SUCCESS"))]),
+    ));
+    let outcome = run(&steps);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+}
+
+#[test]
+fn five_transient_failures_in_a_row_are_a_query_error() {
+    let steps: Vec<Step> = (0..5).map(|_| bad_gateway()).collect();
+    let outcome = run(&steps);
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "query_error");
+    assert_eq!(names(&outcome), ["initial", "final"]);
+}
+
+#[test]
+fn a_rate_limit_is_transient() {
+    let limited = failing("PullChecks", "gh: API rate limit exceeded (HTTP 403)", 1);
+    let outcome = run(&[
+        limited,
+        step(
+            "PullChecks",
+            &open(&[run_node("test", "COMPLETED", Some("SUCCESS"))]),
+        ),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+}
