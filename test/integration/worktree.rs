@@ -1003,3 +1003,31 @@ fn a_populated_submodule_stays_protected_after_it_is_deinitialized_in_the_main_c
         "uncommitted edit\n"
     );
 }
+
+fn worktree_at(f: &Fixture, branch: &str, path: &Path) {
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        &path.to_string_lossy(),
+    ]);
+}
+
+#[test]
+fn a_worktree_name_that_is_no_ref_name_still_backs_up_and_restores() {
+    let f = Fixture::new();
+    let odd = f.env.path("trees").join("my tree~1^x:y..z.lock");
+    worktree_at(&f, "odd", &odd);
+    fs::write(odd.join("note.txt"), "note\n").unwrap();
+    let removed = f.json(&["remove", &odd.to_string_lossy(), "--yes"]);
+    let id = removed["id"].as_str().unwrap();
+    assert!(!id.contains([' ', '~', '^', ':']), "{id}");
+    assert!(!odd.exists());
+
+    let restored = f.json(&["restore", id]);
+    assert_eq!(restored["warnings"], json!([]));
+    assert_eq!(fs::read_to_string(odd.join("note.txt")).unwrap(), "note\n");
+}
+

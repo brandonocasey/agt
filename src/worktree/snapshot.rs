@@ -31,7 +31,7 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
         &stamp[11..13],
         &stamp[14..16]
     );
-    let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
+    let name = ref_safe(&entry.path.file_name().unwrap_or_default().to_string_lossy());
     let repo_name = main.file_name().unwrap_or_default().to_string_lossy();
     let shared = Repo::at(main);
     let base = backup::root()?.join(repo_name.as_ref());
@@ -127,6 +127,37 @@ fn build(
     })
 }
 
+/// `name` as part of a ref: every run of characters git refuses in a ref name (space, `~`,
+/// `^`, `:`, `?`, `*`, `[`, `\`, control characters, `..`, `@{`) becomes `-`, and a leading
+/// `.`, a trailing `.` or a trailing `.lock` is dropped.
+fn ref_safe(name: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    let mut previous = ' ';
+    for ch in name.chars() {
+        let bad =
+            !(ch.is_alphanumeric() || "_-+=,@%".contains(ch) || (ch == '.' && previous != '.'));
+        if bad {
+            if !gap {
+                out.push('-');
+            }
+            gap = true;
+        } else {
+            out.push(ch);
+            gap = false;
+        }
+        previous = if bad { ' ' } else { ch };
+    }
+    let trimmed = out.trim_start_matches('.').trim_end_matches('.');
+    let trimmed = trimmed.strip_suffix(".lock").unwrap_or(trimmed);
+    let trimmed = trimmed.replace("@-", "-");
+    if trimmed.is_empty() {
+        "worktree".to_owned()
+    } else {
+        trimmed
+    }
+}
+
 fn make_dir(dir: &Path, mode: u32) -> Result<()> {
     DirBuilder::new()
         .recursive(true)
@@ -159,4 +190,47 @@ pub fn copy_files(from: &Path, to: &Path, rels: &[String], dir_mode: u32) -> Res
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ref_safe;
+
+    /// What `git check-ref-format` says of the backup ref for `name`.
+    fn valid(name: &str) -> bool {
+        std::process::Command::new("git")
+            .args([
+                "check-ref-format",
+                &format!("refs/agt/backups/20260101-0000-worktree-{name}"),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn a_worktree_name_becomes_a_valid_ref_part() {
+        for name in [
+            "my tree",
+            "a~1",
+            "a^b",
+            "a:b",
+            "a..b",
+            "x.lock",
+            "trail.",
+            ".hidden",
+            "a?b*c[d",
+            "a\\b",
+            "a@{b",
+            "tab\there",
+            "ünï cödé",
+            "feat.v1.2",
+            "",
+        ] {
+            let safe = ref_safe(name);
+            assert!(valid(&safe), "{name:?} became {safe:?}");
+        }
+        assert_eq!(ref_safe("feat.v1.2"), "feat.v1.2");
+        assert_eq!(ref_safe("my  tree~1"), "my-tree-1");
+    }
 }
