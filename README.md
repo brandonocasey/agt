@@ -901,6 +901,27 @@ fork replays from its parent are marked `inherited` and left out of a search wit
 `AGENT_TASK_MAX_FILES` and `AGENT_TASK_BYTE_LIMIT`) bound a run; `--session` and `resolve` still
 find an exact session beyond `--max-files`.
 
+## Ps
+
+`agt ps [--json]` lists the agents running now, one row each, busy first and then longest in
+their status. A Claude Code session is a record in `~/.claude*/sessions/<pid>.json` (and
+`$CLAUDE_CONFIG_DIR/sessions`) whose pid runs with a matching `procStart`; a stale record or a reused
+pid is not listed. A row has `pid`, `name`, `kind`, `status` as Claude Code wrote it (`busy`, `idle`,
+`shell` or `waiting`), `status_secs` (how long in that status), `waiting_for` (the text Claude Code
+records with `waiting`, such as `dialog open`), `cwd`, `repository` (the main checkout), `branch`,
+`worktree` (the linked worktree holding `cwd`, else `null`), `session`, and from the session's
+transcripts `model` and `context_tokens` of the last call of the main agent and `usd` spent so far,
+subagents included. `usd` is `null` when the price file lists none of the session's models, and
+`unpriced_calls` counts calls it does not list. The table shows `unpriced` then, and `12.34+` for a
+partial sum. `--json` prints `{"agents": [...]}`.
+
+Running `codex` processes are listed too, with `harness: "codex"` and no name, status or kind. Codex
+writes no live record, so the session is the newest rollout in `~/.codex/sessions` whose
+`session_meta` `cwd` equals the process's working directory and that changed after the process
+started. A subagent's rollout does not count. When no rollout matches, several `codex` processes
+share the directory, or the platform cannot read the process's directory, `session` is `null` and
+`note` says why.
+
 ## Worktrees
 
 `agt worktree` creates git worktrees on the newest default base, installs their dependencies,
@@ -920,7 +941,7 @@ agt worktree backups show ID
 agt worktree backups rm ID [--yes]          # delete the backup's ref and directory
 ```
 
-`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml`; globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
+`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it), and `agents`: the live Claude Code sessions whose working directory is inside it, each with `pid`, `name`, `status` and `session` (the sessions `agt ps` lists). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml`; globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
 
 ```toml
 [worktree]

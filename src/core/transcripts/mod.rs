@@ -9,6 +9,6 @@ mod turns;
 
 pub use locate::{
     Kind, Step, Transcript, Walker, all_roots, belongs_to, claude_projects, codex_roots,
-    history_files, is_scratch, session_files,
+    codex_sessions, history_files, is_scratch, session_files,
 };
 pub use turns::{ScanState, Turn, parse_line};

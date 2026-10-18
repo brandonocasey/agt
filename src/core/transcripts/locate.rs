@@ -10,7 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::codex;
-use super::json::{get, head, tail};
+use super::json::{get, head, tail, text};
 
 /// The longest first line read when looking for a session id.
 const MAX_FIRST_LINE: u64 = 1024 * 1024;
@@ -291,6 +291,41 @@ impl Transcript {
             path,
         }
     }
+}
+
+/// The full ids, newest rollout first, of the Codex sessions started in `cwd` whose rollout
+/// changed at or after `since` (Unix seconds); a subagent's rollout is not one.
+pub fn codex_sessions(home: &Path, cwd: &Path, since: i64) -> Vec<String> {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
+    let mut found = Vec::new();
+    for step in Walker::new(vec![codex_roots(home)[0].clone()]) {
+        let Step::File(path) = step else {
+            continue;
+        };
+        let Some(modified) = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .filter(|age| i64::try_from(age.as_secs()).is_ok_and(|secs| secs >= since))
+        else {
+            continue;
+        };
+        let first = first_record(&path);
+        let payload = get(&first, "payload");
+        let recorded = Path::new(text(payload, "cwd"));
+        if text(&first, "type") != "session_meta"
+            || get(get(payload, "source"), "subagent").is_object()
+            || recorded
+                .canonicalize()
+                .unwrap_or_else(|_| recorded.to_owned())
+                != cwd
+        {
+            continue;
+        }
+        found.push((modified, text(payload, "id").to_owned()));
+    }
+    found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    found.into_iter().map(|(_, session)| session).collect()
 }
 
 /// The transcripts of one session, by its full id: the main file and its subagents' files, in

@@ -176,6 +176,8 @@ pub struct SessionCost {
     pub usd: f64,
     /// Calls to a model the price file does not list.
     pub unpriced_calls: i64,
+    /// The model and context tokens (input, cache writes and reads) of the main agent's last call.
+    pub last: Option<(String, i64)>,
 }
 
 /// The cost of the session with this full id, across its transcripts and its subagents'.
@@ -188,7 +190,17 @@ pub fn session_cost(session: &str) -> Result<SessionCost> {
         return fail(format!("session {session} has no transcripts"));
     }
     for transcript in found {
-        for call in transcript.api_calls("", &mut seen) {
+        let calls = transcript.api_calls("", &mut seen);
+        if transcript.agent == "main"
+            && let Some(call) = calls.last()
+        {
+            let context = USAGE_KEYS[..3]
+                .iter()
+                .map(|key| count(&call.usage, key))
+                .sum();
+            cost.last = Some((call.model.clone(), context));
+        }
+        for call in calls {
             cost.calls += 1;
             for (total, key) in cost.tokens.iter_mut().zip(USAGE_KEYS) {
                 *total += count(&call.usage, key);

@@ -7,6 +7,7 @@ mod issue_push;
 mod issue_queue;
 mod issue_read;
 mod matrix;
+mod ps;
 mod publish;
 mod reviewed;
 mod session_index;

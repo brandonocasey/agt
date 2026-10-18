@@ -1,4 +1,4 @@
-//! Running processes and the live Claude Code sessions recorded for them. `agt cleanup` and
+//! Running processes and the live Claude Code sessions recorded for them. `agt cleanup`, `agt ps` and
 //! `agt worktree` read them here.
 
 use std::path::{Path, PathBuf};
@@ -44,6 +44,10 @@ mod os {
                 (entry.metadata().ok()?.uid() == uid).then_some(pid)
             })
             .collect()
+    }
+
+    pub fn cwd(pid: i32) -> Option<std::path::PathBuf> {
+        fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     pub fn read(pid: i32) -> Option<Proc> {
@@ -167,6 +171,29 @@ mod os {
         (argv, parts.collect())
     }
 
+    pub fn cwd(pid: i32) -> Option<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let size = i32::try_from(size_of::<libc::proc_vnodepathinfo>()).ok()?;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        if read != size {
+            return None;
+        }
+        let path = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
+        Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            path.to_bytes(),
+        )))
+        .filter(|path| !path.as_os_str().is_empty())
+    }
+
     pub fn read(pid: i32) -> Option<Proc> {
         let info = info(pid)?;
         // An exited process waiting for its parent to reap it is gone, not running.
@@ -233,8 +260,9 @@ pub fn session_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// `ps`'s `lstart` text, such as `Fri Oct 16 16:41:54 2026`, in local time, as Unix seconds.
-fn parse_lstart(text: &str) -> Option<i64> {
+/// `ps`'s `lstart` text, such as `Fri Oct 16 16:41:54 2026`, as Unix seconds read in local time
+/// and read in UTC: `ps` prints local time, Claude Code writes UTC on macOS.
+fn parse_lstart(text: &str) -> Option<(i64, i64)> {
     let text = std::ffi::CString::new(text.trim()).ok()?;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let end =
@@ -242,9 +270,11 @@ fn parse_lstart(text: &str) -> Option<i64> {
     if end.is_null() || unsafe { *end } != 0 {
         return None;
     }
+    let mut utc = tm;
     tm.tm_isdst = -1;
-    let secs = unsafe { libc::mktime(&raw mut tm) };
-    (secs != -1).then_some(secs)
+    let local = unsafe { libc::mktime(&raw mut tm) };
+    let utc = unsafe { libc::timegm(&raw mut utc) };
+    (local != -1 && utc != -1).then_some((local, utc))
 }
 
 /// Whether a session record describes the running process, by the `procStart` Claude Code
@@ -262,8 +292,11 @@ pub fn record_matches(record: &Value, proc: &Proc) -> Option<bool> {
         }
         return Some(text.parse::<u64>().ok()? == proc.start_key);
     }
-    let diff = (parse_lstart(&text)? - proc.start).abs();
-    match diff {
+    let (local, utc) = parse_lstart(&text)?;
+    if (utc - proc.start).abs() <= 1 {
+        return Some(true);
+    }
+    match (local - proc.start).abs() {
         0 | 1 => Some(true),
         // A local time inside a daylight saving shift can read an hour off.
         3599..=3601 => None,
@@ -277,16 +310,17 @@ pub fn exists(pid: i32) -> bool {
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-/// A running Claude Code session whose recorded working directory is inside a path.
+/// A running Claude Code session and its record.
 pub struct Live {
     pub pid: i32,
     pub cwd: PathBuf,
+    pub record: Value,
 }
 
-/// The first live Claude Code session whose `cwd` is `root` or inside it. A record counts
-/// when its pid runs and its `procStart` matches the process start time.
-pub fn live_in(root: &Path) -> Option<Live> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+/// Every live Claude Code session. A record counts when its pid runs and its `procStart`
+/// matches the process start time.
+pub fn live() -> Vec<Live> {
+    let mut found = Vec::new();
     for dir in session_dirs() {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -309,14 +343,95 @@ pub fn live_in(root: &Path) -> Option<Live> {
             let Some(cwd) = record.get("cwd").and_then(Value::as_str).map(PathBuf::from) else {
                 continue;
             };
-            let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-            if !canonical.starts_with(&root) {
+            if !read(pid).is_some_and(|proc| record_matches(&record, &proc) == Some(true)) {
                 continue;
             }
-            if read(pid).is_some_and(|proc| record_matches(&record, &proc) == Some(true)) {
-                return Some(Live { pid, cwd });
-            }
+            found.push(Live { pid, cwd, record });
         }
     }
-    None
+    found
+}
+
+/// The first live Claude Code session whose `cwd` is `root` or inside it.
+pub fn live_in(root: &Path) -> Option<Live> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    live()
+        .into_iter()
+        .find(|session| inside(&session.cwd, &root))
+}
+
+/// Whether `path`, links resolved, is `root` or inside it; `root` is already canonical.
+pub fn inside(path: &Path, root: &Path) -> bool {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_owned())
+        .starts_with(root)
+}
+
+/// A running `codex` process and its working directory, when the platform lets it be read.
+pub struct CodexProc {
+    pub proc: Proc,
+    pub cwd: Option<PathBuf>,
+}
+
+pub fn codex_procs() -> Vec<CodexProc> {
+    pids()
+        .into_iter()
+        .filter_map(read)
+        .filter(|proc| proc.comm == "codex")
+        .map(|proc| CodexProc {
+            cwd: os::cwd(proc.pid),
+            proc,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc_started(start: i64) -> Proc {
+        Proc {
+            pid: 1,
+            ppid: 0,
+            start,
+            start_key: 0,
+            comm: String::new(),
+            cmd: String::new(),
+            claude_pid: None,
+        }
+    }
+
+    /// `lstart` text for `secs`, in UTC or local time.
+    fn lstart(secs: i64, utc: bool) -> String {
+        let mut buffer = [0 as libc::c_char; 64];
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe {
+            if utc {
+                libc::gmtime_r(&secs, &raw mut tm);
+            } else {
+                libc::localtime_r(&secs, &raw mut tm);
+            }
+            libc::strftime(
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                c"%a %b %d %H:%M:%S %Y".as_ptr(),
+                &raw const tm,
+            );
+            std::ffi::CStr::from_ptr(buffer.as_ptr())
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    #[test]
+    fn a_proc_start_in_utc_or_local_time_matches_the_process() {
+        let start = 1_792_282_349;
+        let proc = proc_started(start);
+        for utc in [true, false] {
+            let record = serde_json::json!({ "procStart": lstart(start, utc) });
+            assert_eq!(record_matches(&record, &proc), Some(true), "utc: {utc}");
+        }
+        let other = serde_json::json!({ "procStart": lstart(start - 7200 - 600, true) });
+        assert_eq!(record_matches(&other, &proc), Some(false));
+    }
 }

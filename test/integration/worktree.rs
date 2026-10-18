@@ -470,3 +470,40 @@ fn backups_list_show_and_rm() {
     assert_eq!(f.json(&["backups"])["backups"], json!([]));
     f.refuses(&f.env.repo, &["backups", "show", id], "no worktree backup");
 }
+
+#[test]
+fn list_names_the_live_sessions_inside_each_worktree() {
+    let f = Fixture::new();
+    let me = std::process::id();
+    let sessions = f.env.path("home/.claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir(f.wt.join("deep")).unwrap();
+    fs::write(
+        sessions.join(format!("{me}.json")),
+        json!({
+            "pid": me,
+            "cwd": f.wt.join("deep"),
+            "procStart": proc_start(me),
+            "name": "builder",
+            "status": "busy",
+            "sessionId": "abc",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let listed = f.json(&["list"]);
+    let feat = &listed["worktrees"][0];
+    assert_eq!(
+        feat["agents"],
+        json!([{ "pid": me, "name": "builder", "status": "busy", "session": "abc" }])
+    );
+
+    // A record for a reused pid is not an agent.
+    fs::write(
+        sessions.join(format!("{me}.json")),
+        json!({ "pid": me, "cwd": f.wt, "procStart": "Mon Jan  1 00:00:00 2024" }).to_string(),
+    )
+    .unwrap();
+    let listed = f.json(&["list"]);
+    assert_eq!(listed["worktrees"][0]["agents"], json!([]));
+}

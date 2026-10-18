@@ -33,6 +33,8 @@ enum Command {
     Cleanup(cleanup::Cli),
     /// Cost, context, tool, cache, error and friction reports from agent transcripts, and search of what you typed.
     Sessions(sessions::Cli),
+    /// Claude Code sessions and Codex processes running now: status, directory, branch, model, context, cost.
+    Ps(sessions::live::Cli),
     /// Worktrees: create, prepare, port, list, remove after a backup, restore.
     Worktree(worktree::Cli),
     /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
@@ -47,6 +49,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Issue(args) => issue::run(args),
         Command::Cleanup(args) => cleanup::run(args),
         Command::Sessions(args) => sessions::run(args),
+        Command::Ps(args) => sessions::live::run(args),
         Command::Worktree(args) => worktree::run(args),
         Command::Wait(args) => wait::run(args),
     }

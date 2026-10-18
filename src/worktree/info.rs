@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::disposable::is_disposable;
+use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
 use crate::git::Repo;
 
@@ -240,6 +241,25 @@ pub fn describe(repo: &Repo, entry: &Entry, default: Option<&(String, String)>) 
         "behind": behind,
         "merged": merged,
     }))
+}
+
+/// The live Claude Code sessions whose working directory is inside the worktree.
+pub fn agents_in(live: &[Live], path: &Path) -> Value {
+    let root = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let found: Vec<Value> = live
+        .iter()
+        .filter(|session| inside(&session.cwd, &root))
+        .map(|session| {
+            let text = |key: &str| session.record.get(key).and_then(Value::as_str);
+            json!({
+                "pid": session.pid,
+                "name": text("name"),
+                "status": text("status"),
+                "session": text("sessionId"),
+            })
+        })
+        .collect();
+    json!(found)
 }
 
 pub fn real(path: &Path) -> Result<PathBuf> {
