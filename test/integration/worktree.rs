@@ -793,3 +793,27 @@ fn a_process_with_its_directory_inside_the_worktree_blocks_removal() {
     assert!(f.wt.join("feature.txt").exists());
 }
 
+#[test]
+fn restore_detaches_when_the_branch_is_checked_out_in_another_worktree() {
+    let f = Fixture::new();
+    f.dirty();
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let feature = f.env.git(&["rev-parse", "feat"]);
+    // The branch has not moved, but another worktree holds it now.
+    let other = f.env.path("trees/holder");
+    f.env
+        .git(&["worktree", "add", "-q", &other.to_string_lossy(), "feat"]);
+
+    let restored = f.json(&["restore", &id]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("checked out in another worktree") && warning.contains(&feature),
+        "{warning}"
+    );
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
+    assert_eq!(
+        fs::read_to_string(f.wt.join("a.txt")).unwrap(),
+        "a changed\n"
+    );
+}
