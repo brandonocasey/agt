@@ -399,9 +399,11 @@ fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf]) -> Result<()> 
         return Ok(());
     }
     let unheld: HashSet<String> = unheld.into_iter().collect();
-    let leads_to_unheld = |roots: &[(String, String)]| -> Result<Option<String>> {
+    // Held by the remote or by a remote-tracking branch: what no root needs to push.
+    let mut not = remotes.clone();
+    let leads_to_unheld = |roots: &[(String, String)], not: &[String]| -> Result<Option<String>> {
         let commits: Vec<&str> = roots.iter().map(|(_, commit)| commit.as_str()).collect();
-        let reach: HashSet<String> = beyond_remotes(gitdir, &commits, &remotes)?
+        let reach: HashSet<String> = beyond_remotes(gitdir, &commits, not)?
             .into_iter()
             .filter(|commit| unheld.contains(commit))
             .collect();
@@ -436,11 +438,17 @@ fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf]) -> Result<()> 
                     .map(|tip| tip.reference.as_str())
                     .collect();
                 kept.retain(|(reference, _)| !held.contains(reference.as_str()));
+                // Whatever a held tag reaches is on the remote, HEAD at that commit included.
+                not.extend(
+                    tags.iter()
+                        .filter(|tip| held.contains(tip.reference.as_str()))
+                        .filter_map(|tip| tip.commit.clone()),
+                );
             }
             Err(error) => failure = format!(" (the remote could not tell: {})", error.0),
         }
     }
-    let Some(reference) = leads_to_unheld(&kept)? else {
+    let Some(reference) = leads_to_unheld(&kept, &not)? else {
         return Ok(());
     };
     if reference == "HEAD" {

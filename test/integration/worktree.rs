@@ -1438,12 +1438,21 @@ fn an_untracked_file_outside_the_sparse_cone_is_in_the_backup() {
 /// Gives the submodule's upstream a release commit that no branch holds, tagged `tag`, and
 /// fetches it into the worktree's clone.
 fn upstream_release_tag(f: &Fixture, sub: &Path, tag: &str) -> PathBuf {
+    upstream_release(f, sub, tag, false)
+}
+
+/// [`upstream_release_tag`], with an annotated tag when `annotated`.
+fn upstream_release(f: &Fixture, sub: &Path, tag: &str, annotated: bool) -> PathBuf {
     let origin = f.env.path("sub-origin");
     wgit(&f.env, &origin, &["checkout", "-q", "--detach"]);
     fs::write(origin.join("release.txt"), "release\n").unwrap();
     wgit(&f.env, &origin, &["add", "-A"]);
     wgit(&f.env, &origin, &["commit", "-q", "-m", "release"]);
-    wgit(&f.env, &origin, &["tag", tag]);
+    if annotated {
+        wgit(&f.env, &origin, &["tag", "-a", "-m", "release", tag]);
+    } else {
+        wgit(&f.env, &origin, &["tag", tag]);
+    }
     let branch = wgit(
         &f.env,
         &origin,
@@ -1665,4 +1674,25 @@ fn a_sparse_checkout_that_cannot_be_reapplied_still_restores_with_a_warning() {
     // The worktree is usable, as a full checkout.
     assert_eq!(fs::read_to_string(f.wt.join("d3/c")).unwrap(), "c\n");
     wgit(&f.env, &f.wt, &["status", "--porcelain"]);
+}
+
+#[test]
+fn a_submodule_at_a_remote_advertised_tag_commit_on_no_branch_does_not_block_removal() {
+    for annotated in [false, true] {
+        let (f, sub) = with_submodule();
+        upstream_release(&f, &sub, "v1.0", annotated);
+        // The worktree records the release commit; no branch of the clone has it.
+        wgit(&f.env, &sub, &["checkout", "-q", "v1.0"]);
+        wgit(
+            &f.env,
+            &f.wt,
+            &["commit", "-q", "-am", "bump to the release"],
+        );
+        let wt = f.wt.to_string_lossy().into_owned();
+        assert_eq!(
+            f.json(&["remove", &wt])["plan"],
+            true,
+            "annotated {annotated}"
+        );
+    }
 }
