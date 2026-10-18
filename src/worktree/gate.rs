@@ -543,7 +543,9 @@ fn holds_nothing_unique(
             "-z",
             "--no-renames",
             "--untracked-files=all",
-            "--ignore-submodules=none",
+            // A submodule of this one gets its own pass, which filters its junk; here only
+            // its commit counts.
+            "--ignore-submodules=dirty",
         ],
         None,
         &[],
