@@ -240,8 +240,15 @@ fn refuses_what_it_must_not_remove() {
         "current directory",
     );
 
-    // A live Claude Code session whose cwd is inside the worktree, matched by process start.
-    let me = std::process::id();
+    // Another live Claude Code session whose cwd is inside the worktree, matched by process
+    // start. The test process itself is agt's parent, so it would be the calling session.
+    let other = std::process::Command::new("sleep")
+        .arg("60")
+        .current_dir(&f.env.repo)
+        .spawn()
+        .unwrap();
+    let _other = Reaped(other);
+    let me = _other.0.id();
     let sessions = f.env.path("home/.claude/sessions");
     fs::create_dir_all(&sessions).unwrap();
     let start = proc_start(me);
@@ -681,4 +688,59 @@ fn remove_and_restore_leave_other_missing_worktrees_registered() {
     f.json(&["restore", id, "--path", &stale.to_string_lossy()]);
     assert!(stale.join("feature.txt").exists());
     assert!(admin("other").exists(), "restore pruned another worktree");
+}
+
+/// A child process killed and reaped when dropped.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn record_session(f: &Fixture, pid: u32, cwd: &Path) {
+    let sessions = f.env.path("home/.claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("{pid}.json")),
+        json!({ "pid": pid, "cwd": cwd, "procStart": proc_start(pid) }).to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_calling_session_does_not_block_its_own_removal_but_another_does() {
+    let f = Fixture::new();
+    let wt = f.wt.to_string_lossy().into_owned();
+    // The test process is agt's parent: the calling session.
+    record_session(&f, std::process::id(), &f.wt);
+    let plan = f.json(&["remove", &wt]);
+    assert_eq!(plan["plan"], true);
+
+    // CLAUDE_PID names the calling session too.
+    let caller = Reaped(
+        std::process::Command::new("sleep")
+            .arg("60")
+            .current_dir(&f.env.repo)
+            .spawn()
+            .unwrap(),
+    );
+    record_session(&f, caller.0.id(), &f.wt);
+    let output = f
+        .env
+        .command(BIN, &f.env.repo)
+        .env("CLAUDE_PID", caller.0.id().to_string())
+        .args(["worktree", "remove", &wt])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Without CLAUDE_PID it is another live session.
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "session");
 }

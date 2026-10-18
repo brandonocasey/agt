@@ -412,7 +412,15 @@ fn a_live_agent_session_keeps_the_worktree() {
     let site = Site::new();
     let wt = site.branch("busy");
     site.env.git(&["merge", "-q", "busy"]);
-    let me = std::process::id();
+    // Another session's process: the test process is agt's parent, so a record for it would be
+    // the calling session, which never blocks.
+    let mut other = site
+        .env
+        .command("sleep", &site.env.repo)
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let me = other.id();
     let sessions = site.env.path("home/.claude/sessions");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
@@ -422,6 +430,8 @@ fn a_live_agent_session_keeps_the_worktree() {
     .unwrap();
 
     let report = site.run(&["--yes"]);
+    other.kill().unwrap();
+    other.wait().unwrap();
     let row = site.kept(&report, "busy");
     assert!(row["reason"].as_str().unwrap().contains("session"), "{row}");
     assert!(wt.exists());

@@ -352,11 +352,35 @@ pub fn live() -> Vec<Live> {
     found
 }
 
-/// The first live Claude Code session whose `cwd` is `root` or inside it.
+/// This process and its ancestors, nearest first.
+pub fn lineage() -> Vec<i32> {
+    let mut pids = vec![std::process::id().cast_signed()];
+    let mut current = read(pids[0]).map(|proc| proc.ppid);
+    while let Some(pid) = current.filter(|pid| *pid > 1 && !pids.contains(pid)) {
+        pids.push(pid);
+        current = read(pid).map(|proc| proc.ppid);
+    }
+    pids
+}
+
+/// The pids of the calling session: this process, its ancestors and `CLAUDE_PID` when set.
+pub fn own_pids() -> Vec<i32> {
+    let mut pids = lineage();
+    let claude: Option<i32> = std::env::var("CLAUDE_PID")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    pids.extend(claude);
+    pids
+}
+
+/// The first live Claude Code session, other than the calling one, whose `cwd` is `root` or
+/// inside it.
 pub fn live_in(root: &Path) -> Option<Live> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let own = own_pids();
     live()
         .into_iter()
+        .filter(|session| !own.contains(&session.pid))
         .find(|session| inside(&session.cwd, &root))
 }
 

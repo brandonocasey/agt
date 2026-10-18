@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::core::agents::{Proc, exists, pids, read, record_matches, session_dirs};
+use crate::core::agents::{self, Proc, exists, pids, read, record_matches, session_dirs};
 use crate::core::error::{Error, Result};
 
 pub const MIN_AGE_SECS: i64 = 86_400;
@@ -71,16 +71,6 @@ fn session(pid: i32) -> Session {
     }
 }
 
-fn lineage() -> Vec<i32> {
-    let mut pids = vec![std::process::id().cast_signed()];
-    let mut current = read(pids[0]).map(|proc| proc.ppid);
-    while let Some(pid) = current.filter(|pid| *pid > 1 && !pids.contains(pid)) {
-        pids.push(pid);
-        current = read(pid).map(|proc| proc.ppid);
-    }
-    pids
-}
-
 /// Harness processes themselves, which carry `CLAUDE_PID` too; versioned Claude installs run
 /// under their version number, such as `2.1.302`.
 fn is_harness(comm: &str) -> bool {
@@ -94,7 +84,7 @@ fn is_harness(comm: &str) -> bool {
 /// Orphans at least `MIN_AGE_SECS` old. The test-only `AGT_CLEANUP_PID` limits the sweep to
 /// one pid, so tests never see the machine's own processes; `0` looks at none.
 pub fn orphans(now: i64) -> Result<Vec<Orphan>> {
-    let skip = lineage();
+    let skip = agents::lineage();
     let pids = match std::env::var(PID_OVERRIDE) {
         Ok(value) => {
             let pid: i32 = value
