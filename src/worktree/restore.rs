@@ -131,10 +131,18 @@ fn reapply_sparse(
         repo.git(&["config", "extensions.worktreeConfig", "true"])?;
         for name in snapshot::SAVED_GIT_FILES {
             let from = saved.join(name);
+            let to = git_dir.join(name);
             if !from.is_file() {
+                // The backup is the record of these files. One it lacks, which `worktree add`
+                // copied or `sparse-checkout disable` wrote, goes: the worktree then reads the
+                // shared config again, as it did (a sparse checkout set there, the old way).
+                if let Err(error) = fs::remove_file(&to)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(ctx(format!("remove {}", to.display()))(error));
+                }
                 continue;
             }
-            let to = git_dir.join(name);
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
             }

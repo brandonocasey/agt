@@ -2061,6 +2061,40 @@ fn a_dirty_full_worktree_restores_its_changes_from_a_sparse_main_checkout() {
 }
 
 #[test]
+fn a_worktree_made_sparse_through_the_shared_config_restores_sparse() {
+    let f = Fixture::new();
+    for (dir, name) in [("d1", "a"), ("d2", "b")] {
+        fs::create_dir_all(f.wt.join(dir)).unwrap();
+        fs::write(f.wt.join(dir).join(name), format!("{name}\n")).unwrap();
+    }
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "dirs"]);
+    // The old way: the setting in the shared config, patterns in each checkout's own file.
+    f.env.git(&["config", "core.sparseCheckout", "true"]);
+    fs::write(f.env.repo.join(".git/info/sparse-checkout"), "/*\n").unwrap();
+    let patterns = PathBuf::from(wgit(
+        &f.env,
+        &f.wt,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/sparse-checkout",
+        ],
+    ));
+    fs::create_dir_all(patterns.parent().unwrap()).unwrap();
+    fs::write(&patterns, "/*.txt\n/d1/\n").unwrap();
+    wgit(&f.env, &f.wt, &["read-tree", "-mu", "HEAD"]);
+    assert!(!f.wt.join("d2/b").exists());
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["sparse_checkout"], true, "{restored}");
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert!(f.wt.join("d1/a").exists());
+    assert!(!f.wt.join("d2/b").exists());
+}
+
+#[test]
 fn a_sparse_worktree_keeps_its_own_patterns_when_main_is_sparse() {
     let f = sparse_fixture();
     let restored = restore_into_sparse_main(&f);
