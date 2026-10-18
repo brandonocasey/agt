@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use serde_json::{Map, Value, json};
 
 use super::files::{self, OUTPUT_DAYS, SCRATCH_DAYS};
-use super::procs::{self, Proc};
+use super::procs;
+use crate::core::agents::Proc;
 use crate::core::error::Result;
 use crate::issue::prune::prunable;
 use crate::review::commands::prune::expired;
