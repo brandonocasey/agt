@@ -1897,31 +1897,37 @@ fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
     }
 }
 
+/// A `PATH` whose git, asked to ls-remote, starts a child (as ssh is) and then hangs, and the
+/// file that child's pid lands in.
+fn hanging_ls_remote(f: &Fixture) -> (String, PathBuf) {
+    let bin = f.env.path("hanging-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let child_pid = f.env.path("child-pid");
+    let real = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
+        child_pid.display(),
+        real.trim()
+    );
+    let wrapper = bin.join("git");
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    (path, child_pid)
+}
+
 #[test]
 fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         let (f, _sub) = with_unheld_tag();
-        // A git that, asked to ls-remote, starts a child (as ssh is) and then hangs.
-        let bin = f.env.path("hanging-bin");
-        fs::create_dir_all(&bin).unwrap();
-        let child_pid = f.env.path("child-pid");
-        let real = String::from_utf8(
-            std::process::Command::new("which")
-                .arg("git")
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        let script = format!(
-            "#!/bin/sh\ncase \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
-            child_pid.display(),
-            real.trim()
-        );
-        let wrapper = bin.join("git");
-        fs::write(&wrapper, script).unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let (path, child_pid) = hanging_ls_remote(&f);
         let agt = f
             .env
             .command(BIN, &f.env.repo)
@@ -1934,6 +1940,38 @@ fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
             .unwrap();
         crate::auto_sync::assert_signal_kills_the_tool(agt, signal, &child_pid);
     }
+}
+
+#[test]
+fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
+    use std::os::unix::process::CommandExt;
+    let (f, _sub) = with_unheld_tag();
+    let (path, child_pid) = hanging_ls_remote(&f);
+    let mut run = f.env.command(BIN, &f.env.repo);
+    run.env("PATH", path)
+        .env("AGT_LS_REMOTE_TIMEOUT", "3")
+        .args(["worktree", "remove", &f.wt.to_string_lossy()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // As `nohup` starts it. SAFETY: signal(2) is async-signal-safe, so it may run before exec.
+    unsafe {
+        run.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let mut agt = run.spawn().unwrap();
+    let started = std::time::Instant::now();
+    while fs::read_to_string(&child_pid).map_or(true, |text| text.trim().is_empty()) {
+        assert!(started.elapsed().as_secs() < 20, "no child");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let id = i32::try_from(agt.id()).unwrap();
+    // SAFETY: plain kill(2) of the agt process this test started.
+    unsafe { libc::kill(id, libc::SIGHUP) };
+    // agt lives on to the timeout and refuses, killing the check then.
+    assert_eq!(agt.wait().unwrap().code(), Some(1));
+    crate::auto_sync::assert_gone(&child_pid);
 }
 
 #[test]

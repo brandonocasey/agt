@@ -24,8 +24,8 @@ extern "C" fn on_signal(signal: i32) {
     }
 }
 
-/// While alive, SIGINT, SIGTERM and SIGHUP kill the group `pid` leads and then end agt as the
-/// signal would have. Dropping it restores the handlers agt had.
+/// While alive, SIGINT, SIGTERM and SIGHUP, unless agt ignores them, kill the group `pid` leads
+/// and then end agt as the signal would have. Dropping it restores the handlers agt had.
 pub struct Watch {
     previous: [libc::sighandler_t; SIGNALS.len()],
 }
@@ -37,10 +37,25 @@ impl Watch {
         let handler = on_signal as extern "C" fn(i32) as libc::sighandler_t;
         let mut previous = [libc::SIG_DFL; SIGNALS.len()];
         for (slot, signal) in previous.iter_mut().zip(SIGNALS) {
+            // A signal agt was started to ignore (`nohup`, a background job) stays ignored.
+            if ignored(signal) {
+                *slot = libc::SIG_IGN;
+                continue;
+            }
             // SAFETY: the handler only calls async-signal-safe functions and reads an atomic.
             *slot = unsafe { libc::signal(signal, handler) };
         }
         Some(Watch { previous })
+    }
+}
+
+/// Whether `signal` is ignored now, read without changing it.
+fn ignored(signal: i32) -> bool {
+    // SAFETY: a zeroed `sigaction` is a valid output buffer, and a null new action only reads.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(signal, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
     }
 }
 
