@@ -1,6 +1,6 @@
 # agt
 
-`agt` is one command-line binary for coding agents. `agt issue` syncs GitHub and GitLab issues (see [Issues](#issues)). `agt review` keeps PR/MR-style code review threads on your machine, one store
+`agt` is one command-line binary for coding agents. `agt issue` syncs GitHub and GitLab issues (see [Issues](#issues)). Reads work on the local copy and pull from the forge first when it is older than five minutes; see [Auto-sync](#auto-sync). `agt review` keeps PR/MR-style code review threads on your machine, one store
 per repository. It records review runs and passes, each reviewer's model,
 effort, harness and harness version, the findings reviewers kept or killed, and
 line-anchored threads with replies and resolutions. It works without a PR or
@@ -278,7 +278,8 @@ agt review sync --pr https://gitlab.example.com/group/proj/-/merge_requests/3
 ```
 
 `sync` is read-only on the forge: it sends only `GET` requests and GraphQL
-queries. See [Sync](#sync).
+queries. `list`, `show` and `status` run it for you when it is stale; see
+[Auto-sync](#auto-sync) and [Sync](#sync).
 
 Publish to an own PR or MR:
 
@@ -323,7 +324,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   listed only when every target in it has expired, and its reason says which rule applied. A
   directory with no targets at all (only cache files) is listed once agt last wrote there 90
   or more days ago. Either
-  way its directory may hold only targets, `.account.json`, `.repo.json` and stray
+  way its directory may hold only targets, `.account.json`, `.repo.json`, `.pr-lookups.json` and stray
   lock files; a subdirectory, link or any other file keeps it.
 - `issues`: a closed issue, 90 days after the later of its last local and host update,
   and only with no queued change, unsent comment or create, conflict, failed send, note,
@@ -534,6 +535,34 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   are not open. The flag clears if they come back.
 - The authenticated login is cached in `.account.json` in the repository's
   store directory.
+
+### Auto-sync
+
+`list`, `show` and `status` (the only review commands that just read) sync
+before they read, so a review sees the PR/MR as it is now without a manual
+`sync`. Writes such as `pass end` and `resolve` never sync; `publish` syncs as
+before. It is the same sync as `agt review sync`, so it only reads the forge.
+
+- The target has a PR/MR and its `synced_at` is older than `sync.max_age_secs`
+  (default 300): sync it. A fresh one makes no call.
+- The target has none: look the branch's PR/MR up, at most once per max age. A
+  miss is remembered in `.pr-lookups.json` in the repository's store directory
+  (older agt ignores the file), so the reads that follow call nothing. Range
+  and commit targets have no PR/MR to look up.
+- No `origin`, or a host no forge is known for: skipped without a word.
+- The forge failing (`gh`/`glab` missing, not logged in, network, rate limit) or
+  the calls taking longer than 15 seconds in all (the tool is killed) prints
+  `agt: sync skipped (<reason>); showing local data` to stderr, then reads the
+  local data. Stdout and the exit status are what the local read gives. A
+  successful auto-sync prints nothing. A lock held by another agt, such as a
+  running `publish` or sync, skips the sync the same way instead of waiting.
+- `--offline`, `AGT_OFFLINE=1` or `auto = false` in the `[sync]` table of
+  `$XDG_CONFIG_HOME/agt/config.toml` keep a read local; see
+  [Issues](#issues) for the table. An unknown key or bad value there is an
+  error, except under `--offline`, which never reads the file.
+
+An explicit `agt review sync` is unchanged: it has no time cap and fails with
+its own errors.
 
 ## Publish
 
@@ -1006,11 +1035,14 @@ minutes to look at a long job. Exit status: 0 the check passed (`agt wait: done 
 
 ## Issues
 
-`agt issue` keeps GitHub and GitLab issues on your machine. Reads are local and
-work offline. `sync` is the only command that reads a host; every write is queued
-in the local copy and goes out only on `push`, and only for trackers with
-`push = true`. Nothing deletes an issue or a comment or edits someone else's
-comment.
+`agt issue` keeps GitHub and GitLab issues on your machine. Reads (`list`, `show`,
+`search`, `status`, `find`) use the local copy; when a configured tracker's last
+sync is older than five minutes they run `sync` for it first, and when the host
+cannot be reached they read what is there (see [Auto-sync](#auto-sync-of-issues)).
+`sync` is the only command that reads a host, and it stays read-only on it: every
+write is queued in the local copy and goes out only on `push`, and only for
+trackers with `push = true`. Nothing deletes an issue or a comment or edits
+someone else's comment.
 
 Trackers are listed in `$XDG_CONFIG_HOME/agt/config.toml` (`~/.config` when unset).
 A missing file means no trackers; an unknown key or bad value is an error that
@@ -1024,6 +1056,10 @@ repo = "owner/repo"         # GitLab: the full project path
 scope = "involved"          # involved (default) | assigned | all
 since_days = 90             # first sync only; later syncs list from the watermark
 push = false                # writes stay local until this is true
+
+[sync]
+auto = true                 # false keeps every read local
+max_age_secs = 300          # a read syncs when the last sync is older than this
 ```
 
 `involved` is what you created, are assigned or (GitHub only) are mentioned in; GitLab
@@ -1033,6 +1069,20 @@ has no mentions filter, so there it is created or assigned. Credentials come fro
 `gh-<host>-<owner>-<repo>` or `gl-<host>-<group>-<project>`. A tracker is named by
 that key or by `owner/repo` (`--tracker`, global to `agt issue`); an issue by
 `owner/repo#12`, `#12`, `12` or `local-xxxxxx` (not yet created on the host).
+
+### Auto-sync of issues
+
+Before a read, each tracker in scope (`--tracker` narrows it) whose `synced_at` is
+older than `max_age_secs`, or that never synced, syncs like `agt issue sync`. With
+no tracker configured nothing happens and the output does not change. A failure
+(`gh`/`glab` missing, not logged in, network, rate limit, or the calls together
+taking more than 15 seconds, which kills the tool) prints one line,
+`agt: sync skipped (<reason>); showing local data`, to stderr and reads the local
+copy; stdout and the exit status are the local read's. A successful auto-sync
+prints nothing. A tracker being synced or pushed by another agt is skipped the
+same way instead of waited for. `--offline` (global to `agt issue`),
+`AGT_OFFLINE=1` and `auto = false` keep reads local. `agt issue sync` has no time
+cap and keeps its errors and exit codes.
 
 | Command | What it does |
 | --- | --- |
@@ -1085,6 +1135,7 @@ failure does not make `push` exit non-zero: it is listed under `failed`. A creat
 `AGT_GH_BIN` and `AGT_GLAB_BIN` replace the `gh` and `glab`
 executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
 canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
-tests can check age pruning; do not set it otherwise. Tests use temporary
+tests can check age pruning and sync age; do not set it otherwise. `AGT_SYNC_CAP_MS` replaces the 15 seconds an auto-sync may take, for the same
+reason. Tests that check local behavior run with `AGT_OFFLINE=1` (`Env::offline`) so reads do not call the fake forge. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`. See `AGENTS.md` for the checks.
