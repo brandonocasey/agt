@@ -559,8 +559,9 @@ before. It is the same sync as `agt review sync`, so it only reads the forge.
   `.auto-sync.json` and that sync (the PR/MR, or the branch lookup) is not tried
   again for the max age, so an offline machine pays the cap and prints the line
   once, not on every read; a success or an explicit `sync` clears it. A lock held
-  by another agt, such as a running `publish` or sync, skips the sync the same
-  way instead of waiting.
+  by another auto-sync or by a push or publish of the same review skips the sync the same
+  way instead of waiting. An explicit `agt review sync` takes no sync lock and is never
+  skipped.
 - `--offline`, `AGT_OFFLINE=1` or `auto = false` in the `[sync]` table of
   `$XDG_CONFIG_HOME/agt/config.toml` keep a read local; see
   [Issues](#issues) for the table. A config file that cannot be read (an unknown
@@ -1093,7 +1094,7 @@ prints nothing. A failed sync is written to `.auto-sync.json` in the tracker's
 directory and that tracker is not tried again for `max_age_secs` (no call, no
 line); a success or an explicit `sync` clears it. A config file that cannot be
 read prints the skip line with its error and the read goes on locally. A tracker
-being synced or pushed by another agt is skipped the same way instead of waited
+being synced by another auto-sync or pushed is skipped the same way instead of waited
 for. `--offline` (global to `agt issue`),
 `AGT_OFFLINE=1` and `auto = false` keep reads local. `agt issue sync` has no time
 cap and keeps its errors and exit codes.
