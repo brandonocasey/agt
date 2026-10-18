@@ -1,12 +1,13 @@
 //! What `agt cleanup` lists for worktrees and branches: work that is already in the default
 //! branch by local ancestry alone. Nothing here touches the network or runs `lsof`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::info::{self, Entry};
 use super::landed::{Scene, recent};
 use super::nested;
 use super::roots;
+use super::submodules;
 use crate::core::error::Result;
 use crate::core::{agents, clock};
 use crate::git::Repo;
@@ -41,7 +42,7 @@ fn of(repo: &Repo) -> Result<Vec<Found>> {
             Some(branch) => !scene.protected(branch),
             None => true,
         } && scene.contains(repo, &entry.head)?;
-        if merged && idle(&scene, entry)? {
+        if merged && idle(&scene, entry, &main)? {
             found.push(Found {
                 repo: main.clone(),
                 worktree: Some(entry.path.clone()),
@@ -62,12 +63,13 @@ fn of(repo: &Repo) -> Result<Vec<Found>> {
 }
 
 /// Whether the worktree exists, is unlocked, clean, quiet for 3 days and without a live agent session.
-fn idle(scene: &Scene, entry: &Entry) -> Result<bool> {
+fn idle(scene: &Scene, entry: &Entry, main: &Path) -> Result<bool> {
     if entry.locked || !entry.path.exists() || scene.holds_cwd(&entry.path) {
         return Ok(false);
     }
     Ok(info::unsaved(&entry.path)? == 0
         && nested::find(&entry.path).is_ok_and(|inside| inside.is_empty())
+        && submodules::check(&entry.path, main).is_ok()
         && agents::live_in(&entry.path).is_none()
         && !recent(&entry.path, clock::now_secs()?)?)
 }

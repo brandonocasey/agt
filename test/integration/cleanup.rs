@@ -1388,3 +1388,51 @@ fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_direct
     assert_eq!(listed.len(), 1, "{report}");
     assert!(listed[0].as_str().unwrap().contains("a-open"), "{report}");
 }
+
+#[test]
+fn manual_report_skips_a_worktree_whose_submodule_holds_a_stash() {
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    let origin = prune.env.path("sub-origin");
+    for dir in [&repo, &origin] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let git = |dir: &Path, args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", dir)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&origin, &["init", "-q", "-b", "main"]);
+    fs::write(origin.join("lib.txt"), "lib\n").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "lib"]);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(
+        &repo,
+        &["submodule", "add", "-q", origin.to_str().unwrap(), "mod"],
+    );
+    git(&repo, &["commit", "-q", "-m", "one"]);
+    git(
+        &repo,
+        &["worktree", "add", "-q", ".worktrees/done", "-b", "done"],
+    );
+    let done = repo.join(".worktrees/done");
+    git(&done, &["submodule", "update", "--init"]);
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+
+    // A stash lives only in the clone under the worktree's git directory.
+    fs::write(done.join("mod/lib.txt"), "changed\n").unwrap();
+    git(&done.join("mod"), &["stash", "push", "-q"]);
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    assert_eq!(report["manual"]["worktrees"], json!([]));
+}

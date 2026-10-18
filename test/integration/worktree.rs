@@ -913,3 +913,70 @@ fn the_calling_sessions_own_processes_do_not_block_removal_but_others_do() {
     assert!(error.contains(&stranger.0.id().to_string()), "{error}");
     assert!(f.wt.exists());
 }
+
+/// A worktree with an initialized submodule `mod`, at the commit the worktree records.
+fn with_submodule() -> (Fixture, PathBuf) {
+    let f = Fixture::new();
+    add_submodule(&f, "mod", "mod");
+    let sub = f.wt.join("mod");
+    (f, sub)
+}
+
+/// Ignores `pattern` inside the submodule, whose git directory lives under the worktree's.
+fn ignore_in(f: &Fixture, sub: &Path, pattern: &str) {
+    let exclude = PathBuf::from(wgit(
+        &f.env,
+        sub,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ],
+    ));
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(exclude, format!("{pattern}\n")).unwrap();
+}
+
+fn refuses_both_ways(f: &Fixture, message: &str) {
+    let wt = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &wt], message);
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], message);
+    assert!(f.wt.join("mod").exists());
+}
+
+#[test]
+fn a_submodule_stash_blocks_removal() {
+    let (f, sub) = with_submodule();
+    fs::write(sub.join("lib.txt"), "changed\n").unwrap();
+    wgit(&f.env, &sub, &["stash", "push", "-q"]);
+    refuses_both_ways(&f, "stash");
+}
+
+#[test]
+fn a_submodule_branch_that_nothing_else_holds_blocks_removal() {
+    let (f, sub) = with_submodule();
+    wgit(&f.env, &sub, &["switch", "-q", "-c", "unpushed"]);
+    fs::write(sub.join("new.txt"), "n\n").unwrap();
+    wgit(&f.env, &sub, &["add", "-A"]);
+    wgit(&f.env, &sub, &["commit", "-q", "-m", "unpushed work"]);
+    // Back on the recorded commit, so only the branch holds the work.
+    wgit(&f.env, &sub, &["checkout", "-q", "--detach", "HEAD~1"]);
+    refuses_both_ways(&f, "unpushed");
+}
+
+#[test]
+fn ignored_files_in_a_submodule_block_removal_unless_disposable() {
+    let (f, sub) = with_submodule();
+    ignore_in(&f, &sub, ".env\nnode_modules/\nbuild/");
+    fs::create_dir_all(sub.join("node_modules/pkg")).unwrap();
+    fs::write(sub.join("node_modules/pkg/index.js"), "x").unwrap();
+    fs::create_dir_all(sub.join("build")).unwrap();
+    fs::write(sub.join("build/out.o"), "o").unwrap();
+    let wt = f.wt.to_string_lossy().into_owned();
+    // Dependencies and build output are recreated, so they do not block.
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+
+    fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
+    refuses_both_ways(&f, ".env");
+}
