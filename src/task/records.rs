@@ -1,5 +1,5 @@
 //! `create`, `list`, `show`, `update` and `check`: one pretty-printed JSON file per task in
-//! `agents/tasks`, written exactly as `agent-task` writes it.
+//! `agents/tasks`.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -13,11 +13,9 @@ use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{Lock, hostname, write_private};
 use crate::core::output::Output;
-use crate::task::args::Options;
+use crate::task::args::{Check, Create, Target, Update};
 use crate::task::files;
-use crate::task::text::{js_number, limited, safe_integer};
-
-const STATUSES: [&str; 4] = ["active", "paused", "blocked", "complete"];
+use crate::task::text::limited;
 
 pub fn pretty(value: &Value) -> Result<Output> {
     let mut text = serde_json::to_string_pretty(value).map_err(ctx("serialize output"))?;
@@ -35,13 +33,6 @@ pub(super) fn is_id(id: &str) -> bool {
         && bytes.all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
-}
-
-fn validate_id(id: Option<&str>) -> Result<String> {
-    match id {
-        Some(id) if is_id(id) => Ok(id.to_owned()),
-        _ => fail("id must match [a-z0-9][a-z0-9._-]{0,63}"),
-    }
 }
 
 fn task_path(id: &str) -> Result<PathBuf> {
@@ -70,9 +61,8 @@ pub(super) fn read_task(id: &str) -> Result<Value> {
         .map_err(ctx(format!("read {}", file.display())))?;
     let task: Value =
         serde_json::from_str(&raw).map_err(|_| Error(format!("task {id} is invalid")))?;
-    let revision = task.get("revision").and_then(Value::as_f64);
     if task.get("id").and_then(Value::as_str) != Some(id)
-        || revision.and_then(safe_integer).is_none()
+        || task.get("revision").and_then(Value::as_i64).is_none()
     {
         return fail(format!("task {id} is invalid"));
     }
@@ -126,40 +116,32 @@ fn context() -> Value {
     })
 }
 
-fn revision_argument(options: &Options) -> Result<i64> {
-    let expected = options.get("revision").map_or(f64::NAN, js_number);
-    match safe_integer(expected) {
-        Some(revision) if revision >= 1 => Ok(revision),
-        _ => fail("--revision must be a positive integer"),
-    }
-}
-
-fn optional(options: &Options, key: &str) -> Result<Value> {
-    options.get(key).map_or(Ok(Value::Null), |value| {
-        limited(Some(value), key).map(Value::String)
+fn optional(value: Option<&String>, name: &str) -> Result<Value> {
+    value.map_or(Ok(Value::Null), |value| {
+        limited(Some(value), name).map(Value::String)
     })
 }
 
-pub fn create(options: &Options) -> Result<Output> {
-    let id = validate_id(options.id_argument())?;
-    let objective = limited(options.get("objective"), "objective")?;
+pub fn create(args: &Create) -> Result<Output> {
+    let id = args.target.id()?;
+    let objective = limited(Some(&args.objective), "objective")?;
     with_lock(&id, || {
         if task_path(&id)?.exists() {
             return fail(format!("task {id} already exists"));
         }
         let now = clock::now_iso_millis()?;
-        let parent_pr = optional(options, "parent-pr")?;
-        let target_branch = optional(options, "target-branch")?;
-        let task_boundary = optional(options, "task-boundary")?;
+        let parent_pr = optional(args.parent_pr.as_ref(), "parent-pr")?;
+        let target_branch = optional(args.target_branch.as_ref(), "target-branch")?;
+        let task_boundary = optional(args.task_boundary.as_ref(), "task-boundary")?;
         let context = context();
-        let authorization = match options.get("authorization") {
+        let authorization = match &args.authorization {
             Some(provenance) => json!({
                 "provenance": limited(Some(provenance), "authorization")?,
-                "scope": limited(Some(options.get("scope").unwrap_or("unspecified")), "scope")?,
+                "scope": limited(Some(args.scope.as_deref().unwrap_or("unspecified")), "scope")?,
             }),
             None => Value::Null,
         };
-        let next_step = optional(options, "next-step")?;
+        let next_step = optional(args.next_step.as_ref(), "next-step")?;
         write_task(&json!({
             "version": 1,
             "id": id,
@@ -195,8 +177,7 @@ fn bump(task: &mut Value, revision: i64, at: &str) {
 fn check_revision(task: &Value, expected: i64) -> Result<i64> {
     let current = task
         .get("revision")
-        .and_then(Value::as_f64)
-        .and_then(safe_integer)
+        .and_then(Value::as_i64)
         .unwrap_or_default();
     if current != expected {
         return fail(format!(
@@ -206,23 +187,23 @@ fn check_revision(task: &Value, expected: i64) -> Result<i64> {
     Ok(current)
 }
 
-pub fn update(options: &Options) -> Result<Output> {
-    let id = validate_id(options.id_argument())?;
-    let expected = revision_argument(options)?;
+pub fn update(args: &Update) -> Result<Output> {
+    let id = args.target.id()?;
     with_lock(&id, || {
         let mut task = read_task(&id)?;
-        let revision = check_revision(&task, expected)?;
-        for (option, field) in [
-            ("objective", "objective"),
-            ("parent-pr", "parentPr"),
-            ("target-branch", "targetBranch"),
-            ("task-boundary", "taskBoundary"),
+        let revision = check_revision(&task, args.revision)?;
+        for (option, value, field) in [
+            ("objective", &args.objective, "objective"),
+            ("parent-pr", &args.parent_pr, "parentPr"),
+            ("target-branch", &args.target_branch, "targetBranch"),
+            ("task-boundary", &args.task_boundary, "taskBoundary"),
+            ("next-step", &args.next_step, "nextStep"),
         ] {
-            if let Some(value) = options.get(option) {
+            if let Some(value) = value {
                 set(&mut task, field, json!(limited(Some(value), option)?));
             }
         }
-        if let Some(text) = options.get("correction") {
+        if let Some(text) = &args.correction {
             let entry = json!({
                 "text": limited(Some(text), "correction")?,
                 "at": clock::now_iso_millis()?,
@@ -232,33 +213,17 @@ pub fn update(options: &Options) -> Result<Output> {
                 None => set(&mut task, "corrections", json!([entry])),
             }
         }
-        if let Some(value) = options.get("next-step") {
-            set(
-                &mut task,
-                "nextStep",
-                json!(limited(Some(value), "next-step")?),
-            );
+        if let Some(status) = args.status {
+            set(&mut task, "status", json!(status.as_str()));
         }
-        if let Some(status) = options.get("status") {
-            if !STATUSES.contains(&status) {
-                return fail("invalid status");
-            }
-            set(&mut task, "status", json!(status));
-        }
-        if options.get("authorization").is_some() || options.get("scope").is_some() {
+        if args.authorization.is_some() || args.scope.is_some() {
             let stored = |field: &str| {
                 task.pointer(&format!("/authorization/{field}"))
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             };
-            let provenance = options
-                .get("authorization")
-                .map(str::to_owned)
-                .or_else(|| stored("provenance"));
-            let scope = options
-                .get("scope")
-                .map(str::to_owned)
-                .or_else(|| stored("scope"));
+            let provenance = args.authorization.clone().or_else(|| stored("provenance"));
+            let scope = args.scope.clone().or_else(|| stored("scope"));
             let authorization = json!({
                 "provenance": limited(provenance.as_deref(), "authorization")?,
                 "scope": limited(scope.as_deref(), "scope")?,
@@ -285,23 +250,22 @@ fn platform() -> String {
     format!("{os} {arch} {}", hostname())
 }
 
-pub fn check(options: &Options) -> Result<Output> {
-    let id = validate_id(options.id_argument())?;
-    let expected = revision_argument(options)?;
+pub fn check(args: &Check) -> Result<Output> {
+    let id = args.target.id()?;
     with_lock(&id, || {
         let mut task = read_task(&id)?;
-        let revision = check_revision(&task, expected)?;
-        let name = limited(options.get("name"), "name")?;
-        let result = limited(options.get("result"), "result")?;
-        let code_revision = match options.get("code-revision") {
+        let revision = check_revision(&task, args.revision)?;
+        let name = limited(Some(&args.name), "name")?;
+        let result = limited(Some(&args.result), "result")?;
+        let code_revision = match &args.code_revision {
             Some(value) => json!(limited(Some(value), "code-revision")?),
             None => task
                 .pointer("/context/head")
                 .cloned()
                 .unwrap_or(Value::Null),
         };
-        let inputs = optional(options, "inputs")?;
-        let environment = match options.get("environment") {
+        let inputs = optional(args.inputs.as_ref(), "inputs")?;
+        let environment = match &args.environment {
             Some(value) => limited(Some(value), "environment")?,
             None => platform(),
         };
@@ -328,8 +292,8 @@ fn show_task(id: &str) -> Result<Output> {
     pretty(&read_task(id)?)
 }
 
-pub fn show(options: &Options) -> Result<Output> {
-    show_task(&validate_id(options.id_argument())?)
+pub fn show(target: &Target) -> Result<Output> {
+    show_task(&target.id()?)
 }
 
 pub fn list() -> Result<Output> {
@@ -338,7 +302,7 @@ pub fn list() -> Result<Output> {
     let mut entries = fs::read_dir(&root)
         .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
         .map_err(ctx(format!("read {}", root.display())))?;
-    // Node lists a directory sorted by name, which settles ties between equal timestamps.
+    // Name order settles ties between equal timestamps.
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();

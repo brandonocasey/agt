@@ -1,4 +1,4 @@
-//! `agt task`: durable task records and the private session index (the port of `agent-task`).
+//! `agt task`: durable task records and the private session index.
 
 mod args;
 pub mod cli;

@@ -1,5 +1,4 @@
-//! `agt task`: the cases of the `agent-task` tests it replaces, plus checks that the Rust and
-//! Node tools read and write each other's records on the same directory.
+//! `agt task` records and the session index.
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -11,13 +10,6 @@ use serde_json::{Value, json};
 use crate::support::Env;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agt");
-const LEGACY: &str = "AGT_LEGACY_AGENT_TASK";
-/// The Node agent-task in the dotfiles source: its legacy home first, then the path it had
-/// before the `agt task` wrapper replaced it.
-const LEGACY_SOURCES: [&str; 2] = [
-    ".local/share/chezmoi/home/private_dot_local/libexec/agt/executable_agent-task.legacy",
-    ".local/share/chezmoi/home/private_dot_local/bin/executable_agent-task",
-];
 
 struct Task {
     env: Env,
@@ -248,7 +240,7 @@ fn indexes_metadata_ids_and_searches_human_turns_with_bounded_context() {
     let excessive = task.fail(&[
         "search", "--query", "needle", "--file", file, "--limit", "101",
     ]);
-    assert!(excessive.contains("between 1 and 100"), "{excessive}");
+    assert!(excessive.contains("101 is not in 1..=100"), "{excessive}");
 }
 
 #[test]
@@ -478,14 +470,15 @@ fn advances_through_an_oversized_line_under_an_explicit_byte_budget() {
 }
 
 #[test]
-fn help_works() {
+fn help_lists_the_task_commands_and_a_bare_run_is_a_usage_error() {
     let task = Task::new();
     for flag in ["--help", "help"] {
         let output = task.raw(&[flag]);
         assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("resolve"));
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("create") && help.contains("check"), "{help}");
     }
-    assert!(task.raw(&[]).status.success());
+    assert_eq!(task.raw(&[]).status.code(), Some(2));
 }
 
 #[test]
@@ -685,26 +678,33 @@ fn a_held_task_lock_fails_fast_and_is_not_left_behind() {
 }
 
 #[test]
-fn input_errors_match_the_node_tool() {
+fn input_errors_fail_with_a_reason() {
     let task = Task::new();
-    assert!(
-        task.fail(&["frobnicate"])
-            .contains("unknown command: frobnicate")
+    // Usage errors are clap's and exit with 2; the rest exit with 1.
+    let usage = |args: &[&str], reason: &str| {
+        let output = task.raw(args);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {error}");
+        assert!(error.contains(reason), "{args:?}: {error}");
+    };
+    usage(&["frobnicate"], "unrecognized subcommand 'frobnicate'");
+    usage(&["create", "--id"], "a value is required for '--id <ID>'");
+    usage(
+        &["create", "--id", "a", "--objective"],
+        "a value is required for '--objective <OBJECTIVE>'",
     );
-    assert!(
-        task.fail(&["create", "--id"])
-            .contains("--id needs a value")
-    );
-    assert!(
-        task.fail(&["create", "--id", "a", "--objective", "--x"])
-            .contains("--objective needs a value")
+    usage(&["create", "--id", "a"], "--objective <OBJECTIVE>");
+    usage(&["update", "a", "--revision", "0"], "--revision <REVISION>");
+    usage(
+        &["update", "a", "--revision", "1", "--status", "weird"],
+        "invalid value 'weird' for '--status <STATUS>'",
     );
     assert!(
         task.fail(&["create", "--id", "Bad", "--objective", "x"])
             .contains("id must match")
     );
     assert!(
-        task.fail(&["create", "--id", "a"])
+        task.fail(&["create", "--id", "a", "--objective", ""])
             .contains("objective must not be empty")
     );
     assert!(
@@ -713,272 +713,35 @@ fn input_errors_match_the_node_tool() {
     );
     task.run(&["create", "a", "--objective", "x"]);
     assert!(
-        task.fail(&["update", "a", "--revision", "0"])
-            .contains("--revision must be a positive integer")
-    );
-    assert!(
-        task.fail(&["update", "a", "--revision", "1", "--status", "weird"])
-            .contains("invalid status")
-    );
-    assert!(
         task.fail(&["update", "a", "--revision", "1", "--scope", "s"])
             .contains("authorization must not be empty")
     );
-    assert!(task.fail(&["search"]).contains("query must not be empty"));
+    assert!(
+        task.fail(&["update", "a", "--revision", "1", "--next-step", ""])
+            .contains("next-step must not be empty")
+    );
+    assert!(
+        task.fail(&[
+            "check",
+            "a",
+            "--revision",
+            "1",
+            "--name",
+            "unit",
+            "--result",
+            ""
+        ])
+        .contains("result must not be empty")
+    );
+    usage(&["search"], "--query <QUERY>");
     assert!(
         task.fail(&["resolve", "nope-id"])
             .contains("session nope-id was not found")
     );
 }
 
-// Parity with the Node tool. These run `agent-task` from the dotfiles source (or the script
-// named by AGT_LEGACY_AGENT_TASK) against the same temporary state directory, and are skipped
-// when the script or node is not on this host.
-
-fn legacy_script() -> Option<PathBuf> {
-    let path = std::env::var_os(LEGACY).map(PathBuf::from).or_else(|| {
-        let home = std::env::var_os("HOME")?;
-        LEGACY_SOURCES
-            .iter()
-            .map(|source| Path::new(&home).join(source))
-            .find(|path| {
-                std::fs::read_to_string(path)
-                    .is_ok_and(|text| text.starts_with("#!/usr/bin/env node"))
-            })
-    })?;
-    let node = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .ok()?;
-    (path.is_file() && node.status.success()).then_some(path)
-}
-
-impl Task {
-    fn node(&self, script: &Path, args: &[&str]) -> Output {
-        let mut command = self.env.command("node", &self.env.repo);
-        command.arg(script).args(args);
-        command.output().unwrap()
-    }
-
-    fn node_run(&self, script: &Path, args: &[&str]) -> Value {
-        let output = self.node(script, args);
-        assert!(
-            output.status.success(),
-            "agent-task {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
-    }
-}
-
-/// Replaces timestamps and the context so records written at different moments compare equal.
-fn untimed(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for (key, item) in map.iter_mut() {
-                if matches!(key.as_str(), "createdAt" | "updatedAt" | "at") {
-                    *item = json!("T");
-                } else if key == "context" {
-                    // The repository path differs per fixture.
-                    *item = json!("ctx");
-                } else {
-                    untimed(item);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(untimed),
-        _ => {}
-    }
-}
-
 #[test]
-fn rust_and_node_read_and_update_each_others_task_records() {
-    let Some(script) = legacy_script() else {
-        eprintln!("skipped: the agent-task script or node is not available");
-        return;
-    };
-    let task = Task::new();
-    let node_made = task.node_run(
-        &script,
-        &[
-            "create",
-            "--id",
-            "from-node",
-            "--objective",
-            "Node made",
-            "--authorization",
-            "user",
-            "--parent-pr",
-            "7",
-        ],
-    );
-    assert_eq!(task.run(&["show", "from-node"]), node_made);
-    let rust_updated = task.run(&[
-        "update",
-        "from-node",
-        "--revision",
-        "1",
-        "--correction",
-        "Use B",
-        "--status",
-        "blocked",
-    ]);
-    assert_eq!(rust_updated["revision"], 2);
-    let node_checked = task.node_run(
-        &script,
-        &[
-            "check",
-            "from-node",
-            "--revision",
-            "2",
-            "--name",
-            "unit",
-            "--result",
-            "pass",
-        ],
-    );
-    assert_eq!(node_checked["revision"], 3);
-    assert_eq!(node_checked["corrections"][0]["text"], "Use B");
-    task.run(&[
-        "create",
-        "--id",
-        "from-rust",
-        "--objective",
-        "Rust made",
-        "--next-step",
-        "Go",
-    ]);
-    let node_shown = task.node_run(&script, &["show", "from-rust"]);
-    assert_eq!(task.run(&["show", "from-rust"]), node_shown);
-    let node_updated = task.node_run(
-        &script,
-        &[
-            "update",
-            "from-rust",
-            "--revision",
-            "1",
-            "--status",
-            "paused",
-        ],
-    );
-    assert_eq!(node_updated["revision"], 2);
-    assert_eq!(task.run(&["list"]), task.node_run(&script, &["list"]));
-    assert_eq!(task.run(&["list"]).as_array().unwrap().len(), 2);
-    // The bytes on disk are the same format: re-showing through either tool is identical text.
-    let rust_text = task.raw(&["show", "from-rust"]).stdout;
-    assert_eq!(rust_text, task.node(&script, &["show", "from-rust"]).stdout);
-}
-
-#[test]
-fn both_tools_print_the_same_bytes_for_the_same_commands() {
-    let Some(script) = legacy_script() else {
-        eprintln!("skipped: the agent-task script or node is not available");
-        return;
-    };
-    let (rust, node) = (Task::new(), Task::new());
-    let scenario: [&[&str]; 4] = [
-        &[
-            "create",
-            "--id",
-            "same",
-            "--objective",
-            "Parity",
-            "--authorization",
-            "user",
-            "--scope",
-            "edits",
-            "--task-boundary",
-            "b",
-        ],
-        &[
-            "check",
-            "same",
-            "--revision",
-            "1",
-            "--name",
-            "unit",
-            "--result",
-            "pass",
-            "--inputs",
-            "fx",
-        ],
-        &[
-            "update",
-            "same",
-            "--revision",
-            "2",
-            "--correction",
-            "C",
-            "--status",
-            "paused",
-            "--next-step",
-            "N",
-        ],
-        &["list"],
-    ];
-    for args in scenario {
-        let mut left = rust.run(args);
-        let mut right = node.node_run(&script, args);
-        untimed(&mut left);
-        untimed(&mut right);
-        assert_eq!(left, right, "{args:?}");
-        assert_eq!(
-            serde_json::to_string_pretty(&left).unwrap(),
-            serde_json::to_string_pretty(&right).unwrap()
-        );
-    }
-    let usage = rust.raw(&["--help"]).stdout;
-    let legacy_usage = node.node(&script, &["--help"]).stdout;
-    let rewrite = |bytes: &[u8]| String::from_utf8_lossy(bytes).replace("agent-task", "agt task");
-    assert_eq!(rewrite(&legacy_usage), String::from_utf8_lossy(&usage));
-}
-
-#[test]
-fn rust_and_node_share_the_session_index() {
-    let Some(script) = legacy_script() else {
-        eprintln!("skipped: the agent-task script or node is not available");
-        return;
-    };
-    let task = Task::new();
-    let source = task.file("shared.jsonl");
-    let file = source.to_str().unwrap();
-    let home_row = |text: &str| format!("{}\n", user("shared", text));
-    task.write(
-        &source,
-        &format!(
-            "{}{}{{bad}}\n",
-            home_row("needle one"),
-            home_row("needle two")
-        ),
-    );
-    task.write(
-        &task.home().join(".codex/sessions/a.jsonl"),
-        &lines(&[json!({"type": "session_meta", "payload": {"id": "cx"}}), json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "needle codex"}]}})]),
-    );
-    // Node writes the index; Rust continues from it without rescanning, and the results match.
-    let node_stats = task.node_run(&script, &["index", "--file", file]);
-    let rust_stats = task.run(&["index", "--file", file]);
-    assert_eq!(rust_stats["scannedBytes"], 0);
-    assert_eq!(rust_stats["indexed"], node_stats["indexed"]);
-    assert_eq!(rust_stats["malformedLines"], 1);
-    let args = ["search", "--query", "needle", "--file", file];
-    assert_eq!(task.run(&args), task.node_run(&script, &args));
-    // Rust appends and rewrites the index; Node reads it back and sees the new turn.
-    let mut text = fs::read_to_string(&source).unwrap();
-    text.push_str(&home_row("needle three"));
-    fs::write(&source, text).unwrap();
-    let rust_results = task.run(&args);
-    assert_eq!(rust_results.as_array().unwrap().len(), 4);
-    let node_after = task.node_run(&script, &["index", "--file", file]);
-    assert_eq!(node_after["scannedBytes"], 0);
-    assert_eq!(node_after["indexedTurns"], 4);
-    assert_eq!(task.node_run(&script, &args), rust_results);
-    let resolve = ["resolve", "--session", "cx"];
-    assert_eq!(task.run(&resolve), task.node_run(&script, &resolve));
-}
-
-#[test]
-fn the_index_file_has_the_node_format() {
+fn the_index_file_keeps_its_format() {
     let task = Task::new();
     let source = task.file("format.jsonl");
     task.write(&source, &lines(&[user("fmt", "needle")]));

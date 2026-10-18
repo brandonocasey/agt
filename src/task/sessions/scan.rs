@@ -39,7 +39,7 @@ pub struct FileState {
     pub turns: Vec<Turn>,
 }
 
-/// A file's identity and times as `agent-task` records them (milliseconds as a float).
+/// A file's identity and times as the index records them (milliseconds as a float).
 pub struct Stat {
     pub dev: u64,
     pub ino: u64,
@@ -253,4 +253,20 @@ pub fn visible_turns(file: &str, state: &FileState) -> Vec<Turn> {
         turns.push(turn);
     }
     turns
+}
+
+#[cfg(test)]
+mod tests {
+    /// Index timestamps must survive a JSON round trip exactly, or every unchanged session
+    /// file looks changed and is scanned again (serde_json's `float_roundtrip`).
+    #[test]
+    fn index_timestamps_round_trip_exactly() {
+        let ms = 1_791_315_986_406.988_5_f64;
+        let text = serde_json::to_string(&ms).unwrap();
+        assert_eq!(serde_json::from_str::<f64>(&text).unwrap(), ms);
+        assert_eq!(
+            serde_json::from_str::<f64>("1791315986406.9885").unwrap(),
+            ms
+        );
+    }
 }

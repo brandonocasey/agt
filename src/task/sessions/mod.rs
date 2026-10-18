@@ -16,13 +16,17 @@ use crate::core::error::{Result, ctx, fail};
 use crate::core::local::{Lock, error_code, private_dir, write_private};
 use crate::core::output::Output;
 use crate::core::transcripts::Turn;
-use crate::task::args::Options;
+use crate::core::transcripts::json::head;
 use crate::task::files;
 use crate::task::records::pretty;
-use crate::task::text::{js_number, limited, safe_integer, utf16_offset, utf16_slice};
+use crate::task::text::limited;
 
+mod args;
 mod discover;
 mod scan;
+
+use self::args::Sources;
+pub use self::args::{IndexArgs, ResolveArgs, SearchArgs};
 
 use self::discover::{Coverage, Unreadable, discover, unique};
 use self::scan::{FileState, Stat, scan_file, visible_turns};
@@ -114,7 +118,7 @@ fn write_index(index: &Index) -> Result<()> {
     )
 }
 
-/// `path.resolve`: absolute, with `.` and `..` folded away and no symbolic links followed.
+/// The absolute form of `path`, with `.` and `..` folded away and no symbolic links followed.
 fn resolve_path(path: &str) -> String {
     let joined = if Path::new(path).is_absolute() {
         PathBuf::from(path)
@@ -134,18 +138,20 @@ fn resolve_path(path: &str) -> String {
     resolved.to_string_lossy().into_owned()
 }
 
-fn limit_option(options: &Options, key: &str, variable: &str) -> Result<u64> {
-    let value = options.get(key).map(str::to_owned).or_else(|| {
-        std::env::var(variable)
-            .ok()
-            .filter(|value| !value.is_empty())
-    });
-    let Some(value) = value else {
-        return Ok(UNLIMITED);
-    };
-    match safe_integer(js_number(&value)) {
-        Some(number) if number >= 1 => Ok(number as u64),
-        _ => fail(format!("--{key} must be a positive integer")),
+/// The limit from its option, else from the environment variable, else none.
+fn limit(option: Option<u64>, variable: &str) -> Result<u64> {
+    if let Some(number) = option {
+        return Ok(number);
+    }
+    match std::env::var(variable)
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(UNLIMITED),
+        Some(value) => match value.trim().parse::<u64>() {
+            Ok(number) if number >= 1 => Ok(number),
+            _ => fail(format!("{variable} must be a positive integer")),
+        },
     }
 }
 
@@ -159,9 +165,8 @@ fn timestamp_key(timestamp: &Value) -> String {
         Value::String(text) => {
             clock::parse(text).map_or_else(|_| text.clone(), |seconds| seconds.to_string())
         }
-        Value::Bool(true) => "true".into(),
-        Value::Array(_) | Value::Object(_) => "[object Object]".into(),
-        Value::Null | Value::Bool(false) => String::new(),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -169,7 +174,6 @@ fn event_key(turn: &Turn) -> Option<String> {
     let id = match &turn.event_id {
         Value::String(text) if !text.is_empty() => text.clone(),
         Value::Number(number) => number.to_string(),
-        Value::Bool(true) => "true".into(),
         _ => return None,
     };
     Some(format!(
@@ -228,7 +232,7 @@ fn deduplicate(turns: Vec<Turn>) -> Vec<Merged> {
     unique
 }
 
-fn index_sessions(options: &Options, session: Option<&str>) -> Result<Indexed> {
+fn index_sessions(options: &Sources, session: Option<&str>) -> Result<Indexed> {
     let directory = ensure_index_root()?;
     let _lock = Lock::acquire(
         directory.join(".lock"),
@@ -240,12 +244,12 @@ fn index_sessions(options: &Options, session: Option<&str>) -> Result<Indexed> {
     } else {
         read_index()?
     };
-    let max_files = limit_option(options, "max-files", "AGENT_TASK_MAX_FILES")?;
-    let byte_limit = limit_option(options, "byte-limit", "AGENT_TASK_BYTE_LIMIT")?;
+    let max_files = limit(options.max_files, "AGENT_TASK_MAX_FILES")?;
+    let byte_limit = limit(options.byte_limit, "AGENT_TASK_BYTE_LIMIT")?;
     let discovered = discover(max_files, session)?;
     let mut coverage = discovered.coverage;
     coverage.byte_limit = (byte_limit != UNLIMITED).then_some(byte_limit);
-    let extra = options.get("file").map(resolve_path);
+    let extra = options.file.as_deref().map(resolve_path);
     let paths = unique(extra.into_iter().chain(discovered.files));
     let present: std::collections::HashSet<&String> = paths.iter().collect();
     let gone: Vec<String> = index
@@ -351,8 +355,8 @@ fn coverage_value(coverage: &Coverage) -> Result<Value> {
     serde_json::to_value(coverage).map_err(ctx("serialize coverage"))
 }
 
-pub fn index_command(options: &Options) -> Result<Output> {
-    let indexed = index_sessions(options, options.get("session"))?;
+pub fn index_command(args: &IndexArgs) -> Result<Output> {
+    let indexed = index_sessions(&args.sources, args.session.as_deref())?;
     let mut report = serde_json::Map::new();
     report.insert("updatedAt".into(), json!(indexed.updated_at));
     if let Value::Object(coverage) = coverage_value(&indexed.coverage)? {
@@ -368,12 +372,9 @@ fn matching<'a>(turns: &'a [Merged], session: &str) -> Vec<&'a Merged> {
         .collect()
 }
 
-pub fn resolve(options: &Options) -> Result<Output> {
-    let session = limited(
-        options.get("session").or_else(|| options.id_argument()),
-        "session",
-    )?;
-    let indexed = index_sessions(options, Some(&session))?;
+pub fn resolve(args: &ResolveArgs) -> Result<Output> {
+    let session = limited(args.session(), "session")?;
+    let indexed = index_sessions(&args.sources, Some(&session))?;
     let turns = matching(&indexed.turns, &session);
     let Some(first) = turns.first() else {
         eprintln!(
@@ -393,15 +394,11 @@ pub fn resolve(options: &Options) -> Result<Output> {
     }))
 }
 
-pub fn search(options: &Options) -> Result<Output> {
-    let query = limited(options.get("query"), "query")?.to_lowercase();
-    let limit = options.get("limit").map_or(20.0, js_number);
-    let limit = match safe_integer(limit) {
-        Some(limit) if (1..=100).contains(&limit) => limit as usize,
-        _ => return fail("--limit must be between 1 and 100"),
-    };
-    let indexed = index_sessions(options, options.get("session"))?;
-    let turns: Vec<&Merged> = match options.get("session") {
+pub fn search(args: &SearchArgs) -> Result<Output> {
+    let query = limited(Some(&args.query), "query")?.to_lowercase();
+    let limit = usize::from(args.limit);
+    let indexed = index_sessions(&args.sources, args.session.as_deref())?;
+    let turns: Vec<&Merged> = match args.session.as_deref() {
         Some(session) => matching(&indexed.turns, session),
         None => indexed
             .turns
@@ -441,13 +438,13 @@ pub fn search(options: &Options) -> Result<Output> {
                 let item = &turns[*index].turn;
                 json!({
                     "role": item.role,
-                    "text": utf16_slice(&item.text, 0, 500),
+                    "text": head(&item.text, 500),
                     "timestamp": item.timestamp,
                     "offset": item.offset,
                 })
             })
             .collect();
-        let start = utf16_offset(&lowered, found).saturating_sub(160);
+        let start = lowered[..found].chars().count().saturating_sub(160);
         results.push(json!({
             "source": turn.source,
             "sources": merged.sources,
@@ -456,7 +453,7 @@ pub fn search(options: &Options) -> Result<Output> {
             "sessionId": turn.session_id,
             "timestamp": turn.timestamp,
             "role": turn.role,
-            "text": utf16_slice(&turn.text, start, start + 500),
+            "text": turn.text.chars().skip(start).take(500).collect::<String>(),
             "offset": turn.offset,
             "inherited": turn.inherited,
             "context": context,
