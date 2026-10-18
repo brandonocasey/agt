@@ -1307,3 +1307,38 @@ fn manual_report_skips_a_worktree_changed_in_the_last_3_days() {
     let report = prune.run_at(later(), &["--only", "manual"]);
     assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn manual_report_skips_a_worktree_holding_an_ignored_nested_repository() {
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", dir)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "one"]);
+    fs::write(repo.join(".git/info/exclude"), "vendor/\n").unwrap();
+    git(
+        &repo,
+        &["worktree", "add", "-q", ".worktrees/done", "-b", "done"],
+    );
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+
+    // An ignored clone has history that a backup cannot hold, so the worktree is not offered.
+    let nested = repo.join(".worktrees/done/vendor/lib");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    git(&nested, &["commit", "-q", "--allow-empty", "-m", "lib"]);
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    assert_eq!(report["manual"]["worktrees"], json!([]));
+}
