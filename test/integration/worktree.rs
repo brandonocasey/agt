@@ -550,9 +550,8 @@ fn a_nested_repository_blocks_removal_in_plan_and_yes_alike() {
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
-#[test]
-fn a_registered_submodule_is_not_a_nested_repository() {
-    let f = Fixture::new();
+/// Registers a submodule `name` at `path` in the worktree and commits it.
+fn add_submodule(f: &Fixture, name: &str, path: &str) {
     let sub = f.env.path("sub-origin");
     nest(&f.env, &sub);
     wgit(
@@ -564,11 +563,27 @@ fn a_registered_submodule_is_not_a_nested_repository() {
             "submodule",
             "add",
             "-q",
+            "--name",
+            name,
             &sub.to_string_lossy(),
-            "mod",
+            path,
         ],
     );
     wgit(&f.env, &f.wt, &["commit", "-q", "-m", "add submodule"]);
+}
+
+#[test]
+fn a_registered_submodule_is_not_a_nested_repository() {
+    let f = Fixture::new();
+    add_submodule(&f, "mod", "mod");
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["plan"], true);
+}
+
+#[test]
+fn a_submodule_whose_name_has_a_space_is_registered() {
+    let f = Fixture::new();
+    add_submodule(&f, "my lib", "libdir");
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
     assert_eq!(plan["plan"], true);
 }
@@ -767,3 +782,4 @@ fn a_process_with_its_directory_inside_the_worktree_blocks_removal() {
     }
     assert!(f.wt.join("feature.txt").exists());
 }
+

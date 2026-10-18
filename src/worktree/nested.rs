@@ -39,8 +39,11 @@ fn submodule_paths(root: &Path) -> Result<Vec<String>> {
     if !root.join(".gitmodules").is_file() {
         return Ok(Vec::new());
     }
+    // NUL ends an entry and the first newline splits key from value, so a submodule name or
+    // path with spaces reads back whole.
     let listing = Repo::at(root).git_opt(&[
         "config",
+        "-z",
         "--file",
         ".gitmodules",
         "--get-regexp",
@@ -48,8 +51,8 @@ fn submodule_paths(root: &Path) -> Result<Vec<String>> {
     ])?;
     Ok(listing
         .unwrap_or_default()
-        .lines()
-        .filter_map(|line| line.split_once(' ').map(|(_, path)| path.to_owned()))
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n').map(|(_, path)| path.to_owned()))
         .collect())
 }
 
