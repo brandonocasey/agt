@@ -1,8 +1,5 @@
 use std::path::PathBuf;
 
-use serde_json::json;
-
-use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -26,7 +23,6 @@ mod view;
 use self::approve::approve;
 use self::findings::{comment, finding_add, finding_kill, reply, resolve};
 use self::input::read_source;
-use self::prune::{prune_all, prune_dir};
 use self::run::{pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::usage::UsageInput;
@@ -77,11 +73,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             | Command::List(_)
             | Command::Show { .. }
             | Command::Publish { dry_run: true, .. }
-            | Command::Prune { dry_run: true, .. }
     );
-    if let Command::Prune { all: true, dry_run } = cli.command {
-        return prune_all(&store, dry_run).map(Output::Json);
-    }
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
     let mut ctx = Ctx::new(store, selection, read_only, scratch_git)?;
@@ -241,10 +233,6 @@ pub fn run(cli: Cli) -> Result<Output> {
                 only,
             },
         )?,
-        Command::Prune { dry_run, .. } => {
-            let pruned = prune_dir(&ctx.store, &ctx.dir, clock::now_secs()?, dry_run)?;
-            json!({ "dry_run": dry_run, "pruned": pruned.pruned, "skipped": pruned.skipped })
-        }
     };
     Ok(Output::Json(value))
 }

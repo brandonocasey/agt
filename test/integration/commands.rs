@@ -574,7 +574,7 @@ fn foreign_documents_in_the_store_are_ignored() {
     .unwrap();
     assert_eq!(env.run(&["status"])["target"], key);
     assert_eq!(env.run(&["list"])["threads"].as_array().unwrap().len(), 1);
-    env.run(&["prune", "--all"]);
+    cleanup_reviews(&env, &["--yes"], "9999999999");
     assert!(dir.join("issue-gh-7.json").exists());
     assert!(dir.join("issues").join("issue-gh-8.json").exists());
 }
@@ -670,7 +670,7 @@ fn status_writes_nothing() {
 }
 
 #[test]
-fn prune_by_age() {
+fn reviews_expire_by_age() {
     let env = Env::with_branch();
     env.run(&["comment", "--body", "old"]);
     let day = 24 * 60 * 60;
@@ -681,30 +681,20 @@ fn prune_by_age() {
     let soon = (now + 89 * day).to_string();
     let later = (now + 91 * day).to_string();
 
-    let kept = env.run_with(&["prune"], None, &[("AGT_NOW", &soon)]);
-    assert_eq!(kept["pruned"], serde_json::json!([]));
-    let dry = env.run_with(&["prune", "--dry-run"], None, &[("AGT_NOW", &later)]);
-    assert_eq!(dry["pruned"].as_array().unwrap().len(), 1);
+    let kept = cleanup_reviews(&env, &[], &soon);
+    assert_eq!(kept["plan"]["reviews"], serde_json::json!([]));
+    let plan = cleanup_reviews(&env, &[], &later);
+    assert_eq!(plan["plan"]["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(env.run(&["list"])["threads"].as_array().unwrap().len(), 1);
 
-    let pruned = env.run_with(&["prune"], None, &[("AGT_NOW", &later)]);
-    assert_eq!(pruned["pruned"].as_array().unwrap().len(), 1);
-    assert_eq!(env.run(&["list"])["threads"], serde_json::json!([]));
-
-    env.run(&["comment", "--body", "again"]);
-    let output = env
-        .agt(&env.path("home"))
-        .args(["prune", "--all"])
-        .env("AGT_NOW", &later)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let all: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(all["pruned"].as_array().unwrap().len(), 1);
+    let deleted = cleanup_reviews(&env, &["--yes"], &later);
+    let reviews = deleted["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["category"] == "reviews")
+        .count();
+    assert_eq!(reviews, 1);
     assert_eq!(env.run(&["list"])["threads"], serde_json::json!([]));
 
     let old_key = env.run(&["comment", "--body", "old branch"])["target"].clone();
@@ -1529,4 +1519,21 @@ fn usage_and_time_are_recorded() {
         Some(r#"{"findings": [], "usage": [], "extra": 1}"#),
     );
     assert!(error.contains("unknown field extra"), "{error}");
+}
+
+/// `agt cleanup --only reviews` at `now`, over every repository in the isolated store.
+fn cleanup_reviews(env: &Env, extra: &[&str], now: &str) -> serde_json::Value {
+    let output = env
+        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .args(["cleanup", "--only", "reviews"])
+        .args(extra)
+        .env("AGT_NOW", now)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }

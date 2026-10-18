@@ -82,15 +82,6 @@ pub enum Command {
         #[arg(long)]
         pr: Option<String>,
     },
-    /// Drop targets 90 days after their PR/MR closed, else 90 days after their last change.
-    Prune {
-        /// Prune every repository in the store, not only the current one.
-        #[arg(long)]
-        all: bool,
-        /// Print what would be pruned without deleting.
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 #[derive(Subcommand)]

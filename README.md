@@ -292,12 +292,7 @@ agt review publish --only rv-7k2m.c1p0.r1.f1,h1
 `publish` posts what changed locally since the last publish. See
 [Publish](#publish).
 
-Cleanup:
-
-```sh
-agt review prune --dry-run
-agt review prune --all
-```
+Cleanup: `agt cleanup --only reviews` (plan) and `--yes` (delete), for every repository.
 
 ## Cleanup
 
@@ -386,10 +381,7 @@ Each item is deleted under its own lock without waiting; one that another agt pr
 holds is skipped. The output has `plan` (per category a list of `path`, `key`, `reason`
 and `bytes`), `totals` and `warnings`; a place that cannot be read is a warning and the
 rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
-`why`), `signalled` (`pid`, and `signal`: the last one sent) and `bytes_freed`. `agt review prune` still prunes only reviews; its output has `pruned` and `skipped`
-(`repo`, `key`, `why`: a target that is locked by another agt, has fields this agt does not
-know, or cannot be read), and `agt review prune --all` adds `warnings` and goes on past a
-repository directory or file it cannot read.
+`why`), `signalled` (`pid`, and `signal`: the last one sent) and `bytes_freed`.
 
 ## Reviewed, counting and pruning rules
 
@@ -443,8 +435,8 @@ repository directory or file it cannot read.
   default about two weeks later, unless `run end` has since moved the anchor
   to a commit) the anchor counts as outdated.
 - A target is deleted 90 days after the later of its PR/MR's close or merge
-  and its last change, or, with no closed PR/MR, 90 days after its last change. `sync`, `run end` and `prune`
-  apply this to the current repository; `prune --all` to every repository.
+  and its last change, or, with no closed PR/MR, 90 days after its last change. `sync` and `run end`
+  apply this to the current repository; `agt cleanup --only reviews` to every repository.
 - Each trusted `review-record v2` marker whose `head` is the evaluated head
   adds its `reviews-at-head` to `reviews_at_head` and makes the head reviewed.
   A summary holds one marker per run; a run's newest marker counts.

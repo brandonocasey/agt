@@ -213,7 +213,7 @@ fn github_fork_pr_found_in_parent() {
 }
 
 #[test]
-fn prune_ninety_days_after_close() {
+fn reviews_expire_ninety_days_after_close() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::login(env);
@@ -234,13 +234,33 @@ fn prune_ninety_days_after_close() {
     assert_eq!(synced["review"]["closed_at"], "2026-01-01T00:00:00Z");
 
     // The sync on day 59 is the later change, so the 90 days count from it.
-    let kept = env.run_with(&["prune"], None, &[("AGT_NOW", &at(59 + 89))]);
-    assert_eq!(kept["pruned"], json!([]));
-    let pruned = env.run_with(&["prune"], None, &[("AGT_NOW", &at(59 + 91))]);
+    let kept = cleanup_reviews(env, &[], &at(59 + 89));
+    assert_eq!(kept["plan"]["reviews"], json!([]));
+    let plan = cleanup_reviews(env, &[], &at(59 + 91));
     assert_eq!(
-        pruned["pruned"][0]["target"], "gh-5",
+        plan["plan"]["reviews"][0]["key"], "github.com/me/repo/gh-5",
         "91 days after the last change"
     );
+    assert!(env.state().join("github.com/me/repo/gh-5.json").exists());
+    cleanup_reviews(env, &["--yes"], &at(59 + 91));
+    assert!(!env.state().join("github.com/me/repo/gh-5.json").exists());
+}
+
+/// `agt cleanup --only reviews` at `now`, over every repository in the isolated store.
+fn cleanup_reviews(env: &Env, extra: &[&str], now: &str) -> Value {
+    let output = env
+        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .args(["cleanup", "--only", "reviews"])
+        .args(extra)
+        .env("AGT_NOW", now)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn assert_unsent_finding(local: &Value) {

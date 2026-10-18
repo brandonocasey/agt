@@ -133,23 +133,6 @@ impl Prune {
         }
     }
 
-    fn review_prune(&self, args: &[&str]) -> Value {
-        let output = self
-            .env
-            .command(BIN, &self.env.repo)
-            .args(["review", "prune"])
-            .args(args)
-            .env("AGT_NOW", NOW.to_string())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "agt review prune {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
-    }
-
     fn run(&self, args: &[&str]) -> Value {
         self.run_at(NOW, args)
     }
@@ -813,7 +796,7 @@ fn one_corrupt_file_does_not_stop_the_review_and_local_repo_passes() {
 }
 
 #[test]
-fn review_prune_skips_a_target_whose_publish_lock_is_held() {
+fn cleanup_skips_a_review_whose_publish_lock_is_held() {
     let prune = Prune::new();
     let old = prune.target("github.com/o/a", "old", 200);
     let free = prune.target("github.com/o/a", "free", 200);
@@ -823,53 +806,43 @@ fn review_prune_skips_a_target_whose_publish_lock_is_held() {
         .open(old.with_file_name(".old.publish.lock"))
         .unwrap();
     publish.lock().unwrap();
-    let output = prune
-        .env
-        .command(BIN, &prune.env.repo)
-        .args(["review", "prune", "--all"])
-        .env("AGT_NOW", NOW.to_string())
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["pruned"].as_array().unwrap().len(), 1, "{report}");
+    let report = prune.run(&["--yes", "--only", "reviews"]);
+    assert_eq!(report["deleted"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        report["skipped"][0]["key"], "github.com/o/a/old",
+        "{report}"
+    );
     assert!(old.exists() && !free.exists());
 }
 
 #[test]
-fn review_prune_dry_run_writes_nothing() {
+fn the_review_plan_writes_nothing() {
     let prune = Prune {
         env: Env::with_branch(),
     };
-    prune.env.run(&["prune", "--dry-run"]);
+    prune.run(&["--only", "reviews"]);
     assert!(!prune.env.state().join("local").exists());
-    prune.env.run(&["prune"]);
-    let dirs: Vec<_> = fs::read_dir(prune.env.state().join("local"))
-        .unwrap()
-        .flatten()
-        .collect();
-    assert!(dirs[0].path().join(".repo.json").exists());
 }
 
 #[test]
-fn review_prune_all_goes_on_past_a_corrupt_file_and_reports_it_once() {
+fn the_review_pass_goes_on_past_a_corrupt_file_and_reports_it_once() {
     let prune = Prune::new();
     let a = prune.target("github.com/o/a", "old-a", 120);
     let b = prune.target("github.com/o/b", "old-b", 120);
     let bad = a.with_file_name("bad.json");
     fs::write(&bad, "not json").unwrap();
-    let report = prune.review_prune(&["--all", "--dry-run"]);
-    assert_eq!(report["pruned"].as_array().unwrap().len(), 2, "{report}");
-    let skipped = report["skipped"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1, "{report}");
-    assert_eq!(skipped[0]["key"], "bad");
-    assert_eq!(report["warnings"], json!([]));
-    prune.review_prune(&["--all"]);
+    let report = prune.run(&["--only", "reviews"]);
+    assert_eq!(
+        keys(&report, "reviews"),
+        ["github.com/o/a/old-a", "github.com/o/b/old-b"],
+        "{report}"
+    );
+    prune.run(&["--yes", "--only", "reviews"]);
     assert!(!a.exists() && !b.exists());
     assert!(bad.exists());
-    // The whole-store pass warns once about the same file, next to a healthy target.
+    // The pass warns once about the corrupt file, next to a healthy target.
     let keep = prune.target("github.com/o/a", "fresh", 1);
-    let report = prune.run(&[]);
+    let report = prune.run(&["--only", "reviews"]);
     let warnings = report["warnings"].as_array().unwrap();
     let about_bad = warnings
         .iter()
@@ -880,16 +853,16 @@ fn review_prune_all_goes_on_past_a_corrupt_file_and_reports_it_once() {
 }
 
 #[test]
-fn review_prune_lists_a_target_it_could_not_remove_as_skipped() {
+fn cleanup_lists_a_review_it_could_not_remove_as_skipped() {
     let prune = Prune::new();
     let old = prune.target("github.com/o/a", "busy", 120);
     let lock = old.with_file_name(".busy.lock");
     File::create(&lock).unwrap();
     let guard = File::options().write(true).open(&lock).unwrap();
     guard.lock().unwrap();
-    let report = prune.review_prune(&["--all"]);
+    let report = prune.run(&["--yes", "--only", "reviews"]);
     assert!(old.exists());
-    assert_eq!(report["skipped"][0]["key"], "busy");
+    assert_eq!(report["skipped"][0]["key"], "github.com/o/a/busy");
     assert!(
         report["skipped"][0]["why"]
             .as_str()
@@ -908,11 +881,11 @@ fn an_unreadable_repository_directory_is_a_warning_and_the_pass_goes_on() {
     let closed = prune.target("github.com/o/b", "hidden", 120);
     let dir = closed.parent().unwrap().to_path_buf();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
-    let report = prune.review_prune(&["--all", "--dry-run"]);
+    let report = prune.run(&["--only", "reviews"]);
     let plan = prune.run(&[]);
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     // A reader that ignores permissions (root) sees both; otherwise one is a warning.
-    let seen = report["pruned"].as_array().unwrap().len();
+    let seen = report["plan"]["reviews"].as_array().unwrap().len();
     let warned = report["warnings"].as_array().unwrap().len();
     assert!(
         (seen == 1 && warned == 1) || (seen == 2 && warned == 0),
