@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::disposable::is_disposable;
+use super::disposable::is_os_junk;
 use super::{info, nested};
 use crate::core::error::{Result, fail};
 use crate::git::Repo;
@@ -176,8 +176,9 @@ fn unfilled_submodules(roots: &[PathBuf]) -> Result<()> {
                     let dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
                     if dir { format!("{name}/") } else { name }
                 })
-                // What a tool recreates (a Finder `.DS_Store`) is no loss.
-                .filter(|name| !is_disposable(name))
+                // Only a file the operating system recreates (a Finder `.DS_Store`) is no loss:
+                // nothing here is ignored, so `build/` or `vendor/` may hold real work.
+                .filter(|name| !is_os_junk(name))
                 .map(|name| name.trim_end_matches('/').to_owned())
                 .collect();
             names.sort();

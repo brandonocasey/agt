@@ -20,6 +20,11 @@ const DIRS: [&str; 16] = [
     ".tox",
 ];
 
+/// Whether `name`, a file name, is a file the operating system writes and recreates.
+pub fn is_os_junk(name: &str) -> bool {
+    matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini")
+}
+
 /// Whether `path` (relative, `/`-separated; a trailing `/` marks a directory) is disposable.
 /// Files such as `.env*`, credentials, notes and source are never disposable.
 pub fn is_disposable(path: &str) -> bool {
@@ -39,9 +44,7 @@ pub fn is_disposable(path: &str) -> bool {
     {
         return true;
     }
-    name == ".DS_Store"
-        || name == "Thumbs.db"
-        || name == "desktop.ini"
+    is_os_junk(name)
         || name.ends_with(".log")
         || name.ends_with(".tsbuildinfo")
         || name.ends_with(".swp")

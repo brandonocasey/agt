@@ -1845,3 +1845,40 @@ fn os_junk_in_an_uninitialized_submodule_directory_does_not_block_removal() {
     f.json(&["remove", &wt, "--yes"]);
     assert!(!second.exists());
 }
+
+#[test]
+fn a_build_directory_in_an_uninitialized_submodule_directory_blocks_removal() {
+    let (f, _sub) = with_submodule();
+    let second = f.env.path("trees/second");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "second",
+        &second.to_string_lossy(),
+        "feat",
+    ]);
+    // Nothing in a gitlink directory is ignored, so a `build/` here is not a build output.
+    fs::create_dir_all(second.join("mod/build")).unwrap();
+    fs::write(second.join("mod/build/notes.md"), "work").unwrap();
+    fs::write(second.join("mod/.DS_Store"), "x").unwrap();
+    let wt = second.to_string_lossy().into_owned();
+    for args in [
+        vec!["remove", wt.as_str()],
+        vec!["remove", wt.as_str(), "--yes"],
+    ] {
+        let out = f.agt(&f.env.repo, &args);
+        assert!(
+            !out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("not initialized") && err.contains("build"),
+            "{err}"
+        );
+    }
+    assert!(second.join("mod/build/notes.md").exists());
+}
