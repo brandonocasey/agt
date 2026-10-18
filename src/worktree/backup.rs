@@ -1,0 +1,132 @@
+//! Worktree backups: `agents/backups/<repo>/<id>/backup.json` and `files/`, plus the ref
+//! `refs/agt/backups/<id>` that keeps the snapshot commit alive. Backups are never pruned
+//! automatically.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use clap::{Args, Subcommand};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::output::Output;
+use crate::git::Repo;
+use crate::store::{Namespace, Store};
+
+const FILE: &str = "backup.json";
+pub const REF_PREFIX: &str = "refs/agt/backups/";
+
+#[derive(Serialize, Deserialize)]
+pub struct Record {
+    pub id: String,
+    pub repository: PathBuf,
+    pub worktree: PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+    pub snapshot: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub created: String,
+    pub copied: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Print one backup's record and directory.
+    Show { id: String },
+    /// Delete a backup's ref and directory. Without `--yes` only say what would go.
+    Rm {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+pub fn run(cli: Cli) -> Result<Output> {
+    match cli.command {
+        None => {
+            let backups: Vec<Value> = all()?
+                .iter()
+                .map(|(record, dir)| summary(record, dir))
+                .collect();
+            Ok(Output::Json(json!({ "backups": backups })))
+        }
+        Some(Command::Show { id }) => {
+            let (record, dir) = find(&id)?;
+            Ok(Output::Json(summary(&record, &dir)))
+        }
+        Some(Command::Rm { id, yes }) => {
+            let (record, dir) = find(&id)?;
+            if !yes {
+                return Ok(Output::Json(
+                    json!({ "plan": true, "id": id, "ref": record.reference, "dir": dir }),
+                ));
+            }
+            if record.repository.is_dir() {
+                Repo::at(&record.repository).git(&["update-ref", "-d", &record.reference])?;
+            }
+            fs::remove_dir_all(&dir).map_err(ctx(format!("remove {}", dir.display())))?;
+            Ok(Output::Json(
+                json!({ "removed": id, "ref": record.reference, "dir": dir }),
+            ))
+        }
+    }
+}
+
+fn summary(record: &Record, dir: &Path) -> Value {
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    value["dir"] = json!(dir);
+    value
+}
+
+pub fn root() -> Result<PathBuf> {
+    Ok(Store::open(Namespace::Tasks)?.backups_dir().to_owned())
+}
+
+pub fn write(dir: &Path, record: &Record) -> Result<()> {
+    let text = serde_json::to_string_pretty(record).map_err(ctx("serialize backup record"))?;
+    fs::write(dir.join(FILE), text).map_err(ctx(format!("write {}", dir.join(FILE).display())))
+}
+
+/// Every backup with its directory, oldest first.
+fn all() -> Result<Vec<(Record, PathBuf)>> {
+    let mut found = Vec::new();
+    let Ok(repos) = fs::read_dir(root()?) else {
+        return Ok(found);
+    };
+    for repo in repos.flatten().filter(|entry| entry.path().is_dir()) {
+        for dir in fs::read_dir(repo.path())
+            .map_err(ctx("read backups"))?
+            .flatten()
+        {
+            let Ok(bytes) = fs::read(dir.path().join(FILE)) else {
+                continue;
+            };
+            if let Ok(record) = serde_json::from_slice::<Record>(&bytes) {
+                found.push((record, dir.path()));
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.created.cmp(&b.0.created).then(a.0.id.cmp(&b.0.id)));
+    Ok(found)
+}
+
+pub fn find(id: &str) -> Result<(Record, PathBuf)> {
+    let mut matches: Vec<_> = all()?
+        .into_iter()
+        .filter(|(record, _)| record.id == id)
+        .collect();
+    match matches.len() {
+        0 => fail(format!("no worktree backup {id}")),
+        1 => Ok(matches.remove(0)),
+        _ => Err(Error(format!("several worktree backups are named {id}"))),
+    }
+}

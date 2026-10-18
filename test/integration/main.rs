@@ -14,6 +14,7 @@ mod sync;
 mod task;
 mod wait;
 mod watch;
+mod worktree;
 
 use assert_cmd::Command;
 

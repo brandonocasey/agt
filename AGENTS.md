@@ -15,7 +15,7 @@ mise run test
 ```
 
 `mise run install` installs the binary into `~/.cargo/bin`. Commands run as
-`agt review <command>`, `agt issue <command>`, `agt cleanup`, `agt sessions <command>`, `agt wait`, `agt watch` and `agt ci`; the integration helper `Env::agt` prepends
+`agt review <command>`, `agt issue <command>`, `agt cleanup`, `agt sessions <command>`, `agt worktree <command>`, `agt wait`, `agt watch` and `agt ci`; the integration helper `Env::agt` prepends
 `review` and `Env::issue*` (in `support/issue.rs`, with the fake issue tracker) prepend `issue`.
 
 ## Layout
@@ -25,7 +25,7 @@ persisted `model`), `src/git.rs` and `src/forge` (services, transports, anchors,
 markers) are foundations. `src/review` and `src/issue` are domain modules. Foundations never
 import a domain module and domain modules never import each other;
 `test/integration/agt.rs` scans `src/` and fails on the offending line. `src/task` is the `agt task` domain (records and the session index in `agents/tasks`, the
-Node `agent-task` format). `src/cleanup` is not a domain: it may import every domain's `prune` module and deletes across all namespaces, cache files and orphan processes. `src/sessions` is the `agt sessions` domain (transcript reports; `py.rs` keeps the `agent-sessions` script's number and table formats) and `src/core/transcripts.rs` names the transcript roots it shares with `agt task`. Add new domains (`watch`, `ci`) as sibling modules.
+Node `agent-task` format). `src/cleanup` is not a domain: it may import every domain's `prune` module and deletes across all namespaces, cache files and orphan processes. `src/sessions` is the `agt sessions` domain (transcript reports; `py.rs` keeps the `agent-sessions` script's number and table formats) and `src/core/transcripts.rs` names the transcript roots it shares with `agt task`. `src/worktree` is the `agt worktree` domain (list, remove with a snapshot backup, restore); `src/core/agents.rs` reads running processes and live Claude Code session records for it and for `src/cleanup/procs.rs`. Add new domains (`watch`, `ci`) as sibling modules.
 
 ## Release
 

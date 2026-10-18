@@ -11,6 +11,7 @@ mod store;
 mod task;
 mod wait;
 mod watch;
+mod worktree;
 
 use std::process::ExitCode;
 

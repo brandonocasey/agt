@@ -37,6 +37,15 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// The repository whose work tree is `root`, which MUST be a directory git accepts.
+    pub fn at(root: &Path) -> Self {
+        Self {
+            root: root.to_owned(),
+            env: Vec::new(),
+            _scratch: None,
+        }
+    }
+
     pub fn discover() -> Result<Self> {
         let output = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
@@ -114,7 +123,7 @@ impl Repo {
         Ok(output)
     }
 
-    fn checked(
+    pub fn checked(
         &self,
         args: &[&str],
         input: Option<Vec<u8>>,
@@ -128,11 +137,11 @@ impl Repo {
         Ok(output.stdout)
     }
 
-    fn git(&self, args: &[&str]) -> Result<String> {
+    pub fn git(&self, args: &[&str]) -> Result<String> {
         text(self.checked(args, None, &[])?)
     }
 
-    fn git_opt(&self, args: &[&str]) -> Result<Option<String>> {
+    pub fn git_opt(&self, args: &[&str]) -> Result<Option<String>> {
         let output = self.exec(args, None, &[])?;
         if !output.status.success() {
             return Ok(None);
@@ -140,7 +149,7 @@ impl Repo {
         Ok(Some(text(output.stdout)?).filter(|value| !value.is_empty()))
     }
 
-    fn succeeds(&self, args: &[&str]) -> Result<bool> {
+    pub fn succeeds(&self, args: &[&str]) -> Result<bool> {
         Ok(self.exec(args, None, &[])?.status.success())
     }
 

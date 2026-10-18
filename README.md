@@ -887,6 +887,34 @@ priced at the input rate. A session is labelled by the last 8 characters of its 
 ids start with a timestamp); a subagent rollout is grouped under its role and its parent's
 session. Default Claude Code roots are every `~/.claude*/projects`, links followed.
 
+## Worktrees
+
+`agt worktree` lists linked git worktrees, removes one after backing it up, and restores a backup. Output is JSON.
+
+```sh
+agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
+agt worktree remove PATH [--yes]            # without --yes: print the plan, change nothing
+agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
+agt worktree backups                        # list backups
+agt worktree backups show ID
+agt worktree backups rm ID [--yes]          # delete the backup's ref and directory
+```
+
+`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml`; globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
+
+```toml
+[worktree]
+roots = ["~/Projects/*/*", "~/projects/*/*"]
+```
+
+`remove` refuses the main checkout, a locked worktree, a path that is not a linked worktree, a worktree that holds the current directory, a worktree where a live Claude Code session runs (`~/.claude*/sessions/<pid>.json` with a `cwd` inside it, a running pid and a matching `procStart`), and a worktree with an initialized submodule that is off its recorded commit, dirty, or on no remote-tracking branch and not in the main checkout's clone. With `--yes` it first snapshots, then runs `git worktree remove --force` and `git worktree prune`. It never deletes the branch.
+
+The snapshot is a commit of the whole working tree (tracked changes plus untracked, non-ignored files) with the worktree's HEAD as parent, built in a temporary index and pinned at `refs/agt/backups/<id>`, so the commits outlive the branch. Ignored files that are not disposable (`.env*`, credentials, notes) are copied with their modes. Disposable paths are skipped: `node_modules/`, `.venv/`, `vendor/`, `target/`, `dist/`, `build/`, `coverage/`, `*.log`, `*.tsbuildinfo`, `.DS_Store`, editor swap files and `.cache/agents/scratch/`.
+
+A backup lives in `$XDG_STATE_HOME/agents/backups/<repo>/<YYYYMMDD-HHMM>-worktree-<name>/` as `backup.json` (id, repository, worktree path, branch, head, snapshot commit, ref, created, copied and skipped paths) and `files/`. The id is the directory name. Backups are never pruned automatically.
+
+`restore` recreates the worktree at its original path (or `--path`) and refuses an existing path. It checks out the original branch when it exists and is not checked out elsewhere (warning when its tip moved off the snapshot's parent), detaches when it is checked out elsewhere, and recreates the branch at the snapshot's parent when it is gone. The working tree then matches the snapshot, with modified, deleted and untracked files left unstaged, and the copied ignored files return. At the original path `claude --continue` finds the old session.
+
 ## Wait
 
 `agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every

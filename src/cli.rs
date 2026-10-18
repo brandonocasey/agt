@@ -10,6 +10,7 @@ use crate::sessions;
 use crate::task;
 use crate::wait;
 use crate::watch;
+use crate::worktree;
 
 /// Tools for coding agents.
 #[derive(Parser)]
@@ -35,6 +36,8 @@ enum Command {
     Cleanup(cleanup::Cli),
     /// Cost, context, tool, cache, error and friction reports from agent transcripts.
     Sessions(sessions::Cli),
+    /// Linked worktrees: list them, remove one after a backup, restore a backup.
+    Worktree(worktree::Cli),
     /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
     Wait(wait::Cli),
 }
@@ -48,6 +51,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Issue(args) => issue::run(args),
         Command::Cleanup(args) => cleanup::run(args),
         Command::Sessions(args) => sessions::run(args),
+        Command::Worktree(args) => worktree::run(args),
         Command::Wait(args) => wait::run(args),
     }
 }

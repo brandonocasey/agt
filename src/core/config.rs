@@ -15,6 +15,16 @@ use crate::core::error::{Error, Result, fail};
 pub struct Config {
     #[serde(default)]
     pub issues: Issues,
+    #[serde(default)]
+    pub worktree: Worktree,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Worktree {
+    /// Globs of repository directories `agt worktree list --all` scans; `~` is the home
+    /// directory. `None` means the default layout.
+    pub roots: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
@@ -134,6 +144,17 @@ mod tests {
         let config = Config::load_from(&dir.path().join("agt").join("config.toml")).unwrap();
         assert_eq!(config, Config::default());
         assert!(config.issues.tracker.is_empty());
+    }
+
+    #[test]
+    fn worktree_roots_are_optional() {
+        let (_dir, config) = load("");
+        assert_eq!(config.unwrap().worktree.roots, None);
+        let (_dir, config) = load("[worktree]\nroots = [\"~/code/*\"]\n");
+        assert_eq!(
+            config.unwrap().worktree.roots,
+            Some(vec!["~/code/*".to_owned()])
+        );
     }
 
     #[test]
