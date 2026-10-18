@@ -559,3 +559,22 @@ fn a_registered_submodule_is_not_a_nested_repository() {
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
     assert_eq!(plan["plan"], true);
 }
+
+#[test]
+fn listing_never_rewrites_a_worktree_index() {
+    let f = Fixture::new();
+    let index = PathBuf::from(wgit(
+        &f.env,
+        &f.wt,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    ));
+    // Same content, new mtime: a plain `git status` refreshes and rewrites the index.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(f.wt.join("a.txt"), "a\n").unwrap();
+    let before = fs::read(&index).unwrap();
+    let listed = f.json(&["list"]);
+    assert_eq!(listed["worktrees"].as_array().unwrap().len(), 1);
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["plan"], true);
+    assert_eq!(fs::read(&index).unwrap(), before);
+}

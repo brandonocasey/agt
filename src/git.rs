@@ -89,7 +89,9 @@ impl Repo {
         let mut command = Command::new("git");
         command
             .current_dir(&self.root)
-            .args(["-c", "core.quotepath=false"])
+            // `git status` and friends would otherwise refresh and rewrite the index of a
+            // worktree that is only being read.
+            .args(["--no-optional-locks", "-c", "core.quotepath=false"])
             .args(args)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .envs(env.iter().copied())
