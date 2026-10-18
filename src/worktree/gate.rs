@@ -29,6 +29,7 @@ const UNFINISHED: [&str; 8] = [
 /// Refuses, naming the repository and the reason, when removing the worktree at `worktree`
 /// would delete work that exists nowhere else.
 pub fn check(worktree: &Path, main: &Path) -> Result<()> {
+    worktree_state(worktree)?;
     let found = nested::repositories(worktree)?;
     let strays: Vec<String> = found
         .iter()
@@ -76,6 +77,85 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
         }
         let workdir = workdir_of(&clone);
         holds_nothing_unique(&name, &clone, workdir.as_deref(), &elsewhere)?;
+    }
+    Ok(())
+}
+
+/// What the worktree's own git directory holds that the snapshot, a tree of the working files,
+/// does not: per-worktree refs, an unfinished operation, a staged version that the working file
+/// no longer has, and files in a submodule directory that is not initialized.
+fn worktree_state(worktree: &Path) -> Result<()> {
+    let repo = Repo::at(worktree);
+    let git_dir = PathBuf::from(repo.git(&["rev-parse", "--absolute-git-dir"])?);
+    for marker in UNFINISHED {
+        if git_dir.join(marker).exists() {
+            return fail(format!(
+                "{} has a {} in progress; finish or abort it first",
+                worktree.display(),
+                marker.trim_end_matches("_HEAD").to_lowercase()
+            ));
+        }
+    }
+    let own = repo.git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/worktree",
+        "refs/bisect",
+    ])?;
+    if let Some(reference) = own.lines().next() {
+        return fail(format!(
+            "{} has the per-worktree ref {reference}, which the backup does not keep; delete it or move its commits to a branch first",
+            worktree.display()
+        ));
+    }
+    let status = repo.checked(
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=no",
+        ],
+        None,
+        &[],
+    )?;
+    for entry in status
+        .split(|byte| *byte == 0)
+        .filter(|entry| entry.len() > 3)
+    {
+        let (staged, unstaged) = (entry[0], entry[1]);
+        if staged != b' ' && staged != b'?' && unstaged != b' ' && unstaged != b'?' {
+            return fail(format!(
+                "{} has both staged and unstaged changes: the backup keeps only the working file, so stage or commit them together first",
+                String::from_utf8_lossy(&entry[3..])
+            ));
+        }
+    }
+    unfilled_submodules(worktree)
+}
+
+/// A submodule directory that is not initialized yet holds files: git lists none of them and
+/// the backup keeps none.
+fn unfilled_submodules(worktree: &Path) -> Result<()> {
+    for path in nested::submodule_paths(worktree)? {
+        let dir = worktree.join(&path);
+        if dir.join(".git").exists() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        if !names.is_empty() {
+            return fail(format!(
+                "submodule {path} is not initialized but holds files the backup does not keep: {}; move them first",
+                names.join(", ")
+            ));
+        }
     }
     Ok(())
 }

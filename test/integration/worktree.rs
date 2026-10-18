@@ -1194,3 +1194,198 @@ fn a_submodule_tag_a_linked_worktree_or_an_unfinished_operation_blocks_removal()
     fs::write(clone_of(&f, &sub).join("MERGE_HEAD"), format!("{head}\n")).unwrap();
     refuses_both_ways(&f, "in progress");
 }
+
+#[test]
+fn per_worktree_refs_and_unfinished_operations_block_removal() {
+    let f = Fixture::new();
+    let wt = f.wt.to_string_lossy().into_owned();
+    wgit(&f.env, &f.wt, &["update-ref", "refs/worktree/keep", "HEAD"]);
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "refs/worktree/keep");
+    wgit(&f.env, &f.wt, &["update-ref", "-d", "refs/worktree/keep"]);
+
+    let git_dir = PathBuf::from(wgit(&f.env, &f.wt, &["rev-parse", "--absolute-git-dir"]));
+    for marker in ["rebase-merge", "MERGE_HEAD", "CHERRY_PICK_HEAD"] {
+        let path = git_dir.join(marker);
+        if marker == "rebase-merge" {
+            fs::create_dir(&path).unwrap();
+        } else {
+            fs::write(&path, "0000000000000000000000000000000000000000\n").unwrap();
+        }
+        f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "in progress");
+        if path.is_dir() {
+            fs::remove_dir(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+}
+
+#[test]
+fn a_path_with_staged_and_unstaged_changes_blocks_removal() {
+    let f = Fixture::new();
+    let wt = f.wt.to_string_lossy().into_owned();
+    fs::write(f.wt.join("a.txt"), "staged\n").unwrap();
+    wgit(&f.env, &f.wt, &["add", "a.txt"]);
+    // Staged alone is kept in the snapshot's working tree.
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    fs::write(f.wt.join("a.txt"), "worktree\n").unwrap();
+    refuses_staged(&f, &wt);
+}
+
+fn refuses_staged(f: &Fixture, wt: &str) {
+    f.refuses(&f.env.repo, &["remove", wt, "--yes"], "a.txt");
+    f.refuses(&f.env.repo, &["remove", wt], "staged and unstaged");
+    assert!(f.wt.join("a.txt").exists());
+}
+
+#[test]
+fn files_in_an_uninitialized_submodule_directory_block_removal() {
+    let (f, _sub) = with_submodule();
+    let second = f.env.path("trees/second");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "second",
+        &second.to_string_lossy(),
+        "feat",
+    ]);
+    let wt = second.to_string_lossy().into_owned();
+    // Nothing initialized and nothing written: removal goes ahead as a plan.
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    fs::write(second.join("mod/notes.md"), "mine\n").unwrap();
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "notes.md");
+    assert!(second.join("mod/notes.md").exists());
+}
+
+/// Removes the fixture's worktree, restores it, and returns the restored worktree's path.
+fn remove_and_restore(f: &Fixture) -> Value {
+    let removed = f.remove();
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    removed
+}
+
+#[test]
+fn edits_hidden_by_skip_worktree_or_assume_unchanged_are_backed_up_and_counted_as_changes() {
+    for flag in ["--skip-worktree", "--assume-unchanged"] {
+        let f = Fixture::new();
+        wgit(&f.env, &f.wt, &["update-index", flag, "a.txt"]);
+        fs::write(f.wt.join("a.txt"), "hidden edit\n").unwrap();
+        assert_eq!(
+            wgit(&f.env, &f.wt, &["status", "--porcelain"]),
+            "",
+            "{flag}"
+        );
+        let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+        assert_eq!(plan["snapshot_files"], 1, "{flag}: {plan}");
+        remove_and_restore(&f);
+        assert_eq!(
+            fs::read_to_string(f.wt.join("a.txt")).unwrap(),
+            "hidden edit\n",
+            "{flag}"
+        );
+    }
+}
+
+#[test]
+fn sparse_checkout_files_that_are_absent_stay_in_the_backup() {
+    let f = Fixture::new();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["sparse-checkout", "set", "--no-cone", "/a.txt"],
+    );
+    assert!(!f.wt.join("b.txt").exists());
+    fs::write(f.wt.join("a.txt"), "edited in sparse\n").unwrap();
+    let removed = f.remove();
+    assert_eq!(removed["snapshot_files"], 1, "{removed}");
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    wgit(&f.env, &f.wt, &["sparse-checkout", "disable"]);
+    assert_eq!(
+        fs::read_to_string(f.wt.join("a.txt")).unwrap(),
+        "edited in sparse\n"
+    );
+    assert_eq!(fs::read_to_string(f.wt.join("b.txt")).unwrap(), "b\n");
+    assert_eq!(fs::read_to_string(f.wt.join("c.txt")).unwrap(), "c\n");
+}
+
+#[test]
+fn regenerable_caches_never_block_removal_in_the_worktree_or_a_submodule() {
+    let (f, sub) = with_submodule();
+    ignore_in(&f, &sub, ".pytest_cache/\n__pycache__/");
+    fs::write(
+        f.wt.join(".gitignore"),
+        ".env\n__pycache__/\n.tox/\n.next/\n",
+    )
+    .unwrap();
+    wgit(&f.env, &f.wt, &["add", ".gitignore"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "ignore caches"]);
+    for dir in [
+        "mod/.pytest_cache/v",
+        "mod/pkg/__pycache__",
+        ".tox/py",
+        ".next/cache",
+    ] {
+        fs::create_dir_all(f.wt.join(dir)).unwrap();
+        fs::write(f.wt.join(dir).join("x"), "x").unwrap();
+    }
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["copied_ignored"], json!([]), "{plan}");
+    let skipped = plan["skipped_disposable"].as_array().unwrap();
+    assert!(skipped.iter().any(|s| s == ".tox/"), "{plan}");
+    // A secret next to the caches still blocks.
+    ignore_in(&f, &sub, ".env\n.pytest_cache/\n__pycache__/");
+    fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
+    refuses_both_ways(&f, ".env");
+}
+
+#[test]
+fn ignored_paths_are_listed_once() {
+    let f = Fixture::new();
+    fs::write(f.wt.join(".gitignore"), ".env\n__pycache__/\n*.local\n").unwrap();
+    wgit(&f.env, &f.wt, &["add", ".gitignore"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "ignore"]);
+    // Untracked directories holding only ignored files: git lists the directory and its children.
+    for dir in ["cfg/__pycache__", "cfg/deep"] {
+        fs::create_dir_all(f.wt.join(dir)).unwrap();
+    }
+    fs::create_dir_all(f.wt.join("pkg/__pycache__")).unwrap();
+    fs::write(f.wt.join("pkg/__pycache__/x.pyc"), "x").unwrap();
+    fs::write(f.wt.join("cfg/__pycache__/x.local"), "x").unwrap();
+    fs::write(f.wt.join("pkg/mod.py"), "m\n").unwrap();
+    wgit(&f.env, &f.wt, &["add", "pkg/mod.py"]);
+    fs::write(f.wt.join("cfg/a.local"), "a").unwrap();
+    fs::write(f.wt.join("cfg/deep/b.local"), "b").unwrap();
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    for key in ["copied_ignored", "skipped_disposable"] {
+        let mut listed: Vec<&str> = plan[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let count = listed.len();
+        listed.sort_unstable();
+        listed.dedup();
+        assert_eq!(listed.len(), count, "{key}: {plan}");
+    }
+    assert!(
+        !plan["copied_ignored"].as_array().unwrap().is_empty(),
+        "{plan}"
+    );
+}
+
+#[test]
+fn a_worktree_named_with_repeated_lock_endings_backs_up_and_restores() {
+    let f = Fixture::new();
+    let odd = f.env.path("trees").join("x.lock.lock");
+    worktree_at(&f, "odd", &odd);
+    fs::write(odd.join("note.txt"), "note\n").unwrap();
+    let removed = f.json(&["remove", &odd.to_string_lossy(), "--yes"]);
+    let id = removed["id"].as_str().unwrap();
+    assert!(!id.ends_with(".lock"), "{id}");
+    let restored = f.json(&["restore", id]);
+    assert_eq!(restored["warnings"], json!([]));
+}

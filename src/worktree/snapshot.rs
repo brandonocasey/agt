@@ -79,7 +79,7 @@ fn build(
     reference: &str,
     created: i64,
 ) -> Result<Taken> {
-    let tree = Repo::at(&entry.path).worktree_tree()?;
+    let tree = Repo::at(&entry.path).worktree_tree_with_hidden_edits()?;
     let message = format!("agt worktree backup {id}");
     let snapshot = shared.git(&[
         "-c",
@@ -155,8 +155,18 @@ fn ref_safe(name: &str) -> String {
         }
         previous = if bad { ' ' } else { ch };
     }
-    let trimmed = out.trim_start_matches('.').trim_end_matches('.');
-    let trimmed = trimmed.strip_suffix(".lock").unwrap_or(trimmed);
+    let mut trimmed = out.trim_start_matches('.');
+    // Stripping one ending can expose the other (`x.lock.`, `x.lock.lock`), so go until neither is left.
+    loop {
+        let shorter = trimmed
+            .trim_end_matches('.')
+            .strip_suffix(".lock")
+            .unwrap_or_else(|| trimmed.trim_end_matches('.'));
+        if shorter.len() == trimmed.len() {
+            break;
+        }
+        trimmed = shorter;
+    }
     let trimmed = trimmed.replace("@-", "-");
     if trimmed.is_empty() {
         "worktree".to_owned()
@@ -224,6 +234,11 @@ mod tests {
             "a:b",
             "a..b",
             "x.lock",
+            "x.lock.lock",
+            "x.lock.",
+            "x..lock",
+            "x.lock.lock.",
+            ".lock",
             "trail.",
             ".hidden",
             "a?b*c[d",

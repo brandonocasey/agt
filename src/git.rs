@@ -308,9 +308,8 @@ impl Repo {
         self.git_opt(&["config", "user.name"])
     }
 
-    /// Tree id of the work tree as `git add -A` would stage it, built in a copy of the index so
-    /// the real index is untouched and tracked ignored files stay in the tree.
-    pub fn worktree_tree(&self) -> Result<String> {
+    /// A copy of the index in a scratch directory, to run index-changing commands against.
+    fn scratch_index(&self) -> Result<(tempfile::TempDir, PathBuf)> {
         let index = self.git(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
         let scratch = tempfile::tempdir().map_err(ctx("create temporary index directory"))?;
         let temp_index = scratch.path().join("index");
@@ -332,9 +331,77 @@ impl Repo {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return fail(format!("copy git index {index}: {error}")),
         }
+        Ok((scratch, temp_index))
+    }
+
+    /// Tree id of the work tree as `git add -A` would stage it, built in a copy of the index so
+    /// the real index is untouched and tracked ignored files stay in the tree.
+    pub fn worktree_tree(&self) -> Result<String> {
+        let (_scratch, temp_index) = self.scratch_index()?;
         let env = [("GIT_INDEX_FILE", temp_index.as_path())];
         self.checked(&["add", "-A"], None, &env)?;
         text(self.checked(&["write-tree"], None, &env)?)
+    }
+
+    /// Like [`Self::worktree_tree`], but a tracked file marked skip-worktree or assume-unchanged
+    /// that exists on disk is taken as it is, not as the index has it. A file that is gone (a
+    /// sparse checkout) keeps its entry, or the tree would record it as deleted.
+    pub fn worktree_tree_with_hidden_edits(&self) -> Result<String> {
+        let (_scratch, temp_index) = self.scratch_index()?;
+        self.unhide(&temp_index)?;
+        let env = [("GIT_INDEX_FILE", temp_index.as_path())];
+        self.checked(&["add", "-A"], None, &env)?;
+        text(self.checked(&["write-tree"], None, &env)?)
+    }
+
+    /// The tracked files marked skip-worktree or assume-unchanged that exist on disk and differ
+    /// from the index: edits `git status` does not show.
+    pub fn hidden_edits(&self) -> Result<Vec<String>> {
+        let (_scratch, temp_index) = self.scratch_index()?;
+        let flagged = self.unhide(&temp_index)?;
+        if flagged.is_empty() {
+            return Ok(Vec::new());
+        }
+        let env = [("GIT_INDEX_FILE", temp_index.as_path())];
+        let changed = self.checked(&["diff", "--name-only", "-z", "--no-renames"], None, &env)?;
+        Ok(changed
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .filter(|name| flagged.contains(name))
+            .collect())
+    }
+
+    /// Clears skip-worktree and assume-unchanged in the scratch index for each flagged file that
+    /// exists on disk; returns those paths.
+    fn unhide(&self, temp_index: &Path) -> Result<Vec<String>> {
+        let env = [("GIT_INDEX_FILE", temp_index)];
+        let listing = self.checked(&["ls-files", "-v", "-z"], None, &env)?;
+        let mut flagged = Vec::new();
+        let mut input = Vec::new();
+        for entry in listing.split(|byte| *byte == 0).filter(|e| e.len() > 2) {
+            let (tag, path) = (entry[0], &entry[2..]);
+            if tag != b'S' && !tag.is_ascii_lowercase() {
+                continue;
+            }
+            let name = String::from_utf8_lossy(path).into_owned();
+            if fs::symlink_metadata(self.root.join(&name)).is_ok() {
+                input.extend_from_slice(path);
+                input.push(0);
+                flagged.push(name);
+            }
+        }
+        if !input.is_empty() {
+            // One flag per run: with both, git clears only one of them.
+            for flag in ["--no-skip-worktree", "--no-assume-unchanged"] {
+                self.checked(
+                    &["update-index", flag, "-z", "--stdin"],
+                    Some(input.clone()),
+                    &env,
+                )?;
+            }
+        }
+        Ok(flagged)
     }
 
     /// Non-merge commits in `from..to` (or all of `to` when `from` is `None`), oldest first.

@@ -1,6 +1,6 @@
 //! Which ignored paths a backup skips: what a build or install recreates.
 
-const DIRS: [&str; 7] = [
+const DIRS: [&str; 16] = [
     "node_modules",
     ".venv",
     "vendor",
@@ -8,6 +8,16 @@ const DIRS: [&str; 7] = [
     "dist",
     "build",
     "coverage",
+    // Caches a tool regenerates on its next run.
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".next",
+    ".gradle",
+    ".turbo",
+    ".parcel-cache",
+    ".tox",
 ];
 
 /// Whether `path` (relative, `/`-separated; a trailing `/` marks a directory) is disposable.
@@ -52,6 +62,15 @@ mod tests {
             "target/debug/agt",
             "dist/",
             "coverage/lcov.info",
+            "pkg/__pycache__/",
+            ".pytest_cache/v/cache",
+            ".mypy_cache/",
+            ".ruff_cache/",
+            "web/.next/cache/x",
+            ".gradle/",
+            ".turbo/",
+            ".parcel-cache/",
+            ".tox/py/lib",
             "app.log",
             "x/tsconfig.tsbuildinfo",
             ".DS_Store",
@@ -72,6 +91,9 @@ mod tests {
         for path in [
             ".env",
             ".env.local",
+            ".next.env",
+            "__pycache__",
+            ".tox",
             "config/credentials.json",
             "NOTES.md",
             "src/main.rs",

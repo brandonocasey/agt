@@ -127,7 +127,9 @@ pub fn ignored(root: &Path) -> Result<Ignored> {
         walk(root, &entry, &mut found)?;
     }
     found.copy.sort();
+    found.copy.dedup();
     found.skipped.sort();
+    found.skipped.dedup();
     Ok(found)
 }
 
@@ -187,18 +189,20 @@ fn status(root: &Path) -> Result<Vec<(bool, String)>> {
 pub fn dirty(root: &Path) -> Result<(usize, usize)> {
     let listed = status(root)?;
     let untracked = listed.iter().filter(|(untracked, _)| *untracked).count();
-    Ok((listed.len() - untracked, untracked))
+    let hidden = Repo::at(root).hidden_edits()?.len();
+    Ok((listed.len() - untracked + hidden, untracked))
 }
 
 /// Modified tracked files and untracked files that are not disposable: what removing the
 /// worktree would only keep in its snapshot.
 pub fn unsaved(root: &Path) -> Result<usize> {
-    Ok(status(root)?
+    let shown = status(root)?
         .iter()
         .filter(|(untracked, path)| {
             !*untracked || !is_disposable(path) || root.join(path).join(".git").exists()
         })
-        .count())
+        .count();
+    Ok(shown + Repo::at(root).hidden_edits()?.len())
 }
 
 /// One worktree as `agt worktree list` prints it.
