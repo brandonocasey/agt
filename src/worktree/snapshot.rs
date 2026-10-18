@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use super::backup::{self, REF_PREFIX, Record};
 use super::info::{self, Entry};
 use crate::core::clock;
-use crate::core::error::{Result, ctx};
+use crate::core::error::{Result, ctx, fail};
 use crate::git::Repo;
 
 pub struct Taken {
@@ -31,6 +31,12 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
         &stamp[11..13],
         &stamp[14..16]
     );
+    if entry.head.chars().all(|c| c == '0') {
+        return fail(format!(
+            "{} is on a branch with no commit yet; commit something first, a backup needs a commit to restore on",
+            entry.path.display()
+        ));
+    }
     let name = ref_safe(&entry.path.file_name().unwrap_or_default().to_string_lossy());
     let repo_name = main.file_name().unwrap_or_default().to_string_lossy();
     let shared = Repo::at(main);

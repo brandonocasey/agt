@@ -215,7 +215,9 @@ pub fn describe(repo: &Repo, entry: &Entry, default: Option<&(String, String)>) 
     let (modified, untracked) = dirty(&entry.path)?;
     let ignored = ignored(&entry.path)?.copy.len();
     let (mut ahead, mut behind, mut merged) = (Value::Null, Value::Null, Value::Null);
-    if let Some((_, reference)) = default {
+    // A branch with no commit yet has no HEAD to compare.
+    let unborn = entry.head.chars().all(|c| c == '0');
+    if let Some((_, reference)) = default.filter(|_| !unborn) {
         let counts = repo.git(&[
             "rev-list",
             "--left-right",
@@ -233,6 +235,7 @@ pub fn describe(repo: &Repo, entry: &Entry, default: Option<&(String, String)>) 
         "path": entry.path,
         "branch": entry.branch,
         "detached": entry.branch.is_none(),
+        "unborn": unborn,
         "head": entry.head,
         "locked": entry.locked,
         "modified": modified,

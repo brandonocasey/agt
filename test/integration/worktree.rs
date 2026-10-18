@@ -1079,3 +1079,31 @@ fn backup_ids_are_unique_across_repositories() {
     }
 }
 
+#[test]
+fn a_worktree_on_an_unborn_branch_is_listed_and_not_removed() {
+    let f = Fixture::new();
+    let orphan = f.env.path("trees/orphan");
+    let dir = orphan.to_string_lossy();
+    // `worktree add --orphan` needs git 2.42; this builds the same unborn worktree on older git.
+    f.env.git(&["worktree", "add", "-q", "--detach", &dir]);
+    f.env
+        .git(&["-C", &dir, "checkout", "-q", "--orphan", "orphan"]);
+    f.env.git(&["-C", &dir, "rm", "-rfq", "."]);
+    let listed = f.json(&["list"]);
+    let row = listed["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["branch"] == "orphan")
+        .unwrap();
+    assert_eq!(row["unborn"], true);
+    assert!(row["ahead"].is_null() && row["behind"].is_null() && row["merged"].is_null());
+    assert!(
+        listed["worktrees"].as_array().unwrap().len() == 2,
+        "{listed}"
+    );
+
+    let path = orphan.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &path, "--yes"], "no commit yet");
+    assert!(orphan.exists());
+}
