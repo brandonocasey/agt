@@ -2,7 +2,6 @@
 //! Codex transcripts. Claude Code reports print what the `agent-sessions` script printed; Codex
 //! rollouts are read as Claude Code records (see `codex`).
 
-mod codex;
 mod events;
 mod prices;
 mod py;
@@ -91,6 +90,10 @@ struct CostArgs {
     /// Print rows as JSON.
     #[arg(long)]
     json: bool,
+    /// Print what the session with this full id has cost so far, subagents included, instead
+    /// of the grouped report.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["by", "files"])]
+    session: Option<String>,
     /// Price these transcript or stream-json files instead of the roots.
     files: Vec<String>,
 }
@@ -224,6 +227,11 @@ fn scope(common: Common, files: Vec<String>) -> Result<Scope> {
 
 pub fn run(cli: Cli) -> Result<Output> {
     let text = match cli.command {
+        Command::Cost(CostArgs {
+            session: Some(id),
+            json,
+            ..
+        }) => spend::session(&id, json)?,
         Command::Cost(args) => {
             let scope = scope(args.common, args.files)?;
             spend::cost(&scope, &args.by, args.json)?

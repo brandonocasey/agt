@@ -8,10 +8,11 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::core::error::Result;
+use crate::core::transcripts::Kind;
 use crate::sessions::Scope;
 use crate::sessions::prices::Prices;
 use crate::sessions::py::{self, count, fixed, get, grouped, key, object, text, tok, truthy};
-use crate::sessions::source::{Kind, transcripts};
+use crate::sessions::source::transcripts;
 use crate::sessions::spend::short_project;
 
 // Leading `cd DIR &&`, `cd DIR;`, and `VAR=value;` steps hide the command that did the work.

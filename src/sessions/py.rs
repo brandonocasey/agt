@@ -7,53 +7,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
-static NULL: Value = Value::Null;
-
-/// `value.get(key)` on a dict; `None` (here `Null`) for a missing key or a non-object.
-pub fn get<'a>(value: &'a Value, key: &str) -> &'a Value {
-    value.get(key).unwrap_or(&NULL)
-}
-
-/// `value.get(key) or {}` followed by dict access: a non-object counts as empty.
-pub fn object<'a>(value: &'a Value, key: &str) -> &'a Value {
-    let found = get(value, key);
-    if found.is_object() { found } else { &NULL }
-}
-
-pub fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
-/// `value.get(key) or 0` for a token count.
-pub fn count(value: &Value, key: &str) -> i64 {
-    match get(value, key) {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_f64().map(|float| float as i64))
-            .unwrap_or_default(),
-        Value::Bool(true) => 1,
-        _ => 0,
-    }
-}
-
-pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
-    get(value, key).as_str().unwrap_or_default()
-}
-
-/// A hashable stand-in for a JSON value, as Python sets and dict keys use them.
-pub fn key(value: &Value) -> String {
-    match value {
-        Value::String(text) => format!("s{text}"),
-        other => format!("v{other}"),
-    }
-}
+pub use crate::core::transcripts::json::{count, get, head, key, object, tail, text, truthy};
 
 /// Python's `str.isspace()` set: Unicode white space plus the four separator controls.
 pub fn is_space(c: char) -> bool {
@@ -70,24 +24,6 @@ pub fn split(text: &str) -> impl Iterator<Item = &str> {
 
 pub fn chars(text: &str) -> usize {
     text.chars().count()
-}
-
-/// `text[:n]` by code point.
-pub fn head(text: &str, n: usize) -> &str {
-    text.char_indices()
-        .nth(n)
-        .map_or(text, |(at, _)| &text[..at])
-}
-
-/// `text[-n:]` by code point.
-pub fn tail(text: &str, n: usize) -> &str {
-    let total = chars(text);
-    if total <= n {
-        return text;
-    }
-    text.char_indices()
-        .nth(total - n)
-        .map_or(text, |(at, _)| &text[at..])
 }
 
 /// `f"{value:.{places}f}"`.
@@ -428,13 +364,6 @@ mod tests {
         assert_eq!(str_repr("it's"), "\"it's\"");
         assert_eq!(str_repr("a'b\"c"), "'a\\'b\"c'");
         assert_eq!(counts_repr(&[("m".into(), 2)]), "{'m': 2}");
-    }
-
-    #[test]
-    fn slices_count_code_points() {
-        assert_eq!(head("héllo", 2), "hé");
-        assert_eq!(tail("héllo", 3), "llo");
-        assert_eq!(tail("ab", 5), "ab");
     }
 
     #[test]

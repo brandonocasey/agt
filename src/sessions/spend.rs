@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 
 use crate::core::error::{Result, fail};
+use crate::core::transcripts::session_files;
 use crate::sessions::Scope;
 use crate::sessions::prices::Prices;
 use crate::sessions::py::{self, count, fixed, grouped, text, tok};
@@ -200,6 +201,70 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
         out.push_str(&format!("Fast-mode calls: {fast}\n"));
     }
     Ok(out)
+}
+
+/// What one session cost so far.
+#[derive(Default)]
+pub struct SessionCost {
+    pub calls: i64,
+    /// Input, cache write, cache read and output tokens.
+    pub tokens: [i64; 4],
+    pub usd: f64,
+    /// Calls to a model the price file does not list.
+    pub unpriced_calls: i64,
+}
+
+/// The cost of the session with this full id, across its transcripts and its subagents'.
+pub fn session_cost(session: &str) -> Result<SessionCost> {
+    let prices = Prices::load()?;
+    let mut seen = HashSet::new();
+    let mut cost = SessionCost::default();
+    let found = session_files(&super::source::home(), session);
+    if found.is_empty() {
+        return fail(format!("session {session} has no transcripts"));
+    }
+    for transcript in found {
+        for call in transcript.api_calls("", &mut seen) {
+            cost.calls += 1;
+            for (total, key) in cost.tokens.iter_mut().zip(USAGE_KEYS) {
+                *total += count(&call.usage, key);
+            }
+            match prices.usd(&call.model, &call.usage) {
+                Some(parts) => cost.usd += parts.total(),
+                None => cost.unpriced_calls += 1,
+            }
+        }
+    }
+    Ok(cost)
+}
+
+/// `cost --session`: one session's cost, as a line or as JSON.
+pub fn session(id: &str, as_json: bool) -> Result<String> {
+    let cost = session_cost(id)?;
+    if as_json {
+        let mut object = Map::new();
+        object.insert("session".into(), json!(id));
+        object.insert("calls".into(), json!(cost.calls));
+        for (name, total) in USAGE_KEYS.iter().zip(cost.tokens) {
+            object.insert((*name).to_owned(), json!(total));
+        }
+        object.insert("usd".into(), json!(py::round(cost.usd, 4)));
+        object.insert("unpriced_calls".into(), json!(cost.unpriced_calls));
+        return Ok(py::dumps_indented(&Value::Object(object)) + "\n");
+    }
+    let [input, write, read, output] = cost.tokens.map(|tokens| tok(tokens as f64));
+    let mut line = format!(
+        "Session {id}: ${} over {} calls (in {input}, write {write}, read {read}, out {output})\n",
+        grouped(cost.usd, 2),
+        cost.calls
+    );
+    if cost.unpriced_calls > 0 {
+        line.push_str(&format!(
+            "{} calls to models the price file does not list\n",
+            cost.unpriced_calls
+        ));
+    }
+    Ok(line)
 }
 
 pub fn agents(scope: &Scope) -> Result<String> {

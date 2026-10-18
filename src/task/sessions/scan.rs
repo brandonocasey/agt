@@ -10,30 +10,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::core::error::{Result, ctx};
-use crate::task::files;
-use crate::task::text::{MAX_TEXT, safe_integer, utf16_slice};
+use crate::core::transcripts::{ScanState, Turn, parse_line};
 
 pub const READ_CHUNK: usize = 64 * 1024;
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 const PREFIX_BYTES: u64 = 4_096;
-const ASSISTANT_TEXT: usize = 500;
-
-/// One human or assistant message found in a transcript.
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Turn {
-    pub source: String,
-    pub source_type: String,
-    pub host: String,
-    pub session_id: Option<String>,
-    pub timestamp: Value,
-    pub role: String,
-    pub text: String,
-    pub offset: u64,
-    pub line_bytes: u64,
-    pub event_id: Value,
-    pub inherited: bool,
-}
 
 /// What the index remembers about one transcript file, enough to continue after the bytes it
 /// has already read.
@@ -58,16 +39,6 @@ pub struct FileState {
     pub turns: Vec<Turn>,
 }
 
-#[derive(Clone, Default)]
-pub struct ScanState {
-    pub turns: Vec<Turn>,
-    pub session_id: Option<String>,
-    pub forked_from: Option<String>,
-    pub history_start: Option<i64>,
-    pub malformed: u64,
-    pub oversized: u64,
-}
-
 /// A file's identity and times as `agent-task` records them (milliseconds as a float).
 pub struct Stat {
     pub dev: u64,
@@ -89,191 +60,6 @@ impl Stat {
             changed: millis(metadata.ctime(), metadata.ctime_nsec()),
         }
     }
-}
-
-fn truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::Number(number)) => number.as_f64().is_some_and(|n| n != 0.0),
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(_) => true,
-    }
-}
-
-fn text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
-}
-
-fn non_empty<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    text_field(value, key).filter(|text| !text.is_empty())
-}
-
-fn text_parts(content: Option<&Value>) -> Vec<String> {
-    match content {
-        Some(Value::String(text)) => vec![text.clone()],
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter(|item| {
-                matches!(
-                    text_field(item, "type"),
-                    Some("text" | "input_text" | "output_text")
-                )
-            })
-            .filter_map(|item| text_field(item, "text").map(str::to_owned))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-struct Message {
-    role: String,
-    text: String,
-    session_id: Option<String>,
-}
-
-fn chat_role(message: Option<&Value>) -> Option<&str> {
-    message
-        .and_then(|message| text_field(message, "role"))
-        .filter(|role| matches!(*role, "user" | "assistant"))
-}
-
-fn transcript_message(entry: &Value, session_id: Option<&str>) -> Option<Message> {
-    let fallback = |own: Option<&str>| own.or(session_id).map(str::to_owned);
-    if let (Some(text), Some(own)) = (text_field(entry, "text"), non_empty(entry, "session_id")) {
-        return Some(Message {
-            role: "user".into(),
-            text: text.to_owned(),
-            session_id: Some(own.to_owned()),
-        });
-    }
-    if let (Some(text), Some(own)) = (text_field(entry, "display"), non_empty(entry, "sessionId")) {
-        return Some(Message {
-            role: "user".into(),
-            text: text.to_owned(),
-            session_id: Some(own.to_owned()),
-        });
-    }
-    let kind = text_field(entry, "type");
-    if matches!(kind, Some("user" | "assistant")) && !truthy(entry.get("isMeta")) {
-        let message = entry.get("message");
-        let role = chat_role(message)?;
-        let text = text_parts(message.and_then(|message| message.get("content"))).join("\n");
-        return Some(Message {
-            role: role.to_owned(),
-            text,
-            session_id: fallback(non_empty(entry, "sessionId")),
-        });
-    }
-    if kind == Some("response_item") {
-        let payload = entry.get("payload")?;
-        if text_field(payload, "type") != Some("message") {
-            return None;
-        }
-        let role = chat_role(Some(payload))?;
-        return Some(Message {
-            role: role.to_owned(),
-            text: text_parts(payload.get("content")).join("\n"),
-            session_id: fallback(non_empty(entry, "session_id")),
-        });
-    }
-    None
-}
-
-fn is_injected(message: &Message, entry: &Value) -> bool {
-    if truthy(entry.get("isMeta"))
-        || truthy(entry.get("isCompactSummary"))
-        || text_field(entry, "type") == Some("summary")
-    {
-        return true;
-    }
-    if message.role != "user" {
-        return false;
-    }
-    let text = message.text.trim_start();
-    text.starts_with("# AGENTS.md instructions")
-        || text.starts_with("<environment_context>")
-        || text.starts_with("<skills_instructions>")
-        || text.starts_with("<system")
-        || text.starts_with("<developer")
-}
-
-fn source_kind(file: &str) -> &'static str {
-    if file.contains("/.codex/") {
-        "codex"
-    } else {
-        "claude"
-    }
-}
-
-fn first_truthy(entry: &Value, keys: &[&str]) -> Value {
-    keys.iter()
-        .find_map(|key| entry.get(key).filter(|value| truthy(Some(value))))
-        .cloned()
-        .unwrap_or(Value::Null)
-}
-
-/// Reads one JSON line into `state`, counting it as malformed when it is not JSON.
-pub fn parse_line(line: &[u8], state: &mut ScanState, file: &str, offset: u64) {
-    let parsed = serde_json::from_str::<Value>(&String::from_utf8_lossy(line));
-    match parsed {
-        Ok(Value::Null) | Err(_) => state.malformed += 1,
-        Ok(entry) => read_entry(&entry, line, state, file, offset),
-    }
-}
-
-fn read_entry(entry: &Value, line: &[u8], state: &mut ScanState, file: &str, offset: u64) {
-    if text_field(entry, "type") == Some("session_meta") {
-        let payload = entry.get("payload");
-        let payload_field = |key: &str| payload.and_then(|payload| non_empty(payload, key));
-        if let Some(id) = payload.and_then(|payload| text_field(payload, "id")) {
-            state.session_id = Some(id.to_owned());
-        }
-        state.forked_from = payload_field("forked_from_id")
-            .or_else(|| payload_field("parent_thread_id"))
-            .map(str::to_owned);
-        state.history_start = payload
-            .and_then(|payload| payload.get("subagent_history_start_ordinal"))
-            .and_then(Value::as_f64)
-            .and_then(safe_integer);
-    }
-    for key in ["sessionId", "session_id"] {
-        if let Some(id) = text_field(entry, key) {
-            state.session_id = Some(id.to_owned());
-        }
-    }
-    let Some(message) = transcript_message(entry, state.session_id.as_deref()) else {
-        return;
-    };
-    if message.text.is_empty() || is_injected(&message, entry) {
-        return;
-    }
-    let ordinal = entry
-        .get("ordinal")
-        .and_then(Value::as_f64)
-        .and_then(safe_integer);
-    let inherited = state.forked_from.is_some()
-        && state
-            .history_start
-            .is_some_and(|start| ordinal.is_some_and(|ordinal| ordinal < start));
-    let maximum = if message.role == "user" {
-        MAX_TEXT
-    } else {
-        ASSISTANT_TEXT
-    };
-    state.turns.push(Turn {
-        source: file.to_owned(),
-        source_type: source_kind(file).to_owned(),
-        host: files::hostname(),
-        session_id: message.session_id.or_else(|| state.session_id.clone()),
-        timestamp: first_truthy(entry, &["ts", "timestamp"]),
-        role: message.role,
-        text: utf16_slice(&message.text, 0, maximum),
-        offset,
-        line_bytes: line.len() as u64 + 1,
-        event_id: first_truthy(entry, &["uuid", "id"]),
-        inherited,
-    });
 }
 
 /// Reads up to `length` bytes at `position`, fewer only at the end of the file.

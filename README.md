@@ -864,6 +864,7 @@ printed, and the integration tests compare against the script's output.
 
 ```sh
 agt sessions cost [--by agent,model,project,session,file,harness] [--json] [FILE...]
+agt sessions cost --session ID [--json]   # one session's cost so far, subagents included
 agt sessions agents          # per agent type: runs, start and peak context, calls, USD
 agt sessions tools           # tool calls and the share of cost their results carry
 agt sessions cache-gaps [--gap MIN]
@@ -874,7 +875,10 @@ agt sessions friction [--tsv [--width N]]
 
 Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `--scratch`
 (scratch and probe projects are skipped otherwise), `--root DIR` (repeatable), `--top N` (25) and
-`--harness all|claude|codex`. A root named with `--root` can hold either harness; a file whose
+`--harness all|claude|codex`. `cost --session ID` takes the full session id and prints that one
+session's cost so far from its transcript and its subagents' (it ignores the other options).
+A transcript last changed before the start date is not read, and one in a scratch project is
+counted as skipped only when it is in range. A root named with `--root` can hold either harness; a file whose
 first line is a Codex `session_meta` is read as Codex. Prices come from
 `~/.config/agents/model-prices.json`, or the file `AGT_PRICES` names; models it does not list are
 reported as unpriced.

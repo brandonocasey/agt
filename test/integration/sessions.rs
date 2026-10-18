@@ -103,35 +103,34 @@ fn scratch_projects_are_skipped_and_counted() {
         err,
         "(skipped 1 scratch transcripts; --scratch includes them)\n"
     );
-    // Counted whatever its age, as the script did: before the date check.
     let root = env.path("roots");
     std::fs::create_dir_all(root.join("-tmp-probe")).unwrap();
-    std::fs::write(root.join("-tmp-probe/old.jsonl"), "{}\n").unwrap();
-    let mut late = bare(&env, &["cost", "--since", "2099-01-01", "--root"]);
-    late.arg(&root);
-    let (code, _, err) = run(late);
+    std::fs::write(root.join("-tmp-probe/run.jsonl"), "{}\n").unwrap();
+    let mut named = bare(&env, &["cost", "--since", SINCE, "--root"]);
+    named.arg(&root);
+    let (code, _, err) = run(named);
     assert_eq!(code, Some(0));
     assert_eq!(
         err,
         "(skipped 1 scratch transcripts; --scratch includes them)\n"
     );
+    // A transcript older than the start date is not read, so it is not counted.
+    let mut late = bare(&env, &["cost", "--since", "2099-01-01", "--root"]);
+    late.arg(&root);
+    let (code, _, err) = run(late);
+    assert_eq!(code, Some(0));
+    assert_eq!(err, "");
     // Outside `--project`, it is not counted at all.
     let mut other = bare(
         &env,
-        &[
-            "cost",
-            "--since",
-            "2099-01-01",
-            "--project",
-            "repo",
-            "--root",
-        ],
+        &["cost", "--since", SINCE, "--project", "repo", "--root"],
     );
     other.arg(&root);
     let (code, _, err) = run(other);
     assert_eq!(code, Some(0));
     assert_eq!(err, "");
 }
+
 #[test]
 fn default_roots_follow_linked_claude_profiles() {
     let env = Env::new();
@@ -265,6 +264,61 @@ fn bad_input_fails_with_a_reason() {
     assert_eq!(code, Some(1));
     assert!(
         err.contains("cannot read prices from /nonexistent/prices.json"),
+        "{err}"
+    );
+}
+
+/// Links the fixture transcripts into the isolated home as Claude Code and Codex keep them.
+fn link_transcripts(env: &Env) {
+    let home = env.path("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::os::unix::fs::symlink(fixtures().join("projects"), home.join(".claude/projects")).unwrap();
+    std::os::unix::fs::symlink(fixtures().join("codex"), home.join(".codex/sessions")).unwrap();
+    std::os::unix::fs::symlink(
+        fixtures().join("codex-cases"),
+        home.join(".codex/archived_sessions"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn one_session_prices_with_its_subagents() {
+    let env = Env::new();
+    link_transcripts(&env);
+    let out = stdout(sessions(&env, &["cost", "--session", "aaaaaaaa-1111"]));
+    assert_eq!(
+        out,
+        concat!(
+            "Session aaaaaaaa-1111: $2.08 over 10 calls (in 250.1k, write 71.2k, read 37.1k, out 1.1k)\n",
+            "1 calls to models the price file does not list\n",
+        )
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout(sessions(
+        &env,
+        &["cost", "--session", "aaaaaaaa-1111", "--json"],
+    )))
+    .unwrap();
+    assert_eq!(json["calls"], 10);
+    assert_eq!(json["unpriced_calls"], 1);
+    let codex = stdout(sessions(
+        &env,
+        &["cost", "--session", "0199aaaa-0000-7000-8000-000000000001"],
+    ));
+    assert!(codex.contains(" over 3 calls"), "{codex}");
+    // A built-in subagent's rollout names only its parent thread.
+    let parent = stdout(sessions(
+        &env,
+        &["cost", "--session", "0199cccc-0000-7000-8000-00000000cccc"],
+    ));
+    assert!(
+        parent.contains(" over 2 calls (in 15, write 0, read 0, out 2)"),
+        "{parent}"
+    );
+    let (code, _, err) = run(sessions(&env, &["cost", "--session", "no-such-session"]));
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("session no-such-session has no transcripts"),
         "{err}"
     );
 }

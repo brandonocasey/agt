@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::local::{Lock, hostname, write_private};
 use crate::core::output::Output;
 use crate::task::args::Options;
-use crate::task::files::{self, Lock};
+use crate::task::files;
 use crate::task::text::{js_number, limited, safe_integer};
 
 const STATUSES: [&str; 4] = ["active", "paused", "blocked", "complete"];
@@ -94,7 +95,7 @@ fn write_task(task: &Value) -> Result<()> {
     let temporary = files::root()?.join(format!(".{id}.{}.json", std::process::id()));
     let mut data = serde_json::to_string_pretty(task).map_err(ctx("serialize task"))?;
     data.push('\n');
-    files::write_private(&file, &temporary, data.as_bytes(), true)
+    write_private(&file, &temporary, data.as_bytes(), true)
 }
 
 fn git(args: &[&str], dir: &std::path::Path) -> Option<String> {
@@ -118,7 +119,7 @@ fn context() -> Value {
         .as_deref()
         .and_then(|repo| git(&["rev-parse", "HEAD"], std::path::Path::new(repo)));
     json!({
-        "host": files::hostname(),
+        "host": hostname(),
         "repo": repo,
         "worktree": repo.as_ref().map(|_| cwd.to_string_lossy()),
         "head": head,
@@ -281,7 +282,7 @@ fn platform() -> String {
         "aarch64" => "arm64",
         other => other,
     };
-    format!("{os} {arch} {}", files::hostname())
+    format!("{os} {arch} {}", hostname())
 }
 
 pub fn check(options: &Options) -> Result<Output> {

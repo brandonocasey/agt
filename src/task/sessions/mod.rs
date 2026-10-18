@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -14,9 +13,11 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::{Lock, error_code, private_dir, write_private};
 use crate::core::output::Output;
+use crate::core::transcripts::Turn;
 use crate::task::args::Options;
-use crate::task::files::{self, Lock, error_code};
+use crate::task::files;
 use crate::task::records::pretty;
 use crate::task::text::{js_number, limited, safe_integer, utf16_offset, utf16_slice};
 
@@ -24,7 +25,7 @@ mod discover;
 mod scan;
 
 use self::discover::{Coverage, Unreadable, discover, unique};
-use self::scan::{FileState, Stat, Turn, scan_file, visible_turns};
+use self::scan::{FileState, Stat, scan_file, visible_turns};
 
 const INDEX_VERSION: u64 = 4;
 const CONTEXT_TURNS: usize = 2;
@@ -93,21 +94,10 @@ fn read_index() -> Result<Index> {
 fn ensure_index_root() -> Result<PathBuf> {
     files::ensure_root()?;
     let directory = files::index_root()?;
-    match fs::symlink_metadata(&directory) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return fail("session index directory must not be a symbolic link");
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&directory)
-                .map_err(ctx(format!("create {}", directory.display())))?;
-        }
-        Err(error) => return fail(format!("stat {}: {error}", directory.display())),
+    if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return fail("session index directory must not be a symbolic link");
     }
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .map_err(ctx(format!("chmod {}", directory.display())))?;
+    private_dir(&directory)?;
     Ok(directory)
 }
 
@@ -116,7 +106,7 @@ fn write_index(index: &Index) -> Result<()> {
     let mut data = serde_json::to_string(index).map_err(ctx("serialize session index"))?;
     data.push('\n');
     let temporary = directory.join(format!(".index.{}.json", std::process::id()));
-    files::write_private(
+    write_private(
         &directory.join("index.json"),
         &temporary,
         data.as_bytes(),

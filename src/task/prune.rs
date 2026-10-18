@@ -6,10 +6,11 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::files::{self, Lock};
+use super::files;
 use super::records::{is_id, read_task};
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::Lock;
 use crate::store::prune::{PRUNE_AFTER_SECS, Removal};
 
 /// A finished task record that is old enough to drop.

@@ -1,17 +1,14 @@
 //! Finding the transcript files of Codex and Claude profiles under the home directory.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::path::Path;
 
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::core::error::Result;
-use crate::core::transcripts::{claude_profiles, codex_roots};
-use crate::task::files::{error_code, home};
-use crate::task::sessions::scan::{MAX_LINE_BYTES, READ_CHUNK};
+use crate::core::local::{error_code, home};
+use crate::core::transcripts::{Step, Walker, all_roots, belongs_to, history_files};
 
 #[derive(Clone, Serialize)]
 pub struct Unreadable {
@@ -50,43 +47,6 @@ pub struct Discovered {
     pub coverage: Coverage,
 }
 
-/// Whether the first line of `file` names `session` as its own id.
-fn first_line_session(file: &Path, session: &str) -> bool {
-    let Ok(mut handle) = File::open(file) else {
-        return false;
-    };
-    let mut pending: Vec<u8> = Vec::new();
-    let mut chunk = vec![0u8; READ_CHUNK];
-    while pending.len() <= MAX_LINE_BYTES {
-        let Ok(count) = handle.read(&mut chunk) else {
-            return false;
-        };
-        if count == 0 {
-            break;
-        }
-        let newline = chunk[..count].iter().position(|byte| *byte == b'\n');
-        pending.extend_from_slice(&chunk[..newline.unwrap_or(count)]);
-        if newline.is_some() {
-            break;
-        }
-    }
-    let text = String::from_utf8_lossy(&pending);
-    let encoded = serde_json::to_string(session).unwrap_or_default();
-    if ["id", "sessionId", "session_id"]
-        .iter()
-        .any(|key| text.contains(&format!("\"{key}\":{encoded}")))
-    {
-        return true;
-    }
-    let Ok(entry) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    let own = |value: Option<&Value>| value.and_then(Value::as_str) == Some(session);
-    own(entry.get("payload").and_then(|payload| payload.get("id")))
-        || own(entry.get("sessionId"))
-        || own(entry.get("session_id"))
-}
-
 /// The items in first-seen order without repeats.
 pub fn unique(items: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -104,20 +64,12 @@ fn lossy(path: &Path) -> String {
 /// which is found even beyond the limit.
 pub fn discover(maximum: u64, session: Option<&str>) -> Result<Discovered> {
     let home = home()?;
-    let mut roots = codex_roots(&home).to_vec();
-    let profiles = claude_profiles(&home);
-    for profile in &profiles {
-        roots.extend(["projects", "archive", "archives"].map(|name| profile.join(name)));
-    }
-    let mut files: Vec<String> = Vec::new();
+    let roots = all_roots(&home, true);
+    let mut files: Vec<String> = history_files(&home)
+        .iter()
+        .map(|file| lossy(file))
+        .collect();
     let mut preferred: Vec<String> = Vec::new();
-    let histories = std::iter::once(home.join(".codex").join("history.jsonl"))
-        .chain(profiles.iter().map(|profile| profile.join("history.jsonl")));
-    files.extend(
-        histories
-            .filter(|file| file.exists())
-            .map(|file| lossy(&file)),
-    );
     let mut coverage = Coverage {
         roots: roots.iter().map(|root| lossy(root)).collect(),
         discovered: 0,
@@ -138,46 +90,33 @@ pub fn discover(maximum: u64, session: Option<&str>) -> Result<Discovered> {
         inherited_turns: None,
     };
     let count = |files: &[String], preferred: &[String]| (files.len() + preferred.len()) as u64;
-    let mut pending = roots;
-    while !pending.is_empty() && (session.is_some() || count(&files, &preferred) < maximum) {
-        let directory = pending.pop().unwrap_or_default();
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) => {
+    let mut walker = Walker::new(roots);
+    while session.is_some() || count(&files, &preferred) < maximum {
+        let Some(step) = walker.next() else {
+            break;
+        };
+        match step {
+            Step::Unreadable(directory, error) => {
                 if error.kind() != ErrorKind::NotFound {
                     coverage.unreadable.push(Unreadable {
                         source: lossy(&directory),
                         error: error_code(&error),
                     });
                 }
-                continue;
             }
-        };
-        // Node's `readdirSync` returns names sorted, and the order decides which of two
-        // duplicate transcripts is kept, so the same order is used here.
-        let mut entries: Vec<_> = entries.flatten().collect();
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let kind = entry.file_type();
-            if kind.as_ref().is_ok_and(|kind| kind.is_dir()) {
-                pending.push(path);
-            } else if kind.is_ok_and(|kind| kind.is_file()) && name.ends_with(".jsonl") {
-                if session.is_some_and(|id| name.contains(id) || first_line_session(&path, id)) {
-                    preferred.push(lossy(&path));
-                } else if count(&files, &preferred) < maximum {
+            Step::File(path) if session.is_some_and(|id| belongs_to(&path, id)) => {
+                preferred.push(lossy(&path));
+            }
+            Step::File(path) => {
+                if count(&files, &preferred) < maximum {
                     files.push(lossy(&path));
                 }
-            }
-            if session.is_none() && count(&files, &preferred) >= maximum {
-                break;
             }
         }
     }
     coverage.discovered = files.len() + preferred.len();
     coverage.scan_limit_reached = maximum != u64::MAX && count(&files, &preferred) >= maximum;
-    coverage.unscanned_directories = pending.len();
+    coverage.unscanned_directories = walker.unscanned();
     Ok(Discovered {
         files: unique(preferred.into_iter().chain(files)),
         coverage,

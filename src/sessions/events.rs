@@ -7,9 +7,10 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::core::transcripts::Transcript;
 use crate::sessions::Scope;
 use crate::sessions::py::{self, get, key, text, truthy};
-use crate::sessions::source::{Transcript, transcripts};
+use crate::sessions::source::transcripts;
 use crate::sessions::spend::short_project;
 
 static DENIALS: LazyLock<Vec<(Regex, &str)>> =

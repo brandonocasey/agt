@@ -1,217 +1,14 @@
-//! Finding transcripts and reading their records, in the order the script walked them: the
-//! order decides which file a response copied into a resumed session counts toward.
+//! The transcripts a report reads: the roots or files its scope names, narrowed to its dates,
+//! project and harness.
 
-use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
-use indexmap::IndexMap;
-use regex::Regex;
-use serde_json::Value;
-
-use crate::core::transcripts::codex_roots;
-use crate::sessions::codex::{self, Adapter};
-use crate::sessions::py::{self, get, key, object, text, truthy};
+use crate::core::transcripts::{
+    Kind, Step, Transcript, Walker, claude_projects, codex_roots, is_scratch,
+};
 use crate::sessions::{Harness, Scope};
-
-static SCRATCH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"-cache-agents-scratch|-cache-claude-tmp|^-private-tmp|^-tmp")
-        .expect("valid pattern")
-});
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Claude,
-    Codex,
-}
-
-pub struct Transcript {
-    pub path: PathBuf,
-    pub project: String,
-    pub session: String,
-    pub agent: String,
-    pub kind: Kind,
-    /// A `codex exec` run, whose prompts no person typed.
-    pub scripted: bool,
-}
-
-/// One API response: its last record's usage and model, and how many tools it called.
-pub struct Call {
-    pub usage: Value,
-    pub model: String,
-    pub tools: usize,
-}
-
-fn lines(path: &Path, mut each: impl FnMut(&Value)) {
-    let Ok(file) = File::open(path) else {
-        return;
-    };
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-        if let Ok(record) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) {
-            each(&record);
-        }
-    }
-}
-
-fn first_line(path: &Path) -> Value {
-    let Ok(file) = File::open(path) else {
-        return Value::Null;
-    };
-    let mut line = Vec::new();
-    if BufReader::new(file).read_until(b'\n', &mut line).is_err() {
-        return Value::Null;
-    }
-    serde_json::from_str(&String::from_utf8_lossy(&line)).unwrap_or(Value::Null)
-}
-
-impl Transcript {
-    pub fn harness(&self) -> &'static str {
-        match self.kind {
-            Kind::Claude => "claude",
-            Kind::Codex => "codex",
-        }
-    }
-
-    /// Calls `each` with every record, skipping those stamped before `since` (`YYYY-MM-DD`).
-    pub fn records(&self, since: &str, mut each: impl FnMut(&Value)) {
-        let mut keep = |record: &Value| {
-            let stamp = get(record, "timestamp");
-            if since.is_empty() || stamp.as_str().is_none_or(|stamp| stamp >= since) {
-                each(record);
-            }
-        };
-        match self.kind {
-            Kind::Claude => lines(&self.path, keep),
-            Kind::Codex => {
-                let mut adapter =
-                    Adapter::new(self.path.to_string_lossy().into_owned(), self.scripted);
-                lines(&self.path, |record| adapter.feed(record, &mut keep));
-                adapter.finish(&mut keep);
-            }
-        }
-    }
-
-    /// One `Call` per API response. Transcripts write one record per content block, so tool
-    /// calls are counted across records sharing the response id. Responses whose id is in `seen`
-    /// were counted from an earlier file, such as those copied into a resumed session.
-    pub fn api_calls(&self, since: &str, seen: &mut HashSet<String>) -> Vec<Call> {
-        let mut calls: IndexMap<String, Call> = IndexMap::new();
-        let mut tools: IndexMap<String, HashSet<String>> = IndexMap::new();
-        let mut anonymous = 0usize;
-        self.records(since, |record| {
-            let message = object(record, "message");
-            if text(record, "type") != "assistant"
-                || !truthy(get(message, "usage"))
-                || text(message, "model") == "<synthetic>"
-            {
-                return;
-            }
-            let id = get(message, "id");
-            let name = if truthy(id) {
-                key(id)
-            } else {
-                anonymous += 1;
-                format!("a{anonymous}")
-            };
-            let model = match message.get("model") {
-                Some(Value::String(model)) => model.clone(),
-                Some(other) => other.to_string(),
-                None => "?".into(),
-            };
-            calls.insert(
-                name.clone(),
-                Call {
-                    usage: get(message, "usage").clone(),
-                    model,
-                    tools: 0,
-                },
-            );
-            let used = tools.entry(name).or_default();
-            if let Some(blocks) = get(message, "content").as_array() {
-                for block in blocks {
-                    if text(block, "type") == "tool_use" {
-                        used.insert(key(get(block, "id")));
-                    }
-                }
-            }
-        });
-        calls
-            .into_iter()
-            .filter(|(name, _)| {
-                // Only string ids are shared between files.
-                !name.starts_with('s') || seen.insert(name.clone())
-            })
-            .map(|(name, mut call)| {
-                call.tools = tools.get(&name).map_or(0, HashSet::len);
-                call
-            })
-            .collect()
-    }
-}
-
-/// The `.jsonl` entries of `directory`, in `readdir` order.
-fn jsonl_in(directory: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".jsonl"))
-        .map(|entry| entry.path())
-        .collect()
-}
-
-/// `Path.rglob('*.jsonl')` as Python 3.13+ walks it: a directory's matches are listed when its
-/// parent is scanned, then directories are scanned last-found first, without following links.
-fn rglob(root: &Path) -> Vec<PathBuf> {
-    let mut found = jsonl_in(root);
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                let path = entry.path();
-                found.extend(jsonl_in(&path));
-                stack.push(path);
-            }
-        }
-    }
-    found
-}
-
-/// `Path(text).expanduser()` as a string: `~` expanded, `.` parts, repeated and trailing
-/// slashes dropped.
-fn normalize(text: &str, home: &Path) -> PathBuf {
-    let expanded = match text.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            format!("{}{rest}", home.display())
-        }
-        _ => text.to_owned(),
-    };
-    let absolute = expanded.starts_with('/');
-    let parts: Vec<&str> = expanded
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect();
-    let joined = parts.join("/");
-    PathBuf::from(match (absolute, joined.is_empty()) {
-        (true, _) => format!("/{joined}"),
-        (false, true) => ".".into(),
-        (false, false) => joined,
-    })
-}
 
 fn modified(path: &Path) -> Option<f64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
@@ -219,12 +16,6 @@ fn modified(path: &Path) -> Option<f64> {
         Ok(after) => after.as_secs_f64(),
         Err(before) => -before.duration().as_secs_f64(),
     })
-}
-
-fn stem(path: &Path) -> String {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 pub fn home() -> PathBuf {
@@ -240,193 +31,76 @@ fn wanted(scope: &Scope, kind: Kind) -> bool {
     )
 }
 
-/// `HOME.glob('.claude*/projects')`, sorted: every `.claude` name, links followed.
-fn claude_roots(home: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(home) else {
-        return Vec::new();
-    };
-    let mut roots: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".claude"))
-        .map(|entry| entry.path().join("projects"))
-        .filter(|root| root.is_dir())
-        .collect();
-    roots.sort();
-    roots
-}
-
-/// A file found under a root: which harness wrote it and, for Codex, its session line.
-fn codex_meta(path: &Path, kind: Option<Kind>) -> (Kind, Option<codex::Meta>) {
-    if kind == Some(Kind::Claude) {
-        return (Kind::Claude, None);
-    }
-    let meta = codex::meta(&first_line(path));
-    match (kind, meta) {
-        (_, Some(meta)) => (Kind::Codex, Some(meta)),
-        (Some(Kind::Codex), None) => (Kind::Codex, None),
-        (_, None) => (Kind::Claude, None),
-    }
-}
-
-/// The transcripts in scope, in the script's order. Prints how many scratch files it skipped.
-pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
-    let home = home();
-    let mut found = Vec::new();
-    if !scope.files.is_empty() {
-        for file in &scope.files {
-            let path = PathBuf::from(file);
-            let (kind, meta) = codex_meta(&path, None);
-            if !wanted(scope, kind) {
-                continue;
-            }
-            let project = path
-                .parent()
-                .and_then(Path::file_name)
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            found.push(match meta {
-                Some(meta) => Transcript {
-                    project: codex::project(&meta.cwd),
-                    session: meta.session,
-                    agent: meta.agent,
-                    scripted: meta.scripted,
-                    path,
-                    kind,
-                },
-                None => Transcript {
-                    session: stem(&path),
-                    agent: "main".into(),
-                    scripted: false,
-                    project,
-                    path,
-                    kind,
-                },
-            });
+/// `~` and `~/...` as the home directory.
+fn expand(text: &str, home: &Path) -> PathBuf {
+    match text.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(format!("{}{rest}", home.display()))
         }
-        return found;
+        _ => PathBuf::from(text),
     }
+}
+
+/// The transcripts in scope. Prints how many scratch transcripts it skipped.
+pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
+    if !scope.files.is_empty() {
+        return scope
+            .files
+            .iter()
+            .map(|file| Transcript::of_file(PathBuf::from(file)))
+            .filter(|transcript| wanted(scope, transcript.kind))
+            .collect();
+    }
+    let home = home();
     // A root named on the command line can hold either harness; each file says which.
     let roots: Vec<(PathBuf, Option<Kind>)> = if scope.roots.is_empty() {
-        let mut roots: Vec<(PathBuf, Option<Kind>)> = claude_roots(&home)
+        claude_projects(&home)
             .into_iter()
             .map(|root| (root, Some(Kind::Claude)))
-            .collect();
-        roots.extend(
-            codex_roots(&home)
-                .into_iter()
-                .map(|root| (root, Some(Kind::Codex))),
-        );
-        roots
+            .chain(
+                codex_roots(&home)
+                    .into_iter()
+                    .map(|root| (root, Some(Kind::Codex))),
+            )
+            .collect()
     } else {
         scope
             .roots
             .iter()
-            .map(|root| (normalize(root, &home), None))
+            .map(|root| (expand(root, &home), None))
             .collect()
     };
+    let mut found = Vec::new();
     let mut skipped = 0;
-    for (root, kind) in roots {
-        if kind.is_some_and(|kind| !wanted(scope, kind)) {
+    for (root, hint) in roots {
+        if hint.is_some_and(|kind| !wanted(scope, kind)) {
             continue;
         }
-        for path in rglob(&root) {
-            let Ok(relative) = path.strip_prefix(&root) else {
+        for step in Walker::new(vec![root.clone()]) {
+            let Step::File(path) = step else {
                 continue;
             };
-            let parts: Vec<String> = relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            let outside = |project: &str| {
-                scope
-                    .project
-                    .as_ref()
-                    .is_some_and(|text| !project.contains(text.as_str()))
-            };
-            // Default Claude Code files are filtered before they are opened, as the script did.
-            if kind == Some(Kind::Claude) {
-                if outside(&parts[0]) {
-                    continue;
-                }
-                if !scope.scratch && SCRATCH.is_match(&parts[0]) {
-                    skipped += 1;
-                    continue;
-                }
-            }
-            // A scratch file under a named root counts as skipped whatever its age, as the
-            // script counted it, unless it turns out to be Codex's.
-            if kind.is_none()
-                && !scope.scratch
-                && SCRATCH.is_match(&parts[0])
-                && !outside(&parts[0])
-                && wanted(scope, Kind::Claude)
-                && codex::meta(&first_line(&path)).is_none()
-            {
-                skipped += 1;
-                continue;
-            }
             if modified(&path).is_none_or(|time| time < scope.cutoff) {
                 continue;
             }
-            let (kind, meta) = codex_meta(&path, kind);
-            let project = match (&meta, kind) {
-                (Some(meta), _) => codex::project(&meta.cwd),
-                (None, Kind::Codex) => String::new(),
-                (None, Kind::Claude) => parts[0].clone(),
-            };
-            if !wanted(scope, kind) || outside(&project) {
+            let parts: Vec<String> = path
+                .strip_prefix(&root)
+                .iter()
+                .flat_map(|relative| relative.components())
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let transcript = Transcript::locate(path, &parts, hint);
+            let outside = scope
+                .project
+                .as_ref()
+                .is_some_and(|text| !transcript.project.contains(text.as_str()));
+            if !wanted(scope, transcript.kind) || outside {
                 continue;
             }
-            if !scope.scratch && SCRATCH.is_match(&project) {
+            if !scope.scratch && is_scratch(&transcript.project) {
                 skipped += 1;
                 continue;
             }
-            let transcript = if kind == Kind::Codex {
-                let meta = meta.unwrap_or_else(|| codex::Meta {
-                    cwd: String::new(),
-                    session: py::tail(&stem(&path), 8).to_owned(),
-                    agent: "main".into(),
-                    scripted: false,
-                });
-                Transcript {
-                    path,
-                    project,
-                    session: meta.session,
-                    agent: meta.agent,
-                    scripted: meta.scripted,
-                    kind,
-                }
-            } else {
-                let agent = if parts.iter().any(|part| part == "subagents") {
-                    fs::read_to_string(path.with_extension("meta.json"))
-                        .ok()
-                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                        .map_or_else(
-                            || "?".to_owned(),
-                            |meta| match get(&meta, "agentType") {
-                                Value::String(agent) if !agent.is_empty() => agent.clone(),
-                                _ => "?".to_owned(),
-                            },
-                        )
-                } else if parts.len() > 2 {
-                    "other".to_owned()
-                } else {
-                    "main".to_owned()
-                };
-                let session = if parts.len() > 2 {
-                    parts[1].clone()
-                } else {
-                    stem(&path)
-                };
-                Transcript {
-                    project,
-                    session: py::head(&session, 8).to_owned(),
-                    agent,
-                    scripted: false,
-                    path,
-                    kind,
-                }
-            };
             found.push(transcript);
         }
     }
