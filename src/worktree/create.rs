@@ -1,6 +1,7 @@
 //! `agt worktree create`: a worktree for a branch under the main checkout's `.worktrees/`. A new
 //! branch starts at the newest default base among every remote's live default branch and the
-//! local one; no existing branch is moved.
+//! local one; no existing branch is moved. A branch that exists only as `origin/<branch>` gets a
+//! local branch tracking it.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +16,8 @@ use crate::git::Repo;
 
 #[derive(Args)]
 pub struct Cli {
-    /// The branch to check out; created when it does not exist.
+    /// The branch to check out; created when it does not exist (tracking `origin/<branch>` when
+    /// that exists).
     branch: String,
     /// Start a new branch here instead of at the newest default base.
     #[arg(long, value_name = "COMMIT-ISH")]
@@ -64,8 +66,17 @@ pub fn run(cli: Cli) -> Result<Output> {
             let dir = target(&repo, &cli)?;
             let dir_arg = dir.to_string_lossy();
             let mut value = json!({"reused": false});
+            let remote = format!("refs/remotes/origin/{branch}");
             if exists {
                 repo.git(&["worktree", "add", &dir_arg, branch])?;
+            } else if cli.base.is_none()
+                && repo.succeeds(&["show-ref", "--verify", "--quiet", &remote])?
+            {
+                let upstream = format!("origin/{branch}");
+                repo.git(&[
+                    "worktree", "add", "--track", "-b", branch, &dir_arg, &upstream,
+                ])?;
+                value["tracking"] = json!(upstream);
             } else {
                 value["base"] = add_new(&repo, branch, &dir_arg, cli.base.as_deref())?;
             }

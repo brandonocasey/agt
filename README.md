@@ -966,7 +966,7 @@ A backup lives in `$XDG_STATE_HOME/agents/backups/<repo>/<YYYYMMDD-HHMM>-worktre
 a worktree at `<main checkout>/.worktrees/<branch>` (slashes make subdirectories) or at `--path`,
 and prints JSON. The main checkout is the first entry of `git worktree list`; when it is bare,
 `--path` is required. A branch that a worktree already has checked out returns that worktree
-(`reused: true`); another existing branch gets a worktree without moving. A new branch starts at
+(`reused: true`); another existing branch gets a worktree without moving. A branch that exists only as `origin/<branch>` (no local branch, no `--base`) gets a local branch tracking it, checked out in the worktree (`tracking` names the upstream). A new branch starts at
 `--base`, or at the newest default base: for each remote, its live default
 (`git ls-remote --symref <remote> HEAD`) is fetched and its commit recorded at once, and the local
 default branch (`origin/HEAD`'s, else `main`, else `master`) joins them. The candidate that

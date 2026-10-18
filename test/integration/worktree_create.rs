@@ -611,3 +611,67 @@ fn a_port_outside_a_git_work_tree_is_an_error() {
     assert!(!output.status.success());
     assert!(!ports_file(&env).exists());
 }
+
+#[test]
+fn a_branch_that_exists_only_on_origin_gets_a_tracking_local_branch() {
+    let (env, first) = repo_with_commit();
+    remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "origin", "main"]);
+    let work = env.path("scratch");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "remote-only",
+            work.to_str().unwrap(),
+        ],
+    );
+    let tip = commit(&env, &work, "remote-file", "r");
+    git(&env, &env.repo, &["push", "-q", "origin", "remote-only"]);
+    git(
+        &env,
+        &env.repo,
+        &["worktree", "remove", "--force", work.to_str().unwrap()],
+    );
+    git(&env, &env.repo, &["branch", "-D", "remote-only"]);
+    git(&env, &env.repo, &["fetch", "-q", "origin"]);
+
+    let value = agt_json(&env, &env.repo, &["create", "remote-only"]);
+    assert_eq!(value["reused"], false);
+    assert_eq!(value["tracking"], "origin/remote-only");
+    assert_eq!(value["commit"], tip.as_str());
+    assert_ne!(tip, first);
+    let dir = env.repo.join(".worktrees/remote-only");
+    assert_eq!(git(&env, &dir, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(
+        git(&env, &dir, &["branch", "--show-current"]),
+        "remote-only"
+    );
+    assert_eq!(
+        git(
+            &env,
+            &dir,
+            &["rev-parse", "--abbrev-ref", "remote-only@{upstream}"]
+        ),
+        "origin/remote-only"
+    );
+}
+
+#[test]
+fn a_local_and_a_remote_branch_keep_the_local_one() {
+    let (env, first) = repo_with_commit();
+    remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "origin", "main"]);
+    git(&env, &env.repo, &["branch", "both"]);
+    git(&env, &env.repo, &["push", "-q", "origin", "both"]);
+    let local = commit(&env, &env.repo, "local-only", "l");
+    git(&env, &env.repo, &["branch", "-f", "both", &local]);
+    let value = agt_json(&env, &env.repo, &["create", "both"]);
+    assert_eq!(value["commit"], local.as_str());
+    assert!(value.get("tracking").is_none());
+    assert_ne!(local, first);
+}
