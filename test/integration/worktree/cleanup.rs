@@ -806,3 +806,37 @@ fn an_unreadable_directory_keeps_its_worktree_and_the_pass_goes_on() {
     assert!(sealed.exists());
     assert_eq!(site.branches(), ["main", "z-sealed"]);
 }
+
+#[test]
+fn the_calling_sessions_own_process_in_a_landed_worktree_is_a_warning_not_a_block() {
+    let site = Site::new();
+    let wt = site.branch("done");
+    site.env.git(&["merge", "-q", "done"]);
+    // The test process is agt's parent: the calling session. Its child holds the worktree.
+    let me = std::process::id();
+    let sessions = site.env.path("home/.claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("{me}.json")),
+        json!({"pid": me, "cwd": site.env.repo, "procStart": proc_start(me)}).to_string(),
+    )
+    .unwrap();
+    let _child = super::Reaped::new(site.env.command("sleep", &wt).arg("60").spawn().unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(
+        report["removed"][0]["path"],
+        wt.to_str().unwrap(),
+        "{report}"
+    );
+    assert!(!wt.exists());
+    let warnings = report["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            let text = warning.as_str().unwrap();
+            text.contains("(sleep)") && text.contains("calling session")
+        }),
+        "{report}"
+    );
+}
