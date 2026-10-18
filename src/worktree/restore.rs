@@ -84,6 +84,13 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
 
     let target = info::real(&target)?;
+    // `worktree add` copies a sparse main checkout's patterns. The snapshot goes onto a full
+    // checkout, where every file it changes or deletes is on disk; the backup's own sparse
+    // checkout comes back after it.
+    let repo = Repo::at(&target);
+    if sparse_enabled(&repo) {
+        disable_inherited(&repo, &mut warnings);
+    }
     apply(&target, &record.snapshot)?;
     // Before the ignored files come back: a cone reapply deletes an out-of-cone directory
     // that holds only ignored files.
@@ -102,24 +109,19 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Puts the saved sparse-checkout patterns and per-worktree config back into the restored
 /// worktree and reapplies them; true when it did. A failure is a warning naming the saved
-/// files, not an error: the worktree is restored, as a full checkout. `worktree add` copies a
-/// sparse main checkout's patterns, so a backup that was not sparse turns that off again.
+/// files, not an error: the worktree is restored, as a full checkout.
 fn reapply_sparse(
     saved: &std::path::Path,
     target: &std::path::Path,
     warnings: &mut Vec<String>,
 ) -> bool {
-    let repo = Repo::at(target);
-    let inherited = sparse_enabled(&repo);
     if !snapshot::SAVED_GIT_FILES
         .iter()
         .any(|name| saved.join(name).is_file())
     {
-        if inherited {
-            disable_inherited(&repo, warnings);
-        }
         return false;
     }
+    let repo = Repo::at(target);
     let Ok(git_dir) = repo.git(&["rev-parse", "--absolute-git-dir"]) else {
         return false;
     };
@@ -146,8 +148,6 @@ fn reapply_sparse(
             .is_some_and(|value| value == "true");
         if sparse {
             repo.git(&["sparse-checkout", "reapply"])?;
-        } else if inherited {
-            repo.git(&["sparse-checkout", "disable"])?;
         }
         Ok(sparse)
     };

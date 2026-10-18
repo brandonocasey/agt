@@ -1965,6 +1965,32 @@ fn a_backup_without_saved_files_restores_full_from_a_sparse_main_checkout() {
 }
 
 #[test]
+fn a_dirty_full_worktree_restores_its_changes_from_a_sparse_main_checkout() {
+    let f = Fixture::new();
+    f.dirty();
+    let restored = restore_into_sparse_main(&f);
+    assert_eq!(restored["sparse_checkout"], false);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    // Outside main's patterns: a deleted file stays deleted, a changed one keeps its change.
+    assert!(!f.wt.join("c.txt").exists());
+    assert_eq!(
+        fs::read_to_string(f.wt.join("b.txt")).unwrap(),
+        "b staged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(f.wt.join("a.txt")).unwrap(),
+        "a changed\n"
+    );
+    assert!(f.wt.join("new.bin").exists());
+    assert_eq!(
+        wgit(&f.env, &f.wt, &["ls-files", "-t"])
+            .matches("S ")
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn a_sparse_worktree_keeps_its_own_patterns_when_main_is_sparse() {
     let f = sparse_fixture();
     let restored = restore_into_sparse_main(&f);
