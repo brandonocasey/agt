@@ -338,9 +338,10 @@ fn blocker(
     if let Err(error) = submodules::check(&real, main) {
         return Ok(Some((None, error.to_string())));
     }
-    let inside = nested::find(&real)?;
-    if !inside.is_empty() {
-        return Ok(Some((None, nested::reason(&inside))));
+    match nested::find(&real) {
+        Ok(inside) if inside.is_empty() => {}
+        Ok(inside) => return Ok(Some((None, nested::reason(&inside)))),
+        Err(error) => return Ok(Some((None, error.to_string()))),
     }
     if let Some(reason) = cwds.busy(&real) {
         return Ok(Some((None, reason)));

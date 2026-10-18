@@ -1342,3 +1342,49 @@ fn manual_report_skips_a_worktree_holding_an_ignored_nested_repository() {
     let report = prune.run_at(later(), &["--only", "manual"]);
     assert_eq!(report["manual"]["worktrees"], json!([]));
 }
+
+#[test]
+fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Sealed(PathBuf);
+    impl Drop for Sealed {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+    git(&["worktree", "add", "-q", ".worktrees/a-open", "-b", "a-open"]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        ".worktrees/z-sealed",
+        "-b",
+        "z-sealed",
+    ]);
+    let locked = repo.join(".worktrees/z-sealed/locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let _sealed = Sealed(locked);
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    let listed = report["manual"]["worktrees"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{report}");
+    assert!(listed[0].as_str().unwrap().contains("a-open"), "{report}");
+}

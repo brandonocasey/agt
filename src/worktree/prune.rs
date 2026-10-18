@@ -67,7 +67,7 @@ fn idle(scene: &Scene, entry: &Entry) -> Result<bool> {
         return Ok(false);
     }
     Ok(info::unsaved(&entry.path)? == 0
-        && nested::find(&entry.path)?.is_empty()
+        && nested::find(&entry.path).is_ok_and(|inside| inside.is_empty())
         && agents::live_in(&entry.path).is_none()
         && !recent(&entry.path, clock::now_secs()?)?)
 }
