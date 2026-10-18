@@ -247,7 +247,7 @@ fn refuses_what_it_must_not_remove() {
         .current_dir(&f.env.repo)
         .spawn()
         .unwrap();
-    let _other = Reaped(other);
+    let _other = Reaped::new(other);
     let me = _other.0.id();
     let sessions = f.env.path("home/.claude/sessions");
     fs::create_dir_all(&sessions).unwrap();
@@ -715,11 +715,29 @@ fn remove_and_restore_leave_other_missing_worktrees_registered() {
     assert!(admin("other").exists(), "restore pruned another worktree");
 }
 
-/// A child process killed and reaped when dropped.
-struct Reaped(std::process::Child);
+/// A child process killed and reaped when dropped, with its whole process group when it leads
+/// one, so nothing it forked outlives the test.
+struct Reaped(std::process::Child, bool);
+
+impl Reaped {
+    fn new(child: std::process::Child) -> Self {
+        Self(child, false)
+    }
+
+    /// Runs `command` as the leader of its own process group.
+    fn group(command: &mut std::process::Command) -> Self {
+        use std::os::unix::process::CommandExt;
+        Self(command.process_group(0).spawn().unwrap(), true)
+    }
+}
 
 impl Drop for Reaped {
     fn drop(&mut self) {
+        if self.1 {
+            let group = i32::try_from(self.0.id()).unwrap();
+            // SAFETY: killpg only sends a signal to the group this guard's child leads.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -745,7 +763,7 @@ fn the_calling_session_does_not_block_its_own_removal_but_another_does() {
     assert_eq!(plan["plan"], true);
 
     // CLAUDE_PID names the calling session too.
-    let caller = Reaped(
+    let caller = Reaped::new(
         std::process::Command::new("sleep")
             .arg("60")
             .current_dir(&f.env.repo)
@@ -774,7 +792,7 @@ fn the_calling_session_does_not_block_its_own_removal_but_another_does() {
 fn a_process_with_its_directory_inside_the_worktree_blocks_removal() {
     let f = Fixture::new();
     let wt = f.wt.to_string_lossy().into_owned();
-    let child = Reaped(
+    let child = Reaped::new(
         std::process::Command::new("sleep")
             .arg("60")
             .current_dir(&f.wt)
@@ -841,12 +859,10 @@ fn the_calling_sessions_own_processes_do_not_block_removal_but_others_do() {
     let wt = f.wt.to_string_lossy().into_owned();
     // A fake session: a shell outside the worktree whose child has its directory inside it,
     // as a task server or a tool shell of a Claude Code session does.
-    let session = Reaped(
+    let session = Reaped::group(
         std::process::Command::new("sh")
             .args(["-c", "cd \"$1\" && sleep 30 & wait", "sh", &wt])
-            .current_dir(&f.env.repo)
-            .spawn()
-            .unwrap(),
+            .current_dir(&f.env.repo),
     );
     record_session(&f, session.0.id(), &f.env.repo);
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -883,7 +899,7 @@ fn the_calling_sessions_own_processes_do_not_block_removal_but_others_do() {
     );
 
     // A process of nobody's session still blocks.
-    let stranger = Reaped(
+    let stranger = Reaped::new(
         std::process::Command::new("sleep")
             .arg("30")
             .current_dir(&f.wt)
