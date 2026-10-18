@@ -640,3 +640,39 @@ fn a_failed_backup_leaves_no_ref_and_no_directory() {
         .unwrap_or(0);
     assert_eq!(left, 0);
 }
+
+#[test]
+fn remove_and_restore_leave_other_missing_worktrees_registered() {
+    let f = Fixture::new();
+    let other = f.env.path("trees/other");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "other",
+        &other.to_string_lossy(),
+    ]);
+    fs::remove_dir_all(&other).unwrap();
+    let admin = |name: &str| f.env.repo.join(".git/worktrees").join(name);
+    assert!(admin("other").exists());
+
+    let removed = f.remove();
+    assert!(admin("other").exists(), "remove pruned another worktree");
+
+    // A stale registration of the restore target itself is cleared; the other one stays.
+    let stale = f.env.path("trees/again");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "again",
+        &stale.to_string_lossy(),
+    ]);
+    fs::remove_dir_all(&stale).unwrap();
+    let id = removed["id"].as_str().unwrap();
+    f.json(&["restore", id, "--path", &stale.to_string_lossy()]);
+    assert!(stale.join("feature.txt").exists());
+    assert!(admin("other").exists(), "restore pruned another worktree");
+}

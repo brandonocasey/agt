@@ -33,8 +33,15 @@ pub fn run(cli: Cli) -> Result<Output> {
         ));
     }
     let mut warnings = Vec::new();
-    repo.git(&["worktree", "prune"])?;
     let target_text = target.to_string_lossy().into_owned();
+    // Only the registration of this very path is cleared; other missing worktrees keep theirs.
+    let wanted = lexical_real(&target);
+    if info::entries(&repo)?
+        .iter()
+        .any(|entry| !entry.path.exists() && lexical_real(&entry.path) == wanted)
+    {
+        repo.git(&["worktree", "remove", "--force", &target_text])?;
+    }
     match &record.branch {
         None => {
             repo.git(&["worktree", "add", "--detach", &target_text, &record.head])?;
@@ -80,6 +87,18 @@ pub fn run(cli: Cli) -> Result<Output> {
         "copied_ignored": record.copied.len(),
         "warnings": warnings,
     })))
+}
+
+/// `path` with its parent directory resolved, so a path that no longer exists still compares
+/// equal to the way git recorded it.
+fn lexical_real(path: &std::path::Path) -> PathBuf {
+    match (
+        path.parent().and_then(|dir| fs::canonicalize(dir).ok()),
+        path.file_name(),
+    ) {
+        (Some(dir), Some(name)) => dir.join(name),
+        _ => path.to_owned(),
+    }
 }
 
 /// Makes the working tree match `snapshot` and leaves every difference from HEAD unstaged.

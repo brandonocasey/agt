@@ -55,7 +55,6 @@ pub(super) fn removal(main: &Path, path: &Path, entry: &Entry) -> Result<Value> 
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
-    shared.git(&["worktree", "prune"])?;
     let branches = |pattern: &str| -> Result<Vec<String>> {
         let found = shared.git(&[
             "for-each-ref",
