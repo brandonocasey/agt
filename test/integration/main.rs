@@ -9,6 +9,7 @@ mod issue_read;
 mod matrix;
 mod publish;
 mod reviewed;
+mod session_index;
 mod sessions;
 mod support;
 mod sync;

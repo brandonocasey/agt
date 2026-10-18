@@ -23,7 +23,7 @@ pub struct Cli {
 enum Command {
     /// Local PR/MR-style review threads.
     Review(Box<review::cli::Cli>),
-    /// Durable task records and session search.
+    /// Durable task records.
     Task(task::cli::Cli),
     /// Wait for PR/MR checks and pipelines; GitLab failing specs versus the default branch.
     Ci(ci::Cli),
@@ -31,7 +31,7 @@ enum Command {
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
     Cleanup(cleanup::Cli),
-    /// Cost, context, tool, cache, error and friction reports from agent transcripts.
+    /// Cost, context, tool, cache, error and friction reports from agent transcripts, and search of what you typed.
     Sessions(sessions::Cli),
     /// Worktrees: create, prepare, port, list, remove after a backup, restore.
     Worktree(worktree::Cli),

@@ -1,9 +1,8 @@
-//! `agt task`: durable task records and the private session index.
+//! `agt task`: durable task records.
 
 mod args;
 pub mod cli;
 mod files;
 pub mod prune;
 mod records;
-mod sessions;
 mod text;

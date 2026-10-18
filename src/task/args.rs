@@ -3,7 +3,6 @@ use clap::{Args, Subcommand, ValueEnum, value_parser};
 
 use crate::core::error::{Result, fail};
 use crate::task::records::is_id;
-use crate::task::sessions::{IndexArgs, ResolveArgs, SearchArgs};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -17,12 +16,6 @@ pub enum Command {
     Update(Update),
     /// Add a completed check to a task record.
     Check(Check),
-    /// Update the private session index and show coverage.
-    Index(IndexArgs),
-    /// Resolve an exact session id to its source.
-    Resolve(ResolveArgs),
-    /// Search indexed human turns with bounded context.
-    Search(SearchArgs),
 }
 
 /// Which task a command works on.

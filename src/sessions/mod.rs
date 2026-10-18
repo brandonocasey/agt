@@ -3,6 +3,7 @@
 
 mod events;
 mod fmt;
+mod index;
 mod prices;
 mod source;
 mod spend;
@@ -21,7 +22,8 @@ use crate::core::output::Output;
 /// Cost, context, tools, cache gaps, errors and friction from Claude Code and Codex
 /// transcripts in `~/.claude*/projects` and `~/.codex`. Prices come from
 /// `~/.config/agents/model-prices.json` (override: `AGT_PRICES`). Scratch and probe projects
-/// are skipped unless `--scratch` is given.
+/// are skipped unless `--scratch` is given. `index`, `resolve` and `search` keep a private
+/// index of the transcripts to find sessions and what was typed in them.
 #[derive(Args)]
 pub struct Cli {
     #[command(subcommand)]
@@ -44,6 +46,12 @@ enum Command {
     Denials(Common),
     /// Interrupts, corrections, short replies and repeated prompts.
     Friction(FrictionArgs),
+    /// Update the private session index and show coverage.
+    Index(index::IndexArgs),
+    /// Resolve an exact session id to its source.
+    Resolve(index::ResolveArgs),
+    /// Search indexed human turns with bounded context.
+    Search(index::SearchArgs),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -243,6 +251,9 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Friction(args) => {
             events::friction(&scope(args.common, Vec::new())?, args.tsv, args.width)
         }
+        Command::Index(args) => return index::index_command(&args),
+        Command::Resolve(args) => return index::resolve(&args),
+        Command::Search(args) => return index::search(&args),
     };
     // A reader that stops early, such as `head`, is not an error.
     match std::io::stdout().lock().write_all(text.as_bytes()) {

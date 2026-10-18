@@ -332,7 +332,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   a document with fields this agt does not know (with a warning). Open issues,
   `tracker.json` and anything holding such data stay.
 - `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
-  tasks stay, and so does the session index, a cache that `agt task index` rebuilds.
+  tasks stay, and so does the session index, a cache that `agt sessions index` rebuilds.
 - `locks`: `.<key>.lock` and `.<key>.publish.lock` files whose `<key>.json` is gone,
   except an issue tracker's `.push.publish.lock` while `tracker.json` exists.
 - `backups`: `<namespace>-v<n>-<stamp>` directories that agt made before a schema
@@ -798,21 +798,17 @@ Line numbers refer to the pass's reviewed state: its head commit, or its tree
 for uncommitted work. The output lists the new ids under `added` and
 `killed`.
 
-## Tasks and session search
+## Tasks
 
-`agt task` takes `create`, `list`, `show`, `update`, `check`, `index`, `resolve` and `search`;
-`agt task --help` lists them. Arguments are parsed like every other `agt` command, so a usage
-error (a missing value, an unknown flag or command, a bad `--status`, a `--revision` below 1,
-no command at all) exits with 2 and clap's message; other errors exit with 1.
+`agt task` takes `create`, `list`, `show`, `update` and `check`; `agt task --help` lists them.
+Arguments are parsed like every other `agt` command, so a usage error (a missing value, an
+unknown flag or command, a bad `--status`, a `--revision` below 1, no command at all) exits with
+2 and clap's message; other errors exit with 1.
 
-- Task records are one pretty-printed JSON file each in
-  `$XDG_STATE_HOME/agents/tasks/<id>.json` (mode 0600, directory 0700), guarded by a
-  `.<id>.lock` directory and a `revision` that every write must name (record `version` 1).
-- `index`, `resolve` and `search` keep a private index of Codex and Claude transcripts in
-  `agents/tasks/session-index/index.json` (version 4). It is
-  updated incrementally; a `--rebuild`, a rewritten file or another index version scans again.
-  Environment: `AGENT_TASK_MAX_FILES` and `AGENT_TASK_BYTE_LIMIT` set default limits.
-- `search` prints the coverage report as one JSON line on stderr.
+Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/tasks/<id>.json`
+(mode 0600, directory 0700), guarded by a `.<id>.lock` directory and a `revision` that every
+write must name (record `version` 1). Commands that find or search sessions are
+`agt sessions index`, `resolve` and `search`.
 
 ## CI
 
@@ -865,6 +861,9 @@ agt sessions cache-gaps [--gap MIN]
 agt sessions errors          # tool errors grouped by tool and message
 agt sessions denials         # permission denials grouped by source and reason
 agt sessions friction [--tsv [--width N]]
+agt sessions index [--session ID] [--file FILE] [--rebuild] [--max-files N] [--byte-limit N]
+agt sessions resolve SESSION [index options]
+agt sessions search --query TEXT [--session ID] [--limit N] [index options]
 ```
 
 Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `--scratch`
@@ -887,6 +886,18 @@ result whose `exit_code` is not 0 is an error, read as Claude Code's `Exit code 
 priced at the input rate. A session is labelled by the last 8 characters of its thread id (UUIDv7
 ids start with a timestamp); a subagent rollout is grouped under its role and its parent's
 session. Default Claude Code roots are every `~/.claude*/projects`, links followed.
+
+`index`, `resolve` and `search` find sessions and what was typed in them, with a private index
+of the human turns in Codex and Claude transcripts, prompt history files and
+`--file` in `agents/tasks/session-index/index.json` (version 4). The index is updated
+incrementally; `--rebuild`, a rewritten file or another index version scans again. `index`
+prints the coverage as JSON; `resolve` prints the session's sources and turn count; `search`
+prints up to `--limit` (1 to 100, 20) user turns that contain the query, case-insensitively,
+newest first, with the turns around each, and the coverage as one JSON line on stderr. Turns a
+fork replays from its parent are marked `inherited` and left out of a search without
+`--session`. `--max-files` and `--byte-limit` (or the environment variables
+`AGENT_TASK_MAX_FILES` and `AGENT_TASK_BYTE_LIMIT`) bound a run; `--session` and `resolve` still
+find an exact session beyond `--max-files`.
 
 ## Worktrees
 

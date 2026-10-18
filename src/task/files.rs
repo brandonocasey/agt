@@ -10,10 +10,6 @@ pub fn root() -> Result<PathBuf> {
     Ok(Store::open(Namespace::Tasks)?.root().to_path_buf())
 }
 
-pub fn index_root() -> Result<PathBuf> {
-    Ok(root()?.join("session-index"))
-}
-
 pub fn ensure_root() -> Result<PathBuf> {
     let root = root()?;
     private_dir(&root)?;

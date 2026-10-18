@@ -17,9 +17,7 @@ use crate::core::local::{Lock, error_code, private_dir, write_private};
 use crate::core::output::Output;
 use crate::core::transcripts::Turn;
 use crate::core::transcripts::json::head;
-use crate::task::files;
-use crate::task::records::pretty;
-use crate::task::text::limited;
+use crate::store::{Namespace, Store};
 
 mod args;
 mod discover;
@@ -35,6 +33,8 @@ const INDEX_VERSION: u64 = 4;
 const CONTEXT_TURNS: usize = 2;
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 const UNLIMITED: u64 = u64::MAX;
+/// The longest session id or query accepted.
+const MAX_ARGUMENT: usize = 16_384;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,8 +70,34 @@ struct Indexed {
     turns: Vec<Merged>,
 }
 
+/// The index sits in the tasks directory, which agt creates private.
+fn tasks_root() -> Result<PathBuf> {
+    Ok(Store::open(Namespace::Tasks)?.root().to_path_buf())
+}
+
+fn index_root() -> Result<PathBuf> {
+    Ok(tasks_root()?.join("session-index"))
+}
+
 fn index_file() -> Result<PathBuf> {
-    Ok(files::index_root()?.join("index.json"))
+    Ok(index_root()?.join("index.json"))
+}
+
+/// A required argument: not empty and not longer than [`MAX_ARGUMENT`] bytes.
+fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
+    match value {
+        None | Some("") => fail(format!("{name} must not be empty")),
+        Some(value) if value.len() > MAX_ARGUMENT => {
+            fail(format!("{name} exceeds {MAX_ARGUMENT} bytes"))
+        }
+        Some(value) => Ok(value),
+    }
+}
+
+fn pretty(value: &Value) -> Result<Output> {
+    let mut text = serde_json::to_string_pretty(value).map_err(ctx("serialize output"))?;
+    text.push('\n');
+    Ok(Output::Text(text))
 }
 
 fn read_index() -> Result<Index> {
@@ -96,8 +122,8 @@ fn read_index() -> Result<Index> {
 }
 
 fn ensure_index_root() -> Result<PathBuf> {
-    files::ensure_root()?;
-    let directory = files::index_root()?;
+    private_dir(&tasks_root()?)?;
+    let directory = index_root()?;
     if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return fail("session index directory must not be a symbolic link");
     }
@@ -373,7 +399,7 @@ fn matching<'a>(turns: &'a [Merged], session: &str) -> Vec<&'a Merged> {
 }
 
 pub fn resolve(args: &ResolveArgs) -> Result<Output> {
-    let session = limited(args.session(), "session")?;
+    let session = required(args.session(), "session")?.to_owned();
     let indexed = index_sessions(&args.sources, Some(&session))?;
     let turns = matching(&indexed.turns, &session);
     let Some(first) = turns.first() else {
@@ -395,7 +421,7 @@ pub fn resolve(args: &ResolveArgs) -> Result<Output> {
 }
 
 pub fn search(args: &SearchArgs) -> Result<Output> {
-    let query = limited(Some(&args.query), "query")?.to_lowercase();
+    let query = required(Some(&args.query), "query")?.to_lowercase();
     let limit = usize::from(args.limit);
     let indexed = index_sessions(&args.sources, args.session.as_deref())?;
     let turns: Vec<&Merged> = match args.session.as_deref() {

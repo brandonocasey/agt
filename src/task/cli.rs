@@ -3,9 +3,9 @@ use clap::Args;
 use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::task::args::Command;
-use crate::task::{records, sessions};
+use crate::task::records;
 
-/// Durable task records and session search.
+/// Durable task records.
 #[derive(Args)]
 pub struct Cli {
     #[command(subcommand)]
@@ -19,8 +19,5 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Show(target) => records::show(&target),
         Command::Update(args) => records::update(&args),
         Command::Check(args) => records::check(&args),
-        Command::Index(args) => sessions::index_command(&args),
-        Command::Resolve(args) => sessions::resolve(&args),
-        Command::Search(args) => sessions::search(&args),
     }
 }
