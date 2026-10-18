@@ -1823,3 +1823,25 @@ fn per_worktree_config_of_a_never_sparse_worktree_is_restored() {
         "me@example.test"
     );
 }
+
+#[test]
+fn os_junk_in_an_uninitialized_submodule_directory_does_not_block_removal() {
+    let (f, _sub) = with_submodule();
+    let second = f.env.path("trees/second");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "second",
+        &second.to_string_lossy(),
+        "feat",
+    ]);
+    for junk in [".DS_Store", "Thumbs.db", "desktop.ini"] {
+        fs::write(second.join("mod").join(junk), "x").unwrap();
+    }
+    let wt = second.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    f.json(&["remove", &wt, "--yes"]);
+    assert!(!second.exists());
+}

@@ -40,6 +40,8 @@ pub fn is_disposable(path: &str) -> bool {
         return true;
     }
     name == ".DS_Store"
+        || name == "Thumbs.db"
+        || name == "desktop.ini"
         || name.ends_with(".log")
         || name.ends_with(".tsbuildinfo")
         || name.ends_with(".swp")
@@ -75,6 +77,8 @@ mod tests {
             "x/tsconfig.tsbuildinfo",
             ".DS_Store",
             "src/.DS_Store",
+            "Thumbs.db",
+            "assets/desktop.ini",
             "a.swp",
             "notes.txt~",
             ".#lock",

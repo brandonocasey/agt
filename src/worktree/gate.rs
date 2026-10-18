@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::disposable::is_disposable;
 use super::{info, nested};
 use crate::core::error::{Result, fail};
 use crate::git::Repo;
@@ -170,7 +171,14 @@ fn unfilled_submodules(roots: &[PathBuf]) -> Result<()> {
             };
             let mut names: Vec<String> = entries
                 .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                    if dir { format!("{name}/") } else { name }
+                })
+                // What a tool recreates (a Finder `.DS_Store`) is no loss.
+                .filter(|name| !is_disposable(name))
+                .map(|name| name.trim_end_matches('/').to_owned())
                 .collect();
             names.sort();
             if !names.is_empty() {
