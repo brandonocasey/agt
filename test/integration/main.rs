@@ -15,6 +15,7 @@ mod task;
 mod wait;
 mod watch;
 mod worktree;
+mod worktree_create;
 
 use assert_cmd::Command;
 

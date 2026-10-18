@@ -17,10 +17,7 @@ pub struct Cli {
 
 pub fn run(cli: Cli) -> Result<Output> {
     let repos = if cli.all {
-        roots::repositories()?
-            .iter()
-            .map(|path| Repo::at(path))
-            .collect()
+        roots::repositories()?.into_iter().map(Repo::at).collect()
     } else {
         vec![Repo::discover()?]
     };

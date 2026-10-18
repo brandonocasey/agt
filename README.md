@@ -889,9 +889,14 @@ session. Default Claude Code roots are every `~/.claude*/projects`, links follow
 
 ## Worktrees
 
-`agt worktree` lists linked git worktrees, removes one after backing it up, and restores a backup. Output is JSON.
+`agt worktree` creates git worktrees on the newest default base, installs their dependencies,
+gives each a dev-server port, lists them, removes one after backing it up, and restores a backup.
+Output is JSON.
 
 ```sh
+agt worktree create BRANCH [--base C] [--path P] [--prepare] [--port]
+agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lockfiles
+agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
 agt worktree remove PATH [--yes]            # without --yes: print the plan, change nothing
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
@@ -914,6 +919,40 @@ The snapshot is a commit of the whole working tree (tracked changes plus untrack
 A backup lives in `$XDG_STATE_HOME/agents/backups/<repo>/<YYYYMMDD-HHMM>-worktree-<name>/` as `backup.json` (id, repository, worktree path, branch, head, snapshot commit, ref, created, copied and skipped paths) and `files/`. The id is the directory name. Backups are never pruned automatically.
 
 `restore` recreates the worktree at its original path (or `--path`) and refuses an existing path. It checks out the original branch when it exists and is not checked out elsewhere (warning when its tip moved off the snapshot's parent), detaches when it is checked out elsewhere, and recreates the branch at the snapshot's parent when it is gone. The working tree then matches the snapshot, with modified, deleted and untracked files left unstaged, and the copied ignored files return. At the original path `claude --continue` finds the old session.
+
+`agt worktree create <branch> [--base COMMIT-ISH] [--path P] [--prepare] [--port]` puts a branch in
+a worktree at `<main checkout>/.worktrees/<branch>` (slashes make subdirectories) or at `--path`,
+and prints JSON. The main checkout is the first entry of `git worktree list`; when it is bare,
+`--path` is required. A branch that a worktree already has checked out returns that worktree
+(`reused: true`); another existing branch gets a worktree without moving. A new branch starts at
+`--base`, or at the newest default base: for each remote, its live default
+(`git ls-remote --symref <remote> HEAD`) is fetched and its commit recorded at once, and the local
+default branch (`origin/HEAD`'s, else `main`, else `master`) joins them. The candidate that
+contains all the others wins; when they diverge, origin's fetched default is used and
+`base.diverged` is true. `base.candidates` lists every candidate with its commit. No existing
+branch or remote-tracking branch moves, and a remote that cannot be queried or fetched is an
+error naming it. A `.gitmodules` file triggers `git submodule update --init --recursive`.
+
+`agt worktree prepare [PATH] [--clone-deps]` installs dependencies in a worktree (default: the
+current one). It runs `mise install` first when `mise.toml`, `.mise.toml` or `.tool-versions`
+exists and `mise` is on PATH, then one install per lockfile in the root: `package-lock.json`
+`npm ci`; `pnpm-lock.yaml` `pnpm install --frozen-lockfile`; `yarn.lock` `yarn install --immutable`
+(Yarn 2+: a `.yarnrc.yml` or a `packageManager` field of `yarn@2` or later) else
+`yarn install --frozen-lockfile`; `bun.lock`/`bun.lockb` `bun install --frozen-lockfile`;
+`uv.lock` `uv sync --frozen`; `poetry.lock` `poetry install`; `Cargo.lock` `cargo fetch --locked`;
+`go.sum` `go mod download`. Each step reports its command, `exit`, `duration_ms` and `log`
+(under `$XDG_CACHE_HOME/agents/output/`); the exit status is 1 when a step fails. Dependency
+directories are never symlinked. When an install fails and the lockfile is byte-identical to the
+main checkout's, the step and the report carry `clone_available: true`. `--clone-deps` copies
+every `node_modules` of the main checkout (nested ones too) copy-on-write (`cp -cR` on macOS,
+`cp --reflink=auto -R` on Linux) instead of installing, then runs `npm run prepare --if-present`
+when there is a `package-lock.json`, and reports `deps_from: "clone"`.
+
+`agt worktree port [PATH] [--env]` gives a worktree a stable TCP port for its dev server. The
+first call picks a free port between 10000 and 32767 (below the OS ephemeral ranges) and records
+it in `$XDG_STATE_HOME/agents/worktrees/ports.json` under a lock, keyed by the worktree's absolute
+path; later calls return it. A port recorded for another worktree is never handed out, and
+entries whose path no longer exists are dropped on every write. `--env` prints `PORT=<n>`.
 
 ## Wait
 

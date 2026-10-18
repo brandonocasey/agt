@@ -1,9 +1,14 @@
-//! `agt worktree`: list linked worktrees, remove one after a snapshot backup, restore a backup.
+//! `agt worktree`: create a worktree on the newest default base, install its dependencies, give
+//! it a stable dev-server port, list linked worktrees, remove one after a snapshot backup, and
+//! restore a backup.
 
 mod backup;
+mod create;
 mod disposable;
 mod info;
 mod list;
+mod port;
+mod prepare;
 mod remove;
 mod restore;
 mod roots;
@@ -11,9 +16,10 @@ mod snapshot;
 mod submodules;
 
 use clap::{Args, Subcommand};
+use serde_json::Value;
 
 use crate::core::error::Result;
-use crate::core::output::Output;
+use crate::core::output::{self, Output};
 
 #[derive(Args)]
 pub struct Cli {
@@ -23,6 +29,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a worktree for a branch under `.worktrees/`, on the newest default base.
+    Create(create::Cli),
+    /// Install a worktree's dependencies from its lockfiles.
+    Prepare(prepare::Cli),
+    /// A stable dev-server TCP port for a worktree.
+    Port(port::Cli),
     /// Linked worktrees with their dirty counts, ahead/behind and merged state.
     List(list::Cli),
     /// Back up a worktree, then remove it; the branch stays. Without `--yes` only a plan.
@@ -35,9 +47,21 @@ enum Command {
 
 pub fn run(cli: Cli) -> Result<Output> {
     match cli.command {
+        Command::Create(args) => create::run(args),
+        Command::Prepare(args) => prepare::run(args),
+        Command::Port(args) => port::run(args),
         Command::List(args) => list::run(args),
         Command::Remove(args) => remove::run(args),
         Command::Restore(args) => restore::run(args),
         Command::Backups(args) => backup::run(args),
     }
+}
+
+/// Prints `value`; a failed step still prints its report but exits 1.
+fn emit(value: Value, ok: bool) -> Result<Output> {
+    if ok {
+        return Ok(Output::Json(value));
+    }
+    output::print(Output::Json(value))?;
+    Ok(Output::Exit(1))
 }

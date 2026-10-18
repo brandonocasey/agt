@@ -25,7 +25,7 @@ pub fn check(worktree: &Path, main: &Path) -> Result<()> {
                 "{name} is not at the commit the worktree records; check it in or reset it first"
             ));
         }
-        let sub = Repo::at(&worktree.join(path));
+        let sub = Repo::at(worktree.join(path));
         let dirty = sub.git(&["status", "--porcelain", "--ignore-submodules=none"])?;
         if !dirty.is_empty() {
             return fail(format!("{name} has uncommitted changes"));

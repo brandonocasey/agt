@@ -36,7 +36,7 @@ enum Command {
     Cleanup(cleanup::Cli),
     /// Cost, context, tool, cache, error and friction reports from agent transcripts.
     Sessions(sessions::Cli),
-    /// Linked worktrees: list them, remove one after a backup, restore a backup.
+    /// Worktrees: create, prepare, port, list, remove after a backup, restore.
     Worktree(worktree::Cli),
     /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
     Wait(wait::Cli),

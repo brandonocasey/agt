@@ -37,10 +37,11 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// The repository whose work tree is `root`, which MUST be a directory git accepts.
-    pub fn at(root: &Path) -> Self {
+    /// The repository whose work tree is `root`, which MUST be a directory git accepts; it need
+    /// not be the current directory.
+    pub fn at(root: impl Into<PathBuf>) -> Self {
         Self {
-            root: root.to_owned(),
+            root: root.into(),
             env: Vec::new(),
             _scratch: None,
         }
