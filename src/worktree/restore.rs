@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -91,10 +92,13 @@ pub fn run(cli: Cli) -> Result<Output> {
     if sparse_enabled(&repo) {
         disable_inherited(&repo, &mut warnings);
     }
-    apply(&target, &record.snapshot)?;
+    let deleted = apply(&target, &record.snapshot)?;
     // Before the ignored files come back: a cone reapply deletes an out-of-cone directory
     // that holds only ignored files.
     let sparse = reapply_sparse(&dir.join(snapshot::SAVED_GIT_DIR), &target, &mut warnings);
+    if sparse {
+        restage_deletions(&repo, &deleted, &mut warnings);
+    }
     snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
     Ok(Output::Json(json!({
         "sparse_checkout": sparse,
@@ -205,8 +209,55 @@ fn lexical_real(path: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Stages again the snapshot's deletions that the sparse reapply marked skip-worktree. A
+/// deletion outside the cone cannot stay unstaged in a sparse checkout: the reapply treats the
+/// missing file as up to date, and the next commit would keep it.
+fn restage_deletions(repo: &Repo, deleted: &[Vec<u8>], warnings: &mut Vec<String>) {
+    let attempt = || -> Result<()> {
+        if deleted.is_empty() {
+            return Ok(());
+        }
+        let wanted: HashSet<&[u8]> = deleted.iter().map(Vec::as_slice).collect();
+        // `ls-files` expands a sparse index, so a collapsed directory still lists its files.
+        let listing = repo.checked(&["ls-files", "-t", "-z"], None, &[])?;
+        let mut skipped: Vec<u8> = Vec::new();
+        for entry in listing.split(|byte| *byte == 0) {
+            if let Some(path) = entry.strip_prefix(b"S ")
+                && wanted.contains(path)
+            {
+                skipped.extend_from_slice(path);
+                skipped.push(0);
+            }
+        }
+        if skipped.is_empty() {
+            return Ok(());
+        }
+        repo.checked(
+            &[
+                "--literal-pathspecs",
+                "rm",
+                "--cached",
+                "--sparse",
+                "--quiet",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            Some(skipped),
+            &[],
+        )?;
+        Ok(())
+    };
+    if let Err(error) = attempt() {
+        warnings.push(format!(
+            "could not stage again the deletions outside the sparse checkout ({})",
+            error.0
+        ));
+    }
+}
+
 /// Makes the working tree match `snapshot` and leaves every difference from HEAD unstaged.
-fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<()> {
+/// Returns the paths it deleted.
+fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<Vec<Vec<u8>>> {
     let repo = Repo::at(worktree);
     let raw = repo.checked(
         &["diff-tree", "-r", "--no-renames", "-z", "HEAD", snapshot],
@@ -215,6 +266,7 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<()> {
     )?;
     let mut fields = raw.split(|byte| *byte == 0);
     let mut changed: Vec<u8> = Vec::new();
+    let mut deleted: Vec<Vec<u8>> = Vec::new();
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
         let Some(path) = fields.next() else { break };
         let header = String::from_utf8_lossy(header);
@@ -226,6 +278,7 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<()> {
         if parts.get(4).is_some_and(|status| *status == "D") {
             let file = worktree.join(String::from_utf8_lossy(path).as_ref());
             fs::remove_file(&file).map_err(ctx(format!("remove {}", file.display())))?;
+            deleted.push(path.to_vec());
             continue;
         }
         changed.extend_from_slice(path);
@@ -244,5 +297,5 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<()> {
         )?;
     }
     repo.git(&["reset", "-q"])?;
-    Ok(())
+    Ok(deleted)
 }

@@ -1699,6 +1699,51 @@ fn restore_reapplies_the_sparse_checkout_and_says_so() {
     assert!(!f.wt.join("d3").exists());
 }
 
+/// Removes and restores `f` after staging the deletion of `d3/c` (outside the cone) and
+/// deleting `d1/a` (inside it, unstaged); both deletions must be there afterwards.
+fn assert_restore_keeps_deletions(f: &Fixture) {
+    wgit(&f.env, &f.wt, &["rm", "-q", "--sparse", "d3/c"]);
+    fs::remove_file(f.wt.join("d1/a")).unwrap();
+    let removed = f.remove();
+    let id = removed["id"].as_str().unwrap();
+    let restored = f.json(&["restore", id]);
+    assert_eq!(restored["sparse_checkout"], true, "{restored}");
+    assert_eq!(restored["warnings"], json!([]));
+    assert_eq!(
+        wgit(&f.env, &f.wt, &["status", "--porcelain"]),
+        " D d1/a\nD  d3/c"
+    );
+}
+
+#[test]
+fn restore_keeps_a_staged_deletion_outside_the_sparse_cone() {
+    let f = sparse_fixture();
+    wgit(&f.env, &f.wt, &["config", "index.sparse", "false"]);
+    assert_restore_keeps_deletions(&f);
+}
+
+#[test]
+fn restore_keeps_a_staged_deletion_outside_a_cone_with_a_sparse_index() {
+    let f = sparse_fixture();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["sparse-checkout", "init", "--cone", "--sparse-index"],
+    );
+    assert_restore_keeps_deletions(&f);
+}
+
+#[test]
+fn restore_keeps_a_staged_deletion_outside_a_non_cone_sparse_checkout() {
+    let f = sparse_fixture();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["sparse-checkout", "set", "--no-cone", "/d1/", "/d2/"],
+    );
+    assert_restore_keeps_deletions(&f);
+}
+
 #[test]
 fn restore_of_a_full_checkout_does_not_mention_sparse_checkout() {
     let f = Fixture::new();
