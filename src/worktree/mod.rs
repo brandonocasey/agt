@@ -3,12 +3,16 @@
 //! restore a backup.
 
 mod backup;
+mod cleanup;
 mod create;
 mod disposable;
+mod idle;
 mod info;
+mod landed;
 mod list;
 mod port;
 mod prepare;
+pub mod prune;
 mod remove;
 mod restore;
 mod roots;
@@ -39,6 +43,9 @@ enum Command {
     List(list::Cli),
     /// Back up a worktree, then remove it; the branch stays. Without `--yes` only a plan.
     Remove(remove::Cli),
+    /// Remove worktrees and delete branches whose work landed in the default branch. Without
+    /// `--yes` only a plan.
+    Cleanup(cleanup::Cli),
     /// Recreate a removed worktree and its uncommitted files from a backup.
     Restore(restore::Cli),
     /// List, show or delete worktree backups.
@@ -52,6 +59,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Port(args) => port::run(args),
         Command::List(args) => list::run(args),
         Command::Remove(args) => remove::run(args),
+        Command::Cleanup(args) => cleanup::run(args),
         Command::Restore(args) => restore::run(args),
         Command::Backups(args) => backup::run(args),
     }

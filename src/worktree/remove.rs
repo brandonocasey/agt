@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use clap::Args;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::info::{self, Entry};
 use super::{snapshot, submodules};
@@ -45,8 +45,13 @@ pub fn run(cli: Cli) -> Result<Output> {
         })));
     }
 
-    let taken = snapshot::take(&main, entry)?;
-    let shared = Repo::at(&main);
+    Ok(Output::Json(removal(&main, &path, entry)?))
+}
+
+/// Backs `entry` up, then removes its worktree; the caller has checked that it may go.
+pub(super) fn removal(main: &Path, path: &Path, entry: &Entry) -> Result<Value> {
+    let taken = snapshot::take(main, entry)?;
+    let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
     shared.git(&["worktree", "prune"])?;
     let branches = |pattern: &str| -> Result<Vec<String>> {
@@ -61,7 +66,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     };
     let local = branches("refs/heads")?;
     let remote = branches("refs/remotes")?;
-    Ok(Output::Json(json!({
+    Ok(json!({
         "removed": path,
         "id": taken.record.id,
         "ref": taken.record.reference,
@@ -72,11 +77,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         "head_on_remote_branch": !remote.is_empty(),
         "local_branches": local,
         "remote_branches": remote,
-    })))
+    }))
 }
 
 /// The entry for `path`, or the reason it must not be removed.
-fn refuse<'a>(listing: &'a [Entry], path: &Path, main: &Path) -> Result<&'a Entry> {
+pub(super) fn refuse<'a>(listing: &'a [Entry], path: &Path, main: &Path) -> Result<&'a Entry> {
     if path == main {
         return fail(format!("{} is the main checkout", path.display()));
     }

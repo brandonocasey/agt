@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 
 use crate::support::Env;
 
+mod cleanup;
+
 const BIN: &str = env!("CARGO_BIN_EXE_agt");
 
 struct Fixture {
