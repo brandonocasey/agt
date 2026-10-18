@@ -324,7 +324,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   listed only when every target in it has expired, and its reason says which rule applied. A
   directory with no targets at all (only cache files) is listed once agt last wrote there 90
   or more days ago. Either
-  way its directory may hold only targets, `.account.json`, `.repo.json`, `.pr-lookups.json` and stray
+  way its directory may hold only targets, `.account.json`, `.repo.json`, `.auto-sync.json` and stray
   lock files; a subdirectory, link or any other file keeps it.
 - `issues`: a closed issue, 90 days after the later of its last local and host update,
   and only with no queued change, unsent comment or create, conflict, failed send, note,
@@ -545,21 +545,28 @@ before. It is the same sync as `agt review sync`, so it only reads the forge.
 
 - The target has a PR/MR and its `synced_at` is older than `sync.max_age_secs`
   (default 300): sync it. A fresh one makes no call.
-- The target has none: look the branch's PR/MR up, at most once per max age. A
-  miss is remembered in `.pr-lookups.json` in the repository's store directory
-  (older agt ignores the file), so the reads that follow call nothing. Range
-  and commit targets have no PR/MR to look up.
+- The target has none, or its PR/MR is closed or merged: look the branch's PR/MR
+  up, as `sync` does, at most once per max age, so a newer PR/MR of the branch
+  is found. A miss is remembered in `.auto-sync.json` in the repository's store
+  directory (older agt ignores the file), so the reads that follow call
+  nothing. Range and commit targets have no PR/MR to look up.
 - No `origin`, or a host no forge is known for: skipped without a word.
 - The forge failing (`gh`/`glab` missing, not logged in, network, rate limit) or
   the calls taking longer than 15 seconds in all (the tool is killed) prints
   `agt: sync skipped (<reason>); showing local data` to stderr, then reads the
   local data. Stdout and the exit status are what the local read gives. A
-  successful auto-sync prints nothing. A lock held by another agt, such as a
-  running `publish` or sync, skips the sync the same way instead of waiting.
+  successful auto-sync prints nothing. A failed attempt is written to
+  `.auto-sync.json` and that sync (the PR/MR, or the branch lookup) is not tried
+  again for the max age, so an offline machine pays the cap and prints the line
+  once, not on every read; a success or an explicit `sync` clears it. A lock held
+  by another agt, such as a running `publish` or sync, skips the sync the same
+  way instead of waiting.
 - `--offline`, `AGT_OFFLINE=1` or `auto = false` in the `[sync]` table of
   `$XDG_CONFIG_HOME/agt/config.toml` keep a read local; see
-  [Issues](#issues) for the table. An unknown key or bad value there is an
-  error, except under `--offline`, which never reads the file.
+  [Issues](#issues) for the table. A config file that cannot be read (an unknown
+  key, a bad value) does not break the read: the skip line carries the config
+  error and the local data follows. `--offline` never reads the file; an
+  explicit `sync` still fails on it.
 
 An explicit `agt review sync` is unchanged: it has no time cap and fails with
 its own errors.
@@ -1079,8 +1086,12 @@ no tracker configured nothing happens and the output does not change. A failure
 taking more than 15 seconds, which kills the tool) prints one line,
 `agt: sync skipped (<reason>); showing local data`, to stderr and reads the local
 copy; stdout and the exit status are the local read's. A successful auto-sync
-prints nothing. A tracker being synced or pushed by another agt is skipped the
-same way instead of waited for. `--offline` (global to `agt issue`),
+prints nothing. A failed sync is written to `.auto-sync.json` in the tracker's
+directory and that tracker is not tried again for `max_age_secs` (no call, no
+line); a success or an explicit `sync` clears it. A config file that cannot be
+read prints the skip line with its error and the read goes on locally. A tracker
+being synced or pushed by another agt is skipped the same way instead of waited
+for. `--offline` (global to `agt issue`),
 `AGT_OFFLINE=1` and `auto = false` keep reads local. `agt issue sync` has no time
 cap and keeps its errors and exit codes.
 

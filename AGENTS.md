@@ -32,7 +32,7 @@ import a domain module and domain modules never import each other;
 (`src/forge/auto.rs` holds the policy, the one stderr line and the 15 s cap; `src/issue/auto.rs` and
 `src/review/commands/auto.rs` decide what to sync). Only the auto path sets a deadline in
 `src/forge/transport.rs`; explicit `sync` has none. Auto-sync only calls what `sync` calls, so it
-stays read-only on the forge, and a failure never fails the read. A new read command syncs through
+stays read-only on the forge, and a failure (or an unreadable config) never fails the read, and is remembered in `.auto-sync.json` so the next reads back off for the max age. A new read command syncs through
 these modules or says why it stays local. Tests that check local behavior run offline
 (`AGT_OFFLINE=1`, `Env::offline`).
 
