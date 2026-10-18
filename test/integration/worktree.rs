@@ -617,3 +617,26 @@ fn list_all_warns_about_an_unreadable_repository_and_lists_the_rest() {
     assert_eq!(warnings.len(), 1, "{all}");
     assert!(warnings[0].as_str().unwrap().contains("broken"), "{all}");
 }
+
+#[test]
+fn a_failed_backup_leaves_no_ref_and_no_directory() {
+    let f = Fixture::new();
+    f.dirty();
+    let secret = f.wt.join(".env");
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    let path = f.wt.to_string_lossy().into_owned();
+    let output = f.agt(&f.env.repo, &["remove", &path, "--yes"]);
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(f.wt.join("feature.txt").exists());
+    assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+    let backups = f.env.path("state/agents/backups");
+    let left = fs::read_dir(&backups)
+        .map(|dirs| {
+            dirs.flatten()
+                .flat_map(|repo| fs::read_dir(repo.path()).unwrap().flatten())
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(left, 0);
+}

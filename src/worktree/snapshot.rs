@@ -53,7 +53,25 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
         })
         .unwrap_or_default();
     make_dir(&dir.join("files"), 0o700)?;
+    let reference = format!("{REF_PREFIX}{id}");
+    let made = build(main, entry, &shared, &dir, id, &reference, created);
+    if made.is_err() {
+        // A failed backup leaves neither the ref nor the directory behind.
+        let _ = shared.git(&["update-ref", "-d", &reference]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+    made
+}
 
+fn build(
+    main: &Path,
+    entry: &Entry,
+    shared: &Repo,
+    dir: &Path,
+    id: String,
+    reference: &str,
+    created: i64,
+) -> Result<Taken> {
     let tree = Repo::at(&entry.path).worktree_tree()?;
     let message = format!("agt worktree backup {id}");
     let snapshot = shared.git(&[
@@ -68,8 +86,7 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
         "-m",
         &message,
     ])?;
-    let reference = format!("{REF_PREFIX}{id}");
-    shared.git(&["update-ref", &reference, &snapshot])?;
+    shared.git(&["update-ref", reference, &snapshot])?;
     let changed = shared
         .checked(
             &[
@@ -97,15 +114,15 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
         branch: entry.branch.clone(),
         head: entry.head.clone(),
         snapshot,
-        reference,
+        reference: reference.to_owned(),
         created: clock::format(created),
         copied: ignored.copy,
         skipped: ignored.skipped,
     };
-    backup::write(&dir, &record)?;
+    backup::write(dir, &record)?;
     Ok(Taken {
         record,
-        dir,
+        dir: dir.to_owned(),
         changed,
     })
 }
