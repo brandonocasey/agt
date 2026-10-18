@@ -2,6 +2,7 @@ pub mod agents;
 pub mod clock;
 pub mod config;
 pub mod error;
+pub mod group;
 pub mod local;
 pub mod output;
 pub mod random;

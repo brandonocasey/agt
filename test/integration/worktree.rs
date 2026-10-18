@@ -1866,6 +1866,45 @@ fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
 }
 
 #[test]
+fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let (f, _sub) = with_unheld_tag();
+        // A git that, asked to ls-remote, starts a child (as ssh is) and then hangs.
+        let bin = f.env.path("hanging-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let child_pid = f.env.path("child-pid");
+        let real = String::from_utf8(
+            std::process::Command::new("which")
+                .arg("git")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
+            child_pid.display(),
+            real.trim()
+        );
+        let wrapper = bin.join("git");
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let agt = f
+            .env
+            .command(BIN, &f.env.repo)
+            .env("PATH", path)
+            .env("AGT_LS_REMOTE_TIMEOUT", "60")
+            .args(["worktree", "remove", &f.wt.to_string_lossy()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        crate::auto_sync::assert_signal_kills_the_tool(agt, signal, &child_pid);
+    }
+}
+
+#[test]
 fn a_disabled_sparse_checkout_restores_without_a_warning_and_keeps_its_config() {
     let f = sparse_fixture();
     wgit(&f.env, &f.wt, &["sparse-checkout", "disable"]);

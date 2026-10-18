@@ -148,7 +148,7 @@ impl Repo {
     /// Runs `git args` and returns its output, giving up after `seconds`. For commands that
     /// talk to a remote, which must not hang or ask anything: no credential prompt of any kind
     /// (git, ssh, askpass helpers, credential managers), ssh in batch mode with a connect
-    /// timeout, and git in its own process group so that a timeout kills ssh with it.
+    /// timeout, and git in its own process group so that a timeout or a signal to agt kills ssh with it.
     pub fn git_within(&self, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
         let scratch = tempfile::tempdir().map_err(ctx("create temporary output directory"))?;
         let path = scratch.path().join("out");
@@ -170,6 +170,8 @@ impl Repo {
             .stderr(Stdio::null())
             .spawn()
             .map_err(ctx("run git"))?;
+        // Held until return: a signal to agt kills the group too, not just git.
+        let _watch = crate::core::group::Watch::new(child.id());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
         loop {
             match child.try_wait().map_err(ctx("wait for git"))? {

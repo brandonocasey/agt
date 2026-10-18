@@ -241,6 +241,45 @@ fn a_slow_forge_is_killed_at_the_cap(fake: Fake) {
     assert_gone(&pid);
 }
 
+/// Sends `signal` to `agt` once the tool it waits on has recorded its child in `pid`, and checks
+/// that agt died of that signal and left neither the tool nor its child behind.
+pub(crate) fn assert_signal_kills_the_tool(mut agt: std::process::Child, signal: i32, pid: &Path) {
+    let started = Instant::now();
+    while fs::read_to_string(pid).map_or(true, |text| text.trim().is_empty()) {
+        assert!(started.elapsed() < Duration::from_secs(20), "no child");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let id = i32::try_from(agt.id()).unwrap();
+    // SAFETY: plain kill(2) of the agt process this test started.
+    unsafe { libc::kill(id, signal) };
+    let status = agt.wait().unwrap();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(signal)
+    );
+    assert_gone(pid);
+}
+
+#[test]
+fn a_signal_to_agt_kills_the_forge_tool_and_its_children() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let env = changed_on_the_host(&Github);
+        let (tool, pid) = slow_tool(&env);
+        let agt = env
+            .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+            .args(["issue", "list"])
+            .env("AGT_NOW", STALE.to_string())
+            .env("AGT_GH_BIN", &tool)
+            .env("AGT_GLAB_BIN", &tool)
+            .env("AGT_SYNC_CAP_MS", "60000")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert_signal_kills_the_tool(agt, signal, &pid);
+    }
+}
+
 fn a_held_lock_skips_the_issue_sync(fake: Fake) {
     let env = changed_on_the_host(fake);
     let before = env.forge_calls().len();

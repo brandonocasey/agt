@@ -211,6 +211,8 @@ fn finish(mut child: Child, name: &str) -> std::result::Result<Output, Transport
     let Some((deadline, limit)) = deadline() else {
         return child.wait_with_output().map_err(wrap);
     };
+    // Held until return: a signal to agt kills the group too, not just the tool.
+    let _watch = crate::core::group::Watch::new(child.id());
     let stdout = reader(child.stdout.take());
     let stderr = reader(child.stderr.take());
     let status = loop {
