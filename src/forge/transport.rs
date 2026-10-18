@@ -186,7 +186,7 @@ fn grouped(command: &mut Command) -> &mut Command {
 }
 
 fn timed_out(name: &str, limit: Duration) -> TransportError {
-    TransportError::new(format!("{name} timed out after {}s", limit.as_secs()))
+    TransportError::new(format!("{name} timed out after {limit:?}"))
 }
 
 fn reader<R: Read + Send + 'static>(
