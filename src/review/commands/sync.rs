@@ -174,7 +174,7 @@ fn detect(ctx: &Ctx, host: &str) -> Result<Forge> {
         Error(format!(
             "unsupported forge {host}: sync and publish need github.com or a host `gh auth \
              status` knows, or gitlab.com, GITLAB_HOST, glab's configured host, a host \
-             `glab auth status` knows, or an entry for it in hosts.json"
+             `glab auth status` knows, or an entry for it in $XDG_CONFIG_HOME/agt/hosts.json"
         ))
     })
 }
@@ -189,7 +189,12 @@ fn hosts_file(host: &str) -> Result<Option<Forge>> {
     let Ok(base) = local::config_home() else {
         return Ok(None);
     };
-    let path = base.join("agent-review").join("hosts.json");
+    let current = base.join("agt").join("hosts.json");
+    let path = if current.exists() {
+        current
+    } else {
+        base.join("agent-review").join("hosts.json")
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

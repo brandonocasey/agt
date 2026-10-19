@@ -22,7 +22,8 @@ use crate::core::output::Output;
 
 /// Cost, context, tools, cache gaps, errors and friction from Claude Code and Codex
 /// transcripts in `~/.claude*/projects` and `~/.codex`. Prices come from
-/// `~/.config/agents/model-prices.json` (override: `AGT_PRICES`). Scratch and probe projects
+/// `$XDG_CONFIG_HOME/agt/model-prices.json`, else `~/.config/agents/model-prices.json`
+/// (override: `AGT_PRICES`). Scratch and probe projects
 /// are skipped unless `--scratch` is given. `index`, `resolve` and `search` keep a private
 /// index of the transcripts to find sessions and what was typed in them.
 #[derive(Args)]

@@ -23,7 +23,8 @@ Repositories with SHA-1 or SHA-256 object IDs both work.
 
 Up to 0.4.0, the binary was `agent-review`; its commands lacked the `review` prefix.
 Its stores remain readable. Posted comment markers retain the `agent-review` name,
-as does `$XDG_CONFIG_HOME/agent-review/hosts.json`.
+and `$XDG_CONFIG_HOME/agent-review/hosts.json` is still read when `$XDG_CONFIG_HOME/agt/hosts.json`
+does not exist.
 
 A `v*` tag publishes release archives through the [release workflow](../.github/workflows/release.yml).
 
@@ -462,8 +463,11 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 
 ## Sync
 
-- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agent-review/hosts.json`
-  (`{"git.example.com": {"service": "gitlab"}}`, `github` or `gitlab`); the
+- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agt/hosts.json` (else the older
+  `$XDG_CONFIG_HOME/agent-review/hosts.json`), a JSON object of host to
+  `{"service": "github"}` or `{"service": "gitlab"}`, such as
+  `{"git.example.com": {"service": "gitlab"}}`, with host names compared without regard to
+  case and entries for other hosts ignored; the
   names below that need no lookup (`github.com`, `gitlab.com`); the forge this
   repository last synced that host with; then the CLI checks below, which are
   the slowest. GitHub (`gh`, with `GH_HOST=<host>`) for `github.com` or a host
@@ -1001,8 +1005,22 @@ Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `
 session's cost so far from its transcript and its subagents' (it ignores the other options).
 A transcript last changed before the start date is not read. A root named with `--root` can hold either harness; a file whose
 first line is a Codex `session_meta` is read as Codex. Prices come from
-`~/.config/agents/model-prices.json`, or the file `AGT_PRICES` names; models it does not list are
-reported as unpriced.
+`$XDG_CONFIG_HOME/agt/model-prices.json` (else the older `~/.config/agents/model-prices.json`), or
+the file `AGT_PRICES` names; models it does not list are reported as unpriced.
+
+The prices file is a JSON object with a `models` object that maps a model name to its rates in
+USD per million tokens: `input`, `write_5m` and `write_1h` (cache writes with a 5-minute or
+1-hour lifetime), `read` (cache reads) and `output`. A model name matches a transcript's model
+when it equals it or is a prefix of it that ends before a `-`; the longest match wins. A model
+may add `fast_multiplier`, which scales every rate for responses billed at `"speed": "fast"`,
+and `over`, an object with a `prompt_tokens` threshold and its own rates that replace the
+model's when the prompt (input plus cache tokens) exceeds it:
+
+```json
+{"models": {"claude-sonnet-4": {"input": 3, "write_5m": 3.75, "write_1h": 6, "read": 0.3,
+  "output": 15, "over": {"prompt_tokens": 200000, "input": 6, "write_5m": 7.5, "write_1h": 12,
+  "read": 0.6, "output": 22.5}}}}
+```
 
 Codex rollouts are read as Claude Code records: each billed `token_count` is one call, with
 `input_tokens` net of cached tokens. A forked rollout's replay of its parent, everything before the

@@ -267,6 +267,41 @@ fn bad_input_fails_with_a_reason() {
     );
 }
 
+#[test]
+fn prices_come_from_the_agt_config_directory_else_the_older_agents_one() {
+    let env = Env::new();
+    let args = ["cost", "--root", "projects"];
+    let wanted = run(sessions(&env, &args));
+    assert_eq!(wanted.0, Some(0));
+    let fixture = std::fs::read(fixtures().join("prices.json")).unwrap();
+    let default_prices = |env: &Env| {
+        let mut command = sessions(env, &args);
+        command.env_remove("AGT_PRICES");
+        run(command)
+    };
+
+    let (code, _, err) = default_prices(&env);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("cannot read prices from") && err.contains("config/agt/model-prices.json"),
+        "{err}"
+    );
+
+    let older = env.path("home/.config/agents");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(older.join("model-prices.json"), &fixture).unwrap();
+    assert_eq!(default_prices(&env), wanted);
+
+    let current = env.path("config/agt");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join("model-prices.json"), "{}").unwrap();
+    let (code, _, err) = default_prices(&env);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("config/agt/model-prices.json"), "{err}");
+    std::fs::write(current.join("model-prices.json"), &fixture).unwrap();
+    assert_eq!(default_prices(&env), wanted);
+}
+
 /// Links the fixture transcripts into the isolated home as Claude Code and Codex keep them.
 fn link_transcripts(env: &Env) {
     let home = env.path("home");

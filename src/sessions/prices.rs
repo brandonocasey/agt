@@ -1,4 +1,5 @@
-//! Per-model USD rates from `~/.config/agents/model-prices.json` (override: `AGT_PRICES`).
+//! Per-model USD rates from `<config>/agt/model-prices.json`, else `~/.config/agents/model-prices.json`
+//! (override: `AGT_PRICES`). The file is described in `docs/reference.md`.
 
 use std::path::PathBuf;
 
@@ -32,11 +33,18 @@ impl Parts {
     }
 }
 
+/// The file `AGT_PRICES` names; else the one in agt's config directory, or the older
+/// `~/.config/agents/model-prices.json` when only that exists.
 fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("AGT_PRICES").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    Ok(local::home()?.join(".config/agents/model-prices.json"))
+    let current = local::config_home()?.join("agt").join("model-prices.json");
+    if current.exists() {
+        return Ok(current);
+    }
+    let older = local::home()?.join(".config/agents/model-prices.json");
+    Ok(if older.exists() { older } else { current })
 }
 
 fn rate(rates: &Value, key: &str) -> f64 {
@@ -48,7 +56,8 @@ impl Prices {
         let path = path()?;
         let failed = |reason: String| {
             Error(format!(
-                "cannot read prices from {}: {reason}",
+                "cannot read prices from {}: {reason} (put them in $XDG_CONFIG_HOME/agt/model-prices.json \
+                 or name a file in AGT_PRICES; docs/reference.md describes it)",
                 path.display()
             ))
         };

@@ -333,6 +333,29 @@ fn hosts_file_names_the_service_of_an_unknown_host() {
 }
 
 #[test]
+fn the_hosts_file_in_the_agt_config_directory_wins_over_the_older_one() {
+    let setup = Setup::synced_branch("git@gitlab.example.com:group/sub/proj.git");
+    let env = &setup.env;
+    let old = env.git(&["rev-parse", "HEAD~1"]);
+    gitlab::sync_fixtures(&setup, &old);
+    let older = env.path("config/agent-review");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(
+        older.join("hosts.json"),
+        r#"{"gitlab.example.com": {"service": "github"}}"#,
+    )
+    .unwrap();
+    let current = env.path("config/agt");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(
+        current.join("hosts.json"),
+        r#"{"gitlab.example.com": {"service": "gitlab"}}"#,
+    )
+    .unwrap();
+    assert_eq!(env.run(&["sync"])["target"], "gl-3");
+}
+
+#[test]
 fn an_unknown_service_in_the_hosts_file_only_matters_for_its_own_host() {
     let setup = Setup::synced_branch("git@gitlab.example.com:group/sub/proj.git");
     let env = &setup.env;
