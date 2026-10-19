@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -99,6 +101,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     if sparse {
         restage_deletions(&repo, &deleted, &mut warnings);
     }
+    restore_modes(&target, &record.file_modes)?;
     snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
     Ok(Output::Json(json!({
         "sparse_checkout": sparse,
@@ -298,4 +301,35 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<Vec<Vec<u8>>> {
     }
     repo.git(&["reset", "-q"])?;
     Ok(deleted)
+}
+
+fn restore_modes(target: &std::path::Path, modes: &[backup::FileMode]) -> Result<()> {
+    for saved in modes {
+        let relative = std::path::Path::new(std::ffi::OsStr::from_bytes(&saved.path));
+        if relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return fail("backup file mode has an invalid relative path");
+        }
+        let mut path = target.to_owned();
+        let mut components = relative.components().peekable();
+        while let Some(part) = components.next() {
+            path.push(part);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(ctx(format!("stat {}", path.display()))(error)),
+            };
+            if components.peek().is_some() {
+                if !metadata.is_dir() {
+                    return fail(format!("cannot restore mode through {}", path.display()));
+                }
+            } else if metadata.is_file() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(saved.mode & 0o7777))
+                    .map_err(ctx(format!("restore mode of {}", path.display())))?;
+            }
+        }
+    }
+    Ok(())
 }

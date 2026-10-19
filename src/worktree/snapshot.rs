@@ -2,10 +2,11 @@
 //! its ignored files that are not disposable.
 
 use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, symlink};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use super::backup::{self, REF_PREFIX, Record};
+use super::backup::{self, FileMode, REF_PREFIX, Record};
 use super::info::{self, Entry};
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
@@ -115,6 +116,25 @@ fn build(
     let ignored = info::ignored(&entry.path)?;
     copy_files(&entry.path, &dir.join("files"), &ignored.copy, 0o700)?;
     save_git_files(&entry.path, &dir.join(SAVED_GIT_DIR))?;
+    let paths = shared.checked(&["ls-tree", "-r", "--name-only", "-z", &tree], None, &[])?;
+    let mut file_modes = Vec::new();
+    for path in paths
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let source = entry.path.join(std::ffi::OsStr::from_bytes(path));
+        let metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(ctx(format!("stat {}", source.display()))(error)),
+        };
+        if metadata.is_file() {
+            file_modes.push(FileMode {
+                path: path.to_vec(),
+                mode: metadata.permissions().mode() & 0o7777,
+            });
+        }
+    }
     let record = Record {
         id,
         repository: main.to_owned(),
@@ -126,6 +146,7 @@ fn build(
         created: clock::format(created),
         copied: ignored.copy,
         skipped: ignored.skipped,
+        file_modes,
     };
     backup::write(dir, &record)?;
     Ok(Taken {
