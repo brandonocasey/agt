@@ -13,7 +13,7 @@ use crate::core::transcripts::json::{count, get, head, key, object, text, truthy
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, grouped, tok};
 use crate::sessions::prices::Prices;
-use crate::sessions::source::transcripts;
+use crate::sessions::source::Loaded;
 use crate::sessions::spend::short_project;
 
 // Leading `cd DIR &&`, `cd DIR;`, and `VAR=value;` steps hide the command that did the work.
@@ -67,19 +67,26 @@ fn est_tokens(content: &Value) -> f64 {
     }
 }
 
-pub fn tools(scope: &Scope) -> String {
-    // Relative cost units in multiples of the input price: a tool result is written to the cache
-    // once and re-read on every later call until the next compaction.
-    let (write, read, output) = (2.0, 0.1, 5.0);
-    let mut totals: IndexMap<String, (i64, f64, f64)> = IndexMap::new();
-    let mut grand = 0.0;
-    for transcript in transcripts(scope) {
+pub struct Tools {
+    totals: IndexMap<String, (i64, f64, f64)>,
+    grand: f64,
+}
+
+impl Tools {
+    pub fn new() -> Self {
+        Self {
+            totals: IndexMap::new(),
+            grand: 0.0,
+        }
+    }
+    pub fn feed(&mut self, transcript: &Loaded) {
+        let (write, read, output) = (2.0, 0.1, 5.0);
         let mut seen = HashSet::new();
         let mut pending: HashMap<String, (String, f64)> = HashMap::new();
         let mut results: Vec<(i64, f64, f64, String)> = Vec::new();
         let mut bounds: Vec<i64> = Vec::new();
         let mut calls = 0i64;
-        transcript.records(&scope.since_iso, |record| {
+        transcript.records(|record| {
             let kind = text(record, "type");
             if kind == "system" && text(record, "subtype") == "compact_boundary" {
                 bounds.push(calls);
@@ -92,7 +99,7 @@ pub fn tools(scope: &Scope) -> String {
                 if truthy(id) && truthy(get(message, "usage")) && seen.insert(key(id)) {
                     calls += 1;
                     let usage = get(message, "usage");
-                    grand += count(usage, "input_tokens") as f64
+                    self.grand += count(usage, "input_tokens") as f64
                         + count(usage, "cache_creation_input_tokens") as f64 * write
                         + count(usage, "cache_read_input_tokens") as f64 * read
                         + count(usage, "output_tokens") as f64 * output;
@@ -123,39 +130,43 @@ pub fn tools(scope: &Scope) -> String {
         bounds.push(calls);
         for (at, result, input, name) in results {
             let later = (bounds.iter().find(|end| **end >= at).copied().unwrap_or(at) - at) as f64;
-            let entry = totals.entry(name).or_insert((0, 0.0, 0.0));
+            let entry = self.totals.entry(name).or_insert((0, 0.0, 0.0));
             entry.0 += 1;
             entry.1 += result;
             entry.2 += result * (write + read * later) + input * (output + read * later);
         }
     }
-    let mut rows: Vec<(String, (i64, f64, f64))> = totals.into_iter().collect();
-    rows.sort_by(|a, b| b.1.2.total_cmp(&a.1.2));
-    let attributed = rows.iter().fold(0.0, |sum, (_, row)| sum + row.2);
-    let base = if grand == 0.0 { 1.0 } else { grand };
-    let mut out = format!(
-        "Tool inputs and results carry {:.0}% of estimated cost since {}\n",
-        100.0 * attributed / base,
-        scope.since
-    );
-    let table: Vec<Vec<String>> = rows
-        .iter()
-        .take(scope.top)
-        .map(|(name, (calls, result, cost))| {
-            vec![
-                name.clone(),
-                calls.to_string(),
-                format!("{}", (result / *calls as f64).trunc() as i64),
-                format!("{:.1}", 100.0 * cost / base),
-            ]
-        })
-        .collect();
-    fmt::table(
-        &mut out,
-        &["tool", "calls", "avg result tok", "share %"],
-        &table,
-    );
-    out
+
+    pub fn render(self, scope: &Scope) -> String {
+        let Self { totals, grand } = self;
+        let mut rows: Vec<(String, (i64, f64, f64))> = totals.into_iter().collect();
+        rows.sort_by(|a, b| b.1.2.total_cmp(&a.1.2));
+        let attributed = rows.iter().fold(0.0, |sum, (_, row)| sum + row.2);
+        let base = if grand == 0.0 { 1.0 } else { grand };
+        let mut out = format!(
+            "Tool inputs and results carry {:.0}% of estimated cost since {}\n",
+            100.0 * attributed / base,
+            scope.since
+        );
+        let table: Vec<Vec<String>> = rows
+            .iter()
+            .take(scope.top)
+            .map(|(name, (calls, result, cost))| {
+                vec![
+                    name.clone(),
+                    calls.to_string(),
+                    format!("{}", (result / *calls as f64).trunc() as i64),
+                    format!("{:.1}", 100.0 * cost / base),
+                ]
+            })
+            .collect();
+        fmt::table(
+            &mut out,
+            &["tool", "calls", "avg result tok", "share %"],
+            &table,
+        );
+        out
+    }
 }
 
 /// Microseconds since the epoch for an ISO 8601 time, `Z` or an offset.
@@ -191,20 +202,39 @@ struct Previous {
     tool: Option<String>,
 }
 
-pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
-    let prices = Prices::load()?;
-    let minutes = gap.unwrap_or(5.0);
-    let (mut gaps, mut expired, mut rewrite_tokens, mut rewrite_usd) = (0i64, 0i64, 0i64, 0.0);
-    let mut per: IndexMap<(String, String), i64> = IndexMap::new();
-    let mut cause: IndexMap<String, i64> = IndexMap::new();
-    // Gap minutes, rewrite tokens, time, project, session, agent.
-    let mut worst: Vec<(f64, i64, String, String, String, String)> = Vec::new();
-    for transcript in transcripts(scope) {
+pub struct CacheGaps {
+    prices: Prices,
+    gap: Option<f64>,
+    gaps: i64,
+    expired: i64,
+    rewrite_tokens: i64,
+    rewrite_usd: f64,
+    per: IndexMap<(String, String), i64>,
+    cause: IndexMap<String, i64>,
+    worst: Vec<(f64, i64, String, String, String, String)>,
+}
+
+impl CacheGaps {
+    pub fn new(gap: Option<f64>) -> Result<Self> {
+        Ok(Self {
+            prices: Prices::load()?,
+            gap,
+            gaps: 0,
+            expired: 0,
+            rewrite_tokens: 0,
+            rewrite_usd: 0.0,
+            per: IndexMap::new(),
+            cause: IndexMap::new(),
+            worst: Vec::new(),
+        })
+    }
+    pub fn feed(&mut self, transcript: &Loaded) {
+        let minutes = self.gap.unwrap_or(5.0);
         let mut previous: Option<Previous> = None;
         let mut last_tool: Option<String> = None;
         let mut current = Value::Null;
         let mut seen: HashSet<String> = HashSet::new();
-        transcript.records(&scope.since_iso, |record| {
+        transcript.records(|record| {
             let message = object(record, "message");
             if text(record, "type") != "assistant" {
                 return;
@@ -267,22 +297,25 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
             if let Some(previous) = &previous {
                 let elapsed = (at - previous.at) as f64 / 1e6;
                 if elapsed > minutes * 60.0 {
-                    gaps += 1;
+                    self.gaps += 1;
                     if (cached as f64) < 0.5 * previous.context as f64 {
-                        expired += 1;
-                        rewrite_tokens += written;
-                        rewrite_usd += if codex {
-                            prices
+                        self.expired += 1;
+                        self.rewrite_tokens += written;
+                        self.rewrite_usd += if codex {
+                            self.prices
                                 .usd(model, &json!({ "input_tokens": written }))
                                 .map_or(0.0, |parts| parts.input)
                         } else {
-                            prices
+                            self.prices
                                 .usd(model, &json!({ "cache_creation_input_tokens": written }))
                                 .map_or(0.0, |parts| parts.write)
                         };
-                        *per.entry((transcript.agent.clone(), transcript.project.clone()))
+                        *self
+                            .per
+                            .entry((transcript.agent.clone(), transcript.project.clone()))
                             .or_default() += written;
-                        *cause
+                        *self
+                            .cause
                             .entry(
                                 previous
                                     .tool
@@ -291,7 +324,7 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
                                     .unwrap_or_else(|| "(no tool: waiting on the user)".into()),
                             )
                             .or_default() += 1;
-                        worst.push((
+                        self.worst.push((
                             elapsed / 60.0,
                             written,
                             head(stamp, 16).to_owned(),
@@ -309,53 +342,69 @@ pub fn cache_gaps(scope: &Scope, gap: Option<f64>) -> Result<String> {
             });
         });
     }
-    let shown = gap.map_or_else(|| "5".to_owned(), |gap| gap.to_string());
-    let mut out = format!(
-        "Gaps over {shown} min: {gaps}; cache expired in {expired}; rewritten {} tokens, about ${} (as 5m writes)\n",
-        tok(rewrite_tokens as f64),
-        grouped(rewrite_usd, 2)
-    );
-    out.push_str("\nRewrite tokens by agent and project:\n");
-    let rows: Vec<Vec<String>> = most_common(per, scope.top)
-        .into_iter()
-        .map(|((agent, project), tokens)| vec![agent, short_project(&project), tok(tokens as f64)])
-        .collect();
-    fmt::table(&mut out, &["agent", "project", "rewrite tok"], &rows);
-    out.push_str("\nTool running before the expired gap:\n");
-    let rows: Vec<Vec<String>> = most_common(cause, scope.top)
-        .into_iter()
-        .map(|(tool, times)| vec![times.to_string(), tool])
-        .collect();
-    fmt::table(&mut out, &["count", "tool"], &rows);
-    out.push_str("\nLargest rewrites:\n");
-    worst.sort_by_key(|item| std::cmp::Reverse(item.1));
-    let rows: Vec<Vec<String>> = worst
-        .into_iter()
-        .take(10)
-        .map(|(minutes, tokens, time, project, session, agent)| {
-            vec![
-                time,
-                format!("{minutes:.0}"),
-                tok(tokens as f64),
-                agent,
-                short_project(&project),
-                session,
-            ]
-        })
-        .collect();
-    fmt::table(
-        &mut out,
-        &[
-            "time",
-            "gap min",
-            "rewrite tok",
-            "agent",
-            "project",
-            "session",
-        ],
-        &rows,
-    );
-    Ok(out)
+
+    pub fn render(self, scope: &Scope) -> String {
+        let Self {
+            gap,
+            gaps,
+            expired,
+            rewrite_tokens,
+            rewrite_usd,
+            per,
+            cause,
+            mut worst,
+            ..
+        } = self;
+        let shown = gap.map_or_else(|| "5".to_owned(), |gap| gap.to_string());
+        let mut out = format!(
+            "Gaps over {shown} min: {gaps}; cache expired in {expired}; rewritten {} tokens, about ${} (as 5m writes)\n",
+            tok(rewrite_tokens as f64),
+            grouped(rewrite_usd, 2)
+        );
+        out.push_str("\nRewrite tokens by agent and project:\n");
+        let rows: Vec<Vec<String>> = most_common(per, scope.top)
+            .into_iter()
+            .map(|((agent, project), tokens)| {
+                vec![agent, short_project(&project), tok(tokens as f64)]
+            })
+            .collect();
+        fmt::table(&mut out, &["agent", "project", "rewrite tok"], &rows);
+        out.push_str("\nTool running before the expired gap:\n");
+        let rows: Vec<Vec<String>> = most_common(cause, scope.top)
+            .into_iter()
+            .map(|(tool, times)| vec![times.to_string(), tool])
+            .collect();
+        fmt::table(&mut out, &["count", "tool"], &rows);
+        out.push_str("\nLargest rewrites:\n");
+        worst.sort_by_key(|item| std::cmp::Reverse(item.1));
+        let rows: Vec<Vec<String>> = worst
+            .into_iter()
+            .take(10)
+            .map(|(minutes, tokens, time, project, session, agent)| {
+                vec![
+                    time,
+                    format!("{minutes:.0}"),
+                    tok(tokens as f64),
+                    agent,
+                    short_project(&project),
+                    session,
+                ]
+            })
+            .collect();
+        fmt::table(
+            &mut out,
+            &[
+                "time",
+                "gap min",
+                "rewrite tok",
+                "agent",
+                "project",
+                "session",
+            ],
+            &rows,
+        );
+        out
+    }
 }
 
 /// The `n` highest counts, ties in insertion order.

@@ -46,6 +46,28 @@ mod os {
             .collect()
     }
 
+    pub fn cwds() -> std::io::Result<Vec<(i32, std::path::PathBuf)>> {
+        cwds_in(std::path::Path::new("/proc"))
+    }
+
+    fn cwds_in(root: &std::path::Path) -> std::io::Result<Vec<(i32, std::path::PathBuf)>> {
+        let mut all = Vec::new();
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok())
+            else {
+                continue;
+            };
+            if let Ok(cwd) = fs::read_link(entry.path().join("cwd")) {
+                all.push((pid, cwd));
+            }
+        }
+        Ok(all)
+    }
+
     pub fn cwd(pid: i32) -> Option<std::path::PathBuf> {
         fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
@@ -89,6 +111,31 @@ mod os {
             claude_pid,
         })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn unreadable_processes_are_skipped_but_enumeration_errors_propagate() {
+            let root = tempfile::tempdir().unwrap();
+            let processes = root.path().join("proc");
+            fs::create_dir(&processes).unwrap();
+            for pid in [1, 2, 3] {
+                fs::create_dir(processes.join(pid.to_string())).unwrap();
+            }
+            let cwd = root.path().join("worktree");
+            fs::create_dir(&cwd).unwrap();
+            std::os::unix::fs::symlink(&cwd, processes.join("1/cwd")).unwrap();
+            // A vanished cwd and an unreadable cwd MUST NOT hide the readable process.
+            fs::write(processes.join("3/cwd"), "not a readable process link").unwrap();
+            assert_eq!(cwds_in(&processes).unwrap(), vec![(1, cwd)]);
+            assert_eq!(
+                cwds_in(&root.path().join("missing")).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -98,26 +145,77 @@ mod os {
     use super::Proc;
 
     pub fn pids() -> Vec<i32> {
-        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-        let Ok(count) = usize::try_from(count) else {
-            return Vec::new();
-        };
-        // Room for processes started between the two calls.
-        let mut pids = vec![0i32; count + 64];
-        let bytes = i32::try_from(pids.len() * size_of::<i32>()).unwrap_or(i32::MAX);
-        let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
-        pids.truncate(usize::try_from(found).unwrap_or(0));
-        pids.retain(|pid| *pid > 0);
-        pids
+        pids_checked().unwrap_or_default()
     }
 
-    fn info(pid: i32) -> Option<libc::proc_bsdinfo> {
+    fn pids_checked() -> std::io::Result<Vec<i32>> {
+        // proc_listallpids returns a PID count, while its buffer size is in bytes.
+        // https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if count <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut capacity = count as usize + 64;
+        loop {
+            let mut pids = vec![0i32; capacity];
+            let bytes = capacity
+                .checked_mul(size_of::<i32>())
+                .and_then(|size| i32::try_from(size).ok())
+                .ok_or_else(|| std::io::Error::other("process table is too large"))?;
+            let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+            if found <= 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if (found as usize) < capacity {
+                pids.truncate(found as usize);
+                pids.retain(|pid| *pid > 0);
+                return Ok(pids);
+            }
+            capacity = capacity
+                .checked_mul(2)
+                .ok_or_else(|| std::io::Error::other("process table is too large"))?;
+        }
+    }
+
+    pub fn cwds() -> std::io::Result<Vec<(i32, std::path::PathBuf)>> {
+        let pids = pids_checked()?;
+        let mut all = Vec::new();
+        for pid in pids.into_iter().filter(|pid| *pid > 0) {
+            let Ok(info) = info_checked(pid) else {
+                continue;
+            };
+            if info.pbi_status == libc::SZOMB {
+                continue;
+            }
+            if let Ok(cwd) = cwd_checked(pid) {
+                all.push((pid, cwd));
+            }
+        }
+        Ok(all)
+    }
+
+    fn info_checked(pid: i32) -> std::io::Result<libc::proc_bsdinfo> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
+        let size = size_of::<libc::proc_bsdinfo>() as i32;
         let read = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        (read == size).then_some(info)
+        checked_size(read, size)?;
+        Ok(info)
+    }
+
+    fn checked_size(read: i32, size: i32) -> std::io::Result<()> {
+        if read <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if read != size {
+            return Err(std::io::Error::other("incomplete process information"));
+        }
+        Ok(())
+    }
+
+    fn info(pid: i32) -> Option<libc::proc_bsdinfo> {
+        info_checked(pid).ok()
     }
 
     /// argv and environment from `KERN_PROCARGS2`: argc, the exec path, padding, argv, env.
@@ -172,9 +270,13 @@ mod os {
     }
 
     pub fn cwd(pid: i32) -> Option<std::path::PathBuf> {
+        cwd_checked(pid).ok()
+    }
+
+    fn cwd_checked(pid: i32) -> std::io::Result<std::path::PathBuf> {
         use std::os::unix::ffi::OsStrExt;
         let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-        let size = i32::try_from(size_of::<libc::proc_vnodepathinfo>()).ok()?;
+        let size = size_of::<libc::proc_vnodepathinfo>() as i32;
         let read = unsafe {
             libc::proc_pidinfo(
                 pid,
@@ -184,14 +286,13 @@ mod os {
                 size,
             )
         };
-        if read != size {
-            return None;
-        }
+        checked_size(read, size)?;
         let path = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
-        Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
-            path.to_bytes(),
-        )))
-        .filter(|path| !path.as_os_str().is_empty())
+        let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()));
+        if path.as_os_str().is_empty() {
+            return Err(std::io::Error::other("process has no current directory"));
+        }
+        Ok(path)
     }
 
     pub fn read(pid: i32) -> Option<Proc> {
@@ -221,6 +322,12 @@ mod os {
             claude_pid,
         })
     }
+}
+
+/// Enumeration errors MUST reach callers that use current directories to permit deletion.
+/// Individual processes can disappear or deny access; only readable directories are returned.
+pub fn cwds_checked() -> std::io::Result<Vec<(i32, PathBuf)>> {
+    os::cwds()
 }
 
 fn command_line<'a>(parts: impl Iterator<Item = &'a [u8]>) -> String {

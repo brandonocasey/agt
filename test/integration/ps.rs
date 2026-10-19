@@ -695,3 +695,59 @@ fn a_failing_exec_program_warns_and_its_stdout_stays_off_the_event_stream() {
         "{stderr}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn notification_failure_warns_once_without_stopping_the_event_stream() {
+    let env = Env::new();
+    let now: u64 = 1_800_000_000;
+    let waiting = Proc::sleep("sleep", &env.repo);
+    record(
+        &env,
+        waiting.pid(),
+        &proc_start(waiting.pid()),
+        json!({
+            "cwd": env.repo,
+            "name": "builder; $(touch pwned)",
+            "status": "waiting",
+            "waitingFor": "approve Bash",
+            "statusUpdatedAt": (now - 120) * 1000,
+        }),
+    );
+    let output = ps(
+        &env,
+        &[
+            "--watch",
+            "--notify",
+            "--interval",
+            "30",
+            "--max-polls",
+            "2",
+        ],
+    )
+    .env("AGT_NOW", now.to_string())
+    // An explicit nonexistent socket MUST prevent access to the real desktop session bus.
+    .env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={}", env.path("missing-session-bus").display()),
+    )
+    .output()
+    .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("warning: notification failed:").count(),
+        1,
+        "{stderr}"
+    );
+    let events: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"], "blocked");
+    assert_eq!(events[0]["pid"], waiting.pid());
+    assert_eq!(events[0]["waiting_for"], "approve Bash");
+    assert!(!env.repo.join("pwned").exists());
+}

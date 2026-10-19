@@ -109,3 +109,79 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
     }
     found
 }
+
+/// Adapted records shared by every selected report in one invocation.
+pub struct Loaded {
+    transcript: Transcript,
+    records: Vec<serde_json::Value>,
+}
+
+impl std::ops::Deref for Loaded {
+    type Target = Transcript;
+
+    fn deref(&self) -> &Transcript {
+        &self.transcript
+    }
+}
+
+impl Loaded {
+    pub fn records(&self, each: impl FnMut(&serde_json::Value)) {
+        self.records.iter().for_each(each);
+    }
+
+    pub fn api_calls(
+        &self,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Vec<crate::core::transcripts::Call> {
+        Transcript::calls_from_records(&self.records, seen)
+    }
+}
+
+pub fn load(scope: &Scope) -> impl Iterator<Item = Loaded> + '_ {
+    transcripts(scope).into_iter().map(|transcript| {
+        let mut records = Vec::new();
+        transcript.records(&scope.since_iso, |record| records.push(record.clone()));
+        Loaded {
+            transcript,
+            records,
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_reuse_records_after_the_source_disappears() {
+        let dir = tempfile::tempdir().expect("temporary transcript root");
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, concat!(
+            r#"{"type":"assistant","timestamp":"2026-03-01","message":{"id":"response","model":"test","usage":{"input_tokens":10},"content":[]}}"#,
+            "\n",
+        )).expect("write transcript");
+        let scope = Scope {
+            since: "2026-01-01".into(),
+            since_iso: "2026-01-01".into(),
+            cutoff: 0.0,
+            project: None,
+            scratch: false,
+            roots: Vec::new(),
+            files: vec![path.to_string_lossy().into_owned()],
+            top: 25,
+            harness: Harness::All,
+        };
+        let found: Vec<_> = load(&scope).collect();
+        fs::remove_file(path).expect("remove original transcript");
+        for _ in 0..2 {
+            let mut count = 0;
+            found[0].records(|_| count += 1);
+            assert_eq!(count, 1);
+            let mut seen = std::collections::HashSet::new();
+            let calls = found[0].api_calls(&mut seen);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].usage["input_tokens"], 10);
+            assert!(found[0].api_calls(&mut seen).is_empty());
+        }
+    }
+}

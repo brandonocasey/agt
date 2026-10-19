@@ -5,6 +5,7 @@ pub mod error;
 pub mod group;
 pub mod local;
 pub mod output;
+pub mod process;
 pub mod random;
 pub mod shell;
 pub mod transcripts;

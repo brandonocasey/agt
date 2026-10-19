@@ -16,6 +16,7 @@ base64 = "0.22.1"
 clap = { version = "4.5.51", features = ["derive"] }
 indexmap = { version = "2.9.0", features = ["serde"] }
 libc = "0.2.186"
+notify-rust = { version = "4.18.2", default-features = false, features = ["z"] }
 regex = "1.13.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order", "float_roundtrip"] }

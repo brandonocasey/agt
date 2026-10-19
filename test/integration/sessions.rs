@@ -321,3 +321,113 @@ fn one_session_prices_with_its_subagents() {
         "{err}"
     );
 }
+
+#[test]
+fn combined_reports_match_standalone_sections() {
+    let env = Env::new();
+    for root in ["projects", "codex"] {
+        let sections = [
+            ("cost", "Cost"),
+            ("agents", "Agents"),
+            ("tools", "Tools"),
+            ("cache-gaps", "Cache gaps"),
+            ("errors", "Errors"),
+            ("denials", "Denials"),
+            ("friction", "Friction"),
+        ];
+        let wanted = sections
+            .iter()
+            .map(|(command, heading)| {
+                format!(
+                    "{heading}:\n{}",
+                    stdout(sessions(&env, &[command, "--root", root]))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(stdout(sessions(&env, &["report", "--root", root])), wanted);
+        let selected = stdout(sessions(
+            &env,
+            &[
+                "report",
+                "--sections",
+                "denials,cost",
+                "--root",
+                root,
+                "--project",
+                "repo",
+                "--top",
+                "2",
+                "--by",
+                "harness,model",
+            ],
+        ));
+        let denials = stdout(sessions(
+            &env,
+            &["denials", "--root", root, "--project", "repo", "--top", "2"],
+        ));
+        let cost = stdout(sessions(
+            &env,
+            &[
+                "cost",
+                "--root",
+                root,
+                "--project",
+                "repo",
+                "--top",
+                "2",
+                "--by",
+                "harness,model",
+            ],
+        ));
+        assert_eq!(selected, format!("Denials:\n{denials}\nCost:\n{cost}"));
+    }
+}
+
+#[test]
+fn failure_kind_filter_preserves_the_migration_alias() {
+    let env = Env::new();
+    let report = |args: &[&str]| {
+        let mut command = sessions(&env, args);
+        command.args(["--root", "projects"]);
+        stdout(command)
+    };
+    assert_eq!(report(&["errors"]), report(&["errors", "--kind", "error"]));
+    assert_eq!(
+        report(&["denials"]),
+        report(&["errors", "--kind", "denial"])
+    );
+    let all = report(&["errors", "--kind", "all"]);
+    assert!(all.contains("auto mode"), "{all}");
+    assert!(all.contains("Exit code"), "{all}");
+    assert_ne!(all, report(&["errors"]));
+    assert_ne!(all, report(&["denials"]));
+}
+
+#[test]
+fn selected_reports_do_not_require_unused_prices() {
+    let env = Env::new();
+    let mut command = sessions(
+        &env,
+        &[
+            "report",
+            "--sections",
+            "tools,errors,denials,friction",
+            "--root",
+            "projects",
+        ],
+    );
+    command.env("AGT_PRICES", "/nonexistent/prices.json");
+    let actual = stdout(command);
+    let wanted = [
+        ("tools", "Tools"),
+        ("errors", "Errors"),
+        ("denials", "Denials"),
+        ("friction", "Friction"),
+    ]
+    .into_iter()
+    .map(|(name, heading)| format!("{heading}:\n{}", expected(name)))
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert_eq!(actual, wanted);
+}

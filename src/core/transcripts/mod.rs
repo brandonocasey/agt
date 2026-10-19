@@ -11,4 +11,5 @@ pub use locate::{
     Kind, Step, Transcript, Walker, all_roots, belongs_to, claude_projects, codex_roots,
     codex_sessions, history_files, is_scratch, session_files,
 };
+pub use records::Call;
 pub use turns::{ScanState, Turn, parse_line};

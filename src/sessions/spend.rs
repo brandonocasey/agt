@@ -11,7 +11,7 @@ use crate::core::transcripts::session_files;
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, grouped, median, round, tok};
 use crate::sessions::prices::Prices;
-use crate::sessions::source::transcripts;
+use crate::sessions::source::Loaded;
 
 const USAGE_KEYS: [&str; 4] = [
     "input_tokens",
@@ -36,18 +36,32 @@ struct Row {
     usd: f64,
 }
 
-pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
-    let prices = Prices::load()?;
-    let keys: Vec<&str> = by.split(',').collect();
-    if let Some(bad) = keys.iter().find(|key| !BY_KEYS.contains(key)) {
-        return fail(format!("--by takes {}; got {bad}", BY_KEYS.join(", ")));
+pub struct Cost {
+    prices: Prices,
+    keys: Vec<String>,
+    groups: IndexMap<Vec<String>, Group>,
+    unpriced: IndexMap<String, i64>,
+    fast: i64,
+    seen: HashSet<String>,
+}
+
+impl Cost {
+    pub fn new(by: &str) -> Result<Self> {
+        let keys: Vec<String> = by.split(',').map(str::to_owned).collect();
+        if let Some(bad) = keys.iter().find(|key| !BY_KEYS.contains(&key.as_str())) {
+            return fail(format!("--by takes {}; got {bad}", BY_KEYS.join(", ")));
+        }
+        Ok(Self {
+            prices: Prices::load()?,
+            keys,
+            groups: IndexMap::new(),
+            unpriced: IndexMap::new(),
+            fast: 0,
+            seen: HashSet::new(),
+        })
     }
-    let mut groups: IndexMap<Vec<String>, Group> = IndexMap::new();
-    let mut unpriced: IndexMap<String, i64> = IndexMap::new();
-    let mut fast = 0i64;
-    let mut seen = HashSet::new();
-    for transcript in transcripts(scope) {
-        for call in transcript.api_calls(&scope.since_iso, &mut seen) {
+    pub fn feed(&mut self, transcript: &Loaded) {
+        for call in transcript.api_calls(&mut self.seen) {
             let fields = |name: &str| -> String {
                 match name {
                     "agent" => transcript.agent.clone(),
@@ -58,17 +72,18 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
                     _ => transcript.harness().to_owned(),
                 }
             };
-            let group = groups
-                .entry(keys.iter().map(|key| fields(key)).collect())
+            let group = self
+                .groups
+                .entry(self.keys.iter().map(|key| fields(key)).collect())
                 .or_default();
             group.calls += 1;
             group.tools += call.tools as i64;
             for (total, key) in group.tokens.iter_mut().zip(USAGE_KEYS) {
                 *total += count(&call.usage, key);
             }
-            fast += i64::from(text(&call.usage, "speed") == "fast");
-            match prices.usd(&call.model, &call.usage) {
-                None => *unpriced.entry(call.model.clone()).or_default() += 1,
+            self.fast += i64::from(text(&call.usage, "speed") == "fast");
+            match self.prices.usd(&call.model, &call.usage) {
+                None => *self.unpriced.entry(call.model.clone()).or_default() += 1,
                 Some(parts) => {
                     for (sum, value) in group.usd.iter_mut().zip(parts.values()) {
                         *sum += value;
@@ -77,94 +92,105 @@ pub fn cost(scope: &Scope, by: &str, as_json: bool) -> Result<String> {
             }
         }
     }
-    let mut rows: Vec<Row> = groups
-        .into_iter()
-        .map(|(key, mut group)| {
-            let usd = round(group.usd.iter().sum(), 4);
-            group.usd = group.usd.map(|part| round(part, 4));
-            Row { key, group, usd }
-        })
-        .collect();
-    rows.sort_by(|a, b| b.usd.total_cmp(&a.usd));
-    if as_json {
-        let rows: Vec<Value> = rows
-            .iter()
-            .map(|row| {
-                let mut object = Map::new();
-                for (name, value) in keys.iter().zip(&row.key) {
-                    object.insert((*name).to_owned(), json!(value));
-                }
-                object.insert("calls".into(), json!(row.group.calls));
-                object.insert("tool_calls".into(), json!(row.group.tools));
-                for (name, total) in USAGE_KEYS.iter().zip(row.group.tokens) {
-                    object.insert((*name).to_owned(), json!(total));
-                }
-                object.insert("usd".into(), json!(row.usd));
-                for (name, part) in ["usd_input", "usd_write", "usd_read", "usd_output"]
-                    .iter()
-                    .zip(row.group.usd)
-                {
-                    object.insert((*name).to_owned(), json!(part));
-                }
-                Value::Object(object)
+
+    pub fn render(self, scope: &Scope, as_json: bool) -> Result<String> {
+        let Self {
+            keys,
+            groups,
+            unpriced,
+            fast,
+            ..
+        } = self;
+        let mut rows: Vec<Row> = groups
+            .into_iter()
+            .map(|(key, mut group)| {
+                let usd = round(group.usd.iter().sum(), 4);
+                group.usd = group.usd.map(|part| round(part, 4));
+                Row { key, group, usd }
             })
             .collect();
-        let report = json!({"rows": rows, "unpriced": unpriced, "fast_calls": fast});
-        let mut text = serde_json::to_string_pretty(&report).map_err(ctx("serialize report"))?;
-        text.push('\n');
-        return Ok(text);
-    }
-    let total: f64 = rows.iter().map(|row| row.usd).sum();
-    let grand = if total == 0.0 { 1.0 } else { total };
-    let mut out = format!("Total ${} since {}", grouped(total, 2), scope.since);
-    if let Some(project) = &scope.project {
-        out.push_str(&format!(" (project ~ {project})"));
-    }
-    out.push('\n');
-    let mut headers: Vec<&str> = keys.clone();
-    headers.extend([
-        "calls", "in", "write", "read", "out", "USD", "%", "write%", "read%", "out%",
-    ]);
-    let table: Vec<Vec<String>> = rows
-        .iter()
-        .take(scope.top)
-        .map(|row| {
-            let base = if row.usd == 0.0 { 1.0 } else { row.usd };
-            let share = |part: f64| format!("{:.0}", 100.0 * part / base);
-            let mut cells: Vec<String> = row
-                .key
+        rows.sort_by(|a, b| b.usd.total_cmp(&a.usd));
+        if as_json {
+            let rows: Vec<Value> = rows
                 .iter()
-                .map(|value| tail(value, 60).to_owned())
+                .map(|row| {
+                    let mut object = Map::new();
+                    for (name, value) in keys.iter().zip(&row.key) {
+                        object.insert((*name).to_owned(), json!(value));
+                    }
+                    object.insert("calls".into(), json!(row.group.calls));
+                    object.insert("tool_calls".into(), json!(row.group.tools));
+                    for (name, total) in USAGE_KEYS.iter().zip(row.group.tokens) {
+                        object.insert((*name).to_owned(), json!(total));
+                    }
+                    object.insert("usd".into(), json!(row.usd));
+                    for (name, part) in ["usd_input", "usd_write", "usd_read", "usd_output"]
+                        .iter()
+                        .zip(row.group.usd)
+                    {
+                        object.insert((*name).to_owned(), json!(part));
+                    }
+                    Value::Object(object)
+                })
                 .collect();
-            cells.push(row.group.calls.to_string());
-            cells.extend(row.group.tokens.map(|tokens| tok(tokens as f64)));
-            cells.push(grouped(row.usd, 2));
-            cells.push(format!("{:.1}", 100.0 * row.usd / grand));
-            cells.extend([row.group.usd[1], row.group.usd[2], row.group.usd[3]].map(share));
-            cells
-        })
-        .collect();
-    fmt::table(&mut out, &headers, &table);
-    if rows.len() > scope.top {
-        out.push_str(&format!(
-            "({} more groups; --top raises the limit)\n",
-            rows.len() - scope.top
-        ));
-    }
-    if !unpriced.is_empty() {
-        let unpriced: Vec<String> = unpriced
-            .into_iter()
-            .map(|(model, calls)| format!("{model}: {calls}"))
+            let report = json!({"rows": rows, "unpriced": unpriced, "fast_calls": fast});
+            let mut text =
+                serde_json::to_string_pretty(&report).map_err(ctx("serialize report"))?;
+            text.push('\n');
+            return Ok(text);
+        }
+        let total: f64 = rows.iter().map(|row| row.usd).sum();
+        let grand = if total == 0.0 { 1.0 } else { total };
+        let mut out = format!("Total ${} since {}", grouped(total, 2), scope.since);
+        if let Some(project) = &scope.project {
+            out.push_str(&format!(" (project ~ {project})"));
+        }
+        out.push('\n');
+        let mut headers: Vec<&str> = keys.iter().map(String::as_str).collect();
+        headers.extend([
+            "calls", "in", "write", "read", "out", "USD", "%", "write%", "read%", "out%",
+        ]);
+        let table: Vec<Vec<String>> = rows
+            .iter()
+            .take(scope.top)
+            .map(|row| {
+                let base = if row.usd == 0.0 { 1.0 } else { row.usd };
+                let share = |part: f64| format!("{:.0}", 100.0 * part / base);
+                let mut cells: Vec<String> = row
+                    .key
+                    .iter()
+                    .map(|value| tail(value, 60).to_owned())
+                    .collect();
+                cells.push(row.group.calls.to_string());
+                cells.extend(row.group.tokens.map(|tokens| tok(tokens as f64)));
+                cells.push(grouped(row.usd, 2));
+                cells.push(format!("{:.1}", 100.0 * row.usd / grand));
+                cells.extend([row.group.usd[1], row.group.usd[2], row.group.usd[3]].map(share));
+                cells
+            })
             .collect();
-        out.push_str(&format!(
-            "Unpriced models (add them to the price file): {}\n",
-            unpriced.join(", ")
-        ));
+        fmt::table(&mut out, &headers, &table);
+        if rows.len() > scope.top {
+            out.push_str(&format!(
+                "({} more groups; --top raises the limit)\n",
+                rows.len() - scope.top
+            ));
+        }
+        if !unpriced.is_empty() {
+            let unpriced: Vec<String> = unpriced
+                .into_iter()
+                .map(|(model, calls)| format!("{model}: {calls}"))
+                .collect();
+            out.push_str(&format!(
+                "Unpriced models (add them to the price file): {}\n",
+                unpriced.join(", ")
+            ));
+        }
+        if fast > 0 {
+            out.push_str(&format!("Fast-mode calls: {fast}\n"));
+        }
+        Ok(out)
     }
-    if fast > 0 {
-        out.push_str(&format!("Fast-mode calls: {fast}\n"));
-    }
-    Ok(out)
 }
 
 /// What one session cost so far.
@@ -246,15 +272,24 @@ pub fn session(id: &str, as_json: bool) -> Result<String> {
     Ok(line)
 }
 
-pub fn agents(scope: &Scope) -> Result<String> {
-    let prices = Prices::load()?;
-    // Per run: start context, peak context, calls, USD.
-    let mut by: IndexMap<String, Vec<[f64; 4]>> = IndexMap::new();
-    let mut seen = HashSet::new();
-    for transcript in transcripts(scope) {
-        let calls = transcript.api_calls(&scope.since_iso, &mut seen);
+pub struct Agents {
+    prices: Prices,
+    by: IndexMap<String, Vec<[f64; 4]>>,
+    seen: HashSet<String>,
+}
+
+impl Agents {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            prices: Prices::load()?,
+            by: IndexMap::new(),
+            seen: HashSet::new(),
+        })
+    }
+    pub fn feed(&mut self, transcript: &Loaded) {
+        let calls = transcript.api_calls(&mut self.seen);
         if calls.is_empty() {
-            continue;
+            return;
         }
         let context: Vec<i64> = calls
             .iter()
@@ -266,52 +301,57 @@ pub fn agents(scope: &Scope) -> Result<String> {
             })
             .collect();
         let usd = calls.iter().fold(0.0, |sum, call| {
-            sum + prices
+            sum + self
+                .prices
                 .usd(&call.model, &call.usage)
                 .map_or(0.0, |parts| parts.total())
         });
-        by.entry(transcript.agent.clone()).or_default().push([
+        self.by.entry(transcript.agent.clone()).or_default().push([
             context[0] as f64,
             context.iter().copied().max().unwrap_or_default() as f64,
             calls.len() as f64,
             usd,
         ]);
     }
-    let total = |runs: &[[f64; 4]]| runs.iter().fold(0.0, |sum, run| sum + run[3]);
-    let mut agents: Vec<(String, Vec<[f64; 4]>)> = by.into_iter().collect();
-    agents.sort_by(|a, b| total(&b.1).total_cmp(&total(&a.1)));
-    let rows: Vec<Vec<String>> = agents
-        .iter()
-        .map(|(agent, runs)| {
-            let median: Vec<f64> = (0..4)
-                .map(|index| median(runs.iter().map(|run| run[index]).collect()))
-                .collect();
-            vec![
-                agent.clone(),
-                runs.len().to_string(),
-                tok(median[0]),
-                tok(median[1]),
-                format!("{}", median[2].trunc() as i64),
-                format!("{:.2}", median[3]),
-                grouped(total(runs), 2),
-            ]
-        })
-        .collect();
-    let mut out = String::new();
-    fmt::table(
-        &mut out,
-        &[
-            "agent",
-            "runs",
-            "med start ctx",
-            "med peak ctx",
-            "med calls",
-            "med USD",
-            "total USD",
-        ],
-        &rows,
-    );
-    Ok(out)
+
+    pub fn render(self) -> String {
+        let Self { by, .. } = self;
+        let total = |runs: &[[f64; 4]]| runs.iter().fold(0.0, |sum, run| sum + run[3]);
+        let mut agents: Vec<(String, Vec<[f64; 4]>)> = by.into_iter().collect();
+        agents.sort_by(|a, b| total(&b.1).total_cmp(&total(&a.1)));
+        let rows: Vec<Vec<String>> = agents
+            .iter()
+            .map(|(agent, runs)| {
+                let median: Vec<f64> = (0..4)
+                    .map(|index| median(runs.iter().map(|run| run[index]).collect()))
+                    .collect();
+                vec![
+                    agent.clone(),
+                    runs.len().to_string(),
+                    tok(median[0]),
+                    tok(median[1]),
+                    format!("{}", median[2].trunc() as i64),
+                    format!("{:.2}", median[3]),
+                    grouped(total(runs), 2),
+                ]
+            })
+            .collect();
+        let mut out = String::new();
+        fmt::table(
+            &mut out,
+            &[
+                "agent",
+                "runs",
+                "med start ctx",
+                "med peak ctx",
+                "med calls",
+                "med USD",
+                "total USD",
+            ],
+            &rows,
+        );
+        out
+    }
 }
 
 /// A Claude Code project directory name under the home directory as `~/<rest>`.

@@ -4,6 +4,7 @@
 
 mod backup;
 pub mod cleanup;
+mod copy;
 mod create;
 mod disposable;
 mod fast_forward;

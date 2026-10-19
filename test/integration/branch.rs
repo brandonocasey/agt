@@ -308,3 +308,119 @@ fn pushed_prints_the_git_state_when_the_forge_lookup_fails() {
     assert!(stderr.contains("warning: PR/MR lookup failed"), "{stderr}");
     assert!(stderr.contains("run gh: No such file"), "{stderr}");
 }
+
+#[test]
+fn check_defaults_to_both_and_preserves_wrapper_reports() {
+    let site = Site::new();
+    site.pulls(&[]);
+    site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    let (pushed, _) = site.report(&["pushed"]);
+    let (landable, _) = site.report(&["landable"]);
+    let (report, code) = site.report(&["check"]);
+    assert_eq!(code, 0);
+    assert_eq!(report["status"], 0);
+    assert_eq!(
+        report["checks"]["pushed"],
+        json!({"status": 0, "report": pushed})
+    );
+    assert_eq!(
+        report["checks"]["landable"],
+        json!({"status": 0, "report": landable})
+    );
+}
+
+#[test]
+fn check_selects_only_the_requested_checks_and_options() {
+    let site = Site::new();
+    site.pulls(&[]);
+    let bare = site.env.path("origin.git");
+    site.env
+        .git(&["remote", "add", "backup", bare.to_str().unwrap()]);
+    let (report, code) = site.report(&[
+        "check", "topic", "--checks", "pushed", "--remote", "backup", "--target", "invalid",
+    ]);
+    assert_eq!(code, 4);
+    assert_eq!(report["checks"].as_object().unwrap().len(), 1);
+    assert_eq!(report["checks"]["pushed"]["status"], 4);
+    assert_eq!(report["checks"]["pushed"]["report"]["remote"], "backup");
+    let (report, code) = site.report(&[
+        "check", "--checks", "landable", "--remote", "invalid", "--target", "main",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(report["checks"].as_object().unwrap().len(), 1);
+    assert_eq!(report["checks"]["landable"]["report"]["target"], "main");
+}
+
+#[test]
+fn check_conflicts_take_priority_over_not_pushed_in_either_selection_order() {
+    let site = Site::new();
+    site.pulls(&[]);
+    site.env.write("base.txt", "topic\n");
+    site.env.commit_all("topic");
+    site.env.git(&["checkout", "-q", "main"]);
+    site.env.write("base.txt", "main\n");
+    site.env.commit_all("main");
+    site.env.git(&["checkout", "-q", "topic"]);
+    for checks in ["pushed,landable", "landable,pushed"] {
+        let (report, code) = site.report(&["check", "--checks", checks, "--target", "main"]);
+        assert_eq!(code, 5);
+        assert_eq!(report["status"], 5);
+        assert_eq!(report["checks"]["pushed"]["status"], 4);
+        assert_eq!(report["checks"]["landable"]["status"], 5);
+        assert_eq!(
+            report["checks"]["landable"]["report"]["conflicts"],
+            json!(["base.txt"])
+        );
+    }
+}
+
+#[test]
+fn check_fatal_errors_take_priority_over_conflicts() {
+    let site = Site::new();
+    site.env.write("base.txt", "topic\n");
+    site.env.commit_all("topic");
+    site.env.git(&["checkout", "-q", "main"]);
+    site.env.write("base.txt", "main\n");
+    site.env.commit_all("main");
+    site.env.git(&["checkout", "-q", "topic"]);
+    let output = site.agt(&["check", "--remote", "invalid", "--target", "main"]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], 1);
+    assert_eq!(report["checks"]["pushed"]["status"], 1);
+    assert_eq!(report["checks"]["landable"]["status"], 5);
+}
+
+#[test]
+fn check_reports_errors_without_hiding_the_other_check() {
+    let site = Site::new();
+    site.pulls(&[]);
+    for options in [["--target", "invalid"], ["--remote", "invalid"]] {
+        let output = site.agt(&["check", options[0], options[1]]);
+        assert_eq!(output.status.code(), Some(1));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let (failed, other) = if options[0] == "--target" {
+            ("landable", "pushed")
+        } else {
+            ("pushed", "landable")
+        };
+        assert_eq!(report["status"], 1);
+        assert_eq!(report["checks"][failed]["status"], 1);
+        assert!(report["checks"][failed]["error"].as_str().is_some());
+        assert!(report["checks"][other]["report"].is_object());
+    }
+}
+
+#[test]
+fn check_rejects_unknown_checks() {
+    let site = Site::new();
+    let output = site.agt(&["check", "--checks", "unknown"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid value 'unknown'"), "{stderr}");
+    assert!(
+        stderr.contains("pushed") && stderr.contains("landable"),
+        "{stderr}"
+    );
+}

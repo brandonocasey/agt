@@ -875,7 +875,7 @@ fn a_process_with_its_directory_inside_the_worktree_blocks_removal() {
             .spawn()
             .unwrap(),
     );
-    // Give lsof or /proc time to see the child's directory.
+    // The child MUST be visible to the native process directory lookup.
     std::thread::sleep(std::time::Duration::from_millis(300));
     let pid = child.0.id().to_string();
     for args in [vec!["remove", &wt], vec!["remove", &wt, "--yes"]] {

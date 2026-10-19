@@ -241,7 +241,6 @@ mod tests {
                 _ => json!([]),
             };
             Ok(Response {
-                status: 200,
                 headers: Vec::new(),
                 body,
             })

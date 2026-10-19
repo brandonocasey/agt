@@ -1,9 +1,7 @@
 //! Whether any process other than agt, its ancestors and the calling session's own processes
 //! has its current directory inside a worktree.
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::core::agents;
 
@@ -70,47 +68,24 @@ fn describe(pid: i32, cwd: &Path) -> String {
 
 fn read() -> Result<Vec<(i32, PathBuf)>, String> {
     let own = agents::lineage();
-    let mut all = if cfg!(target_os = "linux") {
-        proc_cwds()?
-    } else {
-        lsof_cwds()?
-    };
+    let mut all = agents::cwds_checked().map_err(|error| error.to_string())?;
     all.retain(|(pid, _)| !own.contains(pid));
     Ok(all)
 }
 
-fn proc_cwds() -> Result<Vec<(i32, PathBuf)>, String> {
-    let dir = fs::read_dir("/proc").map_err(|error| format!("read /proc: {error}"))?;
-    Ok(dir
-        .flatten()
-        .filter_map(|entry| {
-            let pid = entry.file_name().to_str()?.parse().ok()?;
-            // Other users' processes are not readable and cannot be inside the user's worktree.
-            Some((pid, fs::read_link(entry.path().join("cwd")).ok()?))
-        })
-        .collect())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn lsof_cwds() -> Result<Vec<(i32, PathBuf)>, String> {
-    let output = Command::new("lsof")
-        .args(["-a", "-d", "cwd", "-Fpn"])
-        .output()
-        .map_err(|error| format!("run lsof: {error}"))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() && text.is_empty() {
-        return Err(format!(
-            "lsof failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    #[test]
+    fn enumeration_failure_refuses_an_idle_worktree() {
+        let mut cwds = Cwds {
+            all: Some(Err("process table unavailable".to_owned())),
+            session: None,
+        };
+        assert_eq!(
+            cwds.busy(Path::new("/unused/worktree")),
+            Some("cannot check running processes: process table unavailable".to_owned())
+        );
     }
-    let mut all = Vec::new();
-    let mut pid = None;
-    for line in text.lines() {
-        if let Some(number) = line.strip_prefix('p') {
-            pid = number.parse().ok();
-        } else if let (Some(path), Some(pid)) = (line.strip_prefix('n'), pid) {
-            all.push((pid, PathBuf::from(path)));
-        }
-    }
-    Ok(all)
 }
