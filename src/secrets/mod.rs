@@ -139,7 +139,10 @@ fn scan_text(name: &str, content: &[u8], rows: &mut BTreeSet<(String, usize, &'s
             .collect();
         // A named format explains the line; the generic rule would only repeat it.
         let named = hits.iter().any(|rule| *rule != rules::GENERIC);
-        for rule in hits.into_iter().filter(|rule| !named || *rule != rules::GENERIC) {
+        for rule in hits
+            .into_iter()
+            .filter(|rule| !named || *rule != rules::GENERIC)
+        {
             rows.insert((name.to_owned(), index + 1, rule));
         }
     }
