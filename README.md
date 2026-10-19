@@ -1143,7 +1143,7 @@ entries whose path no longer exists are dropped on every write. `--env` prints `
 
 ## Secrets
 
-`agt secrets scan [PATH...] [--staged] [--json]` looks for leaked credentials without ever printing
+`agt secrets [PATH...] [--staged] [--json]` looks for leaked credentials without ever printing
 them. It reads the files `git ls-files -co --exclude-standard` lists (tracked and unignored), or
 only the staged blobs with `--staged`, limited to `PATH`s when given, and skips binary files.
 Output is `path:line rule` per hit, or with `--json` rows of `{path, line, rule}`; the matched

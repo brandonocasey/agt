@@ -46,6 +46,10 @@ enum Command {
     /// Worktrees: create, prepare, port, list, remove after a backup, restore.
     Worktree(worktree::Cli),
     /// Scan for leaked credentials without printing them.
+    ///
+    /// Reads tracked and unignored text files (binary files are skipped). Prints `path:line rule`
+    /// per hit (`--json`: rows of path, line, rule), never the matched text. Exit 0 when clean,
+    /// 1 on any match, 2 on an error. A line containing `agt-secrets: allow` is skipped.
     Secrets(secrets::Cli),
     /// Check that this host and repository are set up for agt. Read-only; exit 0 ok, 1 a check failed, 2 warnings only.
     Doctor(doctor::Cli),

@@ -1,4 +1,4 @@
-//! `agt secrets scan`: rows name path, line and rule; the secret itself is never printed.
+//! `agt secrets`: rows name path, line and rule; the secret itself is never printed.
 
 use std::fs;
 use std::process::Output;
@@ -9,7 +9,7 @@ use crate::support::Env;
 
 fn scan(env: &Env, args: &[&str]) -> Output {
     env.command(env!("CARGO_BIN_EXE_agt"), &env.repo)
-        .args(["secrets", "scan"])
+        .arg("secrets")
         .args(args)
         .output()
         .expect("agt runs")
@@ -76,7 +76,7 @@ fn outside_a_repository_it_fails_with_exit_2() {
     let env = Env::new();
     let output = env
         .command(env!("CARGO_BIN_EXE_agt"), &env.path("home"))
-        .args(["secrets", "scan"])
+        .arg("secrets")
         .env("GIT_CEILING_DIRECTORIES", env.path(""))
         .output()
         .unwrap();

@@ -1,4 +1,4 @@
-//! `agt secrets scan`: finds likely credentials in tracked files or staged blobs and reports
+//! `agt secrets`: finds likely credentials in tracked files or staged blobs and reports
 //! only `path`, `line` and rule name; matched text is never printed, not even in errors.
 
 mod rules;
@@ -6,7 +6,7 @@ mod rules;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::Args;
 use serde_json::json;
 
 use crate::core::error::{Result, ctx};
@@ -19,25 +19,8 @@ const ALLOW: &str = "agt-secrets: allow";
 const FOUND: u8 = 1;
 const FAILED: u8 = 2;
 
-/// Secret-leak scan that never shows secret values.
 #[derive(Args)]
 pub struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Scan tracked and unignored text files (binary files are skipped) for credentials.
-    ///
-    /// Prints `path:line rule` per hit (`--json`: rows of path, line, rule), never the matched
-    /// text. Exit 0 when clean, 1 on any match, 2 on an error. A line containing
-    /// `agt-secrets: allow` is skipped.
-    Scan(Scan),
-}
-
-#[derive(Args)]
-struct Scan {
     /// Limit the scan to these files or directories.
     paths: Vec<PathBuf>,
     /// Scan the staged blobs instead of the working tree.
@@ -49,9 +32,8 @@ struct Scan {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let Command::Scan(args) = cli.command;
-    match scan(&args) {
-        Ok(rows) => report(&args, &rows),
+    match scan(&cli) {
+        Ok(rows) => report(&cli, &rows),
         Err(error) => {
             eprintln!("agt: error: {error}");
             Ok(Output::Exit(FAILED))
@@ -59,7 +41,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
 }
 
-fn report(args: &Scan, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<Output> {
+fn report(args: &Cli, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<Output> {
     let output = if args.json {
         Output::Json(
             rows.iter()
@@ -77,7 +59,7 @@ fn report(args: &Scan, rows: &BTreeSet<(String, usize, &'static str)>) -> Result
     Ok(Output::Exit(if rows.is_empty() { 0 } else { FOUND }))
 }
 
-fn scan(args: &Scan) -> Result<BTreeSet<(String, usize, &'static str)>> {
+fn scan(args: &Cli) -> Result<BTreeSet<(String, usize, &'static str)>> {
     let repo = Repo::discover()?;
     let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
     let paths: Vec<String> = args
