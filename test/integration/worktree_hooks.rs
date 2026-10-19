@@ -478,6 +478,27 @@ fn trust_remove_and_list() {
 }
 
 #[test]
+fn trust_list_reports_a_config_replaced_by_a_symlink() {
+    let env = repo();
+    let text = "[worktree.hooks]\ncreate = [\"touch ran\"]\n";
+    untrusted_config(&env, text);
+    agt(&env, &env.repo, &["trust"]);
+    let elsewhere = env.repo.parent().unwrap().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("agt.toml"), text).unwrap();
+    fs::remove_dir_all(env.repo.join(".config")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, env.repo.join(".config")).unwrap();
+    let listed = json(&agt(&env, &env.repo, &["trust", "--list"]));
+    assert_eq!(listed["trusted"][0]["current"], false);
+    assert!(
+        listed["trusted"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("symlink")
+    );
+}
+
+#[test]
 fn trust_errors_without_a_file_or_hooks() {
     let env = repo();
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());

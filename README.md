@@ -1056,7 +1056,7 @@ Output is JSON.
 ```sh
 agt worktree create BRANCH [--base C] [--path P] [--prepare] [--port] [--no-hooks] [--background]
 agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lockfiles
-agt worktree prepare --hooks [PATH] [--clone-deps]  # rerun only the create hooks, no installs (after a failed one)
+agt worktree prepare --hooks [PATH]  # rerun only the create hooks, no installs (after a failed one)
 agt worktree prepare --wait [PATH] [--max SECS]  # wait for the background setup `create --background` started
 agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
