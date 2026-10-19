@@ -21,7 +21,7 @@ static PREAMBLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:cd\s+\S+|[A-Za-z_]\w*=\S*)\s*(?:&&|;)\s*)+").expect("valid pattern")
 });
 
-fn tool_key(name: &str, input: &Value) -> String {
+pub(super) fn tool_key(name: &str, input: &Value) -> String {
     if name == "Bash" {
         let command = text(input, "command");
         let command = PREAMBLE.replace(command.trim(), "");
@@ -47,7 +47,7 @@ fn tool_key(name: &str, input: &Value) -> String {
 }
 
 /// About four characters per token; an image counts 1,600.
-fn est_tokens(content: &Value) -> f64 {
+pub(super) fn est_tokens(content: &Value) -> f64 {
     match content {
         Value::String(text) => text.chars().count() as f64 / 4.0,
         Value::Array(blocks) => {
@@ -106,11 +106,10 @@ impl Tools {
                 }
                 for block in get(message, "content").as_array().into_iter().flatten() {
                     if text(block, "type") == "tool_use" {
-                        let input = get(block, "input");
-                        let tokens = input.to_string().chars().count() as f64 / 4.0;
+                        let tokens = get(block, "input_tokens").as_f64().unwrap_or_default();
                         pending.insert(
                             key(get(block, "id")),
-                            (tool_key(text(block, "name"), input), tokens),
+                            (text(block, "tool_key").to_owned(), tokens),
                         );
                     }
                 }
@@ -122,7 +121,12 @@ impl Tools {
                         continue;
                     }
                     if let Some((name, input)) = pending.remove(&key(get(block, "tool_use_id"))) {
-                        results.push((calls, est_tokens(get(block, "content")), input, name));
+                        results.push((
+                            calls,
+                            get(block, "result_tokens").as_f64().unwrap_or_default(),
+                            input,
+                            name,
+                        ));
                     }
                 }
             }
@@ -202,6 +206,19 @@ struct Previous {
     tool: Option<String>,
 }
 
+pub(super) fn gap_tool(block: &Value) -> String {
+    let input = get(block, "input");
+    let detail = [get(input, "command"), get(input, "description")]
+        .into_iter()
+        .find(|value| truthy(value))
+        .map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    format!("{}: {}", text(block, "name"), head(&detail, 60)).replace('\n', " ")
+}
+
 pub struct CacheGaps {
     prices: Prices,
     gap: Option<f64>,
@@ -247,19 +264,7 @@ impl CacheGaps {
             }
             for block in get(message, "content").as_array().into_iter().flatten() {
                 if text(block, "type") == "tool_use" {
-                    let input = get(block, "input");
-                    let detail = [get(input, "command"), get(input, "description")]
-                        .into_iter()
-                        .find(|value| truthy(value))
-                        .map(|value| match value {
-                            Value::String(text) => text.clone(),
-                            other => other.to_string(),
-                        })
-                        .unwrap_or_default();
-                    last_tool = Some(
-                        format!("{}: {}", text(block, "name"), head(&detail, 60))
-                            .replace('\n', " "),
-                    );
+                    last_tool = Some(text(block, "gap_tool").to_owned());
                 }
             }
             let usage = get(message, "usage");

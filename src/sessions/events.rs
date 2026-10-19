@@ -55,15 +55,56 @@ fn shown(value: &Value) -> String {
     }
 }
 
+pub(super) fn input_summary(block: &Value) -> String {
+    let input = get(block, "input");
+    let input = if truthy(input) {
+        input.clone()
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+    let summary = ["command", "file_path", "url"]
+        .into_iter()
+        .map(|name| get(&input, name))
+        .find(|value| truthy(value))
+        .map_or_else(|| input.to_string(), shown);
+    head(&summary, 100).to_owned()
+}
+
+pub(super) fn compact_failure(block: &Value, summary: &mut Value) {
+    if !truthy(get(block, "is_error")) {
+        return;
+    }
+    summary["is_error"] = true.into();
+    let content = result_text(get(block, "content"));
+    if let Some(denial) = denial_kind(&content) {
+        summary["denial"] = denial.into();
+        return;
+    }
+    let cleaned = ERROR_TAG.replace_all(&content, "");
+    let mut lines = cleaned
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let first = if first.starts_with("Exit code") {
+        lines
+            .next()
+            .map_or_else(|| first.to_owned(), |next| format!("{first} | {next}"))
+    } else {
+        first.to_owned()
+    };
+    summary["error_group"] = head(&DIGITS.replace_all(&first, "#"), 80).into();
+}
+
 struct Failure {
     session: String,
     timestamp: String,
     tool: String,
     summary: String,
-    text: String,
+    denial: Option<String>,
+    error: String,
 }
 
-/// Every failed tool call: its tool, a summary of its input, and the error text.
 fn tool_errors(transcript: &Loaded) -> Vec<Failure> {
     let mut failures = Vec::new();
 
@@ -76,22 +117,9 @@ fn tool_errors(transcript: &Loaded) -> Vec<Failure> {
         for block in blocks.iter().filter(|block| block.is_object()) {
             match text(block, "type") {
                 "tool_use" => {
-                    let input = get(block, "input");
-                    let input = if truthy(input) {
-                        input.clone()
-                    } else {
-                        Value::Object(serde_json::Map::new())
-                    };
-                    let summary = ["command", "file_path", "url"]
-                        .into_iter()
-                        .map(|name| get(&input, name))
-                        .find(|value| truthy(value))
-                        .map_or_else(|| input.to_string(), shown);
+                    let summary = text(block, "input_summary");
                     let name = block.get("name").and_then(Value::as_str).unwrap_or("?");
-                    uses.insert(
-                        key(get(block, "id")),
-                        (name.to_owned(), head(&summary, 100).to_owned()),
-                    );
+                    uses.insert(key(get(block, "id")), (name.to_owned(), summary.to_owned()));
                 }
                 "tool_result" if truthy(get(block, "is_error")) => {
                     let (tool, summary) = uses
@@ -103,7 +131,11 @@ fn tool_errors(transcript: &Loaded) -> Vec<Failure> {
                         timestamp: text(record, "timestamp").to_owned(),
                         tool,
                         summary,
-                        text: result_text(get(block, "content")),
+                        denial: block
+                            .get("denial")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        error: text(block, "error_group").to_owned(),
                     });
                 }
                 _ => {}
@@ -193,7 +225,7 @@ impl Failures {
 
     pub fn feed(&mut self, transcript: &Loaded) {
         for failure in tool_errors(transcript) {
-            if let Some(denial) = denial_kind(&failure.text) {
+            if let Some(denial) = failure.denial {
                 if self.kind != ErrorKind::Error {
                     self.rows.push((
                         denial,
@@ -207,26 +239,7 @@ impl Failures {
             if self.kind == ErrorKind::Denial {
                 continue;
             }
-            let cleaned = ERROR_TAG.replace_all(&failure.text, "");
-            let mut lines: Vec<&str> = cleaned
-                .split('\n')
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .collect();
-            if lines.is_empty() {
-                lines.push("");
-            }
-            // "Exit code N" alone says nothing; the next line is usually the error.
-            let first = if lines[0].starts_with("Exit code") {
-                lines[..lines.len().min(2)].join(" | ")
-            } else {
-                lines[0].to_owned()
-            };
-            let group = format!(
-                "{}: {}",
-                failure.tool,
-                head(&DIGITS.replace_all(&first, "#"), 80)
-            );
+            let group = format!("{}: {}", failure.tool, failure.error);
             self.rows
                 .push((group, failure.session, failure.timestamp, failure.summary));
         }
@@ -272,7 +285,7 @@ static PUNCTUATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^\w\s/!-]").expect("valid pattern"));
 
 /// Text the person typed, or `None` for tool results and injected harness content.
-fn user_text(record: &Value) -> Option<String> {
+pub(super) fn user_text(record: &Value) -> Option<String> {
     if text(record, "type") != "user"
         || truthy(get(record, "isMeta"))
         || truthy(get(record, "isCompactSummary"))
@@ -350,12 +363,12 @@ impl Friction {
             return;
         }
         transcript.records(|record| {
-            if let Some(typed) = user_text(record) {
+            if let Some(typed) = record.get("typed").and_then(Value::as_str) {
                 self.messages.push((
                     head(text(record, "timestamp"), 10).to_owned(),
                     transcript.project.clone(),
                     transcript.session.clone(),
-                    typed,
+                    typed.to_owned(),
                 ));
             }
         });
