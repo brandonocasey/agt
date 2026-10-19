@@ -310,7 +310,7 @@ fn remove_worktree(
         }));
         return Ok(true);
     }
-    match removal(main, &real, entry) {
+    match removal(main, &real, entry, true) {
         Ok(done) => {
             report.remove.push(json!({
                 "path": real,

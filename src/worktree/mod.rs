@@ -8,6 +8,7 @@ mod create;
 mod disposable;
 mod fast_forward;
 mod gate;
+mod hooks;
 mod idle;
 mod info;
 mod landed;
@@ -19,6 +20,7 @@ pub mod prune;
 mod remove;
 mod restore;
 pub(crate) mod roots;
+mod setup;
 mod snapshot;
 
 use clap::{Args, Subcommand};

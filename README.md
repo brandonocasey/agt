@@ -1054,17 +1054,30 @@ gives each a dev-server port, lists them, removes one after backing it up, sweep
 Output is JSON.
 
 ```sh
-agt worktree create BRANCH [--base C] [--path P] [--prepare] [--port]
+agt worktree create BRANCH [--base C] [--path P] [--prepare] [--port] [--no-hooks] [--background]
 agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lockfiles
+agt worktree prepare --wait [PATH] [--max SECS]  # wait for the background setup `create --background` started
 agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
-agt worktree remove PATH [--yes]            # without --yes: print the plan, change nothing
+agt worktree remove PATH [--yes] [--no-hooks]  # without --yes: print the plan, change nothing
 agt cleanup --only worktrees [--all-repos] [--yes] [--offline] [--dirty] [--recent] [--worktree NAME-OR-PATH]...  # remove landed worktrees, delete landed branches
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
 agt worktree backups                        # list backups
 agt worktree backups show ID
 agt worktree backups rm ID [--yes]          # delete the backup's ref and directory
 ```
+
+Hooks run shell commands around a worktree's life. Set them globally in `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's `.config/agt.toml` overrides each key (`create`, `remove`) as a whole:
+
+```toml
+[worktree.hooks]
+create = ["npm run build"]   # after `create` makes a new worktree (not a reused one)
+remove = ["docker compose down"]  # before `remove --yes` or `cleanup --yes` backs the worktree up
+```
+
+Each entry runs as `sh -c <entry>` in the worktree root, one after another, stopping at the first failure; stdin is empty and the output goes to a log under `$XDG_CACHE_HOME/agents/output/`. The environment has `AGT_HOOK` (`create` or `remove`), `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` (empty when detached) and, only when a port is already recorded for the worktree (`create --port` records one first), `PORT`. `create` reports them under `hooks` (`create`: the steps with `command`, `exit`, `ok`, `duration_ms`, `log`; `ok`) and exits 1 when one fails; `--no-hooks` skips them. A failing `remove` hook is an error: nothing is backed up or removed. The `remove` plan (no `--yes`) lists the commands under `hooks`; `remove --no-hooks` skips them and `cleanup` always runs them.
+
+`create --background` returns at once: the port is still recorded first, but `--prepare` and the create hooks run in a detached process, and the output has `background` with its `pid`, the `status` file and the `log` (`background.started: false` when there is nothing to run). The status file `agt-setup.json` is in the worktree's own git directory, so it goes with the worktree. `agt worktree prepare --wait [PATH] [--max SECS]` (default 270) waits until the setup is done, prints the stored report and exits 1 when it failed, or exits 3 when `--max` passes first. It is an error when the worktree has no background setup or the setup process died without finishing. `--wait` cannot be combined with `--clone-deps`.
 
 `list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it) (a worktree on a branch with no commit yet has `unborn: true` and `null` for those three), and `agents`: the live Claude Code sessions whose working directory is inside it, each with `pid`, `name`, `status` and `session` (the sessions `agt ps` lists). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml` (a repository it cannot read becomes an entry of `warnings` and the rest are still listed, as `agt cleanup --only worktrees --all-repos` does); globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
 
