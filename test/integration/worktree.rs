@@ -190,6 +190,82 @@ fn assert_restored(f: &Fixture, feature: &str) {
 }
 
 #[test]
+fn restore_preserves_regular_file_modes_across_umasks() {
+    for mask in ["0002", "0077"] {
+        let f = Fixture::new();
+        f.dirty();
+        let files = [("a.txt", 0o640), ("feature.txt", 0o600), ("new.bin", 0o750)];
+        for (name, mode) in files {
+            fs::set_permissions(f.wt.join(name), fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let removed = f.remove();
+        let output = f
+            .env
+            .command("sh", &f.env.repo)
+            .args([
+                "-c",
+                "umask \"$1\" && exec \"$2\" worktree restore \"$3\"",
+                "restore",
+                mask,
+                BIN,
+                removed["id"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (name, mode) in files {
+            assert_eq!(
+                fs::metadata(f.wt.join(name)).unwrap().permissions().mode() & 0o7777,
+                mode,
+                "{name}, umask {mask}"
+            );
+        }
+    }
+}
+
+#[test]
+fn restore_accepts_a_backup_without_file_mode_metadata() {
+    let f = Fixture::new();
+    f.dirty();
+    let removed = f.remove();
+    let record = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("backup.json");
+    let mut saved: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("file_modes");
+    fs::write(&record, serde_json::to_vec(&saved).unwrap()).unwrap();
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(
+        fs::read(f.wt.join("new.bin")).unwrap(),
+        [0u8, 159, 146, 150, 10]
+    );
+}
+
+#[test]
+fn restore_file_modes_cannot_escape_through_parent_paths_or_symlinks() {
+    for relative in ["../outside", "link/outside"] {
+        let f = Fixture::new();
+        let outside = f.env.path("outside");
+        fs::write(&outside, "outside").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(f.env.path(""), f.wt.join("link")).unwrap();
+        let removed = f.remove();
+        let record = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("backup.json");
+        let mut saved: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        saved["file_modes"] = json!([{"path": relative.as_bytes(), "mode": 0o777}]);
+        fs::write(&record, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let output = f.agt(&f.env.repo, &["restore", removed["id"].as_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
 fn plan_mode_changes_nothing() {
     let f = Fixture::new();
     f.dirty();

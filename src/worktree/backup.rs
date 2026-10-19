@@ -30,6 +30,15 @@ pub struct Record {
     pub created: String,
     pub copied: Vec<String>,
     pub skipped: Vec<String>,
+    #[serde(default)]
+    pub file_modes: Vec<FileMode>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FileMode {
+    /// Paths MUST remain byte-exact because Git filenames need not be UTF-8.
+    pub path: Vec<u8>,
+    pub mode: u32,
 }
 
 #[derive(Args)]
