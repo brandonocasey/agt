@@ -166,9 +166,9 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
     if let Some((host, forge)) = own {
         let name = format!("auth {host}");
         rows.push(match forge {
-            None => Row::fail(
+            None => Row::warn(
                 &name,
-                "no gh or glab login for this origin host",
+                "not a GitHub or GitLab host: forge features unavailable",
                 format!(
                     "{} or {}",
                     login_hint(Forge::Github, Some(host)),
@@ -204,14 +204,36 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
     rows
 }
 
-fn pinned() -> Result<Option<String>, String> {
-    let (ok, out, _) = mise()
+/// The pinned agt version; the error is the detail and the fix hint.
+fn pinned() -> Result<Option<String>, (String, String)> {
+    let install = |why: &str| {
+        (
+            why.to_owned(),
+            "install mise to track the pinned agt".to_owned(),
+        )
+    };
+    let (ok, out, err) = mise()
         .probe(&["ls", "--current", "--json"])
-        .ok_or("mise is not available")?;
+        .ok_or_else(|| install("mise is not available"))?;
     if !ok {
-        return Err("`mise ls --current --json` failed".into());
+        let first = err.lines().map(str::trim).find(|line| !line.is_empty());
+        let hint = if err.to_lowercase().contains("not trusted") {
+            "mise trust"
+        } else {
+            "fix the mise error above"
+        };
+        let why = match first {
+            Some(line) => format!("`mise ls --current --json` failed: {line}"),
+            None => "`mise ls --current --json` failed".to_owned(),
+        };
+        return Err((why, hint.to_owned()));
     }
-    let listing: Value = serde_json::from_str(&out).map_err(|_| "unreadable mise output")?;
+    let listing: Value = serde_json::from_str(&out).map_err(|_| {
+        (
+            "unreadable mise output".to_owned(),
+            "fix the mise error above".to_owned(),
+        )
+    })?;
     Ok(listing.as_object().and_then(|tools| {
         tools
             .iter()
@@ -224,11 +246,7 @@ fn pinned() -> Result<Option<String>, String> {
 fn agt_version() -> Row {
     let running = env!("CARGO_PKG_VERSION");
     match pinned() {
-        Err(why) => Row::warn(
-            "agt version",
-            format!("{running} running; {why}"),
-            "install mise to track the pinned agt",
-        ),
+        Err((why, hint)) => Row::warn("agt version", format!("{running} running; {why}"), hint),
         Ok(None) => Row::ok("agt version", format!("{running} (not pinned in mise)")),
         Ok(Some(pin)) if numbers(running) < numbers(&pin) => Row::warn(
             "agt version",
@@ -389,9 +407,9 @@ fn repository(repo: &Repo, origin: Option<&(String, String)>) -> Vec<Row> {
             "default branch",
             branch.strip_prefix("refs/").unwrap_or(&branch).to_owned(),
         ),
-        Err(error) => Row::fail(
+        Err(_) => Row::fail(
             "default branch",
-            error.0,
+            "cannot find the default branch",
             "git remote set-head origin --auto, or create main",
         ),
     });

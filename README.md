@@ -1168,7 +1168,8 @@ login is only the exit status and account name of `gh auth status` / `glab auth 
 makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `mise` and their versions; the
 login for the origin forge (a fail when missing) and for the other installed forge CLIs (a
 warning); the running agt version against the one `mise ls --current` pins for
-`github:brandonocasey/agt` (older: warn, `mise install`); the global git ignore covering
+`github:brandonocasey/agt` (older: warn, `mise install`; when `mise ls` fails, its first stderr line is the detail and the fix is
+`mise trust` or "fix the mise error above"); the global git ignore covering
 `.worktrees/` and `/.cache/agents/scratch/`; the state and config directories and both config
 files parsing; and, inside a repository, the origin, the default branch and stray agt lock
 files. All subprocesses share a 30-second budget. Exit status: 0 all ok, 1 any fail, 2 only

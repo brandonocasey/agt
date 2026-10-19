@@ -109,3 +109,71 @@ fn the_table_lists_a_fix_under_each_failed_row() {
         "{text}"
     );
 }
+
+#[test]
+fn a_failing_mise_shows_its_error_and_a_matching_fix() {
+    let env = setup("0.0.1");
+    env.respond(&AUTH, "Logged in to github.com account octo (keyring)");
+    let mise = env.path("mise");
+    fs::write(
+        &mise,
+        "#!/bin/sh\necho 'mise ERROR Config files are not trusted' >&2\necho 'more' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let (_, report) = doctor(&env);
+    let version = row(&report, "agt version");
+    assert_eq!(version["status"], "warn");
+    assert!(
+        version["detail"]
+            .as_str()
+            .unwrap()
+            .contains("mise ERROR Config files are not trusted"),
+        "{version}"
+    );
+    assert!(!version["detail"].as_str().unwrap().contains("more"));
+    assert_eq!(version["fix"], "mise trust");
+
+    fs::write(&mise, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").unwrap();
+    let (_, report) = doctor(&env);
+    assert_eq!(
+        row(&report, "agt version")["fix"],
+        "fix the mise error above"
+    );
+}
+
+#[test]
+fn an_origin_that_is_not_a_forge_warns_instead_of_failing() {
+    let env = setup("0.0.1");
+    env.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://git.example.invalid/o/r.git",
+    ]);
+    let (_, report) = doctor(&env);
+    let auth = row(&report, "auth git.example.invalid");
+    assert_eq!(auth["status"], "warn", "{report}");
+    assert!(
+        auth["detail"]
+            .as_str()
+            .unwrap()
+            .contains("forge features unavailable")
+    );
+    assert_ne!(report["status"], "fail", "{report}");
+}
+
+#[test]
+fn a_repo_without_a_default_branch_gets_a_plain_detail() {
+    let env = Env::new();
+    env.git(&["symbolic-ref", "HEAD", "refs/heads/trunk"]);
+    env.write("a.txt", "a");
+    env.commit_all("a");
+    let (_, report) = doctor(&env);
+    let branch = row(&report, "default branch");
+    assert_eq!(branch["status"], "fail");
+    assert_eq!(branch["detail"], "cannot find the default branch");
+    assert_eq!(
+        branch["fix"],
+        "git remote set-head origin --auto, or create main"
+    );
+}
