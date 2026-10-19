@@ -264,7 +264,7 @@ fn pr_link(tracker: &Tracker, arg: &str, source: LinkSource) -> Result<PrLink> {
     })
 }
 
-fn add_pr(issue: &mut Issue, link: PrLink) -> bool {
+fn add_pr(issue: &mut Issue, link: PrLink) {
     let known = issue
         .links
         .prs
@@ -273,7 +273,6 @@ fn add_pr(issue: &mut Issue, link: PrLink) -> bool {
     if !known {
         issue.links.prs.push(link);
     }
-    !known
 }
 
 pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Value> {
@@ -296,9 +295,12 @@ pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Valu
         ) {
             (Some(pr), ..) => {
                 let link = pr_link(tracker, pr, LinkSource::Local)?;
-                let url = link.url.clone().unwrap_or_default();
-                if add_pr(issue, link) && args.comment {
-                    queue_comment(tracker, issue, format!("Linked: {url}"));
+                let body = format!("Linked: {}", link.url.as_deref().unwrap_or_default());
+                add_pr(issue, link);
+                // Keyed on the comment, not the link, so `--comment` still works on a PR that
+                // an earlier `link` or `sync` already recorded.
+                if args.comment && !issue.comments.iter().any(|known| known.body == body) {
+                    queue_comment(tracker, issue, body);
                 }
             }
             (_, Some(other), ..) => push(&mut links.issues, other),

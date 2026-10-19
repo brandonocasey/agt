@@ -191,6 +191,9 @@ fn link_comment_queues_a_comment_and_a_local_link_once(fake: Fake) {
         "github" => "https://github.com/o/r/pull/7",
         _ => "https://gitlab.com/g/p/-/merge_requests/7",
     };
+    // A PR linked first without `--comment` still gets its comment later.
+    env.issue(&["link", "1", "--pr", "7"]);
+    assert_eq!(doc(&env, fake)["comments"], json!([]));
     env.issue(&["link", "1", "--pr", "7", "--comment"]);
     env.issue(&["link", "1", "--pr", url, "--comment"]);
     let stored = doc(&env, fake);
