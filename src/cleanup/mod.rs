@@ -61,6 +61,10 @@ enum Only {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
+    let sweep = cli.only.contains(&Only::Worktrees);
+    if !sweep && let Some(flag) = cli.worktrees.flag_given() {
+        return fail(format!("{flag} needs --only worktrees"));
+    }
     if cli.count {
         return Ok(Output::Text(match manual::saved_count()? {
             Some((count, path)) if count > 0 => {
@@ -69,10 +73,15 @@ pub fn run(cli: Cli) -> Result<Output> {
             _ => String::new(),
         }));
     }
-    let sweep = cli.only.contains(&Only::Worktrees);
-    if !sweep && let Some(flag) = cli.worktrees.flag_given() {
-        return fail(format!("{flag} needs --only worktrees"));
-    }
+    // The sweep runs first: its error (such as no repository here) then stops the pass before
+    // anything is deleted, and the manual list below no longer shows what it removed.
+    let mut worktrees = cli.worktrees;
+    worktrees.yes = cli.yes;
+    let worktrees = if sweep {
+        Some(worktree::cleanup::run(&worktrees)?)
+    } else {
+        None
+    };
     let now = clock::now_secs()?;
     // Removing worktrees and deleting branches is never part of the default pass.
     let only =
@@ -104,15 +113,6 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     let candidates = if only(Only::Manual) {
         Some(manual::candidates()?)
-    } else {
-        None
-    };
-    // The sweep runs before any deletion, so its error (such as no repository here) stops
-    // the pass before anything is gone.
-    let mut worktrees = cli.worktrees;
-    worktrees.yes = cli.yes;
-    let worktrees = if sweep {
-        Some(worktree::cleanup::run(&worktrees)?)
     } else {
         None
     };
