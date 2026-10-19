@@ -33,7 +33,8 @@ use crate::git::Repo;
 /// desktop notification for each `blocked` event. `--exec PROGRAM [-- ARGS...]` runs the
 /// program (no shell) per event with the event JSON on stdin and `AGT_PS_EVENT`, `AGT_PS_PID`,
 /// `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR` and `AGT_PS_STATUS_SECS`
-/// in its environment.
+/// in its environment, its stdout going to stderr. Handlers run one at a time and block polling
+/// until they exit; one that exits non-zero only prints a warning.
 #[derive(Args)]
 pub struct Cli {
     /// Print rows as JSON.
@@ -218,12 +219,14 @@ fn watch(cli: &Cli) -> Result<()> {
         let now = clock::now_secs()?;
         let mut rows = claude_rows(now, false, &mut false);
         let mut events = Vec::new();
+        // A session missing from one poll while its process runs keeps its previous state.
+        let gone = |pid: &i64| !agents::exists(i32::try_from(*pid).unwrap_or_default());
         for (pid, old) in &seen {
-            if !rows.iter().any(|row| row["pid"] == *pid) {
+            if !rows.iter().any(|row| row["pid"] == *pid) && gone(pid) {
                 events.push(event("ended", &old.row, now));
             }
         }
-        seen.retain(|pid, _| rows.iter().any(|row| row["pid"] == *pid));
+        seen.retain(|pid, _| rows.iter().any(|row| row["pid"] == *pid) || !gone(pid));
         for row in rows.drain(..) {
             let pid = row["pid"].as_i64().unwrap_or_default();
             let waiting = row["status"] == "waiting";
@@ -302,16 +305,22 @@ fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()>
         .env("AGT_PS_WAITING_FOR", text("waiting_for"))
         .env("AGT_PS_STATUS_SECS", text("status_secs"))
         .stdin(Stdio::piped())
+        // The event stream on stdout stays one JSON line per event.
+        .stdout(std::io::stderr())
         .spawn()
         .map_err(|error| Error(format!("run {program}: {error}")))?;
     if let Some(mut stdin) = child.stdin.take() {
         // A program that ignores its input may exit before reading it.
         let _ = writeln!(stdin, "{line}");
     }
-    child
+    let status = child
         .wait()
-        .map(drop)
-        .map_err(|error| Error(format!("wait for {program}: {error}")))
+        .map_err(|error| Error(format!("wait for {program}: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error(format!("{program} exited with {status}")))
+    }
 }
 
 /// Posts a desktop notification. The text travels as arguments, never through a shell or as

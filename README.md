@@ -1033,7 +1033,10 @@ default 60; once per waiting stretch, with `waiting_for`), `cleared` (a blocked 
 `notify-send` elsewhere; the text is passed as arguments, never through a shell). `--exec` runs
 the program, without a shell, once per event with the event JSON on stdin and `AGT_PS_EVENT`,
 `AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR` and
-`AGT_PS_STATUS_SECS` set; a failing program only warns.
+`AGT_PS_STATUS_SECS` set. The program's stdout goes to agt's stderr, so stdout stays one JSON line
+per event. It runs synchronously: polling waits until it exits. A program that exits non-zero only
+warns on stderr. A session whose process still runs but is missing from one poll keeps its state
+and is not reported `ended`.
 
 ## Worktrees
 
