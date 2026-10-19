@@ -221,7 +221,7 @@ fn pinned() -> Result<Option<String>, (String, String)> {
         let lines = || err.lines().map(str::trim).filter(|line| !line.is_empty());
         let first = lines()
             .find(|line| line.contains("ERROR"))
-            .or_else(|| lines().last());
+            .or_else(|| lines().next_back());
         let hint = if err.to_lowercase().contains("not trusted") {
             "mise trust"
         } else {

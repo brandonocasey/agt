@@ -140,12 +140,22 @@ fn a_failing_mise_shows_its_error_and_a_matching_fix() {
     .unwrap();
     let (_, report) = doctor(&env);
     let detail = row(&report, "agt version")["detail"].to_string();
-    assert!(detail.contains("real cause") && !detail.contains("WARN"), "{detail}");
+    assert!(
+        detail.contains("real cause") && !detail.contains("WARN"),
+        "{detail}"
+    );
 
-    fs::write(&mise, "#!/bin/sh\necho 'warming up' >&2\necho 'boom' >&2\nexit 1\n").unwrap();
+    fs::write(
+        &mise,
+        "#!/bin/sh\necho 'warming up' >&2\necho 'boom' >&2\nexit 1\n",
+    )
+    .unwrap();
     let (_, report) = doctor(&env);
     let detail = row(&report, "agt version")["detail"].to_string();
-    assert!(detail.contains("boom") && !detail.contains("warming"), "{detail}");
+    assert!(
+        detail.contains("boom") && !detail.contains("warming"),
+        "{detail}"
+    );
 
     fs::write(&mise, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").unwrap();
     let (_, report) = doctor(&env);
