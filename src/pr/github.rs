@@ -20,7 +20,13 @@ fn pr(node: &Value) -> Pr {
             .unwrap_or_default()
             .to_owned()
     };
-    let mergeable = text("/mergeable").to_lowercase();
+    let merge_state = text("/mergeStateStatus").to_lowercase();
+    let mergeable = match (text("/mergeable").as_str(), merge_state.as_str()) {
+        ("CONFLICTING", _) | (_, "dirty") => "conflicting",
+        ("MERGEABLE", "blocked" | "behind" | "draft") => "blocked",
+        ("MERGEABLE", _) => "mergeable",
+        _ => "unknown",
+    };
     Pr {
         id: text("/id"),
         number: node["number"].as_u64().unwrap_or_default(),
@@ -48,8 +54,8 @@ fn pr(node: &Value) -> Pr {
             .and_then(Value::as_str)
             .map(str::to_lowercase),
         conflicts: mergeable == "conflicting",
-        mergeable,
-        merge_state: text("/mergeStateStatus").to_lowercase(),
+        mergeable: mergeable.to_owned(),
+        merge_state,
     }
 }
 

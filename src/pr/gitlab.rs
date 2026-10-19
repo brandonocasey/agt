@@ -20,12 +20,12 @@ fn mr(node: &Value) -> Pr {
         .as_bool()
         .or_else(|| node["squash"].as_bool())
         .unwrap_or(false);
-    let mergeable = if conflicts {
-        "conflicting"
-    } else if detailed == "mergeable" {
-        "mergeable"
-    } else {
-        "unknown"
+    let mergeable = match detailed.as_str() {
+        _ if conflicts => "conflicting",
+        "conflict" | "need_rebase" => "conflicting",
+        "mergeable" => "mergeable",
+        "" | "checking" | "unchecked" | "preparing" => "unknown",
+        _ => "blocked",
     };
     Pr {
         id: node["iid"].to_string(),

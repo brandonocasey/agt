@@ -56,6 +56,9 @@ enum Command {
     /// branch, head sha, author, labels, auto_merge (on or off) with its method, merge queue or
     /// train state, mergeable and conflicts.
     ///
+    /// `mergeable` is mergeable, conflicting, blocked (checks, approvals, discussions, draft or
+    /// behind: see `merge_state`) or unknown (the forge has not computed it yet).
+    ///
     /// <NUMBER> is 12, #12, !12 or a PR/MR URL; without it, the PR/MR of --branch or of the
     /// current branch (an open one first, else the newest).
     View {

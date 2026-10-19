@@ -400,6 +400,7 @@ fn gitlab_view_reports_the_merge_train() {
     assert_eq!(view["auto_merge"], "on");
     assert_eq!(view["auto_merge_method"], "squash");
     assert_eq!(view["queue"], "fresh");
+    assert_eq!(view["mergeable"], "blocked");
 }
 
 #[test]
@@ -435,4 +436,149 @@ fn gitlab_merge_auto_squash_sends_the_sha() {
     assert!(
         err(&env, &["merge", "3", "--sha", SHA, "--method", "rebase"]).contains("cannot rebase")
     );
+}
+
+const GL_MRS: &str = "projects/g%2Fp/merge_requests";
+const GL_LIST: &str = "?state=opened&order_by=created_at&sort=desc&per_page=100";
+const GL_WRITE: [&str; 4] = ["-H", "Content-Type: application/json", "--input", "-"];
+
+fn gl_get(env: &Env, path: &str, body: &str) {
+    env.respond(&["api", "-X", "GET", path], body);
+}
+
+fn gl_put(env: &Env, path: &str) {
+    let mut args = vec!["api", "-X", "PUT", path];
+    args.extend(GL_WRITE);
+    env.respond(&args, "{}");
+}
+
+#[test]
+fn mergeable_has_one_value_set_on_both_forges() {
+    let env = gitlab();
+    let status = |detailed: &str, conflicts: bool| {
+        gl_get(
+            &env,
+            &format!("{GL_MRS}/3"),
+            &gl_mr(
+                &json!({"detailed_merge_status": detailed, "has_conflicts": conflicts, "merge_when_pipeline_succeeds": false}),
+            ),
+        );
+        ok(&env, &["view", "3"])["mergeable"].clone()
+    };
+    assert_eq!(status("mergeable", false), "mergeable");
+    assert_eq!(status("checking", false), "unknown");
+    assert_eq!(status("not_approved", false), "blocked");
+    assert_eq!(status("need_rebase", true), "conflicting");
+    let env = github();
+    gh_view(&env, 7, &json!({"mergeStateStatus": "BLOCKED"}));
+    assert_eq!(ok(&env, &["view", "7"])["mergeable"], "blocked");
+    gh_view(
+        &env,
+        7,
+        &json!({"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"}),
+    );
+    assert_eq!(ok(&env, &["view", "7"])["mergeable"], "unknown");
+}
+
+#[test]
+fn gitlab_create_posts_a_draft_mr() {
+    let env = gitlab();
+    gl_get(&env, &format!("{GL_MRS}{GL_LIST}&source_branch=feat"), "[]");
+    let mut post = vec!["api", "-X", "POST", GL_MRS];
+    post.extend(GL_WRITE);
+    env.respond(&post, r#"{"iid": 3}"#);
+    gl_get(
+        &env,
+        &format!("{GL_MRS}/3"),
+        &gl_mr(&json!({"merge_when_pipeline_succeeds": false})),
+    );
+    let created = ok(&env, &["create", "--title", "T", "--body", "B", "--draft"]);
+    assert_eq!(created["number"], 3);
+    assert_eq!(
+        inputs(&env)[0].1,
+        json!({"source_branch": "feat", "target_branch": "main", "title": "Draft: T", "description": "B"})
+    );
+}
+
+#[test]
+fn gitlab_update_sets_fields_labels_and_draft_state() {
+    let env = gitlab();
+    let path = format!("{GL_MRS}/3");
+    gl_get(
+        &env,
+        &path,
+        &gl_mr(&json!({"merge_when_pipeline_succeeds": false})),
+    );
+    gl_put(&env, &path);
+    ok(
+        &env,
+        &[
+            "update",
+            "3",
+            "--body",
+            "B",
+            "--add-label",
+            "a",
+            "--add-label",
+            "b",
+            "--remove-label",
+            "c",
+        ],
+    );
+    assert_eq!(
+        inputs(&env)[0].1,
+        json!({"description": "B", "add_labels": "a,b", "remove_labels": "c"})
+    );
+    ok(&env, &["update", "3", "--ready"]);
+    assert_eq!(inputs(&env)[1].1, json!({"title": "Add a"}));
+    ok(&env, &["update", "3", "--title", "Draft: New", "--draft"]);
+    assert_eq!(inputs(&env)[2].1, json!({"title": "Draft: New"}));
+    gl_get(
+        &env,
+        &path,
+        &gl_mr(&json!({"title": "Add a", "merge_when_pipeline_succeeds": false})),
+    );
+    ok(&env, &["update", "3", "--draft"]);
+    assert_eq!(inputs(&env)[3].1, json!({"title": "Draft: Add a"}));
+}
+
+#[test]
+fn gitlab_list_mine_asks_for_created_by_me() {
+    let env = gitlab();
+    let mr = gl_mr(&json!({"merge_when_pipeline_succeeds": false}));
+    gl_get(
+        &env,
+        &format!("{GL_MRS}{GL_LIST}&scope=created_by_me"),
+        &format!("[{mr}]"),
+    );
+    let rows = ok(&env, &["list", "--mine"]);
+    assert_eq!(rows[0]["number"], 3);
+    assert_eq!(rows[0]["state"], "open");
+}
+
+#[test]
+fn gitlab_merge_refuses_a_head_that_is_not_the_sha() {
+    let env = gitlab();
+    gl_get(
+        &env,
+        &format!("{GL_MRS}/3"),
+        &gl_mr(&json!({"draft": false, "merge_when_pipeline_succeeds": false})),
+    );
+    assert!(err(&env, &["merge", "3", "--sha", "fedcba9876543210"]).contains("not fedcba98"));
+    assert!(env.forge_inputs().is_empty());
+}
+
+#[test]
+fn github_ready_and_draft_run_their_mutations() {
+    let env = github();
+    gh_view(&env, 7, &json!({}));
+    env.respond(
+        &["api", "graphql", "-f", "query=PrDraft", "-f", "id=PR_node"],
+        "{}",
+    );
+    ok(&env, &["update", "7", "--ready"]);
+    ok(&env, &["update", "7", "--draft"]);
+    let calls = env.forge_calls().join("\n");
+    assert_eq!(calls.matches("query=PrDraft").count(), 2);
+    assert!(env.forge_inputs().is_empty());
 }

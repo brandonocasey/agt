@@ -912,7 +912,7 @@ agt pr auto-merge off|on <n> [--sha HEAD]
 else the newest) and prints `number`, `url`, `title`, `state` (`open`, `merged`, `closed`),
 `draft`, `head_branch`, `base_branch`, `head_sha`, `author`, `labels`, `auto_merge` (`on` or
 `off`) with `auto_merge_method`, `queue` (the merge queue or train state, `null` when not
-queued), `mergeable`, `merge_state` and `conflicts`. `list` prints an array of the same rows
+queued), `mergeable` (`mergeable`, `conflicting`, `blocked` or `unknown` while the forge computes it), the forge's own `merge_state` and `conflicts`. `list` prints an array of the same rows
 (newest first, at most 100). `create` fails, printing the existing one, when the branch has an
 open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head starts with `--sha`
 (at least 7 characters), then sends the full head to the forge's own guard (GitHub `sha`, GitLab
