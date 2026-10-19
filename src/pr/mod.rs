@@ -166,6 +166,10 @@ pub struct Pr {
     pub mergeable: String,
     pub merge_state: String,
     pub conflicts: bool,
+    /// The head branch lives in this repository (not a fork).
+    pub same_repo: bool,
+    /// GitLab: the MR squashes on merge.
+    pub squash: bool,
 }
 
 impl Pr {
@@ -244,6 +248,7 @@ impl Remote {
     /// The open PR/MR of `branch`, else the newest of any state.
     fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
         let mut found = self.list(Some(branch), State::All, false)?;
+        found.retain(|pr| pr.same_repo);
         let at = found.iter().position(|pr| pr.state == "open").unwrap_or(0);
         Ok((!found.is_empty()).then(|| found.swap_remove(at)))
     }
@@ -257,7 +262,7 @@ impl Remote {
                     .ok_or_else(|| Error("GitHub auto-merge needs --method".into()))?;
                 github::enable_auto(t, pr, sha, how)
             }
-            Forge::Gitlab => gitlab::merge(t, repo, pr.number, sha, how, true),
+            Forge::Gitlab => gitlab::merge(t, repo, pr, sha, how, true),
         }
     }
 }
@@ -361,7 +366,7 @@ fn execute(command: Command) -> Result<Output> {
             if let Some(open) = remote
                 .list(Some(&branch), State::Open, false)?
                 .into_iter()
-                .next()
+                .find(|pr| pr.same_repo)
             {
                 output::print(Output::Json(open.json()))?;
                 return fail(format!(
@@ -372,7 +377,13 @@ fn execute(command: Command) -> Result<Output> {
             let base = match base {
                 Some(base) => base,
                 None => {
-                    let full = repo.default_branch(None)?;
+                    let full = repo.default_branch(None).map_err(|error| {
+                        if error.0.starts_with("cannot find the default branch") {
+                            Error("cannot find the default branch; pass --base <branch>".into())
+                        } else {
+                            error
+                        }
+                    })?;
                     full.strip_prefix("refs/remotes/origin/")
                         .or_else(|| full.strip_prefix("refs/heads/"))
                         .unwrap_or(&full)
@@ -438,7 +449,9 @@ fn execute(command: Command) -> Result<Output> {
             } else {
                 match remote.origin.forge {
                     Forge::Github => github::merge(t, slug, at, &current.head_sha, method),
-                    Forge::Gitlab => gitlab::merge(t, slug, at, &current.head_sha, method, false),
+                    Forge::Gitlab => {
+                        gitlab::merge(t, slug, &current, &current.head_sha, method, false)
+                    }
                 }?;
             }
             shown(remote.view(at)?)
@@ -458,13 +471,20 @@ fn execute(command: Command) -> Result<Output> {
             };
             let now = remote.view(at)?;
             let on = now.auto_merge.is_some();
-            if changed && on == matches!(switch, Switch::Off) {
+            // Turning auto-merge on merges at once when the checks already passed.
+            let merged = matches!(switch, Switch::On) && changed && now.state == "merged";
+            if changed && !merged && on == matches!(switch, Switch::Off) {
                 return fail(format!(
                     "auto-merge is still {} on #{at} after the change",
                     if on { "on" } else { "off" }
                 ));
             }
-            Ok(Output::Json(json!({"changed": changed, "pr": now.json()})))
+            if matches!(switch, Switch::On) {
+                memo::forget(&key)?;
+            }
+            Ok(Output::Json(
+                json!({"changed": changed, "merged": merged, "pr": now.json()}),
+            ))
         }
     }
 }
@@ -486,7 +506,6 @@ fn pause(remote: &Remote, pr: &Pr, key: &str) -> Result<bool> {
 /// Turns auto-merge back on with the recorded method; false when it is on already.
 fn restore(remote: &Remote, pr: &Pr, key: &str, sha: Option<&str>) -> Result<bool> {
     if pr.auto_merge.is_some() {
-        memo::forget(key)?;
         return Ok(false);
     }
     let Some(method) = memo::recorded(key)? else {
@@ -498,6 +517,5 @@ fn restore(remote: &Remote, pr: &Pr, key: &str, sha: Option<&str>) -> Result<boo
     let sha = sha.unwrap_or(&pr.head_sha);
     guard(pr, sha)?;
     remote.enable_auto(pr, &pr.head_sha, How::named(&method))?;
-    memo::forget(key)?;
     Ok(true)
 }

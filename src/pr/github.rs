@@ -7,7 +7,7 @@ use crate::core::error::{Error, Result, fail};
 use crate::forge::service::{Method, Request, Var};
 use crate::forge::transport::Transport;
 
-const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state}";
+const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isCrossRepository";
 
 fn split(repo: &str) -> (&str, &str) {
     repo.split_once('/').unwrap_or_default()
@@ -54,6 +54,8 @@ fn pr(node: &Value) -> Pr {
             .and_then(Value::as_str)
             .map(str::to_lowercase),
         conflicts: mergeable == "conflicting",
+        same_repo: node["isCrossRepository"].as_bool() != Some(true),
+        squash: false,
         mergeable: mergeable.to_owned(),
         merge_state,
     }
@@ -94,6 +96,9 @@ pub fn list(
     state: State,
     mine: bool,
 ) -> Result<Vec<Pr>> {
+    if mine {
+        return search_mine(t, repo, branch, state);
+    }
     let (owner, name) = split(repo);
     let states = match state {
         State::Open => "OPEN",
@@ -108,18 +113,41 @@ pub fn list(
         vars.push(Var::text("branch", branch));
     }
     let reply = graphql(t, &query, vars)?;
-    let viewer = reply
-        .pointer("/data/viewer/login")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let nodes = reply
         .pointer("/data/repository/pullRequests/nodes")
         .and_then(Value::as_array)
         .ok_or_else(|| Error(format!("GitHub returned no pull requests for {repo}")))?;
+    Ok(nodes.iter().map(pr).collect())
+}
+
+/// The signed-in user's pull requests, filtered by the server so older ones are found too.
+fn search_mine(
+    t: &dyn Transport,
+    repo: &str,
+    branch: Option<&str>,
+    state: State,
+) -> Result<Vec<Pr>> {
+    let mut terms = format!("is:pr repo:{repo} author:@me sort:created-desc");
+    match state {
+        State::Open => terms.push_str(" is:open"),
+        State::Merged => terms.push_str(" is:merged"),
+        State::All => {}
+    }
+    if let Some(branch) = branch {
+        terms.push_str(&format!(" head:{branch}"));
+    }
+    let query = format!(
+        "query PrSearch($q:String!){{search(query:$q,type:ISSUE,first:100){{nodes{{... on PullRequest{{{FIELDS}}}}}}}}}"
+    );
+    let reply = graphql(t, &query, vec![Var::text("q", terms)])?;
+    let nodes = reply
+        .pointer("/data/search/nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error(format!("GitHub returned no pull requests for {repo}")))?;
     Ok(nodes
         .iter()
+        .filter(|node| node["number"].is_u64())
         .map(pr)
-        .filter(|found| !mine || found.author == viewer)
         .collect())
 }
 

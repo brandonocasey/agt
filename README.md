@@ -941,11 +941,11 @@ queued), `mergeable` (`mergeable`, `conflicting`, `blocked` or `unknown` while t
 open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head starts with `--sha`
 (at least 7 characters), then sends the full head to the forge's own guard (GitHub `sha`, GitLab
 `sha`); `--auto` merges when checks pass (GitHub needs `--method` unless auto-merge was on; GitLab
-cannot rebase). It never deletes the branch.
+cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLab would squash). Branch lookups (`view`, `create`) ignore PRs/MRs from forks. `list --mine` asks the forge for your own PRs/MRs, so older ones are found. `create` without `--base` needs a resolvable default branch, else pass `--base`. It never deletes the branch.
 
 `auto-merge off` records the method it disables in `$XDG_STATE_HOME/agents/pr/auto-merge.json`
 (keyed by host, repository and number) and reads the state back; `auto-merge on` re-enables it with
-the recorded method at the current head (or `--sha`). A PR/MR in a merge queue or train is refused.
+the recorded method at the current head (or `--sha`); when the checks had already passed and the forge merges at once, it reports `merged: true`. A PR/MR in a merge queue or train is refused.
 Failures print `agt: error: ...` and exit 1.
 
 ## Sessions

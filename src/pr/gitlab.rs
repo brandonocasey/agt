@@ -22,7 +22,7 @@ fn mr(node: &Value) -> Pr {
         .unwrap_or(false);
     let mergeable = match detailed.as_str() {
         _ if conflicts => "conflicting",
-        "conflict" | "need_rebase" => "conflicting",
+        "conflict" => "conflicting",
         "mergeable" => "mergeable",
         "" | "checking" | "unchecked" | "preparing" => "unknown",
         _ => "blocked",
@@ -60,6 +60,14 @@ fn mr(node: &Value) -> Pr {
         mergeable: mergeable.to_owned(),
         merge_state: detailed,
         conflicts,
+        same_repo: match (
+            node["source_project_id"].as_u64(),
+            node["target_project_id"].as_u64(),
+        ) {
+            (Some(source), Some(target)) => source == target,
+            _ => true,
+        },
+        squash,
     }
 }
 
@@ -200,7 +208,7 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
 pub fn merge(
     t: &dyn Transport,
     repo: &str,
-    number: u64,
+    current: &Pr,
     sha: &str,
     how: Option<How>,
     auto: bool,
@@ -208,6 +216,13 @@ pub fn merge(
     let mut body = json!({"sha": sha, "should_remove_source_branch": false});
     match how {
         Some(How::Squash) => body["squash"] = json!(true),
+        // GitLab squashes when the MR has squash on and only reads `squash: true` from the request.
+        Some(How::Merge) if current.squash => {
+            return fail(format!(
+                "!{} has squash on, which GitLab applies on merge; use --method squash or turn squash off on the merge request",
+                current.number
+            ));
+        }
         Some(How::Rebase) => {
             return fail("GitLab cannot rebase on merge; use --method merge or squash");
         }
@@ -218,7 +233,7 @@ pub fn merge(
     }
     t.send(&Request::rest(
         Method::Put,
-        format!("{}/{number}/merge", base(repo)),
+        format!("{}/{}/merge", base(repo), current.number),
         Some(body),
     ))
     .map(|_| ())

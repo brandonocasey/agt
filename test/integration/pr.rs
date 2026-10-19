@@ -150,19 +150,75 @@ fn an_unknown_forge_is_reported() {
 }
 
 #[test]
-fn list_mine_keeps_the_signed_in_authors() {
+fn list_mine_searches_by_author_on_the_server() {
+    let env = github();
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=PrSearch",
+            "-f",
+            "q=is:pr repo:o/r author:@me sort:created-desc is:open head:feat",
+        ],
+        &format!(
+            r#"{{"data":{{"search":{{"nodes":[{}, {{}}]}}}}}}"#,
+            node(2, &json!({}))
+        ),
+    );
+    let rows = ok(&env, &["list", "--mine", "--branch", "feat"]);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["number"], 2);
+}
+
+#[test]
+fn a_fork_pr_with_the_same_head_name_is_not_the_branchs_pr() {
     let env = github();
     gh_list(
         &env,
         "feat",
         &[
-            node(1, &json!({"author": {"login": "other"}})),
-            node(2, &json!({})),
+            node(1, &json!({"isCrossRepository": true})),
+            node(2, &json!({"isCrossRepository": false})),
         ],
     );
-    let rows = ok(&env, &["list", "--mine", "--branch", "feat"]);
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    assert_eq!(rows[0]["number"], 2);
+    gh_view(&env, 2, &json!({}));
+    assert_eq!(ok(&env, &["view"])["number"], 2);
+
+    let env = github();
+    gh_list(
+        &env,
+        "feat",
+        &[node(1, &json!({"isCrossRepository": true}))],
+    );
+    env.respond(
+        &["api", "--method", "POST", "repos/o/r/pulls", "--input", "-"],
+        r#"{"number": 9}"#,
+    );
+    gh_view(&env, 9, &json!({}));
+    assert_eq!(ok(&env, &["create", "--title", "T"])["number"], 9);
+
+    let env = gitlab();
+    env.respond(
+        &["api", "-X", "GET", "projects/g%2Fp/merge_requests?state=all&order_by=created_at&sort=desc&per_page=100&source_branch=feat"],
+        &format!("[{}]", gl_mr(&json!({"source_project_id": 8, "target_project_id": 5, "merge_when_pipeline_succeeds": false}))),
+    );
+    let message = err(&env, &["view"]);
+    assert!(message.contains("no PR/MR for branch feat"), "{message}");
+}
+
+#[test]
+fn create_without_a_default_branch_asks_for_base() {
+    let env = github();
+    env.git(&["branch", "-m", "main", "trunk"]);
+    env.git(&["switch", "-q", "-c", "work"]);
+    env.git(&["branch", "-D", "feat"]);
+    gh_list(&env, "work", &[]);
+    let message = err(&env, &["create", "--title", "T"]);
+    assert!(
+        message.contains("--base") && !message.contains("--default-branch"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -469,6 +525,7 @@ fn mergeable_has_one_value_set_on_both_forges() {
     assert_eq!(status("checking", false), "unknown");
     assert_eq!(status("not_approved", false), "blocked");
     assert_eq!(status("need_rebase", true), "conflicting");
+    assert_eq!(status("need_rebase", false), "blocked");
     let env = github();
     gh_view(&env, 7, &json!({"mergeStateStatus": "BLOCKED"}));
     assert_eq!(ok(&env, &["view", "7"])["mergeable"], "blocked");
@@ -581,4 +638,68 @@ fn github_ready_and_draft_run_their_mutations() {
     let calls = env.forge_calls().join("\n");
     assert_eq!(calls.matches("query=PrDraft").count(), 2);
     assert!(env.forge_inputs().is_empty());
+}
+
+#[test]
+fn gitlab_merge_method_merge_refuses_a_squash_on_mr() {
+    let env = gitlab();
+    let on = gl_mr(&json!({"draft": false, "merge_when_pipeline_succeeds": false}));
+    gl_get(&env, &format!("{GL_MRS}/3"), &on);
+    let message = err(&env, &["merge", "3", "--sha", SHA, "--method", "merge"]);
+    assert!(message.contains("squash on"), "{message}");
+    let off = gl_mr(
+        &json!({"draft": false, "merge_when_pipeline_succeeds": false, "squash_on_merge": false}),
+    );
+    gl_get(&env, &format!("{GL_MRS}/3"), &off);
+    gl_put(&env, &format!("{GL_MRS}/3/merge"));
+    ok(&env, &["merge", "3", "--sha", SHA, "--method", "merge"]);
+    assert_eq!(
+        inputs(&env)[0].1,
+        json!({"sha": SHA, "should_remove_source_branch": false})
+    );
+}
+
+#[test]
+fn gitlab_auto_merge_on_that_merges_at_once_succeeds_and_forgets_the_memo() {
+    let env = gitlab();
+    let mr = format!("{GL_MRS}/3");
+    let open = |auto: bool| {
+        gl_mr(
+            &json!({"draft": false, "merge_when_pipeline_succeeds": auto, "detailed_merge_status": "mergeable"}),
+        )
+    };
+    gl_get(&env, &mr, &open(true));
+    env.respond_nth(&["api", "-X", "GET", &mr], 2, &open(false));
+    env.fail_call_with(
+        &[
+            "api",
+            "-X",
+            "GET",
+            "projects/g%2Fp/merge_trains/merge_requests/3",
+        ],
+        "glab: 404 Not Found (HTTP 404)",
+    );
+    let cancel = vec![
+        "api",
+        "-X",
+        "POST",
+        "projects/g%2Fp/merge_requests/3/cancel_merge_when_pipeline_succeeds",
+    ];
+    env.respond(&cancel, "{}");
+    ok(&env, &["auto-merge", "off", "3"]);
+    let record = env.path("state/agents/pr/auto-merge.json");
+    assert!(std::fs::read_to_string(&record).unwrap().contains("squash"));
+
+    env.reset_calls();
+    gl_get(&env, &mr, &open(false));
+    env.respond_nth(
+        &["api", "-X", "GET", &mr],
+        2,
+        &gl_mr(&json!({"state": "merged", "merge_when_pipeline_succeeds": false})),
+    );
+    gl_put(&env, &format!("{mr}/merge"));
+    let on = ok(&env, &["auto-merge", "on", "3"]);
+    assert_eq!(on["merged"], true);
+    assert_eq!(on["pr"]["state"], "merged");
+    assert!(!std::fs::read_to_string(&record).unwrap().contains("squash"));
 }
