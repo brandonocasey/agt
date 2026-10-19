@@ -63,10 +63,14 @@ pub fn run(cli: Cli) -> Result<Output> {
     let mut fetched = Vec::new();
     // Validated before the worktree exists: an invalid config must not leave one whose create
     // hooks never ran (a rerun would find it reused).
-    let has_hooks = checked_out.is_none() && !cli.no_hooks && {
-        let main = main_checkout(&repo)?.path;
-        !hooks::resolve(&main)?.is_empty(hooks::Kind::Create)
+    let resolved = if checked_out.is_none() && !cli.no_hooks {
+        Some(hooks::resolve(&main_checkout(&repo)?.path)?)
+    } else {
+        None
     };
+    let has_hooks = resolved
+        .as_ref()
+        .is_some_and(|resolved| !resolved.is_empty(hooks::Kind::Create));
     let mut value = match checked_out {
         Some(entry) => {
             let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
@@ -114,15 +118,22 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
         if run_hooks {
             steps.push(Step::Hooks);
+            // Reported now too: a caller that never waits must still see it.
+            if let Some(untrusted) = resolved.and_then(|resolved| resolved.untrusted) {
+                value["hooks"] = json!({"untrusted": untrusted});
+            }
         }
-        if steps.is_empty() {
-            value["background"] = json!({"started": false, "reason": "nothing to run"});
+        value["background"] = if !steps.is_empty() {
+            setup::spawn(&dir, &steps)?
+        } else if let Some(report) = setup::running(&dir)? {
+            report
         } else {
-            value["background"] = setup::spawn(&dir, &steps)?;
-        }
+            json!({"started": false, "reason": "nothing to run"})
+        };
         return emit(value, ok);
     }
     if cli.prepare {
+        setup::refuse_while_running(&dir)?;
         let (report, passed) = prepare::prepare(&dir, false)?;
         value["prepare"] = report;
         ok = passed;

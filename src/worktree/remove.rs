@@ -100,6 +100,8 @@ pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) 
             ));
         }
         hooks_report = Some(report).filter(|report| report.get("untrusted").is_some());
+        // The hooks ran arbitrary commands; check again for work they may have left.
+        gate::check(path, main)?;
     }
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);

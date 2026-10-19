@@ -292,19 +292,106 @@ fn a_second_background_create_reports_the_running_setup() {
 }
 
 #[test]
+fn a_second_background_create_with_nothing_new_still_reports_the_running_setup() {
+    let env = repo();
+    repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 3\"]\n");
+    let first = json(&agt(&env, &env.repo, &["create", "twice", "--background"]));
+    let again = json(&agt(&env, &env.repo, &["create", "twice", "--background"]));
+    assert_eq!(again["background"]["already_running"], true);
+    assert_eq!(again["background"]["pid"], first["background"]["pid"]);
+}
+
+#[test]
+fn prepare_refuses_while_a_background_setup_runs() {
+    let env = repo();
+    repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 3\"]\n");
+    let first = json(&agt(&env, &env.repo, &["create", "busy", "--background"]));
+    let tree = first["path"].as_str().unwrap();
+    for args in [
+        vec!["prepare", tree],
+        vec!["prepare", "--hooks", tree],
+        vec!["create", "busy", "--prepare"],
+    ] {
+        let output = agt(&env, &env.repo, &args);
+        assert!(!output.status.success(), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("prepare --wait"), "{args:?}: {error}");
+    }
+    let waited = agt(&env, &env.repo, &["prepare", "--wait", tree]);
+    assert!(waited.status.success());
+    assert!(
+        agt(&env, &env.repo, &["prepare", "--hooks", tree])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn a_branch_named_like_a_tag_reaches_the_hook_unshortened() {
+    let env = repo();
+    env.git(&["-C", env.repo.to_str().unwrap(), "tag", "v1"]);
+    repo_config(
+        &env,
+        "[worktree.hooks]\ncreate = [\"echo \\\"$AGT_BRANCH\\\" > branch.txt\"]\n",
+    );
+    let value = json(&agt(&env, &env.repo, &["create", "v1"]));
+    let tree = Path::new(value["path"].as_str().unwrap());
+    let seen = fs::read_to_string(tree.join("branch.txt")).unwrap();
+    assert_eq!(seen.trim(), "v1");
+}
+
+#[test]
+fn a_damaged_ports_file_does_not_block_a_remove_without_hooks() {
+    let env = repo();
+    json(&agt(&env, &env.repo, &["create", "plain"]));
+    let ports = env.path("state/agents/worktrees/ports.json");
+    fs::create_dir_all(ports.parent().unwrap()).unwrap();
+    fs::write(&ports, "{bad").unwrap();
+    let tree = env.repo.join(".worktrees/plain");
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!tree.exists());
+}
+
+#[test]
+fn work_a_remove_hook_leaves_behind_blocks_the_removal() {
+    let env = repo();
+    repo_config(
+        &env,
+        "[worktree.hooks]\nremove = [\"git init -q nested && git -C nested -c user.name=t -c user.email=t@t commit -q --allow-empty -m x\"]\n",
+    );
+    json(&agt(&env, &env.repo, &["create", "late"]));
+    let tree = env.repo.join(".worktrees/late");
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("nested"), "{error}");
+    assert!(tree.join("nested").exists());
+}
+
+#[test]
 fn a_status_stuck_at_starting_does_not_block_a_new_setup() {
     let env = repo();
     let first = json(&agt(&env, &env.repo, &["create", "stuck"]));
     let tree = Path::new(first["path"].as_str().unwrap()).to_path_buf();
-    let git_dir = String::from_utf8(
-        std::process::Command::new("git")
-            .args(["rev-parse", "--absolute-git-dir"])
-            .current_dir(&tree)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
+    let git_dir = env.git(&[
+        "-C",
+        tree.to_str().unwrap(),
+        "rev-parse",
+        "--absolute-git-dir",
+    ]);
     let status = Path::new(git_dir.trim()).join("agt-setup.json");
     fs::write(&status, r#"{"state":"running","pid":0,"log":null}"#).unwrap();
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
@@ -434,6 +521,7 @@ fn background_child_reports_untrusted_hooks() {
         &env.repo,
         &["create", "feature", "--background"],
     ));
+    assert_eq!(created["hooks"]["untrusted"]["create"][0], "touch local");
     let path = created["path"].as_str().unwrap();
     let waited = json(&agt(&env, &env.repo, &["prepare", "--wait", path]));
     assert_eq!(waited["hooks"]["untrusted"]["create"][0], "touch local");

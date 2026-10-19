@@ -71,23 +71,45 @@ fn read_status(file: &Path) -> Result<Option<Value>> {
     }
 }
 
+/// The report `{"pid", "status", "log", "already_running": true}` of a background setup that
+/// still runs in the worktree `root`.
+pub(super) fn running(root: &Path) -> Result<Option<Value>> {
+    let status = status_path(root)?;
+    let Some(existing) = read_status(&status)? else {
+        return Ok(None);
+    };
+    let pid = existing["pid"].as_u64().unwrap_or(0);
+    if existing["state"] != "running" || !live(pid, &status) {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "pid": pid,
+        "status": status,
+        "log": existing["log"],
+        "already_running": true,
+    })))
+}
+
+/// Fails while a background setup runs in the worktree `root`, so its installs and hooks never
+/// run twice at once.
+pub(super) fn refuse_while_running(root: &Path) -> Result<()> {
+    match running(root)? {
+        Some(report) => fail(format!(
+            "a background setup (pid {}) is still running in {}; wait for it with `agt worktree prepare --wait`",
+            report["pid"],
+            root.display()
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Starts the detached child for `steps` in the worktree `root` and returns the report
 /// `{"pid", "status", "log"}`.
 pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
-    let status = status_path(root)?;
-    if let Some(existing) = read_status(&status)?
-        && existing["state"] == "running"
-    {
-        let pid = existing["pid"].as_u64().unwrap_or(0);
-        if live(pid, &status) {
-            return Ok(json!({
-                "pid": pid,
-                "status": status,
-                "log": existing["log"],
-                "already_running": true,
-            }));
-        }
+    if let Some(report) = running(root)? {
+        return Ok(report);
     }
+    let status = status_path(root)?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
