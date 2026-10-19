@@ -1,6 +1,6 @@
-//! `agt worktree cleanup`: remove worktrees and delete local branches whose work already
-//! landed in the default branch. Never touches a remote, a PR, uncommitted work (a snapshot
-//! backup keeps it) or a branch whose merge cannot be proven.
+//! `agt cleanup --only worktrees`: remove worktrees and delete local branches whose work
+//! already landed in the default branch. Never touches a remote, a PR, uncommitted work (a
+//! snapshot backup keeps it) or a branch whose merge cannot be proven.
 
 use std::path::{Path, PathBuf};
 
@@ -13,19 +13,20 @@ use super::remove::{refuse, removal};
 use super::{gate, info, roots};
 use crate::core::clock;
 use crate::core::error::Result;
-use crate::core::output::Output;
 use crate::forge::landed::Origin;
 use crate::git::Repo;
 
+/// The `agt cleanup` flags of the `worktrees` kind; each needs `--only worktrees`.
 #[derive(Args)]
-pub struct Cli {
+#[command(next_help_heading = "Worktrees (with --only worktrees)")]
+pub struct Options {
     /// Sweep every repository under the configured roots (`[worktree] roots` in the agt
     /// config), not only the current one.
-    #[arg(long)]
+    #[arg(long = "all-repos")]
     all: bool,
-    /// Remove and delete. Without it nothing changes and the plan is printed.
-    #[arg(long)]
-    yes: bool,
+    /// Set from `agt cleanup --yes`.
+    #[arg(skip)]
+    pub yes: bool,
     /// Judge by local ancestry only; do not ask GitHub or GitLab.
     #[arg(long)]
     offline: bool,
@@ -38,8 +39,23 @@ pub struct Cli {
     /// Act only on this branch or worktree path (repeatable). Each must still qualify as
     /// the plan said; a named row that does not is reported as skipped, and an unnamed
     /// row is never touched.
-    #[arg(long, value_name = "BRANCH-OR-PATH")]
+    #[arg(long = "worktree", id = "worktree", value_name = "BRANCH-OR-PATH")]
     only: Vec<String>,
+}
+
+impl Options {
+    /// The first worktree flag given, for the error when `--only worktrees` is missing.
+    pub fn flag_given(&self) -> Option<&'static str> {
+        [
+            (self.all, "--all-repos"),
+            (self.offline, "--offline"),
+            (self.dirty, "--dirty"),
+            (self.recent, "--recent"),
+            (!self.only.is_empty(), "--worktree"),
+        ]
+        .into_iter()
+        .find_map(|(given, flag)| given.then_some(flag))
+    }
 }
 
 /// The rows `--only` names.
@@ -84,7 +100,7 @@ struct Report {
     hit: Vec<usize>,
 }
 
-pub fn run(cli: Cli) -> Result<Output> {
+pub fn run(cli: &Options) -> Result<Value> {
     let repos: Vec<Repo> = if cli.all {
         roots::repositories()?.into_iter().map(Repo::at).collect()
     } else {
@@ -95,9 +111,8 @@ pub fn run(cli: Cli) -> Result<Output> {
     let mut cwds = Cwds::default();
     let mut rows = Vec::new();
     for repo in repos {
-        let swept = info::main_checkout(&repo).and_then(|main| {
-            sweep(&repo, &cli, &only, &mut cwds).map(|report| (main.path, report))
-        });
+        let swept = info::main_checkout(&repo)
+            .and_then(|main| sweep(&repo, cli, &only, &mut cwds).map(|report| (main.path, report)));
         let (main, report) = match swept {
             Ok(done) => done,
             Err(error) if cli.all => (
@@ -145,10 +160,10 @@ pub fn run(cli: Cli) -> Result<Output> {
     if !cli.yes {
         out["next"] = json!("pass --yes to remove and delete");
     }
-    Ok(Output::Json(out))
+    Ok(out)
 }
 
-fn sweep(repo: &Repo, cli: &Cli, only: &Only, cwds: &mut Cwds) -> Result<Report> {
+fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Report> {
     let mut report = Report::default();
     let Some(scene) = Scene::read(repo)? else {
         report.warnings.push("no default branch found".into());
@@ -267,7 +282,7 @@ fn remove_worktree(
     entry: &info::Entry,
     main: &Path,
     subject: &Subject,
-    cli: &Cli,
+    cli: &Options,
     cwds: &mut Cwds,
     report: &mut Report,
 ) -> Result<bool> {
@@ -323,7 +338,7 @@ fn blocker(
     scene: &Scene,
     entry: &info::Entry,
     main: &Path,
-    cli: &Cli,
+    cli: &Options,
     cwds: &mut Cwds,
 ) -> Result<Option<(Option<&'static str>, String)>> {
     if !entry.path.exists() {

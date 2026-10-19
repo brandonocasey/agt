@@ -11,7 +11,7 @@ use crate::core::error::Result;
 use crate::core::{agents, clock};
 use crate::git::Repo;
 
-/// A merged worktree or branch that `agt worktree cleanup` would remove.
+/// A merged worktree or branch that `agt cleanup --only worktrees` would remove.
 pub struct Found {
     pub repo: PathBuf,
     pub worktree: Option<PathBuf>,

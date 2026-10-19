@@ -13,23 +13,26 @@ use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
 
 use crate::core::clock;
-use crate::core::error::Result;
+use crate::core::error::{Result, fail};
 use crate::core::output::Output;
 use crate::store::prune::PRUNE_AFTER_SECS;
+use crate::worktree;
 
 #[derive(Args)]
 pub struct Cli {
     /// Delete what the plan lists. Without it nothing is deleted and the plan is printed.
     #[arg(long)]
     yes: bool,
-    /// Limit the pass to these kinds of thing; repeat for several. Default: all. `--yes`
-    /// signals processes only when `processes` is named here.
+    /// Limit the pass to these kinds of thing; repeat for several. Default: all but
+    /// `worktrees`. `--yes` signals processes only when `processes` is named here.
     #[arg(long, value_enum, value_name = "KIND")]
     only: Vec<Only>,
     /// Print how many leftovers the last `--yes` run listed for you to remove, from its saved
     /// report, and exit. Prints nothing when there are none.
     #[arg(long, conflicts_with_all = ["yes", "only"])]
     count: bool,
+    #[command(flatten)]
+    worktrees: worktree::cleanup::Options,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -51,6 +54,10 @@ enum Only {
     /// Merged worktrees and branches, other backups, old Codex releases and Playwright
     /// builds: listed, never deleted. `--yes` saves the list to a report.
     Manual,
+    /// Worktrees and local branches whose work landed in the default branch, in the current
+    /// repository. Only when named: `--yes` then removes each worktree after a snapshot
+    /// backup and deletes its branch.
+    Worktrees,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -62,8 +69,14 @@ pub fn run(cli: Cli) -> Result<Output> {
             _ => String::new(),
         }));
     }
+    let sweep = cli.only.contains(&Only::Worktrees);
+    if !sweep && let Some(flag) = cli.worktrees.flag_given() {
+        return fail(format!("{flag} needs --only worktrees"));
+    }
     let now = clock::now_secs()?;
-    let only = |kind: Only| cli.only.is_empty() || cli.only.contains(&kind);
+    // Removing worktrees and deleting branches is never part of the default pass.
+    let only =
+        |kind: Only| cli.only.contains(&kind) || (cli.only.is_empty() && kind != Only::Worktrees);
     let mut plan = plan::Plan::default();
     if only(Only::Reviews) {
         plan.reviews(now)?;
@@ -94,6 +107,15 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         None
     };
+    // The sweep runs before any deletion, so its error (such as no repository here) stops
+    // the pass before anything is gone.
+    let mut worktrees = cli.worktrees;
+    worktrees.yes = cli.yes;
+    let worktrees = if sweep {
+        Some(worktree::cleanup::run(&worktrees)?)
+    } else {
+        None
+    };
     let signal = cli.only.contains(&Only::Processes);
     let outcome = cli.yes.then(|| apply::run(&plan, now, signal));
     let mut report = json!({
@@ -107,6 +129,9 @@ pub fn run(cli: Cli) -> Result<Output> {
     if let Some(map) = report.as_object_mut() {
         if let Some(outcome) = outcome {
             map.extend(outcome.json());
+        }
+        if let Some(worktrees) = worktrees {
+            map.insert("worktrees".into(), worktrees);
         }
         if let Some(candidates) = &candidates {
             map.insert("manual".into(), manual::json(candidates));

@@ -1,4 +1,4 @@
-//! `agt worktree cleanup` against a local bare repository as origin (reached through
+//! `agt cleanup --only worktrees` against a local bare repository as origin (reached through
 //! `insteadOf`, so `origin` reads as a GitHub or GitLab URL) and the fake `gh`/`glab`.
 
 use std::fs;
@@ -93,13 +93,13 @@ impl Site {
         self.env
             .command(BIN, dir)
             .env("AGT_NOW", now.to_string())
-            .args(["worktree", "cleanup"])
+            .args(["cleanup", "--only", "worktrees"])
             .args(args)
             .output()
             .unwrap()
     }
 
-    /// The report of the one repository, after `agt worktree cleanup <args>` in the main checkout.
+    /// The report of the one repository, after `agt cleanup --only worktrees <args>` in the main checkout.
     fn run(&self, args: &[&str]) -> Value {
         self.run_in(&self.env.repo, args)
     }
@@ -108,11 +108,11 @@ impl Site {
         let output = self.agt_in(dir, args);
         assert!(
             output.status.success(),
-            "agt worktree cleanup {args:?}: {}",
+            "agt cleanup --only worktrees {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        report["repositories"][0].clone()
+        report["worktrees"]["repositories"][0].clone()
     }
 
     /// Answers the fake `gh` for the PRs of `branch`.
@@ -172,6 +172,39 @@ fn pull(number: u64, state: &str, base: &str, branch: &str, head: &str, cross: b
 
 fn merged(number: u64, branch: &str, head: &str) -> Value {
     pull(number, "MERGED", "main", branch, head, false)
+}
+
+#[test]
+fn the_default_cleanup_pass_never_removes_a_landed_worktree() {
+    let site = Site::new();
+    let wt = site.branch("done");
+    site.env.git(&["merge", "-q", "done"]);
+    let output = site
+        .env
+        .command(BIN, &site.env.repo)
+        .args(["cleanup", "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["worktrees"], Value::Null);
+    assert!(wt.exists());
+    site.env
+        .git(&["rev-parse", "--verify", "--quiet", "refs/heads/done"]);
+    // Worktree flags alone do not opt in.
+    let output = site
+        .env
+        .command(BIN, &site.env.repo)
+        .args(["cleanup", "--yes", "--dirty"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--dirty needs --only worktrees"),
+        "{stderr}"
+    );
+    assert!(wt.exists());
 }
 
 #[test]
@@ -499,8 +532,8 @@ fn without_yes_the_plan_names_every_action_and_nothing_changes() {
     let output = site.agt_in(&site.env.repo, &[]);
     assert!(output.status.success());
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["plan"], true);
-    let report = &plan["repositories"][0];
+    assert_eq!(plan["worktrees"]["plan"], true);
+    let report = &plan["worktrees"]["repositories"][0];
     assert_eq!(report["remove"].as_array().unwrap().len(), 2);
     let actions: Vec<&str> = report["delete"]
         .as_array()
@@ -551,7 +584,7 @@ fn all_sweeps_every_configured_repository() {
     )
     .unwrap();
 
-    let report = site.run_in(&site.env.path("home"), &["--all", "--yes"]);
+    let report = site.run_in(&site.env.path("home"), &["--all-repos", "--yes"]);
     assert_eq!(report["repository"], site.env.repo.to_str().unwrap());
     assert_eq!(report["removed"][0]["path"], wt.to_str().unwrap());
     assert_eq!(site.branches(), ["main"]);
@@ -634,14 +667,14 @@ fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
     )
     .unwrap();
 
-    let output = site.agt_in(&site.env.path("home"), &["--all", "--yes"]);
+    let output = site.agt_in(&site.env.path("home"), &["--all-repos", "--yes"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let rows = report["repositories"].as_array().unwrap();
+    let rows = report["worktrees"]["repositories"].as_array().unwrap();
     assert_eq!(rows.len(), 2, "{report}");
     let bad = rows
         .iter()
@@ -705,10 +738,11 @@ fn full(site: &Site, args: &[&str]) -> Value {
     let output = site.agt_in(&site.env.repo, args);
     assert!(
         output.status.success(),
-        "agt worktree cleanup {args:?}: {}",
+        "agt cleanup --only worktrees {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).unwrap()
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    report["worktrees"].clone()
 }
 
 #[test]
@@ -723,7 +757,7 @@ fn only_acts_on_the_named_rows_and_skips_the_rest_with_a_reason() {
     fs::write(dirty.join("dirty"), "changed").unwrap();
 
     // The plan lists the named row alone and changes nothing.
-    let plan = full(&site, &["--only", "a"]);
+    let plan = full(&site, &["--worktree", "a"]);
     let row = &plan["repositories"][0];
     assert_eq!(row["remove"].as_array().unwrap().len(), 1, "{plan}");
     assert_eq!(row["remove"][0]["branch"], "a");
@@ -736,11 +770,11 @@ fn only_acts_on_the_named_rows_and_skips_the_rest_with_a_reason() {
         &site,
         &[
             "--yes",
-            "--only",
+            "--worktree",
             "a",
-            "--only",
+            "--worktree",
             "dirty",
-            "--only",
+            "--worktree",
             "no-such-branch",
         ],
     );
@@ -763,7 +797,7 @@ fn only_acts_on_the_named_rows_and_skips_the_rest_with_a_reason() {
     assert!(b.exists() && dirty.exists());
     assert_eq!(site.branches(), ["b", "dirty", "main"]);
 
-    let report = full(&site, &["--yes", "--only", b.to_str().unwrap()]);
+    let report = full(&site, &["--yes", "--worktree", b.to_str().unwrap()]);
     assert_eq!(report["repositories"][0]["removed"][0]["branch"], "b");
     assert_eq!(report["skipped"], json!([]));
     assert!(!b.exists() && dirty.exists());
