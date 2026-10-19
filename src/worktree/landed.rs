@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::info::{self, Entry};
+use crate::core::clock;
 use crate::core::error::Result;
 use crate::forge::landed::{Origin, State};
 use crate::git::Repo;
@@ -294,10 +295,9 @@ pub fn recent(path: &Path, now: i64) -> Result<bool> {
     }
     let touched = |file: &Path| {
         std::fs::symlink_metadata(file)
-            .and_then(|meta| meta.modified())
             .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .is_some_and(|age| since(i64::try_from(age.as_secs()).unwrap_or(i64::MAX)))
+            .and_then(|meta| clock::mtime_secs(&meta))
+            .is_some_and(since)
     };
     let git_dir = PathBuf::from(repo.git(&["rev-parse", "--absolute-git-dir"])?);
     if ["HEAD", "index", "logs/HEAD"]

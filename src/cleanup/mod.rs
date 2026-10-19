@@ -121,7 +121,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let mut report = json!({
         "dry_run": !cli.yes,
         "now": clock::format(now),
-        "retention_days": PRUNE_AFTER_SECS / 86_400,
+        "retention_days": PRUNE_AFTER_SECS / clock::SECS_PER_DAY,
         "plan": plan.json(),
         "totals": plan.totals(),
         "warnings": plan.warnings,

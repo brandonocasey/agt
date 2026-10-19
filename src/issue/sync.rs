@@ -42,7 +42,9 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
     let now = clock::now()?;
     let since = match &tracker.doc.watermark {
         Some(mark) => clock::format(clock::parse(mark)? - OVERLAP_SECS),
-        None => clock::format(clock::now_secs()? - i64::from(tracker.doc.since_days) * 86_400),
+        None => clock::format(
+            clock::now_secs()? - i64::from(tracker.doc.since_days) * clock::SECS_PER_DAY,
+        ),
     };
     let listed = service.list_changed(&ListQuery {
         repo: &tracker.doc.repo,

@@ -53,7 +53,7 @@ impl Presence {
 
     /// Why the repository is, or is not, treated as gone, naming the rule that decided.
     pub fn describe(&self) -> String {
-        let days = |secs: &i64| (secs / 86_400).max(0);
+        let days = |secs: &i64| (secs / clock::SECS_PER_DAY).max(0);
         match self {
             Self::NoRecord => "no recorded path, so its existence cannot be checked".into(),
             Self::Unreadable(why) => format!("its path record is unreadable ({why})"),
@@ -64,7 +64,7 @@ impl Presence {
             } => format!(
                 "{common_dir} is missing but agt last wrote there {} day(s) ago, under the {} days that mark a repository gone, so it may have moved",
                 days(unseen_secs),
-                GONE_AFTER_SECS / 86_400
+                GONE_AFTER_SECS / clock::SECS_PER_DAY
             ),
             Self::Unmounted(path) => {
                 format!("{path} is missing below a mount root, so its volume may only be unmounted")
@@ -75,7 +75,7 @@ impl Presence {
             } => format!(
                 "local repository is gone: {common_dir} no longer exists and agt last wrote there {} day(s) ago (path missing and unseen for {}+ days)",
                 days(unseen_secs),
-                GONE_AFTER_SECS / 86_400
+                GONE_AFTER_SECS / clock::SECS_PER_DAY
             ),
         }
     }
@@ -488,9 +488,7 @@ fn last_write(dir: &Path, extras: &[PathBuf]) -> i64 {
 }
 
 fn seen_by_mtime(path: &Path) -> Option<i64> {
-    let modified = fs::metadata(path).ok()?.modified().ok()?;
-    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
-    i64::try_from(since.as_secs()).ok()
+    clock::mtime_secs(&fs::metadata(path).ok()?)
 }
 
 /// Whether every entry of `dir` is one of `paths`.

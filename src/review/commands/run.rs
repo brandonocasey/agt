@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::local::read_source;
 use crate::store::model::{CommitPatch, Pass, PassKind, Reveal, Reviewer, RoleUsage, Run};
 
 use super::findings::{FindingInput, add_findings, parse_findings};
-use super::input::{read_source, read_stdin};
 use super::prune::prune_dir;
 use super::usage::{UsageInput, run_spend};
 use super::{Ctx, find_pass_mut, find_run_mut, major_found, random_id};
@@ -125,12 +125,8 @@ pub(super) fn read_reviewers(source: Option<&Path>) -> Result<Vec<ReviewerInput>
     let Some(source) = source else {
         return Ok(Vec::new());
     };
-    let text = if source == Path::new("-") {
-        read_stdin("reviewers")?
-    } else {
-        std::fs::read_to_string(source).map_err(ctx(format!("read {}", source.display())))?
-    };
-    serde_json::from_str(&text).map_err(ctx("parse reviewers (expected a JSON array)"))
+    serde_json::from_str(&read_source(source, "reviewers")?)
+        .map_err(ctx("parse reviewers (expected a JSON array)"))
 }
 
 /// `manual` is the main session's own pass and `fix` the fixer, which signs fix replies.

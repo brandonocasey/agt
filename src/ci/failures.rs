@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use crate::core::error::{Result, fail};
 
-use super::api::{Jobs, Project, RUNNING, id_text, parallel, text};
+use super::api::{Jobs, Project, RUNNING, id_text, parallel};
 use super::specs::{family, parse_specs};
 use super::table::{Out, table};
+use crate::core::transcripts::json::text;
 
 /// `(state, final, job)` of a spec: whether it failed or only flaked, whether it failed in the
 /// job's last attempt, and the job that last reported it.

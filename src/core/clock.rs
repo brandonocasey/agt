@@ -1,3 +1,4 @@
+use std::fs;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +38,22 @@ pub fn now() -> Result<String> {
     Ok(format(now_secs()?))
 }
 
+/// Seconds in a day.
+pub const SECS_PER_DAY: i64 = 86_400;
+
+/// Nanoseconds since the Unix epoch, for names that must differ between runs; 0 before 1970.
+pub fn unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos())
+}
+
+/// When `meta` was last modified, in Unix seconds; `None` when unknown or before 1970.
+pub fn mtime_secs(meta: &fs::Metadata) -> Option<i64> {
+    let elapsed = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(elapsed.as_secs()).ok()
+}
+
 /// The current time as `YYYY-MM-DDTHH:MM:SS.mmmZ`, the form `Date.toISOString()` prints.
 pub fn now_iso_millis() -> Result<String> {
     let elapsed = SystemTime::now()
@@ -53,8 +70,8 @@ pub fn now_iso_millis() -> Result<String> {
 }
 
 pub fn format(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rest = secs.rem_euclid(86_400);
+    let days = secs.div_euclid(SECS_PER_DAY);
+    let rest = secs.rem_euclid(SECS_PER_DAY);
     let (year, month, day) = civil_from_days(days);
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
@@ -121,7 +138,10 @@ pub fn parse(text: &str) -> Result<i64> {
     {
         return fail(format!("invalid timestamp: {text}"));
     }
-    Ok(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+    Ok(
+        days_from_civil(year, month, day) * SECS_PER_DAY + hour * 3600 + minute * 60 + second
+            - offset,
+    )
 }
 
 /// Rewrites a forge timestamp in the store's `YYYY-MM-DDTHH:MM:SSZ` form.

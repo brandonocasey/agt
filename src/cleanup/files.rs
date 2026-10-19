@@ -6,15 +6,14 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
+use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::core::local;
 use crate::store::prune::Removal;
 
 pub const OUTPUT_DAYS: i64 = 7;
 pub const SCRATCH_DAYS: i64 = 30;
-const DAY: i64 = 86_400;
 /// Test-only replacement for `/tmp`, so tests never read the real one.
 const TMP_OVERRIDE: &str = "AGT_CLEANUP_TMP";
 
@@ -40,12 +39,7 @@ pub fn harness_roots() -> Result<Vec<PathBuf>> {
 }
 
 fn mtime(meta: &fs::Metadata) -> i64 {
-    meta.modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
-        })
+    clock::mtime_secs(meta).unwrap_or(0)
 }
 
 /// The newest modification time in a tree and its total size. Links count as themselves and
@@ -140,13 +134,15 @@ fn stale_in(
                 continue;
             }
             match measure(&path) {
-                Ok((newest, bytes)) if now - newest > days * DAY => found.push(Stale {
-                    key: key(&path),
-                    root: root.to_path_buf(),
-                    path,
-                    newest,
-                    bytes,
-                }),
+                Ok((newest, bytes)) if now - newest > days * clock::SECS_PER_DAY => {
+                    found.push(Stale {
+                        key: key(&path),
+                        root: root.to_path_buf(),
+                        path,
+                        newest,
+                        bytes,
+                    })
+                }
                 Ok(_) => {}
                 // Something deleted it while we looked; there is nothing left to plan.
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -237,7 +233,7 @@ pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
 pub fn reason(stale: &Stale, now: i64, days: i64) -> String {
     format!(
         "nothing in it changed for {} day(s) (over {days}); newest change {}",
-        (now - stale.newest) / DAY,
+        (now - stale.newest) / clock::SECS_PER_DAY,
         crate::core::clock::format(stale.newest)
     )
 }
@@ -267,7 +263,7 @@ pub fn remove(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Removal::Kept),
         Err(error) => return Err(Error(format!("{}: {error}", path.display()))),
     };
-    if now - newest <= days * DAY {
+    if now - newest <= days * clock::SECS_PER_DAY {
         return Ok(Removal::Kept);
     }
     let result = fs::symlink_metadata(path).and_then(|meta| {

@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 use super::files::{self, OUTPUT_DAYS, SCRATCH_DAYS};
 use super::procs;
 use crate::core::agents::Proc;
+use crate::core::clock;
 use crate::core::error::Result;
 use crate::issue::prune::prunable;
 use crate::review::commands::prune::expired;
@@ -218,15 +219,15 @@ impl Plan {
         } else if repo.targets.is_empty() {
             format!(
                 "no targets left; only cache files, last written {} day(s) ago (over {} days); {}",
-                repo.idle_secs / 86_400,
-                PRUNE_AFTER_SECS / 86_400,
+                repo.idle_secs / clock::SECS_PER_DAY,
+                PRUNE_AFTER_SECS / clock::SECS_PER_DAY,
                 repo.presence.describe()
             )
         } else {
             format!(
                 "{} target(s), all older than {} days (every target expired); {}",
                 repo.targets.len(),
-                PRUNE_AFTER_SECS / 86_400,
+                PRUNE_AFTER_SECS / clock::SECS_PER_DAY,
                 repo.presence.describe()
             )
         };

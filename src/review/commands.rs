@@ -23,11 +23,11 @@ mod usage;
 mod view;
 use self::approve::approve;
 use self::findings::{comment, finding_add, finding_kill, reply, resolve};
-use self::input::read_source;
 use self::run::{pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::usage::UsageInput;
 use self::view::{list, show};
+use crate::core::local::read_source;
 
 const MAX_TEXT: usize = 65_536;
 

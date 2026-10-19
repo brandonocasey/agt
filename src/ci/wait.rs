@@ -6,7 +6,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -51,21 +51,12 @@ fn cancelled() -> bool {
     CANCEL.load(Ordering::SeqCst)
 }
 
-fn timestamp() -> String {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let stamp = clock::format(i64::try_from(elapsed.as_secs()).unwrap_or(0));
-    format!(
-        "{}.{:03}Z",
-        stamp.trim_end_matches('Z'),
-        elapsed.subsec_millis()
-    )
-}
-
 fn write_event(event: Value) {
     let mut fields = Map::new();
-    fields.insert("at".to_owned(), timestamp().into());
+    fields.insert(
+        "at".to_owned(),
+        clock::now_iso_millis().unwrap_or_default().into(),
+    );
     if let Value::Object(event) = event {
         fields.extend(event);
     }

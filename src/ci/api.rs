@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::core::error::Result;
+use crate::core::transcripts::json::text;
 use crate::forge::gitlab::Gitlab;
 use crate::forge::gitlab::ci::base_of_id;
 use crate::forge::transport::CliTransport;
@@ -17,10 +18,6 @@ pub const RUNNING: [&str; 7] = [
     "scheduled",
     "canceling",
 ];
-
-pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
-    value.get(key).and_then(Value::as_str).unwrap_or("")
-}
 
 /// A JSON id as text.
 pub fn id_text(value: &Value) -> String {

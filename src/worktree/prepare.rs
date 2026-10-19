@@ -5,7 +5,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use clap::Args;
 use serde_json::{Value, json};
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use super::emit;
 use super::info::{main_checkout, toplevel};
 use super::setup::{self, Step};
+use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local;
 use crate::core::output::Output;
@@ -223,9 +224,7 @@ pub(super) fn run_step(
     index: usize,
     env: &[(&str, String)],
 ) -> Result<Value> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
+    let nanos = clock::unix_nanos();
     let name = format!(
         "worktree-prepare-{}-{nanos}-{index}.log",
         std::process::id()

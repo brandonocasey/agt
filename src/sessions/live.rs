@@ -450,7 +450,7 @@ fn age(secs: i64) -> String {
         0..=59 => format!("{secs}s"),
         60..=3599 => format!("{}m", secs / 60),
         3600..=86399 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / 86400),
+        _ => format!("{}d", secs / clock::SECS_PER_DAY),
     }
 }
 

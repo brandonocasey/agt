@@ -1,8 +1,6 @@
 //! The commands that change only the local copy: `link`, `note` and every write that waits for
 //! `push`. Nothing here talks to a host.
 
-use std::io::Read;
-
 use serde_json::Value;
 
 use super::cli::{CreateArgs, EditArgs, LinkArgs, Reason, State};
@@ -10,7 +8,8 @@ use super::trackers::{self, Tracker, doc_name};
 use super::view::summary;
 use crate::core::clock;
 use crate::core::config::Config;
-use crate::core::error::{Result, ctx, fail};
+use crate::core::error::{Result, fail};
+use crate::core::local::read_stdin;
 use crate::core::random;
 use crate::forge::{self, service};
 use crate::store::Store;
@@ -22,11 +21,7 @@ const MAX_TEXT: usize = 65_536;
 /// `text`, or stdin when it is `-`; never empty unless `allow_empty`.
 fn read_text(text: &str, what: &str, allow_empty: bool) -> Result<String> {
     let text = if text == "-" {
-        let mut input = String::new();
-        std::io::stdin()
-            .read_to_string(&mut input)
-            .map_err(ctx(format!("read {what} from stdin")))?;
-        input
+        read_stdin(what)?
     } else {
         text.to_owned()
     };

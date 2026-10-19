@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::core::agents::{self, Proc, exists, pids, read, record_matches, session_dirs};
+use crate::core::clock;
 use crate::core::error::{Error, Result};
 
-pub const MIN_AGE_SECS: i64 = 86_400;
+pub const MIN_AGE_SECS: i64 = clock::SECS_PER_DAY;
 const GRACE: Duration = Duration::from_secs(10);
 const PID_OVERRIDE: &str = "AGT_CLEANUP_PID";
 
@@ -156,7 +157,7 @@ pub fn reason(orphan: &Orphan) -> String {
     format!(
         "Claude session {} is gone; running {} day(s): {}",
         orphan.proc.claude_pid.unwrap_or_default(),
-        orphan.age / 86_400,
+        orphan.age / clock::SECS_PER_DAY,
         orphan.proc.cmd
     )
 }

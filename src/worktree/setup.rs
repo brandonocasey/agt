@@ -7,12 +7,13 @@ use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use super::info::toplevel;
 use super::{emit, hooks, prepare};
+use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{read_json, write_json};
 use crate::core::output::Output;
@@ -94,9 +95,7 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
         return Ok(report);
     }
     let status = status_path(root)?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
+    let nanos = clock::unix_nanos();
     let log =
         prepare::output_dir()?.join(format!("worktree-setup-{}-{nanos}.log", std::process::id()));
     let sink = File::create(&log).map_err(ctx(format!("create {}", log.display())))?;

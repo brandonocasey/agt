@@ -1,7 +1,7 @@
 //! The local machine and the private files under the user's state directory.
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -214,6 +214,24 @@ pub fn is_current(held: &File, path: &Path) -> Result<bool> {
         Ok(meta) => Ok(meta.ino() == held.ino() && meta.dev() == held.dev()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => fail(format!("stat {}: {error}", path.display())),
+    }
+}
+
+/// All of stdin as text; `what` names it in the error.
+pub fn read_stdin(what: &str) -> Result<String> {
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(ctx(format!("read {what} from stdin")))?;
+    Ok(text)
+}
+
+/// The text of the file `source`, or of stdin when it is `-`.
+pub fn read_source(source: &Path, what: &str) -> Result<String> {
+    if source == Path::new("-") {
+        read_stdin(what)
+    } else {
+        fs::read_to_string(source).map_err(ctx(format!("read {}", source.display())))
     }
 }
 

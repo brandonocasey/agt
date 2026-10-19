@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::local::read_source;
 use crate::forge;
 use crate::review::cli::{AuthorArgs, CommentArgs, ReplyArgs, ResolveArgs};
 use crate::store::model::{
@@ -11,7 +12,7 @@ use crate::store::model::{
     Side, Target, Thread, ThreadType, Triage,
 };
 
-use super::input::{AnchorInput, build_anchor, limited, read_body, read_source};
+use super::input::{AnchorInput, build_anchor, limited, read_body};
 use super::{Ctx, find_pass, find_pass_mut, find_thread_mut, major_found, passes};
 
 /// A comment written here, numbered after the thread's other local comments.

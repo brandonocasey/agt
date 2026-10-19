@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use super::codex;
 use super::json::{get, head, tail, text};
+use crate::core::clock;
 
 /// The longest first line read when looking for a session id.
 const MAX_FIRST_LINE: u64 = 1024 * 1024;
@@ -303,10 +304,9 @@ pub fn codex_sessions(home: &Path, cwd: &Path, since: i64) -> Vec<String> {
             continue;
         };
         let Some(modified) = fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
             .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .filter(|age| i64::try_from(age.as_secs()).is_ok_and(|secs| secs >= since))
+            .and_then(|metadata| clock::mtime_secs(&metadata))
+            .filter(|secs| *secs >= since)
         else {
             continue;
         };

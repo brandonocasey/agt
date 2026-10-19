@@ -1,7 +1,5 @@
-use std::io::Read;
-use std::path::Path;
-
-use crate::core::error::{Result, ctx, fail};
+use crate::core::error::{Result, fail};
+use crate::core::local;
 use crate::store::model::{Anchor, Side};
 
 use super::MAX_TEXT;
@@ -16,17 +14,9 @@ pub(super) fn limited(text: String, name: &str) -> Result<String> {
     Ok(text)
 }
 
-pub(super) fn read_stdin(what: &str) -> Result<String> {
-    let mut text = String::new();
-    std::io::stdin()
-        .read_to_string(&mut text)
-        .map_err(ctx(format!("read {what} from stdin")))?;
-    Ok(text)
-}
-
 pub(super) fn read_body(body: &str) -> Result<String> {
     if body == "-" {
-        return limited(read_stdin("body")?, "body");
+        return limited(local::read_stdin("body")?, "body");
     }
     limited(body.to_owned(), "body")
 }
@@ -104,12 +94,4 @@ pub(super) fn build_anchor(
         commit,
         tree,
     }))
-}
-
-pub(super) fn read_source(source: &Path, what: &str) -> Result<String> {
-    if source == Path::new("-") {
-        read_stdin(what)
-    } else {
-        std::fs::read_to_string(source).map_err(ctx(format!("read {}", source.display())))
-    }
 }
