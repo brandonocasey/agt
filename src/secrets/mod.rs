@@ -89,7 +89,9 @@ fn scan(args: &Scan) -> Result<BTreeSet<(String, usize, &'static str)>> {
         vec![
             "diff",
             "--cached",
-            "--name-only",
+            "--raw",
+            "--no-abbrev",
+            "--no-renames",
             "-z",
             "--diff-filter=ACMR",
         ]
@@ -99,13 +101,31 @@ fn scan(args: &Scan) -> Result<BTreeSet<(String, usize, &'static str)>> {
     git.push("--");
     git.extend(paths.iter().map(String::as_str));
     let listing = repo.checked(&git, None, &[])?;
-    let mut rows = BTreeSet::new();
-    for name in listing
+    let mut fields = listing
         .split(|&byte| byte == 0)
-        .filter(|name| !name.is_empty())
-    {
-        let name = String::from_utf8_lossy(name).into_owned();
-        let Some(content) = read(&repo, &name, args.staged)? else {
+        .filter(|field| !field.is_empty());
+    let mut rows = BTreeSet::new();
+    while let Some(field) = fields.next() {
+        let (name, object) = if args.staged {
+            // `:<old mode> <new mode> <old id> <new id> <status>`, then the path.
+            let meta = String::from_utf8_lossy(field).into_owned();
+            let Some(name) = fields.next() else { break };
+            let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+            let [_, mode, _, id, _] = parts[..] else {
+                continue;
+            };
+            // Submodules and symlinks are not file content.
+            if mode == "160000" || mode == "120000" {
+                continue;
+            }
+            (
+                String::from_utf8_lossy(name).into_owned(),
+                Some(id.to_owned()),
+            )
+        } else {
+            (String::from_utf8_lossy(field).into_owned(), None)
+        };
+        let Some(content) = read(&repo, &name, object.as_deref())? else {
             continue;
         };
         scan_text(&name, &content, &mut rows);
@@ -113,12 +133,17 @@ fn scan(args: &Scan) -> Result<BTreeSet<(String, usize, &'static str)>> {
     Ok(rows)
 }
 
-/// The file's bytes, or `None` for a file that is gone, binary or not a regular file.
-fn read(repo: &Repo, name: &str, staged: bool) -> Result<Option<Vec<u8>>> {
-    let content = if staged {
-        repo.checked(&["show", &format!(":{name}")], None, &[])?
+/// The file's bytes (the staged blob `object`, else the working-tree file), or `None` for a
+/// file that is gone, binary or not a regular file (symlinks are never followed).
+fn read(repo: &Repo, name: &str, object: Option<&str>) -> Result<Option<Vec<u8>>> {
+    let content = if let Some(id) = object {
+        repo.checked(&["cat-file", "blob", id], None, &[])?
     } else {
         let path: &Path = &repo.root().join(name);
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => {}
+            _ => return Ok(None),
+        }
         match std::fs::read(path) {
             Ok(content) => content,
             Err(_) => return Ok(None),

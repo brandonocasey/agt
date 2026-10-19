@@ -82,3 +82,46 @@ fn outside_a_repository_it_fails_with_exit_2() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn staged_submodules_and_colon_names_are_read_by_object_id() {
+    let env = Env::new();
+    let value = secret();
+    fs::write(env.repo.join("x.txt"), "clean\n").unwrap();
+    fs::write(env.repo.join("0:x.txt"), format!("token: {value}\n")).unwrap();
+    env.git(&["add", "."]);
+    let head = "1".repeat(40);
+    env.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{head},sub"),
+    ]);
+    let output = scan(&env, &["--staged", "--json"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let rows: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        rows,
+        json!([{"path": "0:x.txt", "line": 1, "rule": "github-token"}])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinks_are_skipped_in_both_modes() {
+    let env = Env::new();
+    let fifo = env.path("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    std::os::unix::fs::symlink(&fifo, env.repo.join("link")).unwrap();
+    let outside = env.path("outside.txt");
+    fs::write(&outside, secret()).unwrap();
+    std::os::unix::fs::symlink(&outside, env.repo.join("out")).unwrap();
+    env.git(&["add", "."]);
+    for args in [&[][..], &["--staged"]] {
+        assert_eq!(scan(&env, args).status.code(), Some(0), "{args:?}");
+    }
+}
