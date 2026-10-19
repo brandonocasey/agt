@@ -351,11 +351,20 @@ fn notify(event: &Value) {
         .unwrap_or("a session");
     let title = format!("agt: {who} is blocked");
     let body = event["waiting_for"].as_str().unwrap_or("waiting for input");
-    if let Err(error) = notify_rust::Notification::new()
+    #[cfg(target_os = "linux")]
+    let result = notify_rust::Notification::new()
         .summary(&title)
         .body(body)
         .show()
-    {
+        .map(|_| ());
+    #[cfg(target_os = "macos")]
+    let result = mac_notification_sys::Notification::new()
+        .title(&title)
+        .message(body)
+        .asynchronous(true)
+        .send()
+        .map(|_| ());
+    if let Err(error) = result {
         eprintln!("warning: notification failed: {error}");
     }
 }

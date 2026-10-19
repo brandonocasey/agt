@@ -12,6 +12,7 @@ dependencies = [
  "clap",
  "indexmap",
  "libc",
+ "mac-notification-sys",
  "notify-rust",
  "regex",
  "serde",
