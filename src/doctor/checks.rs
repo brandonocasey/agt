@@ -166,9 +166,10 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
     if let Some((host, forge)) = own {
         let name = format!("auth {host}");
         rows.push(match forge {
+            // It may still be GitHub Enterprise or self-hosted GitLab that nobody logged in to.
             None => Row::warn(
                 &name,
-                "not a GitHub or GitLab host: forge features unavailable",
+                format!("no gh or glab login for {host}; forge features unavailable"),
                 format!(
                     "{} or {}",
                     login_hint(Forge::Github, Some(host)),
@@ -216,7 +217,11 @@ fn pinned() -> Result<Option<String>, (String, String)> {
         .probe(&["ls", "--current", "--json"])
         .ok_or_else(|| install("mise is not available"))?;
     if !ok {
-        let first = err.lines().map(str::trim).find(|line| !line.is_empty());
+        // mise puts warnings first: prefer its `ERROR` line, else the last line it printed.
+        let lines = || err.lines().map(str::trim).filter(|line| !line.is_empty());
+        let first = lines()
+            .find(|line| line.contains("ERROR"))
+            .or_else(|| lines().last());
         let hint = if err.to_lowercase().contains("not trusted") {
             "mise trust"
         } else {

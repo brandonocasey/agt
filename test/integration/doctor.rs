@@ -133,6 +133,20 @@ fn a_failing_mise_shows_its_error_and_a_matching_fix() {
     assert!(!version["detail"].as_str().unwrap().contains("more"));
     assert_eq!(version["fix"], "mise trust");
 
+    fs::write(
+        &mise,
+        "#!/bin/sh\necho 'mise WARN old config' >&2\necho 'mise ERROR real cause' >&2\necho 'trailer' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let (_, report) = doctor(&env);
+    let detail = row(&report, "agt version")["detail"].to_string();
+    assert!(detail.contains("real cause") && !detail.contains("WARN"), "{detail}");
+
+    fs::write(&mise, "#!/bin/sh\necho 'warming up' >&2\necho 'boom' >&2\nexit 1\n").unwrap();
+    let (_, report) = doctor(&env);
+    let detail = row(&report, "agt version")["detail"].to_string();
+    assert!(detail.contains("boom") && !detail.contains("warming"), "{detail}");
+
     fs::write(&mise, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").unwrap();
     let (_, report) = doctor(&env);
     assert_eq!(
@@ -157,7 +171,7 @@ fn an_origin_that_is_not_a_forge_warns_instead_of_failing() {
         auth["detail"]
             .as_str()
             .unwrap()
-            .contains("forge features unavailable")
+            .contains("no gh or glab login for git.example.invalid; forge features unavailable")
     );
     assert_ne!(report["status"], "fail", "{report}");
 }
