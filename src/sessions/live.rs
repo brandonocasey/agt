@@ -210,6 +210,8 @@ fn codex_status(path: &Path) -> (&'static str, Option<i64>) {
 struct Seen {
     row: Value,
     blocked: bool,
+    /// Unix seconds the current status began, when the record says.
+    since: Option<i64>,
 }
 
 fn watch(cli: &Cli) -> Result<()> {
@@ -230,7 +232,19 @@ fn watch(cli: &Cli) -> Result<()> {
         for row in rows.drain(..) {
             let pid = row["pid"].as_i64().unwrap_or_default();
             let waiting = row["status"] == "waiting";
-            let blocked = seen.get(&pid).is_some_and(|old| old.blocked);
+            let since = row["status_secs"].as_i64().map(|secs| now - secs);
+            let mut blocked = seen.get(&pid).is_some_and(|old| old.blocked);
+            // A new waiting stretch behind a blocked one ends the old stretch and starts afresh.
+            if blocked
+                && waiting
+                && let Some(old) = seen.get(&pid)
+                && old.since.is_some()
+                && since.is_some()
+                && old.since != since
+            {
+                events.push(event("cleared", &old.row, now));
+                blocked = false;
+            }
             let now_blocked = if waiting {
                 blocked
                     || row["status_secs"]
@@ -249,6 +263,7 @@ fn watch(cli: &Cli) -> Result<()> {
                 Seen {
                     row,
                     blocked: now_blocked,
+                    since,
                 },
             );
         }

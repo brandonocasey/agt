@@ -577,6 +577,49 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
     reaper.join().unwrap().unwrap();
 }
 
+#[test]
+fn watch_reports_a_new_waiting_stretch_behind_a_blocked_one() {
+    let env = Env::new();
+    let now: u64 = 1_800_000_000;
+    let waiting = Proc::sleep("sleep", &env.repo);
+    let pid = waiting.pid();
+    record(
+        &env,
+        pid,
+        &proc_start(pid),
+        json!({ "cwd": env.repo, "status": "waiting", "statusUpdatedAt": (now - 100) * 1000 }),
+    );
+    // After the first event the session starts a new waiting stretch without leaving `waiting`.
+    let live = env.path(&format!("home/.claude/sessions/{pid}.json"));
+    let again = env.path("again.json");
+    fs::write(
+        &again,
+        json!({
+            "pid": pid, "procStart": proc_start(pid), "cwd": env.repo, "kind": "interactive",
+            "sessionId": format!("sess-{pid}"), "status": "waiting",
+            "statusUpdatedAt": (now + 10) * 1000,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = env.path("restretch.sh");
+    executable(
+        &script,
+        &format!(
+            "#!/bin/sh\ncp '{}' '{}'\n",
+            again.display(),
+            live.display()
+        ),
+    );
+    // Polls at +0, +30, +60, +90, +120: the new stretch is 20s old at +30 and 80s old at +90.
+    let events = watch(&env, now, "5", &["--exec", &script.to_string_lossy()]);
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["blocked", "cleared", "blocked"], "{events:?}");
+}
+
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     let mut mode = fs::metadata(path).unwrap().permissions();
