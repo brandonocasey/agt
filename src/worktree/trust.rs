@@ -74,6 +74,11 @@ fn list() -> Result<Output> {
     let files: Vec<_> = load(&store()?)?
         .into_iter()
         .map(|(file, sha256)| {
+            // Keys are `<main>/.config/agt.toml`; a symlink there is never trusted.
+            let main = Path::new(&file).parent().and_then(Path::parent);
+            if let Some(reason) = main.and_then(symlink_reason) {
+                return json!({"file": file, "sha256": sha256, "current": false, "reason": reason});
+            }
             let current = match fs::read(&file) {
                 Ok(bytes) => json!(digest(&bytes) == sha256),
                 Err(_) => json!("missing"),
