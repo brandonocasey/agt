@@ -6,11 +6,11 @@
 
 use serde_json::{Value, json};
 
-use crate::git::base::Candidate;
 use super::info;
 use crate::core::error::Result;
 use crate::core::shell::quote;
 use crate::git::Repo;
+use crate::git::base::Candidate;
 
 /// The report on the local default branch and, when it may still be behind, the warning; `None`
 /// when there is no local default branch or no remote to bring it up to.
