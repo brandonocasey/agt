@@ -21,13 +21,23 @@ impl Proc {
     }
 
     fn run(program: &str, args: &[&str], dir: &Path) -> Self {
-        let child = Command::new(program)
-            .args(args)
-            .current_dir(dir)
-            .stdin(Stdio::null())
-            .spawn()
-            .unwrap();
-        Self(child)
+        // A just-copied program can be briefly busy on Linux: a process another test thread
+        // forks at that moment holds the copy's write handle until it execs. Retry until then.
+        for _ in 0..50 {
+            match Command::new(program)
+                .args(args)
+                .current_dir(dir)
+                .stdin(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => return Self(child),
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("run {program}: {error}"),
+            }
+        }
+        panic!("run {program}: still busy after 1 s");
     }
 
     fn pid(&self) -> u32 {
