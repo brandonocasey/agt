@@ -204,8 +204,8 @@ pub fn run(options: &Options) -> u8 {
         .iter()
         .map(|target| Tracked {
             target: target.clone(),
-            head: target.sha.clone(),
-            awaiting: target.awaiting,
+            head: target.target.sha.clone(),
+            awaiting: target.target.awaiting,
             prior: None,
             done: false,
             transient_failures: 0,

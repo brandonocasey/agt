@@ -4,14 +4,12 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
+use crate::forge;
 use crate::forge::service::{Method, Request, Var};
 use crate::forge::transport::Transport;
+use crate::store::model::ReviewState;
 
 const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
-
-fn split(repo: &str) -> (&str, &str) {
-    repo.split_once('/').unwrap_or_default()
-}
 
 fn pr(node: &Value) -> Pr {
     let text = |pointer: &str| {
@@ -32,7 +30,7 @@ fn pr(node: &Value) -> Pr {
         number: node["number"].as_u64().unwrap_or_default(),
         url: text("/url"),
         title: text("/title"),
-        state: text("/state").to_lowercase(),
+        state: forge::github_state(&text("/state")).unwrap_or(ReviewState::Open),
         draft: node["isDraft"].as_bool().unwrap_or(false),
         head_branch: text("/headRefName"),
         base_branch: text("/baseRefName"),
@@ -69,7 +67,7 @@ fn graphql(t: &dyn Transport, query: &str, vars: Vec<Var>) -> Result<Value> {
 }
 
 pub fn view(t: &dyn Transport, repo: &str, number: u64) -> Result<Pr> {
-    let (owner, name) = split(repo);
+    let (owner, name) = forge::split_repo(repo);
     let query = format!(
         "query PrView($owner:String!,$name:String!,$number:Int!){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{FIELDS}}}}}}}"
     );
@@ -100,7 +98,7 @@ pub fn list(
     if mine {
         return search_mine(t, repo, branch, state);
     }
-    let (owner, name) = split(repo);
+    let (owner, name) = forge::split_repo(repo);
     let states = match state {
         State::Open => "OPEN",
         State::Merged => "MERGED",
@@ -130,7 +128,7 @@ fn search_mine(
 ) -> Result<Vec<Pr>> {
     // Search does not follow renames the way `repository(owner,name)` does, so a remote that
     // still names an old slug would match nothing.
-    let (owner, name) = split(repo);
+    let (owner, name) = forge::split_repo(repo);
     let renamed = graphql(
         t,
         "query PrRepo($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner}}",

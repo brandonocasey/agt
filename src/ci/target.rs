@@ -5,10 +5,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::core::error::{Error, Result, fail};
-use crate::forge::transport::Cli;
+use crate::forge::{github, gitlab};
 use crate::git::Repo;
+use crate::store::model::Forge;
 
-pub static GITLAB_URL: LazyLock<Regex> = LazyLock::new(|| {
+static GITLAB_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^https?://([^/]+)/(.+?)/-/(merge_requests|pipelines)/(\d+)")
         .expect("valid pattern")
 });
@@ -24,17 +25,11 @@ static LOCAL_REF: LazyLock<Regex> =
 static SHA: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{4,64}$").expect("valid pattern"));
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Platform {
-    Github,
-    Gitlab,
-}
-
 /// A target as written; `host` and `repo` are `None` when the argument leaves them to the
 /// current repository.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Target {
-    pub platform: Platform,
+    pub platform: Forge,
     pub host: Option<String>,
     pub repo: Option<String>,
     pub pipeline: bool,
@@ -47,13 +42,9 @@ pub struct Target {
 /// A target with its host and repository known.
 #[derive(Clone)]
 pub struct Resolved {
-    pub platform: Platform,
+    pub target: Target,
     pub host: String,
     pub repo: String,
-    pub pipeline: bool,
-    pub number: u64,
-    pub sha: Option<String>,
-    pub awaiting: bool,
     /// The name of the target in events: `owner/repo#1`, `group/project!1` or
     /// `group/project/-/pipelines/1`.
     pub key: String,
@@ -67,6 +58,11 @@ fn number(text: &str) -> Result<u64> {
 }
 
 pub fn parse(arg: &str) -> Result<Target> {
+    parse_as(arg, true)
+}
+
+/// Like [`parse`]; `bare_pipeline` is whether a bare id is a GitLab pipeline, not an MR.
+pub fn parse_as(arg: &str, bare_pipeline: bool) -> Result<Target> {
     let (value, sha) = match arg.rsplit_once('@') {
         Some((value, sha)) if SHA.is_match(sha) => (value, Some(sha.to_owned())),
         _ => (arg, None),
@@ -85,7 +81,7 @@ pub fn parse(arg: &str) -> Result<Target> {
     if let Some(found) = GITLAB_URL.captures(value) {
         let pipeline = &found[3] == "pipelines";
         return target(
-            Platform::Gitlab,
+            Forge::Gitlab,
             Some(&found[1]),
             Some(&found[2]),
             pipeline,
@@ -94,7 +90,7 @@ pub fn parse(arg: &str) -> Result<Target> {
     }
     if let Some(found) = GITHUB_URL.captures(value) {
         return target(
-            Platform::Github,
+            Forge::Github,
             Some(&found[1]),
             Some(&found[2]),
             false,
@@ -102,15 +98,21 @@ pub fn parse(arg: &str) -> Result<Target> {
         );
     }
     if let Some(found) = GITHUB_REF.captures(value) {
-        return target(Platform::Github, None, Some(&found[1]), false, &found[2]);
+        return target(Forge::Github, None, Some(&found[1]), false, &found[2]);
     }
     if let Some(found) = GITLAB_REF.captures(value) {
-        return target(Platform::Gitlab, None, Some(&found[1]), false, &found[2]);
+        return target(Forge::Gitlab, None, Some(&found[1]), false, &found[2]);
     }
     if let Some(found) = LOCAL_REF.captures(value) {
         return match &found[1] {
-            "#" => target(Platform::Github, None, None, false, &found[2]),
-            sigil => target(Platform::Gitlab, None, None, sigil.is_empty(), &found[2]),
+            "#" => target(Forge::Github, None, None, false, &found[2]),
+            sigil => target(
+                Forge::Gitlab,
+                None,
+                None,
+                bare_pipeline && sigil.is_empty(),
+                &found[2],
+            ),
         };
     }
     fail(format!(
@@ -118,17 +120,8 @@ pub fn parse(arg: &str) -> Result<Target> {
     ))
 }
 
-/// The GitLab host: `GITLAB_HOST`, else what `glab config get host` prints.
 fn gitlab_host() -> Result<String> {
-    let configured = std::env::var("GITLAB_HOST")
-        .ok()
-        .filter(|host| !host.is_empty())
-        .or_else(|| {
-            Cli::glab_configured()
-                .text(&["config", "get", "host"])
-                .filter(|host| !host.is_empty())
-        });
-    configured
+    gitlab::configured_host()
         .ok_or_else(|| Error("no GitLab host: set GITLAB_HOST or configure glab's host".into()))
 }
 
@@ -139,15 +132,12 @@ fn origin() -> Result<(String, String)> {
 }
 
 pub fn resolve(target: Target) -> Result<Resolved> {
-    let (host, repo) = match (target.host, target.repo) {
+    let (host, repo) = match (target.host.clone(), target.repo.clone()) {
         (Some(host), Some(repo)) => (host, repo),
         (None, Some(repo)) => {
             let host = match target.platform {
-                Platform::Github => std::env::var("GH_HOST")
-                    .ok()
-                    .filter(|host| !host.is_empty())
-                    .unwrap_or_else(|| "github.com".to_owned()),
-                Platform::Gitlab => gitlab_host()?,
+                Forge::Github => github::default_host(),
+                Forge::Gitlab => gitlab_host()?,
             };
             (host, repo)
         }
@@ -155,18 +145,14 @@ pub fn resolve(target: Target) -> Result<Resolved> {
     };
     let number = target.number;
     let key = match (target.platform, target.pipeline) {
-        (Platform::Github, _) => format!("{repo}#{number}"),
-        (Platform::Gitlab, false) => format!("{repo}!{number}"),
-        (Platform::Gitlab, true) => format!("{repo}/-/pipelines/{number}"),
+        (Forge::Github, _) => format!("{repo}#{number}"),
+        (Forge::Gitlab, false) => format!("{repo}!{number}"),
+        (Forge::Gitlab, true) => format!("{repo}/-/pipelines/{number}"),
     };
     Ok(Resolved {
-        platform: target.platform,
+        target,
         host,
         repo,
-        pipeline: target.pipeline,
-        number,
-        sha: target.sha,
-        awaiting: target.awaiting,
         key,
     })
 }
@@ -178,11 +164,11 @@ mod tests {
     #[test]
     fn parses_every_target_form() {
         let github = parse("owner/repo#42@abc123").unwrap();
-        assert_eq!(github.platform, Platform::Github);
+        assert_eq!(github.platform, Forge::Github);
         assert_eq!(github.repo.as_deref(), Some("owner/repo"));
         assert_eq!((github.number, github.sha.as_deref()), (42, Some("abc123")));
         let gitlab = parse("group/sub/project!7").unwrap();
-        assert_eq!(gitlab.platform, Platform::Gitlab);
+        assert_eq!(gitlab.platform, Forge::Gitlab);
         assert_eq!(gitlab.repo.as_deref(), Some("group/sub/project"));
         assert_eq!(gitlab.sha, None);
         let url = parse("https://gitlab.example.com/g/s/p/-/merge_requests/3@abc123").unwrap();
@@ -194,14 +180,14 @@ mod tests {
                 .pipeline
         );
         let pull = parse("https://github.com/o/r/pull/5").unwrap();
-        assert_eq!(pull.platform, Platform::Github);
+        assert_eq!(pull.platform, Forge::Github);
         assert_eq!(pull.repo.as_deref(), Some("o/r"));
         let local = parse("#8").unwrap();
-        assert_eq!((local.platform, local.repo), (Platform::Github, None));
+        assert_eq!((local.platform, local.repo), (Forge::Github, None));
         let local = parse("!8").unwrap();
-        assert_eq!((local.platform, local.pipeline), (Platform::Gitlab, false));
+        assert_eq!((local.platform, local.pipeline), (Forge::Gitlab, false));
         let local = parse("8").unwrap();
-        assert_eq!((local.platform, local.pipeline), (Platform::Gitlab, true));
+        assert_eq!((local.platform, local.pipeline), (Forge::Gitlab, true));
     }
 
     #[test]

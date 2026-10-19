@@ -8,7 +8,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::markers;
 use crate::forge::service::{
-    ApproveCap, Capabilities, Inline, Placement, Position, Request, ReviewService,
+    ApproveCap, Capabilities, DraftPoster, Inline, Placement, Position, Request, ReviewService,
 };
 use crate::git::{CommitInfo, Repo};
 use crate::review::commands::Ctx;
@@ -113,8 +113,10 @@ impl Write {
             })
         };
         let mut views = vec![call(self.request.as_ref())];
-        if let Item::Draft { comment } = &self.item {
-            let publish = service.publish_draft(connection.subject(), NEW_DRAFT);
+        if let (Item::Draft { comment }, Inline::DraftThenPublish(drafts)) =
+            (&self.item, service.inline())
+        {
+            let publish = drafts.publish_draft(connection.subject(), NEW_DRAFT);
             let write = Write {
                 item: Item::PublishDraft {
                     comment: comment.clone(),
@@ -398,8 +400,10 @@ impl<'a> Planner<'a> {
                 skipped.push(Skipped::new(&thread.id, reason));
                 continue;
             }
-            if let Some(draft) = &first.draft_id {
-                writes.push(self.publish_draft(&first.id, draft));
+            if let (Some(draft), Inline::DraftThenPublish(drafts)) =
+                (&first.draft_id, self.service().inline())
+            {
+                writes.push(self.publish_draft(drafts, &first.id, draft));
                 expected.push((thread.id.clone(), RemoteKind::Discussion));
                 continue;
             }
@@ -423,8 +427,8 @@ impl<'a> Planner<'a> {
             match spot {
                 Spot::InDiff(position) => {
                     let text = body(target, thread, first, None, self.attempt);
-                    match self.caps().inline {
-                        Inline::ReviewBatch => {
+                    match self.service().inline() {
+                        Inline::ReviewBatch(_) => {
                             let commit = position.commit.clone();
                             let comment = (position, text);
                             match reviews.iter_mut().find(|batch| batch.commit == commit) {
@@ -440,10 +444,8 @@ impl<'a> Planner<'a> {
                             }
                             expected.push((thread.id.clone(), RemoteKind::ReviewThread));
                         }
-                        Inline::DraftThenPublish => {
-                            let request =
-                                self.service()
-                                    .draft(self.connection.subject(), &text, &position);
+                        Inline::DraftThenPublish(drafts) => {
+                            let request = drafts.draft(self.connection.subject(), &text, &position);
                             writes.push(self.write(
                                 Item::Draft {
                                     comment: first.id.clone(),
@@ -476,12 +478,16 @@ impl<'a> Planner<'a> {
                 }
             }
         }
-        let reviews = reviews.into_iter().map(
+        let reviews = reviews.into_iter().filter_map(
             |Batch {
                  commit,
                  ids,
                  comments,
              }| {
+                // Only a service that batches collects any.
+                let Inline::ReviewBatch(batches) = self.service().inline() else {
+                    return None;
+                };
                 let threads: Vec<&Thread> = ids
                     .iter()
                     .filter_map(|id| {
@@ -492,17 +498,13 @@ impl<'a> Planner<'a> {
                     .collect();
                 // The summary is never posted on someone else's PR/MR.
                 let summary = review_body(target, &commit, &threads, self.foreign().is_none());
-                let request = self.service().review_batch(
-                    self.connection.subject(),
-                    &commit,
-                    &summary,
-                    &comments,
-                );
-                Write {
+                let request =
+                    batches.review_batch(self.connection.subject(), &commit, &summary, &comments);
+                Some(Write {
                     item: Item::Review { comments: ids },
                     request: Some(request),
                     sent: comments.into_iter().map(|(_, text)| Some(text)).collect(),
-                }
+                })
             },
         );
         let writes = reviews.chain(writes).collect();
@@ -724,16 +726,13 @@ impl<'a> Planner<'a> {
         })
     }
 
-    fn publish_draft(&self, comment: &str, draft: &str) -> Write {
+    fn publish_draft(&self, drafts: &dyn DraftPoster, comment: &str, draft: &str) -> Write {
         Write {
             item: Item::PublishDraft {
                 comment: comment.to_owned(),
                 draft: draft.to_owned(),
             },
-            request: Some(
-                self.service()
-                    .publish_draft(self.connection.subject(), draft),
-            ),
+            request: Some(drafts.publish_draft(self.connection.subject(), draft)),
             sent: vec![None],
         }
     }

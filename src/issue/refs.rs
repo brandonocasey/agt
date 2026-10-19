@@ -1,5 +1,7 @@
 //! Issue references in free text and branch names.
 
+use crate::forge::service::SERVICES;
+
 /// `(repository, number)` for every `#12`, `owner/repo#12` and issue URL in `text`. The
 /// repository is `None` for a bare `#12`.
 pub fn references(text: &str) -> Vec<(Option<String>, u64)> {
@@ -51,12 +53,18 @@ fn is_path_char(byte: u8) -> bool {
 }
 
 /// The issue numbers a branch name carries: a segment that starts with digits (`12-fix`,
-/// `feat/12-fix`) or follows `issue-`, `issues-`, `gh-`, `gl-` or `#`.
+/// `feat/12-fix`) or follows `issue-`, `issues-`, a service's key prefix (`gh-`, `gl-`) or `#`.
 pub fn branch_numbers(branch: &str) -> Vec<u64> {
     let mut found = Vec::new();
+    let prefixes: Vec<String> = ["issues-", "issue-"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(SERVICES.iter().map(|kind| format!("{}-", kind.key_prefix)))
+        .chain(["#".to_owned()])
+        .collect();
     for segment in branch.split('/') {
         let mut rest = segment;
-        for prefix in ["issues-", "issue-", "gh-", "gl-", "#"] {
+        for prefix in prefixes.iter().map(String::as_str) {
             if let Some(stripped) = segment.strip_prefix(prefix) {
                 rest = stripped;
                 break;

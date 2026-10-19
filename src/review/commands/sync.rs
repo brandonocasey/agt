@@ -10,7 +10,7 @@ use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
 use crate::core::local;
 use crate::forge::anchors;
-use crate::forge::service::{self, Capabilities, Kind, ReviewService, ReviewSubject, SERVICES};
+use crate::forge::service::{self, Capabilities, ReviewService, ReviewSubject};
 use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
 use crate::git::Repo;
 use crate::store::Account;
@@ -133,15 +133,7 @@ pub(super) fn locate(ctx: &Ctx) -> Result<Option<(Forge, String, String)>> {
     let Some((host, repo)) = ctx.repo.origin_location()? else {
         return Ok(None);
     };
-    let cached = ctx
-        .store
-        .load_account(&ctx.dir)?
-        .filter(|account| account.host == host)
-        .map(|account| account.forge);
-    let Ok(forge) = pick(&host, hosts_file(&host)?, cached) else {
-        return Ok(None);
-    };
-    Ok(Some((forge, host, repo)))
+    Ok(known_forge(ctx, &host)?.map(|forge| (forge, host, repo)))
 }
 
 /// The connection to the PR/MR of `branch` in `repo` on `host`, or `None` when it has none.
@@ -165,38 +157,26 @@ pub(super) fn find_for_branch(
     }))
 }
 
-/// The forge of `host`, never guessed. In order: the hosts file
-/// (`$XDG_CONFIG_HOME/agent-review/hosts.json`, `{"<host>": {"service": "gitlab"}}`), hosts
-/// every service knows by name, the forge this repository last synced that host with, then
-/// each service's own configuration and logins, which are the slowest to ask.
-fn detect(ctx: &Ctx, host: &str) -> Result<Forge> {
+/// The forge of `host` by [`service::detect`], with the hosts file and the forge this repository
+/// last synced the host with as its first hints.
+fn known_forge(ctx: &Ctx, host: &str) -> Result<Option<Forge>> {
     let cached = ctx
         .store
         .load_account(&ctx.dir)?
         .filter(|account| account.host == host)
         .map(|account| account.forge);
-    pick(host, hosts_file(host)?, cached)
+    Ok(service::detect(host, hosts_file(host)?, cached))
 }
 
-fn pick(host: &str, configured: Option<Forge>, cached: Option<Forge>) -> Result<Forge> {
-    let by = |check: fn(&Kind) -> fn(&str) -> bool| {
-        SERVICES
-            .iter()
-            .find(|kind| check(kind)(host))
-            .map(|kind| kind.forge)
-    };
-    configured
-        .or_else(|| by(|kind| kind.well_known))
-        .or(cached)
-        .or_else(|| by(|kind| kind.configured))
-        .or_else(|| by(|kind| kind.probe))
-        .ok_or_else(|| {
-            Error(format!(
-                "unsupported forge {host}: sync and publish need github.com or a host `gh auth \
-                 status` knows, or gitlab.com, GITLAB_HOST, glab's configured host, a host \
-                 `glab auth status` knows, or an entry for it in hosts.json"
-            ))
-        })
+/// The forge of `host`, never guessed; see [`known_forge`].
+fn detect(ctx: &Ctx, host: &str) -> Result<Forge> {
+    known_forge(ctx, host)?.ok_or_else(|| {
+        Error(format!(
+            "unsupported forge {host}: sync and publish need github.com or a host `gh auth \
+             status` knows, or gitlab.com, GITLAB_HOST, glab's configured host, a host \
+             `glab auth status` knows, or an entry for it in hosts.json"
+        ))
+    })
 }
 
 #[derive(Deserialize)]
@@ -1279,24 +1259,6 @@ mod tests {
         assert_eq!(
             rejected_reason("Rejected: by design.\n<!-- agent-review id=h1/c2 -->").as_deref(),
             Some("by design")
-        );
-    }
-
-    #[test]
-    fn hosts_are_detected_in_a_fixed_order() {
-        // The hosts file wins over a name every service knows, which wins over the cache.
-        let forge = |result: Result<Forge>| result.unwrap();
-        assert!(forge(pick("github.com", Some(Forge::Gitlab), None)) == Forge::Gitlab);
-        assert!(forge(pick("github.com", None, Some(Forge::Gitlab))) == Forge::Github);
-        assert!(forge(pick("gitlab.com", None, None)) == Forge::Gitlab);
-        // A cached host needs no probe of any CLI.
-        assert!(forge(pick("git.example.invalid", None, Some(Forge::Gitlab))) == Forge::Gitlab);
-        assert!(
-            forge(pick(
-                "git.example.invalid",
-                Some(Forge::Github),
-                Some(Forge::Gitlab)
-            )) == Forge::Github
         );
     }
 }

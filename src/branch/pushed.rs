@@ -6,10 +6,10 @@ use super::{NOT_PUSHED, tip};
 use crate::core::error::{Result, fail};
 use crate::forge::github::Github;
 use crate::forge::gitlab::{Gitlab, ci::base_of_path};
-use crate::forge::landed::{Origin, Pull, State};
+use crate::forge::landed::{Origin, Pull};
 use crate::forge::transport::CliTransport;
 use crate::git::Repo;
-use crate::store::model::Forge;
+use crate::store::model::{Forge, ReviewState};
 
 pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
     let local = tip(repo, branch)?;
@@ -99,7 +99,7 @@ fn pull_report(repo: &Repo, branch: &str, local: &str) -> Result<Option<Value>> 
     let Some(pull) = origin
         .pulls(branch)?
         .into_iter()
-        .find(|pull| pull.state == State::Open && pull.same_repo)
+        .find(|pull| pull.state == Some(ReviewState::Open) && pull.same_repo)
     else {
         return Ok(None);
     };

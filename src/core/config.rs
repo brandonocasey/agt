@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::error::{Error, Result, fail};
 use crate::core::local;
+use crate::store::model::Forge;
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,7 +85,7 @@ pub struct Issues {
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tracker {
-    pub forge: TrackerForge,
+    pub forge: Forge,
     pub host: String,
     /// `owner/repo` (GitLab: the full project path).
     pub repo: String,
@@ -94,13 +95,6 @@ pub struct Tracker {
     pub since_days: u32,
     #[serde(default)]
     pub push: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TrackerForge {
-    Github,
-    Gitlab,
 }
 
 /// Which issues a tracker pulls.
@@ -344,7 +338,7 @@ mod tests {
         let (_dir, config) =
             load("[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\n");
         let tracker = &config.unwrap().issues.tracker[0];
-        assert_eq!(tracker.forge, TrackerForge::Github);
+        assert_eq!(tracker.forge, Forge::Github);
         assert_eq!(tracker.scope, Scope::Involved);
         assert_eq!(tracker.since_days, 90);
         assert_eq!(tracker.push, None);
@@ -360,7 +354,7 @@ mod tests {
         );
         let trackers = config.unwrap().issues.tracker;
         assert_eq!(trackers.len(), 2);
-        assert_eq!(trackers[0].forge, TrackerForge::Gitlab);
+        assert_eq!(trackers[0].forge, Forge::Gitlab);
         assert_eq!(trackers[0].scope, Scope::Assigned);
         assert_eq!(trackers[0].since_days, 30);
         assert_eq!(trackers[0].push, Some(true));

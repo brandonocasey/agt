@@ -37,11 +37,7 @@ pub fn sync_stale(
     };
     let mut due = Vec::new();
     for tracker in configured {
-        let key = trackers::tracker_key(
-            trackers::forge_of(tracker.forge),
-            &tracker.host,
-            &tracker.repo,
-        );
+        let key = trackers::tracker_key(tracker.forge, &tracker.host, &tracker.repo);
         let dir = store.repo_dir(&key)?;
         let doc = store.load_doc::<TrackerDoc>(&dir, TRACKER_FILE)?;
         let synced_at = doc.as_ref().and_then(|doc| doc.synced_at.as_deref());
@@ -185,8 +181,7 @@ pub fn push_changed(
             attach(store, destination(&config, filter)?, &source, &issue)?
         } else {
             let target = config.issues.tracker.iter().find(|target| {
-                trackers::tracker_key(trackers::forge_of(target.forge), &target.host, &target.repo)
-                    == source.doc.key
+                trackers::tracker_key(target.forge, &target.host, &target.repo) == source.doc.key
             });
             if target.is_some_and(|target| target.push == Some(false)) {
                 return crate::core::error::fail("tracker has push = false");

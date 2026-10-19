@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::core::config::{self, Config};
 use crate::core::local;
-use crate::forge::service::{Kind, SERVICES};
+use crate::forge::service;
 use crate::forge::transport::Cli;
 use crate::git::Repo;
 use crate::store::model::Forge;
@@ -93,9 +93,13 @@ fn tools() -> Vec<Row> {
         None => Row::fail("git", "not found", "install git 2.38 or newer"),
     });
     for (name, cli, hint) in [
-        ("gh", gh(), "install the GitHub CLI: https://cli.github.com"),
         (
-            "glab",
+            service::kind(Forge::Github).tool,
+            gh(),
+            "install the GitHub CLI: https://cli.github.com",
+        ),
+        (
+            service::kind(Forge::Gitlab).tool,
             glab(),
             "install the GitLab CLI: https://gitlab.com/gitlab-org/cli",
         ),
@@ -125,13 +129,6 @@ fn forge_cli(forge: Forge, host: Option<&str>) -> Cli {
     }
 }
 
-fn tool_name(forge: Forge) -> &'static str {
-    match forge {
-        Forge::Github => "gh",
-        Forge::Gitlab => "glab",
-    }
-}
-
 /// Logged in to `host` (or to anything, without one) through the forge's CLI: `Ok` with the
 /// account, `Err` with why not. A missing CLI is `Err(None)`.
 fn login(forge: Forge, host: Option<&str>) -> Result<String, Option<String>> {
@@ -146,23 +143,16 @@ fn login(forge: Forge, host: Option<&str>) -> Result<String, Option<String>> {
 }
 
 fn login_hint(forge: Forge, host: Option<&str>) -> String {
-    let name = tool_name(forge);
+    let name = service::kind(forge).tool;
     match host {
         Some(host) => format!("{name} auth login --hostname {host}"),
         None => format!("{name} auth login"),
     }
 }
 
-fn forge_for(host: &str) -> Option<&'static Kind> {
-    SERVICES
-        .iter()
-        .find(|kind| (kind.well_known)(host) || (kind.configured)(host))
-        .or_else(|| SERVICES.iter().find(|kind| (kind.probe)(host)))
-}
-
 fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
     let mut rows = Vec::new();
-    let own = origin_host.map(|host| (host, forge_for(host).map(|kind| kind.forge)));
+    let own = origin_host.map(|host| (host, service::detect(host, None, None)));
     if let Some((host, forge)) = own {
         let name = format!("auth {host}");
         rows.push(match forge {
@@ -177,12 +167,14 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
                 ),
             ),
             Some(forge) => match login(forge, Some(host)) {
-                Ok(account) => Row::ok(&name, format!("{} as {account}", tool_name(forge))),
+                Ok(account) => {
+                    Row::ok(&name, format!("{} as {account}", service::kind(forge).tool))
+                }
                 Err(why) => Row::fail(
                     &name,
                     format!(
                         "{}: {}",
-                        tool_name(forge),
+                        service::kind(forge).tool,
                         why.unwrap_or("not installed".into())
                     ),
                     login_hint(forge, Some(host)),
@@ -194,7 +186,7 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
         if own.is_some_and(|(_, own)| own == Some(forge)) {
             continue;
         }
-        let name = format!("auth {}", tool_name(forge));
+        let name = format!("auth {}", service::kind(forge).tool);
         // A missing CLI is already a warning in the tools rows.
         match login(forge, None) {
             Ok(account) => rows.push(Row::ok(&name, format!("logged in as {account}"))),

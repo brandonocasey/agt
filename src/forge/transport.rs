@@ -12,7 +12,8 @@ use serde_json::Value;
 
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;
-use crate::forge::service::{Endpoint, Pagination, Request, Var};
+use crate::forge::service::{self, Endpoint, Pagination, Request, Var};
+use crate::store::model::Forge;
 
 /// A successful reply (status 2xx); a non-2xx status is a [`TransportError`].
 pub struct Response {
@@ -139,13 +140,6 @@ fn next_link(header: &str) -> Option<String> {
     })
 }
 
-/// The tool a [`Cli`] runs; each spells the `api` subcommand's flags differently.
-#[derive(Clone, Copy)]
-pub enum Tool {
-    Gh,
-    Glab,
-}
-
 /// When the forge calls of the current command must be done. Only the auto-sync of a read sets
 /// it; explicit commands run without a cap.
 static DEADLINE: Mutex<Option<(Instant, Duration)>> = Mutex::new(None);
@@ -185,9 +179,10 @@ fn tool_program(name: &str, default: &str) -> std::ffi::OsString {
 
 impl Cli {
     pub fn gh(host: &str) -> Self {
+        let name = service::kind(Forge::Github).tool;
         Self {
-            program: tool_program("AGT_GH_BIN", "gh"),
-            name: "gh",
+            program: tool_program("AGT_GH_BIN", name),
+            name,
             env: vec![("GH_HOST", host.to_owned())],
         }
     }
@@ -201,9 +196,10 @@ impl Cli {
 
     /// glab on the host its own configuration names.
     pub fn glab_configured() -> Self {
+        let name = service::kind(Forge::Gitlab).tool;
         Self {
-            program: tool_program("AGT_GLAB_BIN", "glab"),
-            name: "glab",
+            program: tool_program("AGT_GLAB_BIN", name),
+            name,
             env: Vec::new(),
         }
     }
@@ -288,21 +284,22 @@ impl From<Error> for TransportError {
 /// `gh` or `glab` running `api` requests.
 pub struct CliTransport {
     cli: Cli,
-    tool: Tool,
+    /// Which tool the requests are for; each spells the `api` subcommand's flags differently.
+    forge: Forge,
 }
 
 impl CliTransport {
     pub fn gh(host: &str) -> Self {
         Self {
             cli: Cli::gh(host),
-            tool: Tool::Gh,
+            forge: Forge::Github,
         }
     }
 
     pub fn glab(host: &str) -> Self {
         Self {
             cli: Cli::glab(host),
-            tool: Tool::Glab,
+            forge: Forge::Gitlab,
         }
     }
 
@@ -310,7 +307,7 @@ impl CliTransport {
     pub fn glab_configured() -> Self {
         Self {
             cli: Cli::glab_configured(),
-            tool: Tool::Glab,
+            forge: Forge::Gitlab,
         }
     }
 }
@@ -361,9 +358,9 @@ impl Transport for CliTransport {
     }
 
     fn render(&self, request: &Request) -> Vec<String> {
-        match self.tool {
-            Tool::Gh => gh_args(request),
-            Tool::Glab => glab_args(request),
+        match self.forge {
+            Forge::Github => gh_args(request),
+            Forge::Gitlab => glab_args(request),
         }
     }
 }

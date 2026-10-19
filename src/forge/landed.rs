@@ -4,11 +4,11 @@
 use serde_json::Value;
 
 use crate::core::error::{Error, Result};
-use crate::forge::service::{Kind, Pagination, Request, SERVICES, Var};
+use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::Transport;
 use crate::forge::{self, encode};
 use crate::git::Repo;
-use crate::store::model::Forge;
+use crate::store::model::{Forge, ReviewState};
 
 const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository}}}}";
 
@@ -19,23 +19,14 @@ pub struct Origin {
     pub repo: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum State {
-    Open,
-    /// Merged, with a merged timestamp.
-    Merged,
-    Closed,
-    /// Any other state, or a merged one without a timestamp.
-    Unknown,
-}
-
 pub struct Pull {
     pub number: u64,
     pub url: String,
     pub title: String,
     /// When it was closed, as the forge wrote it.
     pub closed_at: Option<String>,
-    pub state: State,
+    /// `None` for a state this build does not know, or a merged one without a timestamp.
+    pub state: Option<ReviewState>,
     pub base: String,
     pub head_branch: String,
     pub head_sha: String,
@@ -50,13 +41,8 @@ impl Origin {
         let Some((host, path)) = repo.origin_location()? else {
             return Ok(None);
         };
-        let by =
-            |check: fn(&Kind) -> fn(&str) -> bool| SERVICES.iter().find(|kind| check(kind)(&host));
-        let found = by(|kind| kind.well_known)
-            .or_else(|| by(|kind| kind.configured))
-            .or_else(|| by(|kind| kind.probe));
-        Ok(found.map(|kind| Self {
-            forge: kind.forge,
+        Ok(service::detect(&host, None, None).map(|forge| Self {
+            forge,
             host,
             repo: path,
         }))
@@ -81,7 +67,7 @@ impl Origin {
     }
 
     fn github(&self, transport: &dyn Transport, branch: &str) -> Result<Vec<Pull>> {
-        let (owner, name) = self.repo.split_once('/').unwrap_or_default();
+        let (owner, name) = forge::split_repo(&self.repo);
         let mut pulls = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -126,12 +112,10 @@ impl Origin {
 
 fn github_pull(node: &Value) -> Result<Pull> {
     let merged = node["mergedAt"].as_str().is_some();
-    let state = match node["state"].as_str() {
-        Some("OPEN") => State::Open,
-        Some("CLOSED") => State::Closed,
-        Some("MERGED") if merged => State::Merged,
-        _ => State::Unknown,
-    };
+    let state = node["state"]
+        .as_str()
+        .and_then(forge::github_state)
+        .filter(|state| merged || *state != ReviewState::Merged);
     Ok(Pull {
         number: node["number"]
             .as_u64()
@@ -149,12 +133,10 @@ fn github_pull(node: &Value) -> Result<Pull> {
 
 fn gitlab_pull(node: &Value) -> Result<Pull> {
     let merged = node["merged_at"].as_str().is_some();
-    let state = match node["state"].as_str() {
-        Some("opened" | "locked") => State::Open,
-        Some("closed") => State::Closed,
-        Some("merged") if merged => State::Merged,
-        _ => State::Unknown,
-    };
+    let state = node["state"]
+        .as_str()
+        .and_then(forge::gitlab_state)
+        .filter(|state| merged || *state != ReviewState::Merged);
     let (source, target) = (
         node["source_project_id"].as_u64(),
         node["target_project_id"].as_u64(),

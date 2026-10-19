@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{self, Output};
 use crate::forge::landed::Origin;
-use crate::forge::service::{ReviewService, kind};
+use crate::forge::service::{ReviewService, SERVICES, kind};
 use crate::forge::{PrRef, parse_pr};
 use crate::git::Repo;
-use crate::store::model::Forge;
+use crate::store::model::{Forge, ReviewState};
 
 /// View, list, create, update and merge the PRs/MRs of this repository, on GitHub or GitLab.
 #[derive(Args)]
@@ -155,7 +155,7 @@ pub struct Pr {
     pub number: u64,
     pub url: String,
     pub title: String,
-    pub state: String,
+    pub state: ReviewState,
     pub draft: bool,
     pub head_branch: String,
     pub base_branch: String,
@@ -183,7 +183,7 @@ impl Pr {
             "number": self.number,
             "url": self.url,
             "title": self.title,
-            "state": self.state,
+            "state": self.state.as_str(),
             "draft": self.draft,
             "head_branch": self.head_branch,
             "base_branch": self.base_branch,
@@ -254,7 +254,10 @@ impl Remote {
     fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
         let mut found = self.list(Some(branch), State::All, false)?;
         found.retain(|pr| pr.same_repo);
-        let at = found.iter().position(|pr| pr.state == "open").unwrap_or(0);
+        let at = found
+            .iter()
+            .position(|pr| pr.state == ReviewState::Open)
+            .unwrap_or(0);
         Ok((!found.is_empty()).then(|| found.swap_remove(at)))
     }
 
@@ -291,8 +294,8 @@ fn branch_of(repo: &Repo, branch: Option<String>) -> Result<String> {
 
 /// Fails unless `pr` is open and its head is `sha`.
 fn guard(pr: &Pr, sha: &str) -> Result<()> {
-    if pr.state != "open" {
-        return fail(format!("#{} is {}, not open", pr.number, pr.state));
+    if pr.state != ReviewState::Open {
+        return fail(format!("#{} is {}, not open", pr.number, pr.state.as_str()));
     }
     if sha.len() < 7 || !pr.head_sha.starts_with(sha) {
         return fail(format!(
@@ -316,7 +319,7 @@ fn not_queued(pr: &Pr) -> Result<()> {
 /// Names a missing or unauthenticated gh/glab instead of repeating the raw tool error.
 fn explain(error: Error) -> Error {
     let message = &error.0;
-    for tool in ["gh", "glab"] {
+    for tool in SERVICES.iter().map(|kind| kind.tool) {
         if message.starts_with(&format!("run {tool}:")) {
             return Error(format!(
                 "{tool} is not installed or not on PATH (needed for this repository's forge)"
@@ -480,7 +483,8 @@ fn execute(command: Command) -> Result<Output> {
             let now = remote.view(at)?;
             let on = now.auto_merge.is_some();
             // Turning auto-merge on merges at once when the checks already passed.
-            let merged = matches!(switch, Switch::On) && changed && now.state == "merged";
+            let merged =
+                matches!(switch, Switch::On) && changed && now.state == ReviewState::Merged;
             if changed && !merged && on == matches!(switch, Switch::Off) {
                 return fail(format!(
                     "auto-merge is still {} on #{at} after the change",

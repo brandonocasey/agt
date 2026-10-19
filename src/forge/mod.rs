@@ -52,6 +52,32 @@ pub fn parse_pr(arg: &str) -> Result<PrRef> {
     })
 }
 
+/// The state a GitHub `state` (`OPEN`, `CLOSED`, `MERGED`) names; `None` for any other.
+pub fn github_state(text: &str) -> Option<ReviewState> {
+    match text {
+        "OPEN" => Some(ReviewState::Open),
+        "CLOSED" => Some(ReviewState::Closed),
+        "MERGED" => Some(ReviewState::Merged),
+        _ => None,
+    }
+}
+
+/// The state a GitLab `state` names; `None` for any other. `locked` is an MR being merged, so
+/// still open.
+pub fn gitlab_state(text: &str) -> Option<ReviewState> {
+    match text {
+        "opened" | "locked" => Some(ReviewState::Open),
+        "closed" => Some(ReviewState::Closed),
+        "merged" => Some(ReviewState::Merged),
+        _ => None,
+    }
+}
+
+/// The owner and name of `owner/name`; both empty without a slash.
+pub fn split_repo(repo: &str) -> (&str, &str) {
+    repo.split_once('/').unwrap_or_default()
+}
+
 /// The web page of `sha` in the repository of the PR/MR `review`.
 pub fn commit_url(review: &Review, sha: &str) -> Option<String> {
     let kind = service::kind(review.forge);

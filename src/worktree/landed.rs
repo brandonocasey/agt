@@ -7,8 +7,9 @@ use serde_json::{Value, json};
 use super::info;
 use crate::core::clock;
 use crate::core::error::Result;
-use crate::forge::landed::{Origin, State};
+use crate::forge::landed::Origin;
 use crate::git::{Repo, Worktree};
+use crate::store::model::ReviewState;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -172,7 +173,10 @@ impl Scene {
             Ok(pulls) => pulls,
             Err(error) => return Ok(finding(Verdict::Unknown, format!("forge lookup: {error}"))),
         };
-        if let Some(open) = pulls.iter().find(|pull| pull.state == State::Open) {
+        if let Some(open) = pulls
+            .iter()
+            .find(|pull| pull.state == Some(ReviewState::Open))
+        {
             return Ok(finding(
                 Verdict::Open,
                 format!("open PR #{} {}", open.number, open.url),
@@ -180,7 +184,7 @@ impl Scene {
         }
         let mut merged: Vec<_> = pulls
             .iter()
-            .filter(|pull| pull.state == State::Merged)
+            .filter(|pull| pull.state == Some(ReviewState::Merged))
             .collect();
         merged.sort_by_key(|pull| std::cmp::Reverse(pull.number));
         let (mut unknown, mut diverged, mut foreign) = (None, None, None);
@@ -216,13 +220,16 @@ impl Scene {
                 format!("diverged from merged PR #{number}"),
             ));
         }
-        if let Some(unknown) = pulls.iter().find(|pull| pull.state == State::Unknown) {
+        if let Some(unknown) = pulls.iter().find(|pull| pull.state.is_none()) {
             return Ok(finding(
                 Verdict::Unknown,
                 format!("PR #{} is in a state agt does not know", unknown.number),
             ));
         }
-        if let Some(closed) = pulls.iter().find(|pull| pull.state == State::Closed) {
+        if let Some(closed) = pulls
+            .iter()
+            .find(|pull| pull.state == Some(ReviewState::Closed))
+        {
             let mut found = finding(
                 Verdict::Closed,
                 format!(

@@ -4,6 +4,7 @@ use super::plan::{Item, Write};
 use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::markers::agent_id;
+use crate::forge::service::Inline;
 use crate::review::commands::Ctx;
 use crate::review::commands::sync::{Connection, landed};
 use crate::store::model::{
@@ -85,17 +86,15 @@ pub(super) fn run_writes(
             })?;
         }
         posted.push(json!({ "kind": write.kind(), "items": write.ids(), "remote_id": remote }));
-        if let (Item::Draft { comment }, Some(draft)) = (&write.item, remote) {
+        if let (Item::Draft { comment }, Some(draft), Inline::DraftThenPublish(drafts)) =
+            (&write.item, remote, connection.service.inline())
+        {
             let publish = Write {
                 item: Item::PublishDraft {
                     comment: comment.clone(),
                     draft: draft.clone(),
                 },
-                request: Some(
-                    connection
-                        .service
-                        .publish_draft(connection.subject(), &draft),
-                ),
+                request: Some(drafts.publish_draft(connection.subject(), &draft)),
                 sent: vec![None],
             };
             run_writes(ctx, connection, target, vec![publish], attempt, posted)?;

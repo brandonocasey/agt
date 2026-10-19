@@ -7,8 +7,8 @@ use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::service::{
-    ApproveCap, Capabilities, Inline, Kind, Method, Pagination, Placement, Position, Posted,
-    ReplyCap, Request, ReviewService, ReviewSubject, Service,
+    ApproveCap, Capabilities, DraftPoster, Inline, Kind, Method, Pagination, Placement, Position,
+    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Draft, Fetched, PrInfo, ThreadData};
@@ -19,15 +19,12 @@ use serde_json::json;
 pub const KIND: Kind = Kind {
     forge: Forge::Gitlab,
     key_prefix: "gl",
+    tool: "glab",
     url_marker: "/-/merge_requests/",
     commit_marker: "/-/commit/",
     well_known: |host| host == "gitlab.com",
     configured: |host| {
-        let named = |value: &str| bare_host(value) == host;
-        std::env::var("GITLAB_HOST").is_ok_and(|value| named(&value))
-            || Cli::glab_configured()
-                .text(&["config", "get", "host"])
-                .is_some_and(|value| named(&value))
+        env_host().is_some_and(|name| name == host) || cli_host().is_some_and(|name| name == host)
     },
     // `glab config get host` names only the global default, not every host glab is logged in to.
     probe: |host| {
@@ -42,7 +39,6 @@ pub const KIND: Kind = Kind {
 
 const CAPS: Capabilities = Capabilities {
     pagination: Pagination::CliPaginate,
-    inline: Inline::DraftThenPublish,
     ranges: true,
     reply: ReplyCap::All,
     resolve: true,
@@ -53,6 +49,28 @@ const CAPS: Capabilities = Capabilities {
     edits_attributed: false,
     notes_become_discussions: true,
 };
+
+/// The host a `GITLAB_HOST`-style value names, if it names one.
+fn named_host(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| bare_host(&value))
+        .filter(|host| !host.is_empty())
+}
+
+/// The host `GITLAB_HOST` names.
+fn env_host() -> Option<String> {
+    named_host(std::env::var("GITLAB_HOST").ok())
+}
+
+/// The host `glab config get host` prints.
+fn cli_host() -> Option<String> {
+    named_host(Cli::glab_configured().text(&["config", "get", "host"]))
+}
+
+/// The GitLab host the user configured: `GITLAB_HOST`, else glab's own configuration.
+pub fn configured_host() -> Option<String> {
+    env_host().or_else(cli_host)
+}
 
 /// The lowercase host of a `GITLAB_HOST`-style value, which may be a URL.
 fn bare_host(value: &str) -> String {
@@ -128,20 +146,8 @@ impl ReviewService for Gitlab {
         place(repo, review, anchor, commit, line)
     }
 
-    fn draft(&self, subject: ReviewSubject, body: &str, position: &Position) -> Request {
-        Request::rest(
-            Method::Post,
-            format!("{}/draft_notes", base(subject)),
-            Some(json!({ "note": body, "position": position.data })),
-        )
-    }
-
-    fn publish_draft(&self, subject: ReviewSubject, draft: &str) -> Request {
-        Request::rest(
-            Method::Put,
-            format!("{}/draft_notes/{draft}/publish", base(subject)),
-            None,
-        )
+    fn inline(&self) -> Inline<'_> {
+        Inline::DraftThenPublish(self)
     }
 
     fn thread(&self, subject: ReviewSubject, text: &str) -> Request {
@@ -213,6 +219,24 @@ impl ReviewService for Gitlab {
         _response: &Value,
     ) -> Result<(String, Vec<Posted>)> {
         Err(Error("GitLab takes no review batches".into()))
+    }
+}
+
+impl DraftPoster for Gitlab {
+    fn draft(&self, subject: ReviewSubject, body: &str, position: &Position) -> Request {
+        Request::rest(
+            Method::Post,
+            format!("{}/draft_notes", base(subject)),
+            Some(json!({ "note": body, "position": position.data })),
+        )
+    }
+
+    fn publish_draft(&self, subject: ReviewSubject, draft: &str) -> Request {
+        Request::rest(
+            Method::Put,
+            format!("{}/draft_notes/{draft}/publish", base(subject)),
+            None,
+        )
     }
 }
 
@@ -351,11 +375,7 @@ fn find_mr(glab: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(S
 }
 
 fn state(text: &str) -> ReviewState {
-    match text {
-        "merged" => ReviewState::Merged,
-        "closed" => ReviewState::Closed,
-        _ => ReviewState::Open,
-    }
+    forge::gitlab_state(text).unwrap_or(ReviewState::Open)
 }
 
 fn note(note: &Value, mr_url: &str) -> Result<CommentData> {
@@ -485,6 +505,21 @@ mod tests {
     use crate::forge::contract::{self, Replay};
     use crate::forge::transport::glab_args;
 
+    #[test]
+    fn a_url_style_host_is_reduced_to_the_host() {
+        let named = |value: &str| named_host(Some(value.to_owned()));
+        assert_eq!(
+            named("https://GitLab.Example.com/"),
+            Some("gitlab.example.com".to_owned())
+        );
+        assert_eq!(
+            named("gitlab.example.com"),
+            Some("gitlab.example.com".to_owned())
+        );
+        assert_eq!(named(""), None);
+        assert_eq!(named_host(None), None);
+    }
+
     const VARS: [(&str, &str); 7] = [
         ("RUN", "rv-test"),
         ("HEAD", "1111111111111111111111111111111111111111"),
@@ -523,7 +558,10 @@ mod tests {
 
     #[test]
     fn capabilities_match_the_contract() {
-        contract::golden("gitlab/capabilities.json", &contract::capabilities(&CAPS));
+        contract::golden(
+            "gitlab/capabilities.json",
+            &contract::capabilities(&gitlab()),
+        );
     }
 
     /// System notes dropped, individual notes general, positions kept with their head, and a

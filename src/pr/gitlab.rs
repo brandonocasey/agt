@@ -4,9 +4,10 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
-use crate::forge::encode;
 use crate::forge::service::{Method, Request};
 use crate::forge::transport::Transport;
+use crate::forge::{self, encode};
+use crate::store::model::ReviewState;
 
 fn base(repo: &str) -> String {
     format!("projects/{}/merge_requests", encode(repo))
@@ -32,12 +33,7 @@ fn mr(node: &Value) -> Pr {
         number: node["iid"].as_u64().unwrap_or_default(),
         url: text("web_url"),
         title: text("title"),
-        state: match node["state"].as_str() {
-            Some("merged") => "merged",
-            Some("closed") => "closed",
-            _ => "open",
-        }
-        .to_owned(),
+        state: forge::gitlab_state(&text("state")).unwrap_or(ReviewState::Open),
         draft: node["draft"].as_bool().unwrap_or(false),
         head_branch: text("source_branch"),
         base_branch: text("target_branch"),
@@ -75,7 +71,7 @@ fn mr(node: &Value) -> Pr {
 /// The merge train state of an open MR with auto-merge on; `None` when it is not on a train
 /// (the host answers 404).
 fn queue(t: &dyn Transport, repo: &str, found: &mut Pr) -> Result<()> {
-    if found.state != "open" || found.auto_merge.is_none() {
+    if found.state != ReviewState::Open || found.auto_merge.is_none() {
         return Ok(());
     }
     let path = format!(

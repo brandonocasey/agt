@@ -142,13 +142,32 @@ pub enum Pagination {
     ContinuationHeader(&'static str),
 }
 
-/// How a service takes in-diff comments.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Inline {
+/// How a service takes in-diff comments, with the calls that fit it.
+#[derive(Clone, Copy)]
+pub enum Inline<'a> {
     /// One review holds every in-diff comment of a commit (GitHub).
-    ReviewBatch,
+    ReviewBatch(&'a dyn BatchPoster),
     /// A draft note per comment, published right after it is created (GitLab).
-    DraftThenPublish,
+    DraftThenPublish(&'a dyn DraftPoster),
+}
+
+/// A service that holds the in-diff comments of a commit in one review.
+pub trait BatchPoster {
+    /// A review with a summary and in-diff comments of one commit.
+    fn review_batch(
+        &self,
+        subject: ReviewSubject,
+        commit: &str,
+        summary: &str,
+        comments: &[(Position, String)],
+    ) -> Request;
+}
+
+/// A service that takes an in-diff comment as a draft note, published right after.
+pub trait DraftPoster {
+    /// A draft note holding an in-diff comment.
+    fn draft(&self, subject: ReviewSubject, body: &str, position: &Position) -> Request;
+    fn publish_draft(&self, subject: ReviewSubject, draft: &str) -> Request;
 }
 
 /// Which remote thread kinds take a native reply; the rest get a general comment ending in
@@ -180,7 +199,6 @@ pub enum ApproveCap {
 
 pub struct Capabilities {
     pub pagination: Pagination,
-    pub inline: Inline,
     /// Multi-line comments.
     pub ranges: bool,
     pub reply: ReplyCap,
@@ -268,24 +286,8 @@ pub trait ReviewService: Service {
         commit: &str,
         line: u32,
     ) -> Option<Placement>;
-    /// A review with a summary and in-diff comments of one commit. Only for
-    /// [`Inline::ReviewBatch`].
-    fn review_batch(
-        &self,
-        _subject: ReviewSubject,
-        _commit: &str,
-        _summary: &str,
-        _comments: &[(Position, String)],
-    ) -> Request {
-        unreachable!("{} takes no review batches", self.name())
-    }
-    /// A draft note holding an in-diff comment. Only for [`Inline::DraftThenPublish`].
-    fn draft(&self, _subject: ReviewSubject, _body: &str, _position: &Position) -> Request {
-        unreachable!("{} takes no draft notes", self.name())
-    }
-    fn publish_draft(&self, _subject: ReviewSubject, _draft: &str) -> Request {
-        unreachable!("{} takes no draft notes", self.name())
-    }
+    /// How in-diff comments are posted, and the calls for it.
+    fn inline(&self) -> Inline<'_>;
     /// A new general thread.
     fn thread(&self, subject: ReviewSubject, text: &str) -> Request;
     /// A general comment that does not block merging.
@@ -338,6 +340,8 @@ pub struct Kind {
     pub forge: Forge,
     /// Prefix of the keys and imported ids: `gh-42`, `gl-7`.
     pub key_prefix: &'static str,
+    /// The command line tool that talks to the service: `gh`, `glab`.
+    pub tool: &'static str,
     /// Path segment of a PR/MR URL between the repository and the number.
     pub url_marker: &'static str,
     /// Path segment of a commit URL between the repository and the sha.
@@ -355,9 +359,49 @@ pub struct Kind {
 
 pub const SERVICES: &[Kind] = &[crate::forge::github::KIND, crate::forge::gitlab::KIND];
 
+/// The forge of `host`, never guessed. In order: `named`, a forge the user named for the host,
+/// hosts every service knows by name, `cached`, a forge this repository last used the host
+/// with, then each service's own configuration and logins, which are the slowest to ask.
+pub fn detect(host: &str, named: Option<Forge>, cached: Option<Forge>) -> Option<Forge> {
+    let by = |check: fn(&Kind) -> fn(&str) -> bool| {
+        SERVICES
+            .iter()
+            .find(|kind| check(kind)(host))
+            .map(|kind| kind.forge)
+    };
+    named
+        .or_else(|| by(|kind| kind.well_known))
+        .or(cached)
+        .or_else(|| by(|kind| kind.configured))
+        .or_else(|| by(|kind| kind.probe))
+}
+
 pub fn kind(forge: Forge) -> &'static Kind {
-    SERVICES
-        .iter()
-        .find(|kind| kind.forge == forge)
-        .expect("every Forge has a registered service")
+    match forge {
+        Forge::Github => &crate::forge::github::KIND,
+        Forge::Gitlab => &crate::forge::gitlab::KIND,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_are_detected_in_a_fixed_order() {
+        // The named forge wins over a name every service knows, which wins over the cache.
+        let forge = |result: Option<Forge>| result.unwrap();
+        assert!(forge(detect("github.com", Some(Forge::Gitlab), None)) == Forge::Gitlab);
+        assert!(forge(detect("github.com", None, Some(Forge::Gitlab))) == Forge::Github);
+        assert!(forge(detect("gitlab.com", None, None)) == Forge::Gitlab);
+        // A cached host needs no probe of any CLI.
+        assert!(forge(detect("git.example.invalid", None, Some(Forge::Gitlab))) == Forge::Gitlab);
+        assert!(
+            forge(detect(
+                "git.example.invalid",
+                Some(Forge::Github),
+                Some(Forge::Gitlab)
+            )) == Forge::Github
+        );
+    }
 }

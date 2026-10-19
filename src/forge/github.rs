@@ -7,8 +7,8 @@ use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
 use crate::forge::anchors;
 use crate::forge::service::{
-    ApproveCap, Capabilities, Inline, Kind, Method, Pagination, Placement, Position, Posted,
-    ReplyCap, Request, ReviewService, ReviewSubject, Service, Var,
+    ApproveCap, BatchPoster, Capabilities, Inline, Kind, Method, Pagination, Placement, Position,
+    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Var,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Fetched, PrInfo, ThreadData};
@@ -32,12 +32,24 @@ const REPLY_MUTATION: &str = "mutation AddReply($threadId:ID!,$body:String!){add
 const RESOLVE_MUTATION: &str = "mutation ResolveThread($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
 const UNRESOLVE_MUTATION: &str = "mutation UnresolveThread($threadId:ID!){unresolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}";
 
+/// The host `gh` uses when nothing names another.
+const DEFAULT_HOST: &str = "github.com";
+
+/// The GitHub host a bare reference means: `GH_HOST`, else github.com.
+pub fn default_host() -> String {
+    std::env::var("GH_HOST")
+        .ok()
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| DEFAULT_HOST.to_owned())
+}
+
 pub const KIND: Kind = Kind {
     forge: Forge::Github,
     key_prefix: "gh",
+    tool: "gh",
     url_marker: "/pull/",
     commit_marker: "/commit/",
-    well_known: |host| host == "github.com",
+    well_known: |host| host == DEFAULT_HOST,
     configured: |_| false,
     probe: |host| {
         Cli::gh(host)
@@ -51,7 +63,6 @@ pub const KIND: Kind = Kind {
 
 const CAPS: Capabilities = Capabilities {
     pagination: Pagination::GraphqlCursor,
-    inline: Inline::ReviewBatch,
     ranges: true,
     reply: ReplyCap::ReviewThreads,
     resolve: true,
@@ -137,31 +148,8 @@ impl ReviewService for Github {
         place(repo, review, anchor, commit, line)
     }
 
-    fn review_batch(
-        &self,
-        subject: ReviewSubject,
-        commit: &str,
-        summary: &str,
-        comments: &[(Position, String)],
-    ) -> Request {
-        let comments: Vec<Value> = comments
-            .iter()
-            .map(|(position, body)| {
-                let mut comment = position.data.clone();
-                comment["body"] = json!(body);
-                comment
-            })
-            .collect();
-        Request::rest(
-            Method::Post,
-            reviews_path(subject),
-            Some(json!({
-                "commit_id": commit,
-                "event": "COMMENT",
-                "body": summary,
-                "comments": comments,
-            })),
-        )
+    fn inline(&self) -> Inline<'_> {
+        Inline::ReviewBatch(self)
     }
 
     fn thread(&self, subject: ReviewSubject, text: &str) -> Request {
@@ -253,6 +241,35 @@ impl ReviewService for Github {
             })
             .collect();
         Ok((review, posted))
+    }
+}
+
+impl BatchPoster for Github {
+    fn review_batch(
+        &self,
+        subject: ReviewSubject,
+        commit: &str,
+        summary: &str,
+        comments: &[(Position, String)],
+    ) -> Request {
+        let comments: Vec<Value> = comments
+            .iter()
+            .map(|(position, body)| {
+                let mut comment = position.data.clone();
+                comment["body"] = json!(body);
+                comment
+            })
+            .collect();
+        Request::rest(
+            Method::Post,
+            reviews_path(subject),
+            Some(json!({
+                "commit_id": commit,
+                "event": "COMMENT",
+                "body": summary,
+                "comments": comments,
+            })),
+        )
     }
 }
 
@@ -413,11 +430,7 @@ fn comment(node: &Value) -> Result<CommentData> {
 }
 
 fn state(text: &str) -> ReviewState {
-    match text {
-        "MERGED" => ReviewState::Merged,
-        "CLOSED" => ReviewState::Closed,
-        _ => ReviewState::Open,
-    }
+    forge::github_state(text).unwrap_or(ReviewState::Open)
 }
 
 fn review_thread(pager: &Pager, node: &Value) -> Result<ThreadData> {
@@ -665,7 +678,10 @@ mod tests {
 
     #[test]
     fn capabilities_match_the_contract() {
-        contract::golden("github/capabilities.json", &contract::capabilities(&CAPS));
+        contract::golden(
+            "github/capabilities.json",
+            &contract::capabilities(&github()),
+        );
     }
 
     /// Two pages of threads, an inner page of comments, reviews (pending and empty ones

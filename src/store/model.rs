@@ -111,12 +111,23 @@ pub enum Forge {
     Gitlab,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+/// The state of a PR/MR on any forge.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewState {
     Open,
     Closed,
     Merged,
+}
+
+impl ReviewState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Merged => "merged",
+        }
+    }
 }
 
 /// A trusted `review-record v2` comment from the PR/MR.

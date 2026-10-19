@@ -11,14 +11,13 @@ mod target;
 mod wait;
 
 use std::collections::HashSet;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use regex::Regex;
 
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::Output;
+use crate::store::model::Forge;
 
 use api::Project;
 use table::Out;
@@ -103,42 +102,22 @@ fn positive(text: &str) -> std::result::Result<f64, String> {
     })
 }
 
-static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^!?(\d+)$").expect("valid pattern"));
-
-struct Target {
-    host: Option<String>,
-    project: Option<String>,
-    merge_request: bool,
-    number: u64,
-}
-
-/// An id, `!id` or GitLab URL; a bare id is an MR.
-fn parse_target(value: &str) -> Result<Target> {
-    if let Some(found) = target::GITLAB_URL.captures(value) {
-        return Ok(Target {
-            host: Some(found[1].to_owned()),
-            project: Some(found[2].to_owned()),
-            merge_request: &found[3] == "merge_requests",
-            number: found[4]
-                .parse()
-                .map_err(|_| Error("id out of range".into()))?,
-        });
+/// An id, `!id` or GitLab MR or pipeline URL, or any other form `agt ci wait` takes; a bare id is
+/// an MR.
+fn parse_target(value: &str) -> Result<target::Target> {
+    let parsed = target::parse_as(value, false)
+        .map_err(|_| Error(format!("expected an id, !id, or URL, got '{value}'")))?;
+    if parsed.platform != Forge::Gitlab {
+        return fail("failures needs a GitLab MR");
     }
-    let Some(found) = NUMBER.captures(value) else {
-        return fail(format!("expected an id, !id, or URL, got '{value}'"));
-    };
-    Ok(Target {
-        host: None,
-        project: None,
-        merge_request: true,
-        number: found[1]
-            .parse()
-            .map_err(|_| Error("id out of range".into()))?,
-    })
+    if parsed.sha.is_some() {
+        return fail("failures takes no @SHA");
+    }
+    Ok(parsed)
 }
 
-fn connect(target: &Target, repo: Option<&str>) -> Result<Project> {
-    Project::connect(repo.or(target.project.as_deref()), target.host.as_deref())
+fn connect(target: &target::Target, repo: Option<&str>) -> Result<Project> {
+    Project::connect(repo.or(target.repo.as_deref()), target.host.as_deref())
 }
 
 /// Runs the command; an error exits 2 with `agt ci: <message>`.
@@ -161,7 +140,7 @@ fn execute(cli: Cli) -> Result<u8> {
             }
             let target = parse_target(&target)?;
             let gitlab = connect(&target, repo.as_deref())?;
-            if !target.merge_request {
+            if target.pipeline {
                 return fail("failures takes an MR, not a pipeline");
             }
             failures::run(

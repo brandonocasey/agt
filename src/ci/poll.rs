@@ -5,11 +5,12 @@ use serde_json::json;
 use super::classify::{
     Head, State, blocked, classify, classify_gitlab, classify_pipeline, present,
 };
-use super::target::{Platform, Resolved};
+use super::target::Resolved;
 use crate::forge::github::Github;
 use crate::forge::gitlab::Gitlab;
 use crate::forge::gitlab::ci::base_of_path;
 use crate::forge::transport::{CliTransport, TransportError};
+use crate::store::model::Forge;
 
 /// Whether repeating the read may succeed: a rate limit, a timeout, a server error or a failure
 /// with no HTTP status (the tool or network). Authentication and permission errors are not.
@@ -58,10 +59,12 @@ pub fn snapshot(
     awaiting: bool,
     waited_secs: i64,
 ) -> (State, Option<String>, bool) {
-    let result = match target.platform {
-        Platform::Github => github(target, head.clone(), awaiting, waited_secs),
-        Platform::Gitlab if target.pipeline => pipeline(target).map(|state| (state, head.clone())),
-        Platform::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs),
+    let result = match target.target.platform {
+        Forge::Github => github(target, head.clone(), awaiting, waited_secs),
+        Forge::Gitlab if target.target.pipeline => {
+            pipeline(target).map(|state| (state, head.clone()))
+        }
+        Forge::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs),
     };
     match result {
         Ok((state, head)) => (state, head, false),
@@ -76,7 +79,7 @@ type Polled = Result<(State, Option<String>), TransportError>;
 
 fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
     let github = Github::new(Box::new(CliTransport::gh(&target.host)));
-    let pull = github.pull_checks(&target.repo, target.number)?;
+    let pull = github.pull_checks(&target.repo, target.target.number)?;
     let head = head.or_else(|| pull.view["headRefOid"].as_str().map(str::to_owned));
     let expected = head.as_deref().unwrap_or("");
     let head_state = Head {
@@ -91,15 +94,15 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
 fn pipeline(target: &Resolved) -> Result<State, TransportError> {
     let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
     let base = base_of_path(&target.repo);
-    let pipeline = gitlab.pipeline(&base, target.number)?;
-    let jobs = gitlab.pipeline_jobs(&base, target.number, false)?;
+    let pipeline = gitlab.pipeline(&base, target.target.number)?;
+    let jobs = gitlab.pipeline_jobs(&base, target.target.number, false)?;
     Ok(classify_pipeline(&pipeline, &jobs))
 }
 
 fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
     let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
     let base = base_of_path(&target.repo);
-    let mr = gitlab.merge_request(&base, target.number)?;
+    let mr = gitlab.merge_request(&base, target.target.number)?;
     let head = head.or_else(|| mr["sha"].as_str().map(str::to_owned));
     let expected = head.as_deref().unwrap_or("");
     let pending = Head {
@@ -134,7 +137,7 @@ fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
     if super::classify::status(&state) != "complete" {
         return Ok((state, head));
     }
-    let latest = gitlab.merge_request(&base, target.number)?;
+    let latest = gitlab.merge_request(&base, target.target.number)?;
     let latest_id = &latest["head_pipeline"]["id"];
     if latest["state"] == "opened" && latest["sha"] == expected && latest_id != id {
         let state = json!({

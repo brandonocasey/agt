@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::config::{self, Config, TrackerForge};
+use crate::core::config::{self, Config};
 use crate::core::error::{Error, Result, fail};
 use crate::store::Store;
 use crate::store::issues::{Issue, TRACKER_FILE, TrackerDoc, VERSION};
@@ -12,13 +12,6 @@ use crate::store::model::Forge;
 pub struct Tracker {
     pub dir: PathBuf,
     pub doc: TrackerDoc,
-}
-
-pub fn forge_of(forge: TrackerForge) -> Forge {
-    match forge {
-        TrackerForge::Github => Forge::Github,
-        TrackerForge::Gitlab => Forge::Gitlab,
-    }
 }
 
 /// `gh-<host>-<owner>-<repo>`, lowercase with slashes as dashes.
@@ -42,7 +35,7 @@ pub fn configured<'a>(
             filter.is_none_or(|filter| {
                 matches(
                     filter,
-                    &tracker_key(forge_of(tracker.forge), &tracker.host, &tracker.repo),
+                    &tracker_key(tracker.forge, &tracker.host, &tracker.repo),
                     &tracker.repo,
                 )
             })
@@ -70,7 +63,7 @@ pub fn ensure(store: &Store, tracker: &config::Tracker) -> Result<Tracker> {
 }
 
 pub fn ensure_mode(store: &Store, tracker: &config::Tracker, preview: bool) -> Result<Tracker> {
-    let forge = forge_of(tracker.forge);
+    let forge = tracker.forge;
     let key = tracker_key(forge, &tracker.host, &tracker.repo);
     let dir = store.repo_dir(&key)?;
     if preview {
@@ -243,8 +236,8 @@ pub fn destinations(
         ));
     };
     let forge = match host.as_str() {
-        "github.com" => TrackerForge::Github,
-        "gitlab.com" => TrackerForge::Gitlab,
+        "github.com" => Forge::Github,
+        "gitlab.com" => Forge::Gitlab,
         _ => return fail("origin has no known issue service; configure a tracker"),
     };
     config.issues.tracker.push(config::Tracker {

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use crate::forge::Fetched;
-use crate::forge::service::{ApproveCap, Capabilities, Inline, Pagination, ReplyCap, Request};
+use crate::forge::service::{ApproveCap, Inline, Pagination, ReplyCap, Request, ReviewService};
 use crate::forge::transport::{Response, Transport, TransportError};
 use crate::store::model::RemoteKind;
 
@@ -127,7 +127,8 @@ pub fn requests(render: fn(&Request) -> Vec<String>, list: &[(&str, Request)]) -
 
 /// The capabilities as `test/fixtures/<service>/capabilities.json` states them, which the
 /// integration scenarios read to know what to expect of the service.
-pub fn capabilities(caps: &Capabilities) -> Value {
+pub fn capabilities(service: &dyn ReviewService) -> Value {
+    let caps = service.caps();
     let (approve, self_allowed) = match caps.approve {
         ApproveCap::None => ("none", Value::Null),
         ApproveCap::Review { self_allowed } => ("review", json!(self_allowed)),
@@ -147,9 +148,9 @@ pub fn capabilities(caps: &Capabilities) -> Value {
             Pagination::NextUrlInBody(_) => "next_url_in_body",
             Pagination::ContinuationHeader(_) => "continuation_header",
         },
-        "inline": match caps.inline {
-            Inline::ReviewBatch => "review_batch",
-            Inline::DraftThenPublish => "draft_then_publish",
+        "inline": match service.inline() {
+            Inline::ReviewBatch(_) => "review_batch",
+            Inline::DraftThenPublish(_) => "draft_then_publish",
         },
         "ranges": caps.ranges,
         "reply": match caps.reply {
