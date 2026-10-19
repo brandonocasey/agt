@@ -364,6 +364,37 @@ fn auto_merge_of_a_pr_that_can_merge_now_merges_it() {
 }
 
 #[test]
+fn plain_merge_of_a_pr_on_a_merge_queue_base_adds_it_to_the_queue() {
+    let env = github();
+    gh_view(&env, 7, &json!({"isMergeQueueEnabled": true}));
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=PrAuto",
+            "-f",
+            "id=PR_node",
+            "-f",
+            "method=SQUASH",
+            "-f",
+            &format!("sha={SHA}"),
+        ],
+        "{}",
+    );
+    ok(&env, &["merge", "7", "--sha", SHA, "--method", "squash"]);
+    let calls = env.forge_calls();
+    assert!(
+        calls.iter().any(|args| args.contains("PrAuto")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().all(|args| !args.contains("/merge")),
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn auto_merge_of_a_pr_on_a_merge_queue_base_enables_auto_merge_instead_of_merging() {
     let env = github();
     gh_view(&env, 7, &json!({"isMergeQueueEnabled": true}));

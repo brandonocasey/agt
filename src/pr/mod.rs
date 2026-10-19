@@ -115,7 +115,8 @@ enum Command {
     /// With --auto, merge when checks pass; GitHub needs --method unless auto-merge was on, and
     /// merges a PR that can merge now at once, as gh does, unless its base requires a merge
     /// queue (then auto-merge queues it).
-    /// GitLab cannot rebase on merge.
+    /// Without --auto, a GitHub PR whose base requires a merge queue is added to the queue
+    /// through auto-merge, so it needs --method too. GitLab cannot rebase on merge.
     Merge {
         number: String,
         /// The head commit reviewed; the merge is refused when the PR/MR head differs.
@@ -456,7 +457,9 @@ fn execute(command: Command) -> Result<Output> {
             if current.draft {
                 return fail(format!("#{at} is a draft; mark it ready first"));
             }
-            if auto {
+            // A GitHub base that requires a merge queue takes a PR only through auto-merge,
+            // which queues it (what `gh pr merge` does).
+            if auto || current.merge_queue {
                 remote.enable_auto(&current, &current.head_sha, method)?;
             } else {
                 match remote.origin.forge {

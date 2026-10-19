@@ -945,7 +945,7 @@ open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head sta
 (at least 7 characters), then sends the full head to the forge's own guard (GitHub `sha`, GitLab
 `sha`); `--auto` merges when checks pass (GitHub needs `--method` unless auto-merge was on, and merges a
 PR that can merge now at once, as gh does, unless its base branch requires a merge queue, where
-auto-merge queues it; `auto-merge on` does the same; GitLab
+auto-merge queues it; `auto-merge on` does the same; plain `merge` without `--auto` on such a PR also adds it to the queue this way (so it needs `--method`); GitLab
 cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLab would squash). Branch lookups (`view`, `create`) ignore PRs/MRs from forks. `list --mine` asks the forge for your own PRs/MRs, so older ones are found. `create` without `--base` needs a resolvable default branch, else pass `--base`. It never deletes the branch.
 
 `auto-merge off` records the method it disables in `$XDG_STATE_HOME/agents/pr/auto-merge.json`
