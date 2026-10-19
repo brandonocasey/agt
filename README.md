@@ -1074,8 +1074,8 @@ only the staged blobs with `--staged`, limited to `PATH`s when given, and skips 
 Output is `path:line rule` per hit, or with `--json` rows of `{path, line, rule}`; the matched
 text is never printed, not even in errors. Rules (one table in `src/secrets/rules.rs`):
 `github-token`, `gitlab-token`, `slack-token`, `aws-key-id`, `private-key`, `jwt` and
-`generic-assignment` (`key`, `token`, `secret` or `password` set to a quoted value of 8 or more
-characters that is not a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
+`generic-assignment` (`key`, `token`, `secret` or `password` set to a quoted value of 8 or more characters, or a bare 16+ character token ending the line as in `.env`, `export` and YAML lines; neither
+may be a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
 containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error.
 
 ## Wait

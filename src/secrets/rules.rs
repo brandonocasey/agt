@@ -39,6 +39,8 @@ fn real_value(value: &str) -> bool {
         .any(|word| lower.contains(word))
 }
 
+pub const GENERIC: &str = "generic-assignment";
+
 const SPECS: &[Spec] = &[
     Spec {
         name: "github-token",
@@ -71,8 +73,14 @@ const SPECS: &[Spec] = &[
         accept: always,
     },
     Spec {
-        name: "generic-assignment",
+        name: GENERIC,
         pattern: r#"(?i)(?:key|token|secret|passw(?:or)?d|pwd)[\w.-]*["']?\s*[:=]\s*["']([^"'\s]+)["']"#,
+        accept: real_value,
+    },
+    // The same rule for `.env`, `export X=...` and YAML lines: one bare token ending the line.
+    Spec {
+        name: GENERIC,
+        pattern: r"(?i)(?:key|token|secret|passw(?:or)?d|pwd)[\w.-]*\s*[:=]\s*([A-Za-z0-9_\-+/=.]{16,})\s*(?:#.*)?$",
         accept: real_value,
     },
 ];
@@ -130,6 +138,23 @@ mod tests {
             r#"token = "short""#,
         ] {
             assert!(hits(line).is_empty(), "{line}");
+        }
+        for line in [
+            "password = getPassword()",
+            "token: changeme",
+            "KEY=$OTHER",
+            "API_KEY=short",
+            "API_KEY=SOME_ENV_VAR_NAME_HERE",
+            "KEY=abcdefghijklmnop qrst",
+        ] {
+            assert!(hits(line).is_empty(), "{line}");
+        }
+        for line in [
+            "API_KEY=Zq8vR2mN7xL4pK9sT3wY6bH1",
+            "export SECRET_TOKEN=Zq8vR2mN7xL4pK9sT3wY6bH1 # prod",
+            "api_key: Zq8vR2mN7xL4pK9sT3wY6bH1",
+        ] {
+            assert_eq!(hits(line), ["generic-assignment"], "{line}");
         }
         assert_eq!(
             hits(r#"db_password = "hunter2hunter2""#),
