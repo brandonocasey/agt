@@ -553,7 +553,7 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
         &script,
         format!(
             "#!/bin/sh\ncat >> '{log}'\necho \"$AGT_PS_EVENT:$AGT_PS_WAITING_FOR\" >> '{log}.env'\n\
-             case \"$AGT_PS_EVENT\" in\n  blocked) cp '{idle}' '{live}' ;;\n  cleared) kill {pid} ;;\nesac\n",
+             case \"$AGT_PS_EVENT\" in\n  blocked) cp '{idle}' '{live}' ;;\n  cleared) kill {pid}; while kill -0 {pid} 2>/dev/null; do sleep 0.05; done ;;\nesac\n",
             log = log.display(),
             idle = idle.display(),
             live = live.display(),
