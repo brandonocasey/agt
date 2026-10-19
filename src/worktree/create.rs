@@ -1,7 +1,8 @@
 //! `agt worktree create`: a worktree for a branch under the main checkout's `.worktrees/`. A new
 //! branch starts at the newest default base among every remote's live default branch and the
-//! local one; no existing branch is moved. A branch that exists only as `origin/<branch>` gets a
-//! local branch tracking it.
+//! local one; the only existing branch that moves is the local default, fast-forwarded to its
+//! upstream's fetched default when it can be. A branch that exists only as `origin/<branch>` gets
+//! a local branch tracking it.
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::info::{self, default_names, main_checkout};
-use super::{emit, port, prepare};
+use super::{emit, fast_forward, port, prepare};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -34,10 +35,10 @@ pub struct Cli {
 }
 
 /// The default branch of one remote (fetched just now) or of this repository.
-struct Candidate {
-    remote: Option<String>,
-    branch: String,
-    commit: String,
+pub(super) struct Candidate {
+    pub(super) remote: Option<String>,
+    pub(super) branch: String,
+    pub(super) commit: String,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -57,6 +58,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let checked_out = info::entries(&repo)?
         .into_iter()
         .find(|entry| entry.branch.as_deref() == Some(branch));
+    let mut fetched = Vec::new();
     let mut value = match checked_out {
         Some(entry) => {
             let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
@@ -75,11 +77,19 @@ pub fn run(cli: Cli) -> Result<Output> {
                 ])?;
                 value["tracking"] = json!(upstream);
             } else {
-                value["base"] = add_new(&repo, branch, &dir_arg, cli.base.as_deref())?;
+                let (base, found) = add_new(&repo, branch, &dir_arg, cli.base.as_deref())?;
+                value["base"] = base;
+                fetched = found;
             }
             finish(&dir, branch, value)?
         }
     };
+    let mut warnings = Vec::new();
+    if let Some((report, warning)) = fast_forward::local_default(&repo, &fetched) {
+        value["local_default"] = report;
+        warnings.extend(warning);
+    }
+    value["warnings"] = json!(warnings);
     let dir = PathBuf::from(value["path"].as_str().unwrap_or_default());
     let mut ok = true;
     if cli.prepare {
@@ -134,10 +144,16 @@ fn target(repo: &Repo, cli: &Cli) -> Result<PathBuf> {
     Ok(main.path.join(".worktrees").join(&cli.branch))
 }
 
-/// Adds the worktree on a new branch and returns what it started from.
-fn add_new(repo: &Repo, branch: &str, dir: &str, base: Option<&str>) -> Result<Value> {
-    let (commit, mut info) = match base {
-        Some(base) => (repo.commit(base)?, json!({"ref": base})),
+/// Adds the worktree on a new branch and returns what it started from, with the default-branch
+/// candidates it weighed (none for an explicit base).
+fn add_new(
+    repo: &Repo,
+    branch: &str,
+    dir: &str,
+    base: Option<&str>,
+) -> Result<(Value, Vec<Candidate>)> {
+    let (commit, mut info, found) = match base {
+        Some(base) => (repo.commit(base)?, json!({"ref": base}), Vec::new()),
         None => {
             let found = candidates(repo)?;
             let (chosen, diverged) = choose(repo, &found)?;
@@ -148,12 +164,13 @@ fn add_new(repo: &Repo, branch: &str, dir: &str, base: Option<&str>) -> Result<V
             (
                 found[chosen].commit.clone(),
                 json!({"candidates": listed, "diverged": diverged}),
+                found,
             )
         }
     };
     repo.git(&["worktree", "add", "--no-track", "-b", branch, dir, &commit])?;
     info["commit"] = json!(commit);
-    Ok(info)
+    Ok((info, found))
 }
 
 /// Initializes submodules and describes the new worktree.

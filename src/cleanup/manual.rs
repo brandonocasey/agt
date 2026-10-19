@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::files::measure;
 use crate::core::error::{Error, Result, ctx};
+use crate::core::shell::quote;
 use crate::store::{Namespace, Store};
 use crate::worktree::prune;
 
@@ -43,17 +44,6 @@ fn home() -> Result<PathBuf> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| Error("HOME is not set".into()))
-}
-
-/// A word the shell reads back unchanged: as is when it holds only safe characters, else in
-/// single quotes. Branch names come from other people's PRs and may hold `;` or `$(`.
-fn quote(word: &str) -> String {
-    let safe = |ch: char| ch.is_ascii_alphanumeric() || "_-./@:+,=%".contains(ch);
-    if !word.is_empty() && word.chars().all(safe) {
-        word.to_owned()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    }
 }
 
 /// Merged worktrees and branches under the configured roots, each with the command that
@@ -285,14 +275,6 @@ pub fn saved_count() -> Result<Option<(usize, PathBuf)>> {
 #[cfg(test)]
 mod tests {
     use super::version_key;
-
-    #[test]
-    fn commands_quote_what_the_shell_would_read() {
-        assert_eq!(super::quote("feat/a-b"), "feat/a-b");
-        assert_eq!(super::quote("a;b"), "'a;b'");
-        assert_eq!(super::quote("c$(d)"), "'c$(d)'");
-        assert_eq!(super::quote("it's"), "'it'\\''s'");
-    }
 
     #[test]
     fn versions_sort_by_number() {

@@ -6,4 +6,5 @@ pub mod group;
 pub mod local;
 pub mod output;
 pub mod random;
+pub mod shell;
 pub mod transcripts;

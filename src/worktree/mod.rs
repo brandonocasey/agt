@@ -6,6 +6,7 @@ mod backup;
 mod cleanup;
 mod create;
 mod disposable;
+mod fast_forward;
 mod gate;
 mod idle;
 mod info;

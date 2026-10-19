@@ -108,8 +108,8 @@ fn a_new_branch_starts_at_the_remote_default_ahead_of_the_local_one() {
         env.repo.join(".worktrees/feat/login").to_str().unwrap()
     );
     assert_eq!(git(&env, &env.repo, &["rev-parse", "feat/login"]), tip);
-    // Nothing existing moved: not the local branch, not the remote-tracking branch.
-    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+    // The local default caught up; the remote-tracking branch did not move.
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), tip);
     assert_eq!(git(&env, &env.repo, &["rev-parse", "origin/main"]), first);
 }
 
@@ -119,6 +119,141 @@ fn with_no_remote_the_local_default_is_the_base() {
     let value = agt_json(&env, &env.repo, &["create", "topic"]);
     assert_eq!(value["base"]["commit"], first.as_str());
     assert_eq!(value["base"]["candidates"].as_array().unwrap().len(), 1);
+    assert!(value.get("local_default").is_none());
+    assert_eq!(value["warnings"], serde_json::json!([]));
+}
+
+/// A repository whose `main` tracks `origin/main`, with one commit on origin it lacks.
+fn behind_origin() -> (Env, PathBuf, String, String) {
+    let (env, first) = repo_with_commit();
+    let bare = remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "-u", "origin", "main"]);
+    let tip = advance(&env, &bare, "second");
+    (env, bare, first, tip)
+}
+
+#[test]
+fn the_local_default_is_fast_forwarded_in_the_checkout_that_has_it() {
+    let (env, _, first, tip) = behind_origin();
+    // A local change the merge does not touch stays as it was.
+    fs::write(env.repo.join("first"), "edited").unwrap();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    let report = &value["local_default"];
+    assert_eq!(report["status"], "updated");
+    assert_eq!(report["branch"], "main");
+    assert_eq!(report["upstream"], "origin/main");
+    assert_eq!(report["from"], first.as_str());
+    assert_eq!(report["to"], tip.as_str());
+    assert_eq!(report["behind"], 1);
+    assert_eq!(report["path"], env.repo.to_str().unwrap());
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "HEAD"]), tip);
+    assert!(env.repo.join("second").exists());
+    assert_eq!(
+        fs::read_to_string(env.repo.join("first")).unwrap(),
+        "edited"
+    );
+}
+
+#[test]
+fn a_local_default_checked_out_nowhere_moves_as_a_ref() {
+    let (env, _, _, tip) = behind_origin();
+    git(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "updated");
+    assert!(value["local_default"].get("path").is_none());
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), tip);
+    assert_eq!(
+        git(&env, &env.repo, &["branch", "--show-current"]),
+        "elsewhere"
+    );
+}
+
+#[test]
+fn local_changes_the_merge_would_overwrite_keep_the_local_default_and_warn() {
+    let (env, bare, first, _) = behind_origin();
+    let tip = advance(&env, &bare, "first");
+    fs::write(env.repo.join("first"), "mine").unwrap();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    let report = &value["local_default"];
+    assert_eq!(report["status"], "skipped");
+    assert_eq!(report["behind"], 2);
+    let reason = report["reason"].as_str().unwrap();
+    assert!(reason.starts_with("git merge refused: "), "{reason}");
+    assert!(reason.contains("first"), "{reason}");
+    assert_eq!(
+        report["retry"],
+        format!(
+            "git -C {} merge --ff-only --quiet {tip}",
+            env.repo.display()
+        )
+    );
+    assert_eq!(
+        value["warnings"],
+        serde_json::json!([format!("local main not updated: {reason}")])
+    );
+    // The new branch still starts at the newest base, and nothing local was lost.
+    assert_eq!(value["base"]["commit"], tip.as_str());
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+    assert_eq!(fs::read_to_string(env.repo.join("first")).unwrap(), "mine");
+}
+
+#[test]
+fn a_diverged_local_default_stays_and_warns() {
+    let (env, _, _, _) = behind_origin();
+    let local = commit(&env, &env.repo.clone(), "local-only", "l");
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    let report = &value["local_default"];
+    assert_eq!(report["status"], "skipped");
+    assert_eq!(report["ahead"], 1);
+    assert_eq!(report["behind"], 1);
+    assert!(report.get("retry").is_none());
+    assert_eq!(
+        value["warnings"][0],
+        "local main not updated: it has diverged from origin/main (1 ahead, 1 behind)"
+    );
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), local);
+}
+
+#[test]
+fn a_local_default_ahead_of_its_upstream_is_left_without_a_warning() {
+    let (env, first) = repo_with_commit();
+    remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "-u", "origin", "main"]);
+    let local = commit(&env, &env.repo.clone(), "landed", "l");
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "ahead");
+    assert_eq!(value["local_default"]["ahead"], 1);
+    assert_eq!(value["local_default"]["to"], first.as_str());
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), local);
+}
+
+#[test]
+fn an_upstream_that_is_not_its_remotes_default_is_a_warning() {
+    let (env, _, first, _) = behind_origin();
+    git(&env, &env.repo, &["push", "-q", "origin", "main:old"]);
+    git(&env, &env.repo, &["fetch", "-q", "origin"]);
+    git(
+        &env,
+        &env.repo,
+        &["branch", "-q", "-u", "origin/old", "main"],
+    );
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "skipped");
+    assert_eq!(
+        value["warnings"][0],
+        "local main not updated: it tracks origin/old, but origin's default is main"
+    );
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+}
+
+#[test]
+fn an_explicit_base_leaves_the_local_default_alone() {
+    let (env, _, first, _) = behind_origin();
+    let value = agt_json(&env, &env.repo, &["create", "work", "--base", "main"]);
+    assert!(value.get("local_default").is_none());
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
 }
 
 #[test]
