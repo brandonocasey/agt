@@ -68,11 +68,13 @@ fn scan(args: &Cli) -> Result<BTreeSet<(String, usize, &'static str)>> {
         .map(|path| cwd.join(path).to_string_lossy().into_owned())
         .collect();
     // A missing path would match nothing and report clean, which a scanner MUST NOT do. A
-    // staged scan also accepts a path that is only in the index, such as a staged file since
-    // deleted from disk.
+    // staged scan also accepts a path in the index or in the staged diff, such as a staged
+    // file since deleted from disk or a staged deletion that hooks pass along.
     for (path, full) in args.paths.iter().zip(&paths) {
         let found = Path::new(full).symlink_metadata().is_ok()
-            || (args.staged && repo.succeeds(&["ls-files", "--error-unmatch", "--", full])?);
+            || (args.staged
+                && (repo.succeeds(&["ls-files", "--error-unmatch", "--", full])?
+                    || !repo.succeeds(&["diff", "--cached", "--quiet", "--", full])?));
         if !found {
             return fail(format!("no such path: {}", path.display()));
         }

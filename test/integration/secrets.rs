@@ -87,6 +87,10 @@ fn a_missing_path_fails_instead_of_reporting_clean() {
     let output = scan(&env, &["--staged", "a.txt"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains("a.txt:1 github-token"));
+    // A staged deletion is part of the staged change and has nothing to scan.
+    env.git(&["commit", "-qm", "a"]);
+    env.git(&["rm", "-q", "--cached", "a.txt"]);
+    assert_eq!(scan(&env, &["--staged", "a.txt"]).status.code(), Some(0));
 }
 
 #[test]

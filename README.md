@@ -1151,7 +1151,7 @@ text is never printed, not even in errors. Rules (one table in `src/secrets/rule
 `github-token`, `gitlab-token`, `slack-token`, `aws-key-id`, `private-key`, `jwt` and
 `generic-assignment` (`key`, `token`, `secret` or `password` set to a quoted value of 8 or more characters, or a bare 16+ character token ending the line as in `.env`, `export` and YAML lines; neither
 may be a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
-containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error, including a `PATH` that does not exist (with `--staged`, one that is neither on disk nor in the index).
+containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error, including a `PATH` that does not exist (with `--staged`, one that is not on disk, in the index or in the staged diff).
 
 ## Wait
 
