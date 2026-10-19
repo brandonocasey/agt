@@ -165,6 +165,18 @@ fn the_local_default_is_fast_forwarded_in_the_checkout_that_has_it() {
 }
 
 #[test]
+fn a_locked_remote_tracking_branch_does_not_stop_the_update() {
+    let (env, _, first, tip) = behind_origin();
+    // A parallel fetch holds the lock on origin/main.
+    fs::write(env.repo.join(".git/refs/remotes/origin/main.lock"), "").unwrap();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "updated");
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), tip);
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "origin/main"]), first);
+}
+
+#[test]
 fn a_local_default_checked_out_nowhere_moves_as_a_ref() {
     let (env, _, _, tip) = behind_origin();
     git(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);

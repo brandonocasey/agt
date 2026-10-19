@@ -62,7 +62,7 @@ fn update(
     let (from, to) = (local.commit.as_str(), upstream.commit.as_str());
     report["upstream"] = json!(format!("{remote}/{tracked}"));
     report["to"] = json!(to);
-    advance_tracking(repo, &remote, tracked, to)?;
+    advance_tracking(repo, &remote, tracked, to);
     if from == to {
         report["status"] = json!("current");
         return Ok(None);
@@ -125,18 +125,19 @@ fn update(
 }
 
 /// Moves the upstream's remote-tracking branch up to the fetched commit, as a fetch would, so
-/// `git status` does not count the commits the local default just gained as unpushed.
-fn advance_tracking(repo: &Repo, remote: &str, tracked: &str, to: &str) -> Result<()> {
+/// `git status` does not count the commits the local default just gained as unpushed. Best
+/// effort: losing the ref lock to a parallel fetch only leaves that count stale, which must not
+/// stop the local default from moving.
+fn advance_tracking(repo: &Repo, remote: &str, tracked: &str, to: &str) {
     let tracking = format!("refs/remotes/{remote}/{tracked}");
     let spec = format!("{tracking}^{{commit}}");
-    let Some(old) = repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec])? else {
-        return Ok(());
+    let Ok(Some(old)) = repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec]) else {
+        return;
     };
-    if old != to && repo.is_ancestor(&old, to)? {
+    if old != to && repo.is_ancestor(&old, to).unwrap_or(false) {
         let message = "agt worktree create: fetched default";
-        repo.git(&["update-ref", "-m", message, &tracking, to, &old])?;
+        let _ = repo.succeeds(&["update-ref", "-m", message, &tracking, to, &old]);
     }
-    Ok(())
 }
 
 /// Runs the update; when git refuses, as it does over local changes a merge would overwrite, the
