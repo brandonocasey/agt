@@ -112,7 +112,8 @@ enum Command {
     /// Merge only while the head is --sha (the forge enforces it too). Never deletes the branch
     /// or bypasses protections.
     ///
-    /// With --auto, merge when checks pass; GitHub needs --method unless auto-merge was on.
+    /// With --auto, merge when checks pass; GitHub needs --method unless auto-merge was on, and
+    /// merges a PR that can merge now at once, as gh does.
     /// GitLab cannot rebase on merge.
     Merge {
         number: String,
@@ -260,6 +261,11 @@ impl Remote {
                 let how = how
                     .or_else(|| pr.auto_merge.as_deref().and_then(How::named))
                     .ok_or_else(|| Error("GitHub auto-merge needs --method".into()))?;
+                // GitHub offers auto-merge only while a PR cannot merge yet; like gh, merge a
+                // PR that can merge now.
+                if matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable") {
+                    return github::merge(t, repo, pr.number, sha, Some(how));
+                }
                 github::enable_auto(t, pr, sha, how)
             }
             Forge::Gitlab => gitlab::merge(t, repo, pr, sha, how, true),

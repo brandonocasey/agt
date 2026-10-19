@@ -339,6 +339,31 @@ fn merge_sends_the_head_guard() {
 }
 
 #[test]
+fn auto_merge_of_a_pr_that_can_merge_now_merges_it() {
+    let env = github();
+    gh_view(&env, 7, &json!({}));
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "PUT",
+            "repos/o/r/pulls/7/merge",
+            "--input",
+            "-",
+        ],
+        "{}",
+    );
+    ok(
+        &env,
+        &["merge", "7", "--sha", SHA, "--method", "squash", "--auto"],
+    );
+    assert_eq!(
+        inputs(&env)[0].1,
+        json!({"sha": SHA, "merge_method": "squash"})
+    );
+}
+
+#[test]
 fn auto_merge_off_records_the_method_and_on_restores_it() {
     let env = github();
     gh_view(
@@ -383,7 +408,8 @@ fn auto_merge_off_records_the_method_and_on_restores_it() {
     assert!(record.contains("rebase"), "{record}");
 
     env.reset_calls();
-    gh_view(&env, 7, &json!({}));
+    // Checks still run, so GitHub offers auto-merge rather than an immediate merge.
+    gh_view(&env, 7, &json!({"mergeStateStatus": "BLOCKED"}));
     env.respond_nth(
         &[
             "api",
