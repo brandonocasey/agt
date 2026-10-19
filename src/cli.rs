@@ -33,7 +33,7 @@ enum Command {
     Branch(branch::Cli),
     /// Wait for PR/MR checks and pipelines; GitLab failing specs versus the default branch.
     Ci(ci::Cli),
-    /// GitHub and GitLab issues, synced locally; writes wait for `push`.
+    /// Local issues with optional GitHub and GitLab sync.
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
     Cleanup(cleanup::Cli),
