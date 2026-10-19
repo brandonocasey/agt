@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::clock;
 use crate::core::error::{Error, Result};
+use crate::core::harness;
 use crate::core::local;
 use crate::store::prune::Removal;
 
@@ -32,7 +33,7 @@ pub struct Stale {
 pub fn harness_roots() -> Result<Vec<PathBuf>> {
     let uid = unsafe { libc::getuid() };
     let tmp = std::env::var_os(TMP_OVERRIDE).map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    Ok(vec![local::home()?.join(".cache").join("claude-tmp"), tmp]
+    Ok(vec![local::home()?.join(harness::CLAUDE_TMP_DIR), tmp]
         .into_iter()
         .map(|base| base.join(format!("claude-{uid}")))
         .collect())
@@ -181,7 +182,7 @@ pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
 
 /// Task directories in `agents/scratch`, and harness session directories.
 pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
-    let root = own_root(local::agents_cache()?.join("scratch"));
+    let root = own_root(local::agents_cache()?.join(harness::SCRATCH_NAME));
     let mut found = stale_in(
         &root,
         std::slice::from_ref(&root),

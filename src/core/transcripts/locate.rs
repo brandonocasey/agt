@@ -12,14 +12,13 @@ use serde_json::Value;
 use super::codex;
 use super::json::{get, head, tail, text};
 use crate::core::clock;
+use crate::core::harness;
 
 /// The longest first line read when looking for a session id.
 const MAX_FIRST_LINE: u64 = 1024 * 1024;
 
-static SCRATCH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"-cache-agents-scratch|-cache-claude-tmp|^-private-tmp|^-tmp")
-        .expect("valid pattern")
-});
+static SCRATCH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(harness::SCRATCH_PROJECT_PATTERN).expect("valid pattern"));
 
 /// Whether a project directory name is a scratch or probe directory, such as one under `/tmp`.
 pub fn is_scratch(project: &str) -> bool {
@@ -53,7 +52,12 @@ pub fn claude_profiles(home: &Path) -> Vec<PathBuf> {
     };
     let mut profiles: Vec<PathBuf> = entries
         .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".claude"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(harness::CLAUDE_DIR_PREFIX)
+        })
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();
@@ -72,7 +76,7 @@ pub fn claude_projects(home: &Path) -> Vec<PathBuf> {
 
 /// Codex session roots: live sessions, then archived ones.
 pub fn codex_roots(home: &Path) -> [PathBuf; 2] {
-    let codex = home.join(".codex");
+    let codex = home.join(harness::CODEX_DIR);
     [codex.join("sessions"), codex.join("archived_sessions")]
 }
 
@@ -91,7 +95,7 @@ pub fn all_roots(home: &Path, projects: bool) -> Vec<PathBuf> {
 
 /// The prompt history files that exist: Codex's, then each Claude Code profile's.
 pub fn history_files(home: &Path) -> Vec<PathBuf> {
-    std::iter::once(home.join(".codex").join("history.jsonl"))
+    std::iter::once(home.join(harness::CODEX_DIR).join("history.jsonl"))
         .chain(
             claude_profiles(home)
                 .into_iter()

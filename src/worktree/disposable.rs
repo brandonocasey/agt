@@ -1,5 +1,7 @@
 //! Which ignored paths a backup skips: what a build or install recreates.
 
+use crate::core::harness;
+
 const DIRS: [&str; 16] = [
     "node_modules",
     ".venv",
@@ -38,9 +40,10 @@ pub fn is_disposable(path: &str) -> bool {
     if dirs.iter().any(|dir| DIRS.contains(dir)) {
         return true;
     }
+    let scratch: Vec<&str> = harness::SCRATCH_DIR.split('/').collect();
     if dirs
-        .windows(3)
-        .any(|window| window == [".cache", "agents", "scratch"])
+        .windows(scratch.len())
+        .any(|window| window == scratch.as_slice())
     {
         return true;
     }

@@ -9,6 +9,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::core::config::{self, Config};
+use crate::core::harness;
 use crate::core::local;
 use crate::forge::service;
 use crate::forge::transport::Cli;
@@ -23,7 +24,7 @@ const MIN_GIT: [u64; 2] = [2, 38];
 const MISE_PIN: &str = "github:brandonocasey/agt";
 const IGNORED: [(&str, &str); 2] = [
     (".worktrees/", ".worktrees/probe"),
-    ("/.cache/agents/scratch/", ".cache/agents/scratch/probe"),
+    (harness::SCRATCH_IGNORE, harness::SCRATCH_PROBE),
 ];
 
 static VERSION: LazyLock<Regex> =
@@ -286,7 +287,7 @@ fn git_ignore(repo: Option<&Repo>) -> Row {
     if missing.is_empty() {
         return Row::ok(
             "git ignore",
-            ".worktrees/ and /.cache/agents/scratch/ are ignored",
+            format!(".worktrees/ and {} are ignored", harness::SCRATCH_IGNORE),
         );
     }
     let target = file.map_or("your global git ignore".into(), |path| {

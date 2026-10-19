@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::harness;
 use crate::core::local;
 use serde_json::Value;
 
@@ -358,7 +359,11 @@ pub fn session_dirs() -> Vec<PathBuf> {
         && let Ok(entries) = std::fs::read_dir(&home)
     {
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(".claude") {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(harness::CLAUDE_DIR_PREFIX)
+            {
                 dirs.push(entry.path().join("sessions"));
             }
         }

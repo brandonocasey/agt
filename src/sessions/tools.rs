@@ -8,6 +8,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::core::error::Result;
+use crate::core::harness;
 use crate::core::transcripts::Kind;
 use crate::core::transcripts::json::{count, get, head, key, object, text, truthy};
 use crate::sessions::Scope;
@@ -33,11 +34,12 @@ pub(super) fn tool_key(name: &str, input: &Value) -> String {
     }
     if name == "Read" {
         let path = text(input, "file_path");
-        let kind = if path.contains("/skills/") || path.contains(".claude") {
-            "skills/rules"
-        } else {
-            "code/other"
-        };
+        let kind =
+            if path.contains(harness::SKILLS_PATH) || path.contains(harness::CLAUDE_DIR_PREFIX) {
+                "skills/rules"
+            } else {
+                "code/other"
+            };
         return format!("Read:{kind}");
     }
     if name.starts_with("mcp__") {

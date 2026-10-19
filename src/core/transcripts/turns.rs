@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::json::{get, head, text, truthy};
+use crate::core::harness;
 use crate::core::local::hostname;
 
 const MAX_TEXT: usize = 16_384;
@@ -116,13 +117,13 @@ fn is_injected(message: &Message, entry: &Value) -> bool {
     let text = message.text.trim_start();
     text.starts_with("# AGENTS.md instructions")
         || text.starts_with("<environment_context>")
-        || text.starts_with("<skills_instructions>")
+        || text.starts_with(harness::SKILLS_INSTRUCTIONS_TAG)
         || text.starts_with("<system")
         || text.starts_with("<developer")
 }
 
 fn source_kind(file: &str) -> &'static str {
-    if file.contains("/.codex/") {
+    if file.contains(harness::CODEX_PATH) {
         "codex"
     } else {
         "claude"

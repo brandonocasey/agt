@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::files::measure;
 use crate::core::error::{Error, Result, ctx};
+use crate::core::harness;
 use crate::core::local;
 use crate::core::shell::quote;
 use crate::store::{Namespace, Store};
@@ -118,7 +119,9 @@ fn version_key(name: &str) -> Vec<(String, u64)> {
 }
 
 fn codex_releases(home: &Path, found: &mut Vec<Candidate>) {
-    let standalone = home.join(".codex").join("packages").join("standalone");
+    let standalone = home
+        .join(harness::CODEX_DIR)
+        .join(harness::CODEX_STANDALONE_DIR);
     let releases = standalone.join("releases");
     let Ok(entries) = fs::read_dir(&releases) else {
         return;
