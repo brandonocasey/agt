@@ -1032,12 +1032,12 @@ that event's timestamp (only the file's last 256 KiB is read).
 polls every `--interval` seconds (default 5) until interrupted and prints one JSON line per event
 for Claude Code sessions: `blocked` (the session has been `waiting` for `--blocked-after` seconds,
 default 60; once per waiting stretch, with `waiting_for`), `cleared` (a blocked session left
-`waiting`) and `ended` (its process is gone). Each line holds the row's fields plus `event` and
+`waiting`, with `reason` `answered`, or a new waiting stretch replaced the blocked one, with `reason` `new_prompt`) and `ended` (its process is gone). Each line holds the row's fields plus `event` and
 `at`. `--notify` posts a desktop notification per `blocked` event (`osascript` on macOS,
 `notify-send` elsewhere; the text is passed as arguments, never through a shell). `--exec` runs
 the program, without a shell, once per event with the event JSON on stdin and `AGT_PS_EVENT`,
-`AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR` and
-`AGT_PS_STATUS_SECS` set. The program's stdout goes to agt's stderr, so stdout stays one JSON line
+`AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`,
+`AGT_PS_STATUS_SECS` and (for `cleared`) `AGT_PS_REASON` set. The program's stdout goes to agt's stderr, so stdout stays one JSON line
 per event. It runs synchronously: polling waits until it exits. A program that exits non-zero only
 warns on stderr. A session whose process still runs but is missing from one poll keeps its state
 and is not reported `ended`.

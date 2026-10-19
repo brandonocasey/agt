@@ -552,7 +552,7 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncat >> '{log}'\necho \"$AGT_PS_EVENT:$AGT_PS_WAITING_FOR\" >> '{log}.env'\n\
+            "#!/bin/sh\ncat >> '{log}'\necho \"$AGT_PS_EVENT:$AGT_PS_WAITING_FOR:$AGT_PS_REASON\" >> '{log}.env'\n\
              case \"$AGT_PS_EVENT\" in\n  blocked) cp '{idle}' '{live}' ;;\n  cleared) kill {pid}; while kill -0 {pid} 2>/dev/null; do sleep 0.05; done ;;\nesac\n",
             log = log.display(),
             idle = idle.display(),
@@ -571,7 +571,7 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
         .collect();
     assert_eq!(kinds, ["blocked", "cleared", "ended"], "{events:?}");
     let logged = fs::read_to_string(format!("{}.env", log.display())).unwrap();
-    assert_eq!(logged, "blocked:dialog; $(touch pwned)\ncleared:\nended:\n");
+    assert_eq!(logged, "blocked:dialog; $(touch pwned):\ncleared::answered\nended::\n");
     assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 3);
     assert!(!env.repo.join("pwned").exists());
     reaper.join().unwrap().unwrap();
@@ -614,6 +614,7 @@ fn watch_reports_a_new_waiting_stretch_behind_a_blocked_one() {
         .map(|event| event["event"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["blocked", "cleared", "blocked"], "{events:?}");
+    assert_eq!(events[1]["reason"], "new_prompt");
 }
 
 fn executable(path: &Path, body: &str) {

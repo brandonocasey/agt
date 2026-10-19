@@ -29,11 +29,12 @@ use crate::git::Repo;
 ///
 /// `--watch` polls forever and prints one JSON line per event: `blocked` (a Claude Code session
 /// has been `waiting` for `--blocked-after` seconds; once per waiting stretch), `cleared` (a
-/// blocked session left `waiting`) and `ended` (a session's process is gone). `--notify` posts a
+/// blocked session left `waiting`, `reason` `answered`, or a new waiting stretch replaced it,
+/// `reason` `new_prompt`) and `ended` (a session's process is gone). `--notify` posts a
 /// desktop notification for each `blocked` event. `--exec PROGRAM [-- ARGS...]` runs the
 /// program (no shell) per event with the event JSON on stdin and `AGT_PS_EVENT`, `AGT_PS_PID`,
-/// `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR` and `AGT_PS_STATUS_SECS`
-/// in its environment, its stdout going to stderr. Handlers run one at a time and block polling
+/// `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`, `AGT_PS_STATUS_SECS`
+/// and `AGT_PS_REASON` (`cleared` only) in its environment, its stdout going to stderr. Handlers run one at a time and block polling
 /// until they exit; one that exits non-zero only prints a warning.
 #[derive(Args)]
 pub struct Cli {
@@ -242,7 +243,9 @@ fn watch(cli: &Cli) -> Result<()> {
                 && since.is_some()
                 && old.since != since
             {
-                events.push(event("cleared", &old.row, now));
+                let mut cleared = event("cleared", &old.row, now);
+                cleared["reason"] = json!("new_prompt");
+                events.push(cleared);
                 blocked = false;
             }
             let now_blocked = if waiting {
@@ -256,7 +259,9 @@ fn watch(cli: &Cli) -> Result<()> {
             if now_blocked && !blocked {
                 events.push(event("blocked", &row, now));
             } else if blocked && !waiting {
-                events.push(event("cleared", &row, now));
+                let mut cleared = event("cleared", &row, now);
+                cleared["reason"] = json!("answered");
+                events.push(cleared);
             }
             seen.insert(
                 pid,
@@ -319,6 +324,7 @@ fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()>
         .env("AGT_PS_CWD", text("cwd"))
         .env("AGT_PS_WAITING_FOR", text("waiting_for"))
         .env("AGT_PS_STATUS_SECS", text("status_secs"))
+        .env("AGT_PS_REASON", text("reason"))
         .stdin(Stdio::piped())
         // The event stream on stdout stays one JSON line per event.
         .stdout(std::io::stderr())
