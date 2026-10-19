@@ -4,7 +4,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Instant;
 
 use clap::Args;
@@ -17,6 +17,7 @@ use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local;
 use crate::core::output::Output;
+use crate::core::process;
 use crate::git::Repo;
 
 const MISE_FILES: [&str; 3] = ["mise.toml", ".mise.toml", ".tool-versions"];
@@ -233,16 +234,15 @@ pub(super) fn run_step(
     let sink = File::create(&log).map_err(ctx(format!("create {}", log.display())))?;
     let again = sink.try_clone().map_err(ctx("duplicate the log handle"))?;
     let started = Instant::now();
-    let status = Command::new(&command[0])
-        .args(&command[1..])
+    let mut run = Command::new(&command[0]);
+    run.args(&command[1..])
         .current_dir(root)
         // An inherited PORT must not leak into a step; the caller's `env` may set it.
         .env_remove("PORT")
         .envs(env.iter().map(|(key, value)| (key, value)))
-        .stdin(Stdio::null())
         .stdout(sink)
-        .stderr(again)
-        .status();
+        .stderr(again);
+    let status = process::status(&mut run, None);
     let mut step = json!({
         "command": command.join(" "),
         "exit": status.as_ref().ok().and_then(|status| status.code()),

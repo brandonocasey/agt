@@ -5,7 +5,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -13,6 +12,7 @@ use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{Lock, hostname, write_json};
 use crate::core::output::Output;
+use crate::git::Repo;
 use crate::task::args::{Check, Create, Target, Update};
 use crate::task::files;
 use crate::task::text::limited;
@@ -85,26 +85,13 @@ fn write_task(task: &Value) -> Result<()> {
     write_json(&file, task, true)
 }
 
-fn git(args: &[&str], dir: &std::path::Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
 fn context() -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let repo = git(&["rev-parse", "--show-toplevel"], &cwd);
-    let head = repo
-        .as_deref()
-        .and_then(|repo| git(&["rev-parse", "HEAD"], std::path::Path::new(repo)));
+    let repo = Repo::at(&cwd)
+        .git_opt(&["rev-parse", "--show-toplevel"])
+        .ok()
+        .flatten();
+    let head = repo.as_deref().and_then(|repo| Repo::at(repo).head().ok());
     json!({
         "host": hostname(),
         "repo": repo,

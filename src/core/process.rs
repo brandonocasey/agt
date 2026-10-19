@@ -1,6 +1,6 @@
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,24 @@ pub fn output(
         let _ = child.wait();
     }
     result
+}
+
+/// Runs a user-supplied command to completion with no deadline and returns its exit status. The
+/// caller sets the output streams and everything else; stdin is null, or a pipe that receives
+/// `input` when there is some (a command that exits without reading it is not an error).
+pub fn status(command: &mut Command, input: Option<&[u8]>) -> io::Result<ExitStatus> {
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let mut child = command.spawn()?;
+    if let Some(bytes) = input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        let _ = stdin.write_all(bytes);
+    }
+    child.wait()
 }
 
 fn collect(

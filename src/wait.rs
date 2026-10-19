@@ -10,6 +10,7 @@ use clap::Args;
 
 use crate::core::error::Result;
 use crate::core::output::Output;
+use crate::core::process;
 
 /// Exit status when `--max` passes before the check succeeds.
 const TIMED_OUT: u8 = 3;
@@ -28,13 +29,12 @@ pub struct Cli {
 }
 
 fn passes(check: &[OsString]) -> bool {
-    Command::new(&check[0])
+    let mut command = Command::new(&check[0]);
+    command
         .args(&check[1..])
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .stderr(Stdio::null());
+    process::status(&mut command, None).is_ok_and(|status| status.success())
 }
 
 pub fn run(cli: Cli) -> Result<Output> {

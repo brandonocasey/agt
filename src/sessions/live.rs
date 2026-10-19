@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use clap::Args;
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ use crate::core::agents::{self, CodexProc};
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx};
 use crate::core::output::Output;
+use crate::core::process;
 use crate::core::transcripts::{codex_sessions, session_files};
 use crate::git::Repo;
 
@@ -315,7 +316,8 @@ fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()>
         Value::String(text) => text.clone(),
         other => other.to_string(),
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .env("AGT_PS_EVENT", text("event"))
         .env("AGT_PS_PID", text("pid"))
@@ -325,18 +327,10 @@ fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()>
         .env("AGT_PS_WAITING_FOR", text("waiting_for"))
         .env("AGT_PS_STATUS_SECS", text("status_secs"))
         .env("AGT_PS_REASON", text("reason"))
-        .stdin(Stdio::piped())
         // The event stream on stdout stays one JSON line per event.
-        .stdout(std::io::stderr())
-        .spawn()
+        .stdout(std::io::stderr());
+    let status = process::status(&mut command, Some(format!("{line}\n").as_bytes()))
         .map_err(|error| Error(format!("run {program}: {error}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        // A program that ignores its input may exit before reading it.
-        let _ = writeln!(stdin, "{line}");
-    }
-    let status = child
-        .wait()
-        .map_err(|error| Error(format!("wait for {program}: {error}")))?;
     if status.success() {
         Ok(())
     } else {
@@ -437,11 +431,7 @@ fn place(row: &mut Value, cwd: &Path) {
     if main != Path::new(top) {
         row["worktree"] = json!(top);
     }
-    row["branch"] = json!(
-        repo.git_opt(&["symbolic-ref", "--quiet", "--short", "HEAD"])
-            .ok()
-            .flatten()
-    );
+    row["branch"] = json!(repo.current_branch().ok().flatten());
 }
 
 /// A duration as its largest whole unit: `45s`, `12m`, `3h`, `2d`.
