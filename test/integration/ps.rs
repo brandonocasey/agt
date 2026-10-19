@@ -571,7 +571,10 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
         .collect();
     assert_eq!(kinds, ["blocked", "cleared", "ended"], "{events:?}");
     let logged = fs::read_to_string(format!("{}.env", log.display())).unwrap();
-    assert_eq!(logged, "blocked:dialog; $(touch pwned):\ncleared::answered\nended::\n");
+    assert_eq!(
+        logged,
+        "blocked:dialog; $(touch pwned):\ncleared::answered\nended::\n"
+    );
     assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 3);
     assert!(!env.repo.join("pwned").exists());
     reaper.join().unwrap().unwrap();
