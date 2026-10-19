@@ -265,3 +265,25 @@ fn landable_without_a_default_branch_names_its_own_flag() {
     );
     assert!(!stderr.contains("--base"), "{stderr}");
 }
+
+#[test]
+fn pushed_prints_the_git_state_when_the_forge_lookup_fails() {
+    let site = Site::new();
+    site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    let missing = site.env.path("no-such-gh");
+    let output = site
+        .env
+        .command(BIN, &site.env.repo)
+        .args(["branch", "pushed"])
+        .env("AGT_GH_BIN", &missing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["state"], "equal");
+    assert_eq!(report["pr"], Value::Null);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning: PR/MR lookup failed"), "{stderr}");
+    assert!(stderr.contains("run gh: No such file"), "{stderr}");
+}

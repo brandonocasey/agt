@@ -32,7 +32,8 @@ enum Command {
     /// `ahead`, `behind`, `diverged` or `missing` on the remote), `ahead` and `behind` counts,
     /// `uncommitted` (changed paths in the worktree that has the branch checked out, else null)
     /// and, when a PR/MR exists, `pr` with `head_matches` and `pipeline.exists` for its head
-    /// commit. Exit 0 only when `state` is `equal` and any PR/MR head equals the local tip; exit
+    /// commit. When the forge lookup fails (`gh` or `glab` missing or not logged in) `pr` is null
+    /// and a warning names the cause; the exit code then follows the git state alone. Exit 0 only when `state` is `equal` and any PR/MR head equals the local tip; exit
     /// 4 otherwise; exit 1 on an error.
     #[command(verbatim_doc_comment)]
     Pushed {

@@ -873,7 +873,9 @@ pins the fetched commit and compares it with the local tip: `state` is `equal`, 
 counts the changed paths of the worktree that has the branch checked out (null when none does).
 When an open PR/MR of the branch exists in the repository `origin` names, `pr` holds its `number`,
 `url`, `head`, `head_matches` (its head equals the local tip) and `pipeline` (`sha` and `exists`: a
-check run, status or pipeline exists for the PR/MR head). Exit 0 only when `state` is `equal` and
+check run, status or pipeline exists for the PR/MR head). When the forge lookup fails (`gh` or
+`glab` missing or not logged in), `pr` is null, a warning on stderr names the cause, and the exit
+code follows the git state alone. Exit 0 only when `state` is `equal` and
 any PR/MR head matches; exit 4 otherwise; exit 1 on an error.
 
 `landable` compares the branch with the target, which defaults to the newest default base among

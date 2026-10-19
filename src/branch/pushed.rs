@@ -28,7 +28,11 @@ pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
             (state, Some(ahead), Some(behind))
         }
     };
-    let pr = pull_report(repo, branch, &local)?;
+    // The git comparison stands without the forge: a failed lookup leaves `pr` null.
+    let pr = pull_report(repo, branch, &local).unwrap_or_else(|error| {
+        eprintln!("warning: PR/MR lookup failed, `pr` is null: {error}");
+        None
+    });
     let head_ok = pr
         .as_ref()
         .is_none_or(|pr| pr["head_matches"] == Value::Bool(true));
