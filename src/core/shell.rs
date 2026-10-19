@@ -1,3 +1,5 @@
+//! Quoting for commands shown to a person or an agent to paste into a shell.
+
 /// A word the shell reads back unchanged: as is when it holds only safe characters, else in
 /// single quotes. Branch names come from other people's PRs and may hold `;` or `$(`.
 pub fn quote(word: &str) -> String {

@@ -308,8 +308,13 @@ fn remove_worktree(
             "evidence": subject.finding.evidence,
             "action": action,
         });
-        if let Some(untrusted) = super::hooks::resolve(main)?.untrusted {
-            row["hooks"] = json!({"untrusted": untrusted});
+        match super::hooks::resolve(main) {
+            Ok(resolved) => {
+                if let Some(untrusted) = resolved.untrusted {
+                    row["hooks"] = json!({"untrusted": untrusted});
+                }
+            }
+            Err(error) => row["hooks"] = json!({"error": error.to_string()}),
         }
         report.remove.push(row);
         return Ok(true);

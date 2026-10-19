@@ -9,6 +9,7 @@ use super::info::main_checkout;
 use super::{port, prepare, trust};
 use crate::core::config::Config;
 use crate::core::error::Result;
+use crate::core::shell::quote;
 use crate::git::Repo;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,7 +64,8 @@ pub(super) fn resolve(main: &Path) -> Result<Resolved> {
     let merged = Config::load_for_repo(&repo)?.worktree.hooks;
     let file = trust::config_file(main);
     let bytes = std::fs::read(&file).unwrap_or_default();
-    if !trust::has_hooks(&bytes) || trust::is_trusted(&file, &bytes)? {
+    let symlink = trust::symlink_reason(main);
+    if !trust::has_hooks(&bytes) || (symlink.is_none() && trust::is_trusted(main, &bytes)?) {
         return Ok(Resolved {
             create: merged.create,
             remove: merged.remove,
@@ -73,15 +75,23 @@ pub(super) fn resolve(main: &Path) -> Result<Resolved> {
     let own = Config::load_from(&file)?.worktree.hooks;
     let global = Config::load()?.worktree.hooks;
     let shown = file.canonicalize().unwrap_or(file);
+    let mut untrusted = json!({
+        "file": shown,
+        "create": own.create,
+        "remove": own.remove,
+    });
+    if let Some(reason) = symlink {
+        untrusted["reason"] = json!(format!("{reason}; its hooks cannot be trusted"));
+    } else {
+        untrusted["next"] = json!(format!(
+            "ask the user to review these commands; to trust them, they run: agt worktree trust {}",
+            quote(&main.display().to_string())
+        ));
+    }
     Ok(Resolved {
         create: global.create,
         remove: global.remove,
-        untrusted: Some(json!({
-            "file": shown,
-            "create": own.create,
-            "remove": own.remove,
-            "next": format!("agt worktree trust {}", main.display()),
-        })),
+        untrusted: Some(untrusted),
     })
 }
 

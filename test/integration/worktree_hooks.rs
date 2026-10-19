@@ -106,7 +106,7 @@ fn the_repository_config_overrides_the_global_hooks_per_key() {
     assert!(tree.join("local").exists());
     assert!(!tree.join("global").exists());
     let plan = json(&agt(&env, &env.repo, &["remove", tree.to_str().unwrap()]));
-    assert_eq!(plan["hooks"][0], "true");
+    assert_eq!(plan["hooks"]["remove"][0], "true");
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn remove_hooks_run_before_the_removal_and_the_plan_lists_them() {
     json(&agt(&env, &env.repo, &["create", "gone"]));
     let tree = env.repo.join(".worktrees/gone");
     let plan = json(&agt(&env, &env.repo, &["remove", tree.to_str().unwrap()]));
-    assert_eq!(plan["hooks"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["hooks"]["remove"].as_array().unwrap().len(), 1);
     assert!(!marker.exists());
     let output = agt(
         &env,
@@ -345,7 +345,8 @@ fn prepare_hooks_reruns_a_failed_create_hook() {
     assert!(output.status.success());
     let value = json(&output);
     assert_eq!(value["hooks"]["ok"], true);
-    assert!(value["steps"].is_array());
+    // Only the hooks run: no install steps.
+    assert!(value.get("steps").is_none());
     assert!(tree.join("ran").exists());
 }
 
@@ -378,7 +379,7 @@ fn untrusted_repository_hooks_do_not_run_and_are_reported() {
         untrusted["next"]
             .as_str()
             .unwrap()
-            .starts_with("agt worktree trust ")
+            .contains("ask the user to review")
     );
     assert_eq!(hooks_of(&report)["create"].as_array().unwrap().len(), 0);
 }
@@ -446,8 +447,8 @@ fn remove_plan_and_yes_honor_the_trust() {
     let created = json(&agt(&env, &env.repo, &["create", "feature"]));
     let path = created["path"].as_str().unwrap();
     let plan = json(&agt(&env, &env.repo, &["remove", path]));
-    assert_eq!(plan["hooks"].as_array().unwrap().len(), 0);
-    assert_eq!(plan["untrusted"]["remove"][0], "touch ../gone");
+    assert_eq!(plan["hooks"]["remove"].as_array().unwrap().len(), 0);
+    assert_eq!(plan["hooks"]["untrusted"]["remove"][0], "touch ../gone");
     let done = json(&agt(&env, &env.repo, &["remove", path, "--yes"]));
     assert_eq!(done["hooks"]["untrusted"]["remove"][0], "touch ../gone");
     assert!(!Path::new(path).parent().unwrap().join("gone").exists());
@@ -482,4 +483,74 @@ fn trust_errors_without_a_file_or_hooks() {
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());
     untrusted_config(&env, "[sync]\nauto_pull = false\n");
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());
+}
+
+#[test]
+fn the_next_command_quotes_the_path() {
+    let env = repo();
+    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"true\"]\n");
+    let report = json(&agt(&env, &env.repo, &["create", "feature"]));
+    let next = hooks_of(&report)["untrusted"]["next"].as_str().unwrap();
+    assert!(
+        next.ends_with(&format!("agt worktree trust {}", {
+            let main = env.repo.canonicalize().unwrap();
+            let text = main.display().to_string();
+            if text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-./@:+,=%".contains(c))
+            {
+                text
+            } else {
+                format!("'{text}'")
+            }
+        })),
+        "{next}"
+    );
+}
+
+#[test]
+fn a_symlinked_config_cannot_borrow_another_repositorys_trust() {
+    let env = repo();
+    repo_config(&env, "[worktree.hooks]\ncreate = [\"touch ran\"]\n");
+    let victim = env.repo.clone();
+    let attacker = env.path("attacker");
+    fs::create_dir_all(&attacker).unwrap();
+    let at = attacker.to_str().unwrap();
+    env.git(&["init", "-q", "-b", "main", at]);
+    fs::write(attacker.join("first"), "1").unwrap();
+    env.git(&["-C", at, "add", "-A"]);
+    env.git(&["-C", at, "commit", "-q", "-m", "first"]);
+    std::os::unix::fs::symlink(victim.join(".config"), attacker.join(".config")).unwrap();
+    let report = json(&agt(&env, &attacker, &["create", "feature"]));
+    let path = Path::new(report["path"].as_str().unwrap());
+    assert!(!path.join("ran").exists());
+    let untrusted = &hooks_of(&report)["untrusted"];
+    assert_eq!(untrusted["create"][0], "touch ran");
+    assert!(untrusted["reason"].as_str().unwrap().contains("symlink"));
+    let refused = agt(&env, &attacker, &["trust"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("symlink"));
+}
+
+#[test]
+fn a_symlinked_config_file_is_untrusted_too() {
+    let env = repo();
+    let real = env.path("real.toml");
+    fs::write(&real, "[worktree.hooks]\ncreate = [\"touch ran\"]\n").unwrap();
+    fs::create_dir_all(env.repo.join(".config")).unwrap();
+    std::os::unix::fs::symlink(&real, env.repo.join(".config/agt.toml")).unwrap();
+    assert!(!agt(&env, &env.repo, &["trust"]).status.success());
+    let report = json(&agt(&env, &env.repo, &["create", "feature"]));
+    assert!(hooks_of(&report)["untrusted"]["reason"].is_string());
+}
+
+#[test]
+fn remove_no_hooks_ignores_a_bad_repository_config() {
+    let env = repo();
+    let created = json(&agt(&env, &env.repo, &["create", "feature"]));
+    let path = created["path"].as_str().unwrap();
+    untrusted_config(&env, "[worktree.hooks]\ncreate = 5\n");
+    let plan = agt(&env, &env.repo, &["remove", path, "--no-hooks"]);
+    assert!(plan.status.success(), "{plan:?}");
+    assert!(!agt(&env, &env.repo, &["remove", path]).status.success());
 }

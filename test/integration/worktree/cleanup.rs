@@ -557,6 +557,25 @@ fn a_failed_forge_call_is_unknown_and_keeps_everything() {
 }
 
 #[test]
+fn a_bad_repository_config_is_reported_per_row_and_the_plan_continues() {
+    let site = Site::new();
+    site.branch("one");
+    site.branch("two");
+    site.env.git(&["merge", "-q", "one"]);
+    site.env.git(&["merge", "-q", "two"]);
+    fs::create_dir_all(site.env.repo.join(".config")).unwrap();
+    fs::write(
+        site.env.repo.join(".config/agt.toml"),
+        "[worktree.hooks]\ncreate = 5\n",
+    )
+    .unwrap();
+    let report = site.run(&[]);
+    let rows = report["remove"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{report}");
+    assert!(rows.iter().all(|row| row["hooks"]["error"].is_string()));
+}
+
+#[test]
 fn without_yes_the_plan_names_every_action_and_nothing_changes() {
     let site = Site::new();
     let wt = site.branch("done");

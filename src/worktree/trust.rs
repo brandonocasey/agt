@@ -1,5 +1,5 @@
 //! `agt worktree trust`: the gate on a repository's `[worktree.hooks]`. A main checkout's
-//! `.config/agt.toml` runs its hooks only while its canonical path is recorded with the SHA-256
+//! `.config/agt.toml` runs its hooks only while its canonical main checkout path is recorded with the SHA-256
 //! of its exact bytes in `$XDG_STATE_HOME/agents/worktrees/trust.json`; any edit untrusts it.
 
 use std::collections::BTreeMap;
@@ -42,9 +42,12 @@ pub fn run(cli: Cli) -> Result<Output> {
     let main = main_checkout(&Repo::at(&toplevel(&dir)?))?.path;
     let file = config_file(&main);
     if cli.remove {
-        let key = key(&file);
+        let key = key(&main);
         let removed = update(|trusted| trusted.remove(&key).is_some())?;
         return Ok(Output::Json(json!({"file": key, "removed": removed})));
+    }
+    if let Some(reason) = symlink_reason(&main) {
+        return fail(format!("refusing to trust: {reason}"));
     }
     let bytes = fs::read(&file).map_err(|_| {
         crate::core::error::Error(format!(
@@ -57,7 +60,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     let hooks = Config::load_from(&file)?.worktree.hooks;
     let hash = digest(&bytes);
-    let key = key(&file);
+    let key = key(&main);
     update(|trusted| trusted.insert(key.clone(), hash.clone()).as_deref() != Some(&hash))?;
     Ok(Output::Json(json!({
         "file": key,
@@ -86,12 +89,20 @@ pub(super) fn config_file(main: &Path) -> PathBuf {
     main.join(".config").join("agt.toml")
 }
 
-/// The trust key of `file`: its canonical path.
-fn key(file: &Path) -> String {
-    file.canonicalize()
-        .unwrap_or_else(|_| file.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+/// The trust key of a repository: its canonical main checkout joined with the literal
+/// `.config/agt.toml`, so a symlinked config cannot borrow another repository's trust.
+fn key(main: &Path) -> String {
+    let root = main.canonicalize().unwrap_or_else(|_| main.to_path_buf());
+    config_file(&root).to_string_lossy().into_owned()
+}
+
+/// Why the repository config cannot be trusted: `.config` or `.config/agt.toml` is a symlink.
+pub(super) fn symlink_reason(main: &Path) -> Option<String> {
+    let file = config_file(main);
+    [file.parent()?, file.as_path()]
+        .into_iter()
+        .find(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()))
+        .map(|path| format!("{} is a symlink", path.display()))
 }
 
 /// Whether the file text has a `[worktree.hooks]` table.
@@ -103,9 +114,9 @@ pub(super) fn has_hooks(bytes: &[u8]) -> bool {
         .is_some()
 }
 
-/// Whether `file` is trusted with exactly the content `bytes`.
-pub(super) fn is_trusted(file: &Path, bytes: &[u8]) -> Result<bool> {
-    Ok(load(&store()?)?.get(&key(file)) == Some(&digest(bytes)))
+/// Whether the repository `main` is trusted with exactly the config content `bytes`.
+pub(super) fn is_trusted(main: &Path, bytes: &[u8]) -> Result<bool> {
+    Ok(load(&store()?)?.get(&key(main)) == Some(&digest(bytes)))
 }
 
 fn digest(bytes: &[u8]) -> String {

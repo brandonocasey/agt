@@ -47,10 +47,10 @@ pub fn run(cli: Cli) -> Result<Output> {
 
     let (modified, untracked) = info::dirty(&path)?;
     if !cli.yes {
-        let resolved = hooks::resolve(&main)?;
         let (planned, untrusted) = if cli.no_hooks {
             (Vec::new(), None)
         } else {
+            let resolved = hooks::resolve(&main)?;
             (
                 resolved.commands(hooks::Kind::Remove).to_vec(),
                 resolved.untrusted,
@@ -65,12 +65,12 @@ pub fn run(cli: Cli) -> Result<Output> {
             "snapshot_files": modified + untracked,
             "copied_ignored": ignored.copy,
             "skipped_disposable": ignored.skipped,
-            "hooks": planned,
+            "hooks": {"remove": planned},
             "warnings": warnings,
             "next": "pass --yes to back up and remove",
         });
         if let Some(untrusted) = untrusted {
-            plan["untrusted"] = untrusted;
+            plan["hooks"]["untrusted"] = untrusted;
         }
         return Ok(Output::Json(plan));
     }
