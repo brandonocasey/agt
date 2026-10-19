@@ -8,6 +8,7 @@ mod issue_push;
 mod issue_queue;
 mod issue_read;
 mod matrix;
+mod pr;
 mod ps;
 mod publish;
 mod review_auto_sync;

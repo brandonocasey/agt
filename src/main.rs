@@ -5,6 +5,7 @@ mod core;
 mod forge;
 mod git;
 mod issue;
+mod pr;
 mod review;
 mod secrets;
 mod sessions;

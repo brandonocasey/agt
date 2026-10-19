@@ -894,6 +894,36 @@ specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each fa
 N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
 `pending` or `unclear`.
 
+## PR
+
+`agt pr` is one GitHub/GitLab-neutral command for the PR/MR of the current repository; the forge
+comes from the `origin` remote, and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`) must be installed and logged in. Output is JSON.
+
+```sh
+agt pr view [<n>|<url>] [--branch B]
+agt pr list [--mine] [--branch B] [--state open|merged|all]
+agt pr create --title T [--body B] [--base BRANCH] [--draft]
+agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--ready|--draft]
+agt pr merge <n> --sha HEAD [--method merge|squash|rebase] [--auto]
+agt pr auto-merge off|on <n> [--sha HEAD]
+```
+
+`view` without a number reads the PR/MR of `--branch` or the current branch (an open one first,
+else the newest) and prints `number`, `url`, `title`, `state` (`open`, `merged`, `closed`),
+`draft`, `head_branch`, `base_branch`, `head_sha`, `author`, `labels`, `auto_merge` (`on` or
+`off`) with `auto_merge_method`, `queue` (the merge queue or train state, `null` when not
+queued), `mergeable`, `merge_state` and `conflicts`. `list` prints an array of the same rows
+(newest first, at most 100). `create` fails, printing the existing one, when the branch has an
+open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head starts with `--sha`
+(at least 7 characters), then sends the full head to the forge's own guard (GitHub `sha`, GitLab
+`sha`); `--auto` merges when checks pass (GitHub needs `--method` unless auto-merge was on; GitLab
+cannot rebase). It never deletes the branch.
+
+`auto-merge off` records the method it disables in `$XDG_STATE_HOME/agents/pr/auto-merge.json`
+(keyed by host, repository and number) and reads the state back; `auto-merge on` re-enables it with
+the recorded method at the current head (or `--sha`). A PR/MR in a merge queue or train is refused.
+Failures print `agt: error: ...` and exit 1.
+
 ## Sessions
 
 `agt sessions` reports on Claude Code transcripts (`~/.claude*/projects`)
