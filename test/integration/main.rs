@@ -5,6 +5,7 @@ mod ci;
 mod ci_wait;
 mod cleanup;
 mod commands;
+mod doctor;
 mod issue_push;
 mod issue_queue;
 mod issue_read;

@@ -3,6 +3,7 @@ mod ci;
 mod cleanup;
 mod cli;
 mod core;
+mod doctor;
 mod forge;
 mod git;
 mod issue;

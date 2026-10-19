@@ -289,6 +289,40 @@ impl Cli {
         }
     }
 
+    /// A tool other than gh and glab, such as `git` or `mise`; the `AGT_*` variable `over`
+    /// overrides the program.
+    pub fn other(name: &'static str, over: &str) -> Self {
+        Self {
+            program: tool_program(over, name),
+            name,
+            env: Vec::new(),
+        }
+    }
+
+    /// Whether a read-only command succeeded, with its stdout and stderr; `None` when the tool
+    /// is missing or the deadline passed.
+    pub fn probe(&self, args: &[&str]) -> Option<(bool, String, String)> {
+        if deadline().is_some_and(|(deadline, _)| Instant::now() >= deadline) {
+            return None;
+        }
+        let child = grouped(
+            Command::new(&self.program)
+                .args(args)
+                .envs(self.env.iter().map(|(key, value)| (key, value))),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+        let output = finish(child, self.name).ok()?;
+        Some((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+
     /// The trimmed output of a read-only command, such as `glab config get host`; `None` when
     /// it fails or the tool is missing, which callers read as "not configured".
     pub fn text(&self, args: &[&str]) -> Option<String> {

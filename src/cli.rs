@@ -5,6 +5,7 @@ use crate::ci;
 use crate::cleanup;
 use crate::core::error::Result;
 use crate::core::output::Output;
+use crate::doctor;
 use crate::issue;
 use crate::pr;
 use crate::review;
@@ -46,6 +47,8 @@ enum Command {
     Worktree(worktree::Cli),
     /// Scan for leaked credentials without printing them.
     Secrets(secrets::Cli),
+    /// Check that this host and repository are set up for agt. Read-only; exit 0 ok, 1 a check failed, 2 warnings only.
+    Doctor(doctor::Cli),
     /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
     Wait(wait::Cli),
 }
@@ -63,6 +66,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Ps(args) => sessions::live::run(args),
         Command::Worktree(args) => worktree::run(args),
         Command::Secrets(args) => secrets::run(args),
+        Command::Doctor(args) => doctor::run(args),
         Command::Wait(args) => wait::run(args),
     }
 }
