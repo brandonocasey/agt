@@ -177,6 +177,25 @@ fn a_locked_remote_tracking_branch_does_not_stop_the_update() {
 }
 
 #[test]
+fn a_local_default_in_a_deleted_worktree_names_the_prune() {
+    let (env, _, first, _) = behind_origin();
+    git(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);
+    let gone = env.path("gone");
+    git(
+        &env,
+        &env.repo,
+        &["worktree", "add", "-q", gone.to_str().unwrap(), "main"],
+    );
+    fs::remove_dir_all(&gone).unwrap();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "skipped");
+    let reason = value["local_default"]["reason"].as_str().unwrap();
+    assert!(reason.contains("no longer exists"), "{reason}");
+    assert!(reason.contains("git worktree prune"), "{reason}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+}
+
+#[test]
 fn a_local_default_checked_out_nowhere_moves_as_a_ref() {
     let (env, _, _, tip) = behind_origin();
     git(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);

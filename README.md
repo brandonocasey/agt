@@ -1026,15 +1026,17 @@ the local default branch to the fetched default of its upstream (`branch.<name>.
 `.merge`, else `origin`'s branch of the same name), and `local_default` reports it: `branch`,
 `from`, `upstream`, `to`, `behind` or `ahead`, and `status`. The upstream's remote-tracking
 branch (`refs/remotes/<remote>/<branch>`), when it exists and is an ancestor of the fetched
-commit, moves up to it as a fetch would, so `git status` never counts the new commits as
-unpushed. `updated` means the local default moved: by
+commit, moves up to it as a fetch would, so `git status` does not count the new commits as
+unpushed; this is best effort, and while another git process holds that ref's lock it stays.
+`updated` means the local default moved: by
 `git merge --ff-only --no-overwrite-ignore --no-autostash` in the worktree that has it checked
 out (`path`), which keeps local changes the merge does not touch and never stashes, else by
 `git fetch . <commit>:refs/heads/<name>`, which git refuses for a branch being rebased or
 bisected. `current` means it already matched, and `ahead` that it holds commits its upstream
 lacks; neither moves it. `skipped` leaves it where it was, with the `reason`: its upstream is
-not a fetched remote default, it diverged, a submodule pointer changes in a checked-out branch
-(a merge would leave the submodule at its old commit), or git refused, as it does when the merge
+not a fetched remote default, it diverged, the worktree that has it checked out no longer
+exists (`git worktree prune` drops that entry), a submodule pointer changes in a checked-out
+branch (a merge would leave the submodule at its old commit), or git refused, as it does when the merge
 would overwrite a local change or an ignored file. A refusal also gives `retry`, the command to
 run once that is resolved. Every `skipped` adds `local <name> not updated: <reason>` to
 `warnings`, which is otherwise empty; it never fails `create`. Without remotes or a local default

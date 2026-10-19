@@ -97,6 +97,12 @@ fn update(
         return run(repo, &fetch, report);
     };
     report["path"] = json!(holder.path);
+    if !holder.path.exists() {
+        return Ok(Some(format!(
+            "it is checked out in {}, which no longer exists; `git worktree prune` drops that entry",
+            holder.path.display()
+        )));
+    }
     // A merge leaves a moved submodule checked out at its old commit, so the checkout turns dirty.
     let raw = repo.git(&["diff", "--raw", "--ignore-submodules=none", from, to])?;
     let gitlink = raw.lines().any(|line| {
