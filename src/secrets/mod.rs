@@ -93,7 +93,8 @@ fn scan(args: &Scan) -> Result<BTreeSet<(String, usize, &'static str)>> {
             "--no-abbrev",
             "--no-renames",
             "-z",
-            "--diff-filter=ACMR",
+            // `T` keeps a symlink replaced by a regular file; the mode check skips the reverse.
+            "--diff-filter=ACMRT",
         ]
     } else {
         vec!["ls-files", "-co", "--exclude-standard", "-z"]

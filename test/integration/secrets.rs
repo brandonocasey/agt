@@ -125,3 +125,20 @@ fn symlinks_are_skipped_in_both_modes() {
         assert_eq!(scan(&env, args).status.code(), Some(0), "{args:?}");
     }
 }
+
+#[test]
+fn a_symlink_replaced_by_a_file_is_scanned_when_staged() {
+    let env = Env::new();
+    fs::write(env.repo.join("example.json"), "{}\n").unwrap();
+    std::os::unix::fs::symlink("example.json", env.repo.join("config.json")).unwrap();
+    env.commit_all("link");
+    fs::remove_file(env.repo.join("config.json")).unwrap();
+    fs::write(env.repo.join("config.json"), format!("{}\n", secret())).unwrap();
+    env.git(&["add", "config.json"]);
+    let output = scan(&env, &["--staged"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "config.json:1 github-token\n"
+    );
+}
