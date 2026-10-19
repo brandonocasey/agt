@@ -65,7 +65,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     // hooks never ran (a rerun would find it reused).
     let has_hooks = checked_out.is_none() && !cli.no_hooks && {
         let main = main_checkout(&repo)?.path;
-        !hooks::configured(&main, hooks::Kind::Create)?.is_empty()
+        !hooks::resolve(&main)?.is_empty(hooks::Kind::Create)
     };
     let mut value = match checked_out {
         Some(entry) => {

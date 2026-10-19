@@ -52,10 +52,7 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
         .canonicalize()
         .map_err(ctx(format!("resolve {}", dir.display())))?;
     let key = path.to_string_lossy().into_owned();
-    let folder = Store::open(Namespace::Tasks)?
-        .agents_dir()
-        .join("worktrees");
-    fs::create_dir_all(&folder).map_err(ctx(format!("create {}", folder.display())))?;
+    let folder = folder()?;
     let _lock = lock(&folder.join("ports.lock"))?;
     let file = folder.join("ports.json");
     let mut ports = load(&file)?;
@@ -77,6 +74,15 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
     Ok((path, port))
 }
 
+/// `$XDG_STATE_HOME/agents/worktrees`, created when missing.
+pub(super) fn folder() -> Result<PathBuf> {
+    let folder = Store::open(Namespace::Tasks)?
+        .agents_dir()
+        .join("worktrees");
+    fs::create_dir_all(&folder).map_err(ctx(format!("create {}", folder.display())))?;
+    Ok(folder)
+}
+
 /// The port already recorded for the worktree at `dir`; nothing is recorded or created.
 pub(super) fn recorded(dir: &Path) -> Result<Option<u16>> {
     let path = dir
@@ -89,7 +95,7 @@ pub(super) fn recorded(dir: &Path) -> Result<Option<u16>> {
     Ok(load(&file)?.get(path.to_string_lossy().as_ref()).copied())
 }
 
-fn lock(path: &Path) -> Result<File> {
+pub(super) fn lock(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)

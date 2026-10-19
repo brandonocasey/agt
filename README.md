@@ -1062,6 +1062,8 @@ agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
 agt worktree remove PATH [--yes] [--no-hooks]  # without --yes: print the plan, change nothing
 agt cleanup --only worktrees [--all-repos] [--yes] [--offline] [--dirty] [--recent] [--worktree NAME-OR-PATH]...  # remove landed worktrees, delete landed branches
+agt worktree trust [PATH] [--remove]        # trust (or forget) the repository's [worktree.hooks]
+agt worktree trust --list                   # trusted files and whether each still matches
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
 agt worktree backups                        # list backups
 agt worktree backups show ID
@@ -1077,6 +1079,8 @@ remove = ["docker compose down"]  # before `remove --yes` or `cleanup --yes` bac
 ```
 
 Each entry runs as `sh -c <entry>` in the worktree root, one after another, stopping at the first failure; stdin is empty and the output goes to a log under `$XDG_CACHE_HOME/agents/output/`. The environment has `AGT_HOOK` (`create` or `remove`), `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` (empty when detached) and, only when a port is already recorded for the worktree (`create --port` records one first), `PORT`. `create` reports them under `hooks` (`create`: the steps with `command`, `exit`, `ok`, `duration_ms`, `log`; `ok`) and exits 1 when one fails; `--no-hooks` skips them. A failing `remove` hook is an error: nothing is backed up or removed. The `remove` plan (no `--yes`) lists the commands under `hooks`; `remove --no-hooks` skips them and `cleanup` always runs them.
+
+Repository hooks are gated like `mise trust`: the global hooks always run, but `[worktree.hooks]` in a repository's `.config/agt.toml` run only while that file is trusted. `agt worktree trust [PATH]` (PATH is any checkout, default the current directory) records the main checkout's file with the SHA-256 of its exact bytes in `$XDG_STATE_HOME/agents/worktrees/trust.json` and prints `file`, `sha256`, and the `create` and `remove` commands it trusts; it fails when the file is missing or has no `[worktree.hooks]`. Any edit untrusts the file. `--remove` forgets it; `--list` prints every trusted file with its hash and `current` (`true`, `false` or `missing`). Trust covers only hooks; other repository keys apply untrusted. An untrusted file's hooks are skipped (the global hooks alone apply, per key) without failing, and the result reports `hooks.untrusted` with `file`, the skipped `create` and `remove` commands, and `next` (the trust command): on `create` (also the background child's report), on `remove` (the plan reports it as a top-level `untrusted`) and on `cleanup` rows.
 
 `agt worktree prepare --hooks [PATH]` runs the install steps and then the create hooks in the foreground (a failed or timed-out create hook cannot be rerun by `create`, which reuses the worktree); the report is the prepare report plus `hooks`, and it exits 1 when a step failed. `PORT` is set only from a recorded port; an inherited `PORT` is removed from every step. The hook config is validated before `create` makes the worktree. A second `create --background` while a setup is running starts no child and reports the running one with `background.already_running: true`.
 

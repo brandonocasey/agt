@@ -22,6 +22,7 @@ mod restore;
 pub(crate) mod roots;
 mod setup;
 mod snapshot;
+mod trust;
 
 use clap::{Args, Subcommand};
 use serde_json::Value;
@@ -49,6 +50,8 @@ enum Command {
     Remove(remove::Cli),
     /// Recreate a removed worktree and its uncommitted files from a backup.
     Restore(restore::Cli),
+    /// Trust, or stop trusting, a repository's `[worktree.hooks]`; `--list` shows what is trusted.
+    Trust(trust::Cli),
     /// List, show or delete worktree backups.
     Backups(backup::Cli),
 }
@@ -61,6 +64,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::List(args) => list::run(args),
         Command::Remove(args) => remove::run(args),
         Command::Restore(args) => restore::run(args),
+        Command::Trust(args) => trust::run(args),
         Command::Backups(args) => backup::run(args),
     }
 }
