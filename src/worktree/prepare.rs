@@ -30,8 +30,8 @@ pub struct Cli {
     /// 1 when it failed and 3 when `--max` passes first.
     #[arg(long, conflicts_with = "clone_deps")]
     wait: bool,
-    /// After the install, run the `[worktree.hooks] create` commands (to rerun hooks that failed).
-    #[arg(long, conflicts_with = "wait")]
+    /// Run only the `[worktree.hooks] create` commands, no install steps (to rerun hooks that failed).
+    #[arg(long, conflicts_with_all = ["wait", "clone_deps"])]
     hooks: bool,
     /// Give up waiting after this many seconds.
     #[arg(long, default_value_t = 270, requires = "wait", value_parser = clap::value_parser!(u64).range(1..))]
@@ -63,13 +63,12 @@ pub fn run(cli: Cli) -> Result<Output> {
             .collect();
         return setup::child(&dir, &steps);
     }
-    let (mut value, mut ok) = prepare(&dir, cli.clone_deps)?;
     if cli.hooks {
         let root = toplevel(&dir)?;
-        let (report, passed) = super::hooks::run(&root, super::hooks::Kind::Create)?;
-        value["hooks"] = report;
-        ok &= passed;
+        let (report, ok) = super::hooks::run(&root, super::hooks::Kind::Create)?;
+        return emit(json!({"path": root, "hooks": report, "ok": ok}), ok);
     }
+    let (value, ok) = prepare(&dir, cli.clone_deps)?;
     emit(value, ok)
 }
 
