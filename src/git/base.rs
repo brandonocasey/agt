@@ -27,8 +27,9 @@ pub fn default_names(repo: &Repo) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Every remote's live default branch, fetched, then the local default branch.
-pub fn candidates(repo: &Repo) -> Result<Vec<Candidate>> {
+/// Every remote's live default branch, fetched, then the local default branch. `flag` names the
+/// option the caller offers to name the base itself, for the error when none is found.
+pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
     for remote in repo.git(&["remote"])?.lines() {
         let named = |error: Error| Error(format!("remote {remote}: {error}"));
@@ -67,7 +68,7 @@ pub fn candidates(repo: &Repo) -> Result<Vec<Candidate>> {
         }
     }
     if found.is_empty() {
-        return fail("no default branch found; pass --base");
+        return fail(format!("no default branch found; pass {flag}"));
     }
     Ok(found)
 }

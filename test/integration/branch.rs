@@ -245,3 +245,23 @@ fn landable_lists_conflicting_paths_against_an_explicit_target() {
     assert_eq!(report["conflicts"], json!(["base.txt"]));
     assert_eq!(report["already_in_target"], json!([]));
 }
+
+#[test]
+fn landable_without_a_default_branch_names_its_own_flag() {
+    let env = Env::new();
+    env.git(&["symbolic-ref", "HEAD", "refs/heads/trunk"]);
+    env.write("a.txt", "a");
+    env.commit_all("a");
+    let output = env
+        .command(BIN, &env.repo)
+        .args(["branch", "landable"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("no default branch found; pass --target"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--base"), "{stderr}");
+}

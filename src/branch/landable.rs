@@ -12,7 +12,7 @@ pub fn run(repo: &Repo, branch: &str, target: Option<&str>) -> Result<(Value, u8
     let (name, base) = match target {
         Some(target) => (target.to_owned(), repo.commit(target)?),
         None => {
-            let found = candidates(repo)?;
+            let found = candidates(repo, "--target")?;
             let (chosen, _) = choose(repo, &found)?;
             let chosen = &found[chosen];
             let name = match &chosen.remote {

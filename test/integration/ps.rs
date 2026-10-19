@@ -605,11 +605,7 @@ fn watch_reports_a_new_waiting_stretch_behind_a_blocked_one() {
     let script = env.path("restretch.sh");
     executable(
         &script,
-        &format!(
-            "#!/bin/sh\ncp '{}' '{}'\n",
-            again.display(),
-            live.display()
-        ),
+        &format!("#!/bin/sh\ncp '{}' '{}'\n", again.display(), live.display()),
     );
     // Polls at +0, +30, +60, +90, +120: the new stretch is 20s old at +30 and 80s old at +90.
     let events = watch(&env, now, "5", &["--exec", &script.to_string_lossy()]);

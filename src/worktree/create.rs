@@ -149,7 +149,7 @@ fn add_new(
     let (commit, mut info, found) = match base {
         Some(base) => (repo.commit(base)?, json!({"ref": base}), Vec::new()),
         None => {
-            let found = candidates(repo)?;
+            let found = candidates(repo, "--base")?;
             let (chosen, diverged) = choose(repo, &found)?;
             let listed: Vec<Value> = found
                 .iter()
