@@ -301,25 +301,33 @@ fn remove_worktree(
         real.display()
     );
     if !cli.yes {
-        report.remove.push(json!({
+        let mut row = json!({
             "path": real,
             "branch": subject.branch,
             "verdict": subject.finding.verdict.as_str(),
             "evidence": subject.finding.evidence,
             "action": action,
-        }));
+        });
+        if let Some(untrusted) = super::hooks::resolve(main)?.untrusted {
+            row["hooks"] = json!({"untrusted": untrusted});
+        }
+        report.remove.push(row);
         return Ok(true);
     }
     match removal(main, &real, entry, true) {
         Ok(done) => {
-            report.remove.push(json!({
+            let mut row = json!({
                 "path": real,
                 "branch": subject.branch,
                 "id": done["id"],
                 "ref": done["ref"],
                 "verdict": subject.finding.verdict.as_str(),
                 "evidence": subject.finding.evidence,
-            }));
+            });
+            if done.get("hooks").is_some() {
+                row["hooks"] = done["hooks"].clone();
+            }
+            report.remove.push(row);
             Ok(true)
         }
         Err(error) => {

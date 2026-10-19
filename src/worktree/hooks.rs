@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::info::main_checkout;
-use super::{port, prepare};
+use super::{port, prepare, trust};
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::git::Repo;
@@ -26,19 +26,62 @@ impl Kind {
     }
 }
 
-/// The configured commands of `kind` for the repository `main` belongs to.
-pub(super) fn configured(main: &Path, kind: Kind) -> Result<Vec<String>> {
+/// The hooks that apply to a repository: the global ones, plus the repository file's when it
+/// is trusted. `untrusted` reports a repository file whose hooks were left out.
+pub(super) struct Resolved {
+    create: Vec<String>,
+    remove: Vec<String>,
+    pub(super) untrusted: Option<Value>,
+}
+
+impl Resolved {
+    pub(super) fn commands(&self, kind: Kind) -> &[String] {
+        match kind {
+            Kind::Create => &self.create,
+            Kind::Remove => &self.remove,
+        }
+    }
+
+    /// Whether `create` has anything to run or to report.
+    pub(super) fn is_empty(&self, kind: Kind) -> bool {
+        self.commands(kind).is_empty() && self.untrusted.is_none()
+    }
+}
+
+/// The hooks of the repository `main` belongs to.
+pub(super) fn resolve(main: &Path) -> Result<Resolved> {
     let repo = Repo::at(main);
     // A bare main checkout has no `.config/agt.toml`, so only the global file applies.
-    let config = if repo.git(&["rev-parse", "--is-bare-repository"])? == "true" {
-        Config::load()?
-    } else {
-        Config::load_for_repo(&repo)?
-    };
-    let hooks = config.worktree.hooks;
-    Ok(match kind {
-        Kind::Create => hooks.create,
-        Kind::Remove => hooks.remove,
+    if repo.git(&["rev-parse", "--is-bare-repository"])? == "true" {
+        let hooks = Config::load()?.worktree.hooks;
+        return Ok(Resolved {
+            create: hooks.create,
+            remove: hooks.remove,
+            untrusted: None,
+        });
+    }
+    let merged = Config::load_for_repo(&repo)?.worktree.hooks;
+    let file = trust::config_file(main);
+    let bytes = std::fs::read(&file).unwrap_or_default();
+    if !trust::has_hooks(&bytes) || trust::is_trusted(&file, &bytes)? {
+        return Ok(Resolved {
+            create: merged.create,
+            remove: merged.remove,
+            untrusted: None,
+        });
+    }
+    let own = Config::load_from(&file)?.worktree.hooks;
+    let global = Config::load()?.worktree.hooks;
+    let shown = file.canonicalize().unwrap_or(file);
+    Ok(Resolved {
+        create: global.create,
+        remove: global.remove,
+        untrusted: Some(json!({
+            "file": shown,
+            "create": own.create,
+            "remove": own.remove,
+            "next": format!("agt worktree trust {}", main.display()),
+        })),
     })
 }
 
@@ -46,7 +89,8 @@ pub(super) fn configured(main: &Path, kind: Kind) -> Result<Vec<String>> {
 /// (keyed by the kind) and the flag says every step succeeded.
 pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
     let main = main_checkout(&Repo::at(root))?.path;
-    let commands = configured(&main, kind)?;
+    let resolved = resolve(&main)?;
+    let commands = resolved.commands(kind);
     let branch = Repo::at(root)
         .git_opt(&["symbolic-ref", "--quiet", "--short", "HEAD"])?
         .unwrap_or_default();
@@ -71,5 +115,9 @@ pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
         }
     }
     let ok = steps.iter().all(|step| step["ok"] == true);
-    Ok((json!({kind.name(): steps, "ok": ok}), ok))
+    let mut report = json!({kind.name(): steps, "ok": ok});
+    if let Some(untrusted) = resolved.untrusted {
+        report["untrusted"] = untrusted;
+    }
+    Ok((report, ok))
 }

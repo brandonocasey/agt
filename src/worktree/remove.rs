@@ -47,13 +47,17 @@ pub fn run(cli: Cli) -> Result<Output> {
 
     let (modified, untracked) = info::dirty(&path)?;
     if !cli.yes {
-        let planned = if cli.no_hooks {
-            Vec::new()
+        let resolved = hooks::resolve(&main)?;
+        let (planned, untrusted) = if cli.no_hooks {
+            (Vec::new(), None)
         } else {
-            hooks::configured(&main, hooks::Kind::Remove)?
+            (
+                resolved.commands(hooks::Kind::Remove).to_vec(),
+                resolved.untrusted,
+            )
         };
         let ignored = info::ignored(&path)?;
-        return Ok(Output::Json(json!({
+        let mut plan = json!({
             "plan": true,
             "path": path,
             "branch": entry.branch,
@@ -64,7 +68,11 @@ pub fn run(cli: Cli) -> Result<Output> {
             "hooks": planned,
             "warnings": warnings,
             "next": "pass --yes to back up and remove",
-        })));
+        });
+        if let Some(untrusted) = untrusted {
+            plan["untrusted"] = untrusted;
+        }
+        return Ok(Output::Json(plan));
     }
 
     let mut done = removal(&main, &path, entry, !cli.no_hooks)?;
@@ -76,6 +84,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 /// caller has checked that it may go. A failing hook is an error before anything is touched.
 pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) -> Result<Value> {
     gate::check(path, main)?;
+    let mut hooks_report = None;
     if run_hooks {
         let (report, ok) = hooks::run(path, hooks::Kind::Remove)?;
         if !ok {
@@ -90,6 +99,7 @@ pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) 
                 failed["log"].as_str().unwrap_or_default()
             ));
         }
+        hooks_report = Some(report).filter(|report| report.get("untrusted").is_some());
     }
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
@@ -106,7 +116,7 @@ pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) 
     };
     let local = branches("refs/heads")?;
     let remote = branches("refs/remotes")?;
-    Ok(json!({
+    let mut done = json!({
         "removed": path,
         "id": taken.record.id,
         "ref": taken.record.reference,
@@ -117,7 +127,11 @@ pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) 
         "head_on_remote_branch": !remote.is_empty(),
         "local_branches": local,
         "remote_branches": remote,
-    }))
+    });
+    if let Some(report) = hooks_report {
+        done["hooks"] = report;
+    }
+    Ok(done)
 }
 
 /// The entry for `path`, or the reason it must not be removed.
