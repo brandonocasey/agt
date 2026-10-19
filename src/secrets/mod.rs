@@ -62,19 +62,21 @@ fn report(args: &Cli, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<
 fn scan(args: &Cli) -> Result<BTreeSet<(String, usize, &'static str)>> {
     let repo = Repo::discover()?;
     let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
-    // A missing path would match nothing and report clean, which a scanner MUST NOT do.
-    if let Some(missing) = args
-        .paths
-        .iter()
-        .find(|path| cwd.join(path).symlink_metadata().is_err())
-    {
-        return fail(format!("no such path: {}", missing.display()));
-    }
     let paths: Vec<String> = args
         .paths
         .iter()
         .map(|path| cwd.join(path).to_string_lossy().into_owned())
         .collect();
+    // A missing path would match nothing and report clean, which a scanner MUST NOT do. A
+    // staged scan also accepts a path that is only in the index, such as a staged file since
+    // deleted from disk.
+    for (path, full) in args.paths.iter().zip(&paths) {
+        let found = Path::new(full).symlink_metadata().is_ok()
+            || (args.staged && repo.succeeds(&["ls-files", "--error-unmatch", "--", full])?);
+        if !found {
+            return fail(format!("no such path: {}", path.display()));
+        }
+    }
     let mut git: Vec<&str> = if args.staged {
         vec![
             "diff",

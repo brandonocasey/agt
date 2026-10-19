@@ -82,6 +82,11 @@ fn a_missing_path_fails_instead_of_reporting_clean() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("no such path: scan"), "{stderr}");
     }
+    // Staged but deleted from disk: the index still holds the blob that would be committed.
+    fs::remove_file(env.repo.join("a.txt")).unwrap();
+    let output = scan(&env, &["--staged", "a.txt"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("a.txt:1 github-token"));
 }
 
 #[test]
