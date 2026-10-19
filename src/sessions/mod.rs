@@ -186,6 +186,16 @@ enum Report {
 }
 
 impl Report {
+    fn needs(&self, needs: &mut source::Needs) {
+        match self {
+            Self::Cost(..) | Self::Agents(_) => needs.calls = true,
+            Self::Tools(_) => needs.tools = true,
+            Self::CacheGaps(_) => needs.gaps = true,
+            Self::Failures(_) => needs.failures = true,
+            Self::Friction(..) => needs.friction = true,
+        }
+    }
+
     fn feed(&mut self, transcript: &source::Loaded) {
         match self {
             Self::Cost(report, _) => report.feed(transcript),
@@ -210,7 +220,9 @@ impl Report {
 }
 
 fn single(scope: Scope, mut report: Report) -> Result<String> {
-    for transcript in source::load(&scope) {
+    let mut needs = source::Needs::default();
+    report.needs(&mut needs);
+    for transcript in source::load(&scope, needs) {
         report.feed(&transcript);
     }
     report.render(&scope)
@@ -386,7 +398,11 @@ pub fn run(cli: Cli) -> Result<Output> {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            for transcript in source::load(&scope) {
+            let mut needs = source::Needs::default();
+            for (_, report) in &reports {
+                report.needs(&mut needs);
+            }
+            for transcript in source::load(&scope, needs) {
                 for (_, report) in &mut reports {
                     report.feed(&transcript);
                 }
