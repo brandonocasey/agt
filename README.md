@@ -1056,6 +1056,7 @@ Output is JSON.
 ```sh
 agt worktree create BRANCH [--base C] [--path P] [--prepare] [--port] [--no-hooks] [--background]
 agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lockfiles
+agt worktree prepare --hooks [PATH] [--clone-deps]  # install, then rerun the create hooks (after a failed one)
 agt worktree prepare --wait [PATH] [--max SECS]  # wait for the background setup `create --background` started
 agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
@@ -1076,6 +1077,8 @@ remove = ["docker compose down"]  # before `remove --yes` or `cleanup --yes` bac
 ```
 
 Each entry runs as `sh -c <entry>` in the worktree root, one after another, stopping at the first failure; stdin is empty and the output goes to a log under `$XDG_CACHE_HOME/agents/output/`. The environment has `AGT_HOOK` (`create` or `remove`), `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` (empty when detached) and, only when a port is already recorded for the worktree (`create --port` records one first), `PORT`. `create` reports them under `hooks` (`create`: the steps with `command`, `exit`, `ok`, `duration_ms`, `log`; `ok`) and exits 1 when one fails; `--no-hooks` skips them. A failing `remove` hook is an error: nothing is backed up or removed. The `remove` plan (no `--yes`) lists the commands under `hooks`; `remove --no-hooks` skips them and `cleanup` always runs them.
+
+`agt worktree prepare --hooks [PATH]` runs the install steps and then the create hooks in the foreground (a failed or timed-out create hook cannot be rerun by `create`, which reuses the worktree); the report is the prepare report plus `hooks`, and it exits 1 when a step failed. `PORT` is set only from a recorded port; an inherited `PORT` is removed from every step. The hook config is validated before `create` makes the worktree. A second `create --background` while a setup is running starts no child and reports the running one with `background.already_running: true`.
 
 `create --background` returns at once: the port is still recorded first, but `--prepare` and the create hooks run in a detached process, and the output has `background` with its `pid`, the `status` file and the `log` (`background.started: false` when there is nothing to run). The status file `agt-setup.json` is in the worktree's own git directory, so it goes with the worktree. `agt worktree prepare --wait [PATH] [--max SECS]` (default 270) waits until the setup is done, prints the stored report and exits 1 when it failed, or exits 3 when `--max` passes first. It is an error when the worktree has no background setup or the setup process died without finishing. `--wait` cannot be combined with `--clone-deps`.
 

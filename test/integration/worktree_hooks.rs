@@ -13,6 +13,8 @@ const BIN: &str = env!("CARGO_BIN_EXE_agt");
 
 fn agt(env: &Env, dir: &Path, args: &[&str]) -> Output {
     env.command(BIN, dir)
+        // An inherited PORT must never reach a hook unless one is recorded.
+        .env("PORT", "54321")
         .arg("worktree")
         .args(args)
         .output()
@@ -74,7 +76,10 @@ fn create_hooks_run_in_the_worktree_with_the_hook_environment() {
 #[test]
 fn a_recorded_port_reaches_the_hook_as_port() {
     let env = repo();
-    repo_config(&env, "[worktree.hooks]\ncreate = [\"echo $PORT > port.txt\"]\n");
+    repo_config(
+        &env,
+        "[worktree.hooks]\ncreate = [\"echo $PORT > port.txt\"]\n",
+    );
     let value = json(&agt(&env, &env.repo, &["create", "p", "--port"]));
     let seen = fs::read_to_string(env.repo.join(".worktrees/p/port.txt")).unwrap();
     assert_eq!(seen.trim(), value["port"]["port"].to_string());
@@ -145,8 +150,16 @@ fn remove_hooks_run_before_the_removal_and_the_plan_lists_them() {
     let plan = json(&agt(&env, &env.repo, &["remove", tree.to_str().unwrap()]));
     assert_eq!(plan["hooks"].as_array().unwrap().len(), 1);
     assert!(!marker.exists());
-    let output = agt(&env, &env.repo, &["remove", tree.to_str().unwrap(), "--yes"]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(fs::read_to_string(&marker).unwrap().trim(), "remove");
     assert!(!tree.exists());
 }
@@ -157,7 +170,11 @@ fn a_failing_remove_hook_blocks_the_removal_and_no_hooks_skips_it() {
     repo_config(&env, "[worktree.hooks]\nremove = [\"exit 7\"]\n");
     json(&agt(&env, &env.repo, &["create", "keep"]));
     let tree = env.repo.join(".worktrees/keep");
-    let output = agt(&env, &env.repo, &["remove", tree.to_str().unwrap(), "--yes"]);
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("exit 7"), "{error}");
@@ -189,7 +206,11 @@ fn background_returns_before_a_slow_hook_and_wait_reports_it() {
     let status = value["background"]["status"].as_str().unwrap();
     assert!(Path::new(status).starts_with(env.repo.join(".git")));
     let waited = agt(&env, &tree, &["prepare", "--wait"]);
-    assert!(waited.status.success(), "{}", String::from_utf8_lossy(&waited.stderr));
+    assert!(
+        waited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
     let report = json(&waited);
     assert_eq!(report["state"], "done");
     assert_eq!(report["hooks"]["create"][0]["ok"], true);
@@ -222,4 +243,64 @@ fn wait_gives_up_after_max_with_exit_3() {
     let tree = env.repo.join(".worktrees/slow");
     let output = agt(&env, &tree, &["prepare", "--wait", "--max", "1"]);
     assert_eq!(output.status.code(), Some(3));
+}
+
+#[test]
+fn an_inherited_port_is_not_passed_when_none_is_recorded() {
+    let env = repo();
+    repo_config(
+        &env,
+        "[worktree.hooks]\ncreate = [\"echo ${PORT:-none} > port.txt\"]\n",
+    );
+    json(&agt(&env, &env.repo, &["create", "np"]));
+    let seen = fs::read_to_string(env.repo.join(".worktrees/np/port.txt")).unwrap();
+    assert_eq!(seen.trim(), "none");
+}
+
+#[test]
+fn an_invalid_config_fails_before_the_worktree_is_created() {
+    let env = repo();
+    repo_config(&env, "[worktree.hooks]\ncreate = 5\n");
+    let output = agt(&env, &env.repo, &["create", "inv"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!env.repo.join(".worktrees/inv").exists());
+    let branches = env.git(&["-C", env.repo.to_str().unwrap(), "branch", "--list", "inv"]);
+    assert!(branches.trim().is_empty(), "{branches}");
+}
+
+#[test]
+fn a_second_background_create_reports_the_running_setup() {
+    let env = repo();
+    repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 3\"]\n");
+    let first = json(&agt(&env, &env.repo, &["create", "twice", "--background"]));
+    let again = json(&agt(
+        &env,
+        &env.repo,
+        &["create", "twice", "--background", "--prepare"],
+    ));
+    assert_eq!(again["background"]["already_running"], true);
+    assert_eq!(again["background"]["log"], first["background"]["log"]);
+    assert_eq!(again["background"]["status"], first["background"]["status"]);
+}
+
+#[test]
+fn prepare_hooks_reruns_a_failed_create_hook() {
+    let env = repo();
+    repo_config(
+        &env,
+        "[worktree.hooks]\ncreate = [\"test -f fixed\", \"touch ran\"]\n",
+    );
+    let failed = agt(&env, &env.repo, &["create", "re"]);
+    assert_eq!(failed.status.code(), Some(1));
+    let tree = env.repo.join(".worktrees/re");
+    let still = agt(&env, &tree, &["prepare", "--hooks"]);
+    assert_eq!(still.status.code(), Some(1));
+    assert_eq!(json(&still)["hooks"]["ok"], false);
+    fs::write(tree.join("fixed"), "").unwrap();
+    let output = agt(&env, &tree, &["prepare", "--hooks"]);
+    assert!(output.status.success());
+    let value = json(&output);
+    assert_eq!(value["hooks"]["ok"], true);
+    assert!(value["steps"].is_array());
+    assert!(tree.join("ran").exists());
 }

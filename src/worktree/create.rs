@@ -61,6 +61,12 @@ pub fn run(cli: Cli) -> Result<Output> {
         .into_iter()
         .find(|entry| entry.branch.as_deref() == Some(branch));
     let mut fetched = Vec::new();
+    // Validated before the worktree exists: an invalid config must not leave one whose create
+    // hooks never ran (a rerun would find it reused).
+    let has_hooks = checked_out.is_none() && !cli.no_hooks && {
+        let main = main_checkout(&repo)?.path;
+        !hooks::configured(&main, hooks::Kind::Create)?.is_empty()
+    };
     let mut value = match checked_out {
         Some(entry) => {
             let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
@@ -95,10 +101,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let dir = PathBuf::from(value["path"].as_str().unwrap_or_default());
     let mut ok = true;
     let fresh = value["reused"] == false;
-    let run_hooks = fresh && !cli.no_hooks && {
-        let main = main_checkout(&repo)?.path;
-        !hooks::configured(&main, hooks::Kind::Create)?.is_empty()
-    };
+    let run_hooks = fresh && has_hooks;
     if cli.background {
         // The port is recorded first so the hooks see it as PORT.
         if cli.port {
