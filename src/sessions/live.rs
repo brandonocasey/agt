@@ -1,7 +1,10 @@
 //! `agt ps`: the Claude Code sessions and Codex processes running now.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use clap::Args;
 use serde_json::{Value, json};
@@ -11,7 +14,7 @@ use super::source::home;
 use super::spend::session_cost;
 use crate::core::agents::{self, CodexProc};
 use crate::core::clock;
-use crate::core::error::Result;
+use crate::core::error::{Error, Result, ctx};
 use crate::core::output::Output;
 use crate::core::transcripts::{codex_sessions, session_files};
 use crate::git::Repo;
@@ -21,38 +24,52 @@ use crate::git::Repo;
 /// Status is as Claude Code wrote it (`busy`, `idle`, `shell` or `waiting`). A Codex process
 /// gets a session only when a rollout in `~/.codex/sessions` names its directory and
 /// changed after it started; otherwise `note` says why not. Cost is USD so far, `null` when
-/// the price file lists no model of the session.
+/// the price file lists no model of the session. A matched Codex session is `busy` while its
+/// rollout's last `task_started` has no later `task_complete` or `turn_aborted`, else `idle`.
+///
+/// `--watch` polls forever and prints one JSON line per event: `blocked` (a Claude Code session
+/// has been `waiting` for `--blocked-after` seconds; once per waiting stretch), `cleared` (a
+/// blocked session left `waiting`) and `ended` (a session's process is gone). `--notify` posts a
+/// desktop notification for each `blocked` event. `--exec PROGRAM [-- ARGS...]` runs the
+/// program (no shell) per event with the event JSON on stdin and `AGT_PS_EVENT`, `AGT_PS_PID`,
+/// `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR` and `AGT_PS_STATUS_SECS`
+/// in its environment.
 #[derive(Args)]
 pub struct Cli {
     /// Print rows as JSON.
     #[arg(long)]
     json: bool,
+    /// Print an event line when a session is blocked, unblocked or ended, until interrupted.
+    #[arg(long, conflicts_with = "json")]
+    watch: bool,
+    /// Seconds a session must have been waiting before it is blocked.
+    #[arg(long, default_value_t = 60, requires = "watch")]
+    blocked_after: i64,
+    /// Seconds between polls.
+    #[arg(long, default_value_t = 5, requires = "watch")]
+    interval: u64,
+    /// Post a desktop notification for each blocked session.
+    #[arg(long, requires = "watch")]
+    notify: bool,
+    /// Run this program for each event.
+    #[arg(long, requires = "watch")]
+    exec: Option<String>,
+    /// Arguments for the `--exec` program.
+    #[arg(last = true, requires = "exec")]
+    exec_args: Vec<String>,
+    /// Stop after this many polls.
+    #[arg(long, hide = true, requires = "watch")]
+    max_polls: Option<u64>,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let now = clock::now_secs()?;
-    let mut rows: Vec<Value> = Vec::new();
-    let mut warned = false;
-    for live in agents::live() {
-        let record = &live.record;
-        let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
-        let since = record.get("statusUpdatedAt").and_then(Value::as_i64);
-        let mut row = json!({
-            "harness": "claude",
-            "pid": live.pid,
-            "name": text("name"),
-            "kind": text("kind"),
-            "status": text("status"),
-            "status_secs": since.map(|millis| (now - millis / 1000).max(0)),
-            "waiting_for": text("waitingFor"),
-            "cwd": live.cwd,
-            "session": text("sessionId"),
-            "note": null,
-        });
-        spend(&mut row, &mut warned);
-        place(&mut row, &live.cwd);
-        rows.push(row);
+    if cli.watch {
+        watch(&cli)?;
+        return Ok(Output::Exit(0));
     }
+    let now = clock::now_secs()?;
+    let mut warned = false;
+    let mut rows = claude_rows(now, true, &mut warned);
     let codex = agents::codex_procs();
     let mut shared: HashMap<PathBuf, usize> = HashMap::new();
     for proc in &codex {
@@ -64,6 +81,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         let mut row = codex_row(
             &proc,
             shared.get(proc.cwd.as_deref().unwrap_or(Path::new(""))),
+            now,
         );
         spend(&mut row, &mut warned);
         if let Some(cwd) = &proc.cwd {
@@ -83,7 +101,35 @@ pub fn run(cli: Cli) -> Result<Output> {
     Ok(Output::Text(render(&rows)))
 }
 
-fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>) -> Value {
+/// One row per live Claude Code session; `detail` adds cost and place.
+fn claude_rows(now: i64, detail: bool, warned: &mut bool) -> Vec<Value> {
+    let mut rows = Vec::new();
+    for live in agents::live() {
+        let record = &live.record;
+        let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
+        let since = record.get("statusUpdatedAt").and_then(Value::as_i64);
+        let mut row = json!({
+            "harness": "claude",
+            "pid": live.pid,
+            "name": text("name"),
+            "kind": text("kind"),
+            "status": text("status"),
+            "status_secs": since.map(|millis| (now - millis / 1000).max(0)),
+            "waiting_for": text("waitingFor"),
+            "cwd": live.cwd,
+            "session": text("sessionId"),
+            "note": null,
+        });
+        if detail {
+            spend(&mut row, warned);
+            place(&mut row, &live.cwd);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64) -> Value {
     let mut row = json!({
         "harness": "codex",
         "pid": proc.proc.pid,
@@ -106,6 +152,11 @@ fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>) -> Value {
                 .next()
             {
                 Some(session) => {
+                    if let Some(file) = session_files(&home(), &session).first() {
+                        let (status, since) = codex_status(&file.path);
+                        row["status"] = json!(status);
+                        row["status_secs"] = json!(since.map(|at| (now - at).max(0)));
+                    }
                     row["session"] = json!(session);
                     None
                 }
@@ -117,6 +168,182 @@ fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>) -> Value {
     };
     row["note"] = json!(note);
     row
+}
+
+/// How much of a rollout's end is searched for its last turn event.
+const ROLLOUT_TAIL: u64 = 256 * 1024;
+
+/// `busy` or `idle` from the end of a Codex rollout, and the Unix seconds of the event that
+/// decided it. A tail without a turn event is `idle` since an unknown time.
+fn codex_status(path: &Path) -> (&'static str, Option<i64>) {
+    let mut tail = Vec::new();
+    if let Ok(mut file) = File::open(path)
+        && let Ok(len) = file.metadata().map(|meta| meta.len())
+        && file
+            .seek(SeekFrom::Start(len.saturating_sub(ROLLOUT_TAIL)))
+            .is_ok()
+    {
+        let _ = file.take(ROLLOUT_TAIL).read_to_end(&mut tail);
+    }
+    for line in tail.split(|byte| *byte == b'\n').rev() {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if record["type"] != "event_msg" {
+            continue;
+        }
+        let busy = match record["payload"]["type"].as_str() {
+            Some("task_started") => true,
+            Some("task_complete" | "turn_aborted") => false,
+            _ => continue,
+        };
+        let at = record["timestamp"]
+            .as_str()
+            .and_then(|stamp| clock::parse(stamp).ok());
+        return (if busy { "busy" } else { "idle" }, at);
+    }
+    ("idle", None)
+}
+
+/// What `--watch` remembers of one Claude Code session between polls.
+struct Seen {
+    row: Value,
+    blocked: bool,
+}
+
+fn watch(cli: &Cli) -> Result<()> {
+    let mut seen: HashMap<i64, Seen> = HashMap::new();
+    let mut polls = 0;
+    loop {
+        let now = clock::now_secs()?;
+        let mut rows = claude_rows(now, false, &mut false);
+        let mut events = Vec::new();
+        for (pid, old) in &seen {
+            if !rows.iter().any(|row| row["pid"] == *pid) {
+                events.push(event("ended", &old.row, now));
+            }
+        }
+        seen.retain(|pid, _| rows.iter().any(|row| row["pid"] == *pid));
+        for row in rows.drain(..) {
+            let pid = row["pid"].as_i64().unwrap_or_default();
+            let waiting = row["status"] == "waiting";
+            let blocked = seen.get(&pid).is_some_and(|old| old.blocked);
+            let now_blocked = if waiting {
+                blocked
+                    || row["status_secs"]
+                        .as_i64()
+                        .is_some_and(|secs| secs >= cli.blocked_after)
+            } else {
+                false
+            };
+            if now_blocked && !blocked {
+                events.push(event("blocked", &row, now));
+            } else if blocked && !waiting {
+                events.push(event("cleared", &row, now));
+            }
+            seen.insert(
+                pid,
+                Seen {
+                    row,
+                    blocked: now_blocked,
+                },
+            );
+        }
+        for event in &events {
+            emit(cli, event)?;
+        }
+        polls += 1;
+        if cli.max_polls.is_some_and(|max| polls >= max) {
+            return Ok(());
+        }
+        clock::sleep(cli.interval);
+    }
+}
+
+fn event(kind: &str, row: &Value, now: i64) -> Value {
+    let mut event = row.clone();
+    event["event"] = json!(kind);
+    event["at"] = json!(clock::format(now));
+    event
+}
+
+fn emit(cli: &Cli, event: &Value) -> Result<()> {
+    let line = event.to_string();
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{line}")
+        .and_then(|()| out.flush())
+        .map_err(ctx("write stdout"))?;
+    drop(out);
+    if cli.notify && event["event"] == "blocked" {
+        notify(event);
+    }
+    if let Some(program) = &cli.exec
+        && let Err(error) = exec(program, &cli.exec_args, event, &line)
+    {
+        eprintln!("warning: {error}");
+    }
+    Ok(())
+}
+
+/// Runs `program` with the event on stdin and in `AGT_PS_*` variables, and waits for it.
+fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()> {
+    let text = |key: &str| match &event[key] {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let mut child = Command::new(program)
+        .args(args)
+        .env("AGT_PS_EVENT", text("event"))
+        .env("AGT_PS_PID", text("pid"))
+        .env("AGT_PS_SESSION", text("session"))
+        .env("AGT_PS_NAME", text("name"))
+        .env("AGT_PS_CWD", text("cwd"))
+        .env("AGT_PS_WAITING_FOR", text("waiting_for"))
+        .env("AGT_PS_STATUS_SECS", text("status_secs"))
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| Error(format!("run {program}: {error}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // A program that ignores its input may exit before reading it.
+        let _ = writeln!(stdin, "{line}");
+    }
+    child
+        .wait()
+        .map(drop)
+        .map_err(|error| Error(format!("wait for {program}: {error}")))
+}
+
+/// Posts a desktop notification. The text travels as arguments, never through a shell or as
+/// script source.
+fn notify(event: &Value) {
+    let who = event["name"]
+        .as_str()
+        .or_else(|| event["cwd"].as_str())
+        .unwrap_or("a session");
+    let title = format!("agt: {who} is blocked");
+    let body = event["waiting_for"].as_str().unwrap_or("waiting for input");
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("osascript");
+        command
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "display notification (item 2 of argv) with title (item 1 of argv)",
+                "-e",
+                "end run",
+            ])
+            .args([&title, body]);
+        command
+    } else {
+        let mut command = Command::new("notify-send");
+        command.args(["--", &title, body]);
+        command
+    };
+    if let Err(error) = command.stdin(Stdio::null()).status() {
+        eprintln!("warning: notification failed: {error}");
+    }
 }
 
 /// Adds model, context tokens and cost from the session's transcripts. When they or the price

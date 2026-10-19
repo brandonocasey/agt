@@ -1003,7 +1003,7 @@ find an exact session beyond `--max-files`.
 
 ## Ps
 
-`agt ps [--json]` lists the agents running now, one row each, busy first and then longest in
+`agt ps [--json] [--watch ...]` lists the agents running now, one row each, busy first and then longest in
 their status. A Claude Code session is a record in `~/.claude*/sessions/<pid>.json` (and
 `$CLAUDE_CONFIG_DIR/sessions`) whose pid runs with a matching `procStart`; a stale record or a reused
 pid is not listed. A row has `pid`, `name`, `kind`, `status` as Claude Code wrote it (`busy`, `idle`,
@@ -1015,12 +1015,25 @@ subagents included. `usd` is `null` when the price file lists none of the sessio
 `unpriced_calls` counts calls it does not list. The table shows `unpriced` then, and `12.34+` for a
 partial sum. `--json` prints `{"agents": [...]}`.
 
-Running `codex` processes are listed too, with `harness: "codex"` and no name, status or kind. Codex
+Running `codex` processes are listed too, with `harness: "codex"` and no name or kind. Codex
 writes no live record, so the session is the newest rollout in `~/.codex/sessions` whose
 `session_meta` `cwd` equals the process's working directory and that changed after the process
 started. A subagent's rollout does not count. When no rollout matches, several `codex` processes
 share the directory, or the platform cannot read the process's directory, `session` is `null` and
-`note` says why.
+`note` says why. A matched session is `busy` when the last `task_started` event in the end of its
+rollout has no later `task_complete` or `turn_aborted`, else `idle`; `status_secs` counts from
+that event's timestamp (only the file's last 256 KiB is read).
+
+`agt ps --watch [--blocked-after SECS] [--interval SECS] [--notify] [--exec PROGRAM [-- ARGS...]]`
+polls every `--interval` seconds (default 5) until interrupted and prints one JSON line per event
+for Claude Code sessions: `blocked` (the session has been `waiting` for `--blocked-after` seconds,
+default 60; once per waiting stretch, with `waiting_for`), `cleared` (a blocked session left
+`waiting`) and `ended` (its process is gone). Each line holds the row's fields plus `event` and
+`at`. `--notify` posts a desktop notification per `blocked` event (`osascript` on macOS,
+`notify-send` elsewhere; the text is passed as arguments, never through a shell). `--exec` runs
+the program, without a shell, once per event with the event JSON on stdin and `AGT_PS_EVENT`,
+`AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR` and
+`AGT_PS_STATUS_SECS` set; a failing program only warns.
 
 ## Worktrees
 

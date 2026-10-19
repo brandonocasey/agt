@@ -222,7 +222,7 @@ fn only_records_of_running_processes_count_and_busy_sessions_sort_first() {
         &env,
         idle.pid(),
         &proc_start(idle.pid()),
-        json!({ "cwd": env.repo, "status": "waiting", "waitingFor": "dialog open" }),
+        json!({ "cwd": env.repo, "cwd": env.repo, "status": "waiting", "waitingFor": "dialog open" }),
     );
     record(
         &env,
@@ -377,4 +377,194 @@ fn a_missing_price_file_leaves_cost_null_with_one_warning() {
         assert!(row(found, proc.pid())["usd"].is_null());
     }
     assert_eq!(error.matches("warning").count(), 1, "{error}");
+}
+
+/// A rollout with the shape Codex writes: a `session_meta` line, then events with timestamps.
+fn rollout_events(env: &Env, file: &str, id: &str, cwd: &Path, events: &[(&str, &str)]) {
+    rollout(env, file, id, cwd, false);
+    let path = env.path("home/.codex/sessions/2026/10/17").join(file);
+    let mut text = fs::read_to_string(&path).unwrap();
+    for (stamp, kind) in events {
+        let line = json!({ "timestamp": stamp, "type": "event_msg", "payload": { "type": kind } });
+        text.push_str(&format!("{line}\n"));
+    }
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+fn a_codex_session_is_busy_from_its_last_unfinished_task_and_idle_otherwise() {
+    let env = Env::new();
+    let cases = [
+        ("busy", vec![("2026-10-17T10:00:00.000Z", "task_started")]),
+        (
+            "idle-done",
+            vec![
+                ("2026-10-17T10:00:00.000Z", "task_started"),
+                ("2026-10-17T10:00:09.000Z", "task_complete"),
+            ],
+        ),
+        (
+            "idle-aborted",
+            vec![
+                ("2026-10-17T10:00:00.000Z", "task_started"),
+                ("2026-10-17T10:00:09.000Z", "turn_aborted"),
+            ],
+        ),
+        (
+            "busy-again",
+            vec![
+                ("2026-10-17T10:00:00.000Z", "task_started"),
+                ("2026-10-17T10:00:09.000Z", "task_complete"),
+                ("2026-10-17T10:00:20.000Z", "task_started"),
+                ("2026-10-17T10:00:21.000Z", "token_count"),
+            ],
+        ),
+        ("idle-new", vec![]),
+    ];
+    let mut procs = Vec::new();
+    for (index, (name, events)) in cases.iter().enumerate() {
+        let dir = env.path(&format!("work/{name}"));
+        fs::create_dir_all(&dir).unwrap();
+        procs.push(codex(&env, &format!("bin-{name}"), &dir));
+        rollout_events(
+            &env,
+            &format!("rollout-{name}.jsonl"),
+            &format!("id{index}"),
+            &dir,
+            events,
+        );
+    }
+    // The tail is searched, not the whole file: the last turn event sits behind a big line.
+    let big = env.path("home/.codex/sessions/2026/10/17/rollout-busy-again.jsonl");
+    let mut text = fs::read_to_string(&big).unwrap();
+    text.push_str(&format!("{}\n", "x".repeat(10_000)));
+    fs::write(big, text).unwrap();
+
+    let mut command = ps(&env, &["--json"]);
+    command.env("AGT_NOW", "1792231230");
+    let output = command.output().unwrap();
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let found = parsed["agents"].as_array().unwrap();
+    let expected = ["busy", "idle", "idle", "busy", "idle"];
+    for (proc, status) in procs.iter().zip(expected) {
+        assert_eq!(row(found, proc.pid())["status"], status);
+    }
+    // 2026-10-17T10:00:00Z is 1792231200.
+    assert_eq!(row(found, procs[0].pid())["status_secs"], 30);
+    assert_eq!(row(found, procs[1].pid())["status_secs"], 21);
+    assert_eq!(row(found, procs[3].pid())["status_secs"], 10);
+    assert!(row(found, procs[4].pid())["status_secs"].is_null());
+}
+
+/// Events from `agt ps --watch` with the clock at `now`, one poll every 30 seconds.
+fn watch(env: &Env, now: u64, polls: &str, extra: &[&str]) -> Vec<Value> {
+    let mut command = ps(
+        env,
+        &[
+            "--watch",
+            "--interval",
+            "30",
+            "--blocked-after",
+            "60",
+            "--max-polls",
+            polls,
+        ],
+    );
+    command.args(extra).env("AGT_NOW", now.to_string());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn watch_reports_a_blocked_session_once_and_ignores_idle_ones() {
+    let env = Env::new();
+    let now: u64 = 1_800_000_000;
+    let waiting = Proc::sleep("sleep", &env.repo);
+    let idle = Proc::sleep("sleep", &env.repo);
+    record(
+        &env,
+        waiting.pid(),
+        &proc_start(waiting.pid()),
+        json!({ "cwd": env.repo, "status": "waiting", "waitingFor": "approve Bash", "statusUpdatedAt": (now - 10) * 1000 }),
+    );
+    record(
+        &env,
+        idle.pid(),
+        &proc_start(idle.pid()),
+        json!({ "cwd": env.repo, "status": "idle", "statusUpdatedAt": (now - 5000) * 1000 }),
+    );
+
+    // Waiting 10s, 40s, 70s, 100s: blocked at the third poll only.
+    let events = watch(&env, now, "4", &[]);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["event"], "blocked");
+    assert_eq!(events[0]["pid"], waiting.pid());
+    assert_eq!(events[0]["waiting_for"], "approve Bash");
+    assert_eq!(events[0]["status_secs"], 70);
+
+    assert!(watch(&env, now, "2", &[]).is_empty());
+}
+
+#[test]
+fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event() {
+    let env = Env::new();
+    let now: u64 = 1_800_000_000;
+    let waiting = Proc::sleep("sleep", &env.repo);
+    let pid = waiting.pid();
+    let start = proc_start(pid);
+    record(
+        &env,
+        pid,
+        &start,
+        json!({ "cwd": env.repo, "status": "waiting", "waitingFor": "dialog; $(touch pwned)", "statusUpdatedAt": (now - 100) * 1000 }),
+    );
+    let live = env.path(&format!("home/.claude/sessions/{pid}.json"));
+    let idle = env.path("idle.json");
+    fs::write(
+        &idle,
+        json!({
+            "pid": pid, "procStart": start, "cwd": env.repo, "kind": "interactive",
+            "sessionId": format!("sess-{pid}"), "status": "idle",
+            "statusUpdatedAt": (now + 1) * 1000,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The first event unblocks the session; the second ends it.
+    let log = env.path("events.log");
+    let script = env.path("on-event.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >> '{log}'\necho \"$AGT_PS_EVENT:$AGT_PS_WAITING_FOR\" >> '{log}.env'\n\
+             case \"$AGT_PS_EVENT\" in\n  blocked) cp '{idle}' '{live}' ;;\n  cleared) kill {pid} ;;\nesac\n",
+            log = log.display(),
+            idle = idle.display(),
+            live = live.display(),
+        ),
+    )
+    .unwrap();
+    let mut mode = fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+    fs::set_permissions(&script, mode).unwrap();
+
+    let events = watch(&env, now, "6", &["--exec", &script.to_string_lossy()]);
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["blocked", "cleared", "ended"], "{events:?}");
+    let logged = fs::read_to_string(format!("{}.env", log.display())).unwrap();
+    assert_eq!(logged, "blocked:dialog; $(touch pwned)\ncleared:\nended:\n");
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 3);
+    assert!(!env.repo.join("pwned").exists());
 }

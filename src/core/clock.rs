@@ -1,15 +1,30 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::error::{Error, Result, fail};
 
 // Test-only override so age pruning can be checked without waiting 90 days.
 const NOW_OVERRIDE: &str = "AGT_NOW";
 
+/// Seconds `sleep` skipped while the clock is overridden.
+static SLEPT: AtomicI64 = AtomicI64::new(0);
+
+/// Waits `secs`. With the clock overridden it advances that clock instead, so loops that poll
+/// by time run at once under test.
+pub fn sleep(secs: u64) {
+    if std::env::var_os(NOW_OVERRIDE).is_some() {
+        SLEPT.fetch_add(i64::try_from(secs).unwrap_or(i64::MAX), Ordering::Relaxed);
+    } else {
+        std::thread::sleep(Duration::from_secs(secs));
+    }
+}
+
 pub fn now_secs() -> Result<i64> {
     if let Some(value) = std::env::var_os(NOW_OVERRIDE) {
         let value = value.to_string_lossy();
         return value
-            .parse()
+            .parse::<i64>()
+            .map(|secs| secs + SLEPT.load(Ordering::Relaxed))
             .map_err(|_| Error(format!("{NOW_OVERRIDE} must be Unix seconds, got {value}")));
     }
     let elapsed = SystemTime::now()
