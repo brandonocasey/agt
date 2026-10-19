@@ -1017,22 +1017,26 @@ and prints JSON. The main checkout is the first entry of `git worktree list`; wh
 (`git ls-remote --symref <remote> HEAD`) is fetched and its commit recorded at once, and the local
 default branch (`origin/HEAD`'s, else `main`, else `master`) joins them. The candidate that
 contains all the others wins; when they diverge, origin's fetched default is used and
-`base.diverged` is true. `base.candidates` lists every candidate with its commit. No
-remote-tracking branch moves, and a remote that cannot be queried or fetched is an
+`base.diverged` is true. `base.candidates` lists every candidate with its commit. Choosing
+moves no remote-tracking branch, and a remote that cannot be queried or fetched is an
 error naming it. A `.gitmodules` file triggers `git submodule update --init --recursive`.
 
 After a new branch starts at the newest default base (not with `--base`), `create` fast-forwards
 the local default branch to the fetched default of its upstream (`branch.<name>.remote` and
 `.merge`, else `origin`'s branch of the same name), and `local_default` reports it: `branch`,
-`from`, `upstream`, `to`, `behind` or `ahead`, and `status`. `updated` means it moved: by
-`git merge --ff-only` in the worktree that has it checked out (`path`), which keeps local changes
-the merge does not touch, else by `git fetch . <commit>:refs/heads/<name>`, which git refuses
-for a branch being rebased or bisected. `current` means it already matched, and `ahead` that it
-holds commits its upstream lacks; neither moves it. `skipped` leaves it where it was, with the
-`reason`: its upstream is not a fetched remote default, it diverged, a submodule pointer changes
-in a checked-out branch (a merge would leave the submodule at its old commit), or git refused, as
-it does when the merge would overwrite local changes. A refusal also gives `retry`, the command
-to run once that is resolved. Every `skipped` adds `local <name> not updated: <reason>` to
+`from`, `upstream`, `to`, `behind` or `ahead`, and `status`. The upstream's remote-tracking
+branch (`refs/remotes/<remote>/<branch>`), when it exists and is an ancestor of the fetched
+commit, moves up to it as a fetch would, so `git status` never counts the new commits as
+unpushed. `updated` means the local default moved: by
+`git merge --ff-only --no-overwrite-ignore --no-autostash` in the worktree that has it checked
+out (`path`), which keeps local changes the merge does not touch and never stashes, else by
+`git fetch . <commit>:refs/heads/<name>`, which git refuses for a branch being rebased or
+bisected. `current` means it already matched, and `ahead` that it holds commits its upstream
+lacks; neither moves it. `skipped` leaves it where it was, with the `reason`: its upstream is
+not a fetched remote default, it diverged, a submodule pointer changes in a checked-out branch
+(a merge would leave the submodule at its old commit), or git refused, as it does when the merge
+would overwrite a local change or an ignored file. A refusal also gives `retry`, the command to
+run once that is resolved. Every `skipped` adds `local <name> not updated: <reason>` to
 `warnings`, which is otherwise empty; it never fails `create`. Without remotes or a local default
 branch there is no `local_default`.
 

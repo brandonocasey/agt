@@ -1,8 +1,8 @@
 //! Brings the local default branch up to its upstream's default, which `create` has just fetched.
 //! Only a fast-forward: `git merge --ff-only` in the worktree that has the branch checked out,
-//! which keeps local changes and refuses to overwrite them, else a ref update that git refuses
-//! for a branch being rebased or bisected. Whatever stops it is a warning, not an error, because
-//! the new worktree already exists.
+//! which keeps local changes and refuses to overwrite them, ignored files included, else a ref
+//! update that git refuses for a branch being rebased or bisected. Whatever stops it is a warning,
+//! not an error, because the new worktree already exists.
 
 use serde_json::{Value, json};
 
@@ -62,6 +62,7 @@ fn update(
     let (from, to) = (local.commit.as_str(), upstream.commit.as_str());
     report["upstream"] = json!(format!("{remote}/{tracked}"));
     report["to"] = json!(to);
+    advance_tracking(repo, &remote, tracked, to)?;
     if from == to {
         report["status"] = json!("current");
         return Ok(None);
@@ -111,9 +112,31 @@ fn update(
     }
     run(
         &Repo::at(&holder.path),
-        &["merge", "--ff-only", "--quiet", to],
+        &[
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--no-autostash",
+            "--quiet",
+            to,
+        ],
         report,
     )
+}
+
+/// Moves the upstream's remote-tracking branch up to the fetched commit, as a fetch would, so
+/// `git status` does not count the commits the local default just gained as unpushed.
+fn advance_tracking(repo: &Repo, remote: &str, tracked: &str, to: &str) -> Result<()> {
+    let tracking = format!("refs/remotes/{remote}/{tracked}");
+    let spec = format!("{tracking}^{{commit}}");
+    let Some(old) = repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec])? else {
+        return Ok(());
+    };
+    if old != to && repo.is_ancestor(&old, to)? {
+        let message = "agt worktree create: fetched default";
+        repo.git(&["update-ref", "-m", message, &tracking, to, &old])?;
+    }
+    Ok(())
 }
 
 /// Runs the update; when git refuses, as it does over local changes a merge would overwrite, the

@@ -108,9 +108,9 @@ fn a_new_branch_starts_at_the_remote_default_ahead_of_the_local_one() {
         env.repo.join(".worktrees/feat/login").to_str().unwrap()
     );
     assert_eq!(git(&env, &env.repo, &["rev-parse", "feat/login"]), tip);
-    // The local default caught up; the remote-tracking branch did not move.
+    // The local default and its remote-tracking branch caught up.
     assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), tip);
-    assert_eq!(git(&env, &env.repo, &["rev-parse", "origin/main"]), first);
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "origin/main"]), tip);
 }
 
 #[test]
@@ -153,6 +153,15 @@ fn the_local_default_is_fast_forwarded_in_the_checkout_that_has_it() {
         fs::read_to_string(env.repo.join("first")).unwrap(),
         "edited"
     );
+    // Nothing reads as unpushed afterwards.
+    assert_eq!(
+        git(
+            &env,
+            &env.repo,
+            &["rev-list", "--count", "origin/main..main"]
+        ),
+        "0"
+    );
 }
 
 #[test]
@@ -184,7 +193,7 @@ fn local_changes_the_merge_would_overwrite_keep_the_local_default_and_warn() {
     assert_eq!(
         report["retry"],
         format!(
-            "git -C {} merge --ff-only --quiet {tip}",
+            "git -C {} merge --ff-only --no-overwrite-ignore --no-autostash --quiet {tip}",
             env.repo.display()
         )
     );
@@ -196,6 +205,75 @@ fn local_changes_the_merge_would_overwrite_keep_the_local_default_and_warn() {
     assert_eq!(value["base"]["commit"], tip.as_str());
     assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
     assert_eq!(fs::read_to_string(env.repo.join("first")).unwrap(), "mine");
+}
+
+#[test]
+fn an_ignored_file_the_merge_would_replace_keeps_the_local_default() {
+    let (env, bare, first, _) = behind_origin();
+    let clone = env.path("clone-ignored");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    commit(&env, &clone, ".envrc", "theirs");
+    git(&env, &clone, &["push", "-q", "origin", "HEAD:main"]);
+    fs::create_dir_all(env.repo.join(".git/info")).unwrap();
+    fs::write(env.repo.join(".git/info/exclude"), ".envrc\n").unwrap();
+    fs::write(env.repo.join(".envrc"), "mine").unwrap();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "skipped");
+    let warning = value["warnings"][0].as_str().unwrap();
+    assert!(warning.contains(".envrc"), "{warning}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+    assert_eq!(fs::read_to_string(env.repo.join(".envrc")).unwrap(), "mine");
+}
+
+#[test]
+fn merge_autostash_never_stashes_local_changes() {
+    let (env, bare, first, _) = behind_origin();
+    advance(&env, &bare, "first");
+    git(&env, &env.repo, &["config", "merge.autoStash", "true"]);
+    fs::write(env.repo.join("first"), "mine").unwrap();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "skipped");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+    assert_eq!(git(&env, &env.repo, &["stash", "list"]), "");
+    assert_eq!(fs::read_to_string(env.repo.join("first")).unwrap(), "mine");
+}
+
+#[test]
+fn a_moved_submodule_keeps_a_checked_out_local_default() {
+    let (env, bare, first, _) = behind_origin();
+    let clone = env.path("clone-gitlink");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let gitlink = format!("160000,{first},vendor");
+    git(
+        &env,
+        &clone,
+        &["update-index", "--add", "--cacheinfo", &gitlink],
+    );
+    git(&env, &clone, &["commit", "-q", "-m", "vendor"]);
+    git(&env, &clone, &["push", "-q", "origin", "HEAD:main"]);
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "skipped");
+    let reason = value["local_default"]["reason"].as_str().unwrap();
+    assert!(reason.starts_with("a submodule moves"), "{reason}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
 }
 
 #[test]
