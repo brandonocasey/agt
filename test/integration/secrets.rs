@@ -72,6 +72,19 @@ fn clean_ignored_binary_allowed_and_unstaged_files_do_not_match() {
 }
 
 #[test]
+fn a_missing_path_fails_instead_of_reporting_clean() {
+    let env = Env::new();
+    fs::write(env.repo.join("a.txt"), format!("token: {}\n", secret())).unwrap();
+    env.git(&["add", "."]);
+    for args in [&["scan"][..], &["scan", "--staged"][..]] {
+        let output = scan(&env, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("no such path: scan"), "{stderr}");
+    }
+}
+
+#[test]
 fn outside_a_repository_it_fails_with_exit_2() {
     let env = Env::new();
     let output = env

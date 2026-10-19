@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use serde_json::json;
 
-use crate::core::error::{Result, ctx};
+use crate::core::error::{Result, ctx, fail};
 use crate::core::output::{self, Output};
 use crate::git::Repo;
 
@@ -62,6 +62,14 @@ fn report(args: &Cli, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<
 fn scan(args: &Cli) -> Result<BTreeSet<(String, usize, &'static str)>> {
     let repo = Repo::discover()?;
     let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
+    // A missing path would match nothing and report clean, which a scanner MUST NOT do.
+    if let Some(missing) = args
+        .paths
+        .iter()
+        .find(|path| cwd.join(path).symlink_metadata().is_err())
+    {
+        return fail(format!("no such path: {}", missing.display()));
+    }
     let paths: Vec<String> = args
         .paths
         .iter()
