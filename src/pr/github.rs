@@ -127,7 +127,19 @@ fn search_mine(
     branch: Option<&str>,
     state: State,
 ) -> Result<Vec<Pr>> {
-    let mut terms = format!("is:pr repo:{repo} author:@me sort:created-desc");
+    // Search does not follow renames the way `repository(owner,name)` does, so a remote that
+    // still names an old slug would match nothing.
+    let (owner, name) = split(repo);
+    let renamed = graphql(
+        t,
+        "query PrRepo($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner}}",
+        vec![Var::text("owner", owner), Var::text("name", name)],
+    )?;
+    let current = renamed
+        .pointer("/data/repository/nameWithOwner")
+        .and_then(Value::as_str)
+        .unwrap_or(repo);
+    let mut terms = format!("is:pr repo:{current} author:@me sort:created-desc");
     match state {
         State::Open => terms.push_str(" is:open"),
         State::Merged => terms.push_str(" is:merged"),
@@ -148,6 +160,8 @@ fn search_mine(
         .iter()
         .filter(|node| node["number"].is_u64())
         .map(pr)
+        // `head:` matches branch names that start with the text; keep exact heads only.
+        .filter(|found| branch.is_none_or(|branch| found.head_branch == branch))
         .collect())
 }
 

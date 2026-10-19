@@ -152,6 +152,20 @@ fn an_unknown_forge_is_reported() {
 #[test]
 fn list_mine_searches_by_author_on_the_server() {
     let env = github();
+    // The remote names an old slug; search only finds the renamed repository.
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=PrRepo",
+            "-f",
+            "owner=o",
+            "-f",
+            "name=r",
+        ],
+        r#"{"data":{"repository":{"nameWithOwner":"o/renamed"}}}"#,
+    );
     env.respond(
         &[
             "api",
@@ -159,11 +173,13 @@ fn list_mine_searches_by_author_on_the_server() {
             "-f",
             "query=PrSearch",
             "-f",
-            "q=is:pr repo:o/r author:@me sort:created-desc is:open head:feat",
+            "q=is:pr repo:o/renamed author:@me sort:created-desc is:open head:feat",
         ],
         &format!(
-            r#"{{"data":{{"search":{{"nodes":[{}, {{}}]}}}}}}"#,
-            node(2, &json!({}))
+            r#"{{"data":{{"search":{{"nodes":[{}, {}, {{}}]}}}}}}"#,
+            node(2, &json!({})),
+            // `head:feat` also matches branches that start with `feat`.
+            node(3, &json!({"headRefName": "feat-2"}))
         ),
     );
     let rows = ok(&env, &["list", "--mine", "--branch", "feat"]);
