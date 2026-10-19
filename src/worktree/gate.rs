@@ -251,10 +251,14 @@ fn workdir_of(clone: &Path) -> Option<PathBuf> {
 /// `git <args>` against the repository whose git directory is `gitdir`, even when its
 /// `core.worktree` names a directory that is gone: the work tree is given on the command line.
 fn plumbing(gitdir: &Path, args: &[&str]) -> Result<String> {
+    crate::git::text(plumbing_bytes(gitdir, args)?)
+}
+
+fn plumbing_bytes(gitdir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let dir = gitdir.to_string_lossy();
     let mut all = vec!["--git-dir", &dir, "--work-tree", &dir];
     all.extend_from_slice(args);
-    Repo::at(gitdir).git(&all)
+    Repo::at(gitdir).checked(&all, None, &[])
 }
 
 /// A ref of a repository, with the commit it leads to (none for a tag of a blob or tree).
@@ -519,13 +523,8 @@ fn holds_nothing_unique(
         }
     }
     commits_held(name, gitdir, elsewhere, online)?;
-    let worktrees = plumbing(gitdir, &["worktree", "list", "--porcelain"])?;
-    if worktrees
-        .lines()
-        .filter(|line| line.starts_with("worktree "))
-        .count()
-        > 1
-    {
+    let worktrees = plumbing_bytes(gitdir, &["worktree", "list", "--porcelain", "-z"])?;
+    if crate::git::parse_worktrees(&worktrees).len() > 1 {
         return fail(format!(
             "{name} has linked worktrees of its own; remove them first"
         ));

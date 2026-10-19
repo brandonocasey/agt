@@ -4,12 +4,12 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::idle::Cwds;
-use super::info::{self, Entry};
+use super::info;
 use super::{gate, hooks, snapshot};
 use crate::core::agents;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
-use crate::git::Repo;
+use crate::git::{Repo, Worktree};
 
 #[derive(Args)]
 pub struct Cli {
@@ -28,7 +28,8 @@ pub fn run(cli: Cli) -> Result<Output> {
         Ok(path) => path,
         Err(_) => return fail(format!("{} is not a linked worktree", cli.path.display())),
     };
-    let listing = info::entries(&Repo::at(&path))
+    let listing = Repo::at(&path)
+        .worktrees()
         .or_else(|_| fail(format!("{} is not a linked worktree", path.display())))?;
     let main = info::real(&listing[0].path)?;
     let entry = refuse(&listing, &path, &main)?;
@@ -82,7 +83,12 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Runs the remove hooks when `run_hooks`, backs `entry` up, then removes its worktree; the
 /// caller has checked that it may go. A failing hook is an error before anything is touched.
-pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) -> Result<Value> {
+pub(super) fn removal(
+    main: &Path,
+    path: &Path,
+    entry: &Worktree,
+    run_hooks: bool,
+) -> Result<Value> {
     gate::check(path, main)?;
     let mut hooks_report = None;
     if run_hooks {
@@ -137,7 +143,11 @@ pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) 
 }
 
 /// The entry for `path`, or the reason it must not be removed.
-pub(super) fn refuse<'a>(listing: &'a [Entry], path: &Path, main: &Path) -> Result<&'a Entry> {
+pub(super) fn refuse<'a>(
+    listing: &'a [Worktree],
+    path: &Path,
+    main: &Path,
+) -> Result<&'a Worktree> {
     if path == main {
         return fail(format!("{} is the main checkout", path.display()));
     }

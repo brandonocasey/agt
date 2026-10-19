@@ -57,8 +57,7 @@ pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
         });
     }
     for name in default_names(repo)? {
-        let spec = format!("refs/heads/{name}^{{commit}}");
-        if let Some(commit) = repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec])? {
+        if let Some(commit) = repo.ref_commit(&format!("refs/heads/{name}"))? {
             found.push(Candidate {
                 remote: None,
                 branch: name,

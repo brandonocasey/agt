@@ -12,7 +12,7 @@ use crate::core::local;
 use crate::forge::anchors;
 use crate::forge::service::{self, Capabilities, Kind, ReviewService, ReviewSubject, SERVICES};
 use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
-use crate::git::{Repo, split_remote};
+use crate::git::Repo;
 use crate::store::Account;
 use crate::store::model::{
     Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RecordPost,
@@ -75,7 +75,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
         });
     }
     let pr_ref = pr.map(forge::parse_pr).transpose()?;
-    let origin = ctx.repo.origin_url()?.and_then(|url| split_remote(&url));
+    let origin = ctx.repo.origin_location()?;
     let location = pr_ref
         .as_ref()
         .and_then(|pr| pr.location.clone())
@@ -130,7 +130,7 @@ pub(super) fn connection_of(review: &Review) -> Result<Connection> {
 /// The forge and repository of `origin`, or `None` when there is no origin or its host is not a
 /// forge this build knows. Neither is an error to a caller that only wants to try.
 pub(super) fn locate(ctx: &Ctx) -> Result<Option<(Forge, String, String)>> {
-    let Some((host, repo)) = ctx.repo.origin_url()?.and_then(|url| split_remote(&url)) else {
+    let Some((host, repo)) = ctx.repo.origin_location()? else {
         return Ok(None);
     };
     let cached = ctx

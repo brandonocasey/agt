@@ -45,7 +45,8 @@ pub fn run(cli: Cli) -> Result<Output> {
     let target_text = target.to_string_lossy().into_owned();
     // Only the registration of this very path is cleared; other missing worktrees keep theirs.
     let wanted = lexical_real(&target);
-    if info::entries(&repo)?
+    if repo
+        .worktrees()?
         .iter()
         .any(|entry| !entry.path.exists() && lexical_real(&entry.path) == wanted)
     {
@@ -58,7 +59,8 @@ pub fn run(cli: Cli) -> Result<Output> {
         Some(branch) => {
             let reference = format!("refs/heads/{branch}");
             let tip = repo.git_opt(&["rev-parse", "--verify", "--quiet", &reference])?;
-            let elsewhere = info::entries(&repo)?
+            let elsewhere = repo
+                .worktrees()?
                 .iter()
                 .any(|entry| entry.branch.as_deref() == Some(branch));
             match tip {

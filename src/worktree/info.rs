@@ -8,48 +8,12 @@ use serde_json::{Value, json};
 use super::disposable::is_disposable;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
-use crate::git::Repo;
 use crate::git::base::default_names;
-
-pub struct Entry {
-    pub path: PathBuf,
-    pub head: String,
-    pub branch: Option<String>,
-    pub locked: bool,
-    pub bare: bool,
-}
-
-/// Every worktree of the repository; the first is the main checkout.
-pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
-    let listing = repo.git(&["worktree", "list", "--porcelain"])?;
-    let mut found: Vec<Entry> = Vec::new();
-    for line in listing.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            found.push(Entry {
-                path: PathBuf::from(path),
-                head: String::new(),
-                branch: None,
-                locked: false,
-                bare: false,
-            });
-        } else if let Some(entry) = found.last_mut() {
-            if let Some(head) = line.strip_prefix("HEAD ") {
-                entry.head = head.to_owned();
-            } else if let Some(branch) = line.strip_prefix("branch ") {
-                entry.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).into());
-            } else if line == "locked" || line.starts_with("locked ") {
-                entry.locked = true;
-            } else if line == "bare" {
-                entry.bare = true;
-            }
-        }
-    }
-    Ok(found)
-}
+use crate::git::{Repo, Worktree};
 
 /// The main checkout: the first entry of `git worktree list`.
-pub fn main_checkout(repo: &Repo) -> Result<Entry> {
-    entries(repo)?
+pub fn main_checkout(repo: &Repo) -> Result<Worktree> {
+    repo.worktrees()?
         .into_iter()
         .next()
         .ok_or_else(|| Error("git worktree list printed nothing".into()))
@@ -71,11 +35,7 @@ pub fn default_branch(repo: &Repo) -> Result<Option<(String, String)>> {
             format!("refs/heads/{name}"),
             format!("refs/remotes/origin/{name}"),
         ] {
-            let spec = format!("{reference}^{{commit}}");
-            if repo
-                .git_opt(&["rev-parse", "--verify", "--quiet", &spec])?
-                .is_some()
-            {
+            if repo.ref_commit(&reference)?.is_some() {
                 return Ok(Some((name, reference)));
             }
         }
@@ -191,7 +151,11 @@ pub fn unsaved(root: &Path) -> Result<usize> {
 }
 
 /// One worktree as `agt worktree list` prints it.
-pub fn describe(repo: &Repo, entry: &Entry, default: Option<&(String, String)>) -> Result<Value> {
+pub fn describe(
+    repo: &Repo,
+    entry: &Worktree,
+    default: Option<&(String, String)>,
+) -> Result<Value> {
     if !entry.path.exists() {
         return Ok(json!({
             "path": entry.path,

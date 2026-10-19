@@ -7,7 +7,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::service::{Kind, Pagination, Request, SERVICES, Var};
 use crate::forge::transport::Transport;
 use crate::forge::{self, encode};
-use crate::git::{Repo, split_remote};
+use crate::git::Repo;
 use crate::store::model::Forge;
 
 const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository}}}}";
@@ -45,16 +45,9 @@ pub struct Pull {
 
 impl Origin {
     /// The forge `origin` is on; `None` when there is no origin or it is no GitHub or GitLab
-    /// host that `gh` or `glab` knows. Both the URL git expands (`insteadOf`) and the one
-    /// written in the config are read.
+    /// host that `gh` or `glab` knows.
     pub fn of(repo: &Repo) -> Result<Option<Self>> {
-        let written = repo.git_opt(&["config", "--get", "remote.origin.url"])?;
-        let urls = [repo.origin_url()?, written];
-        let Some((host, path)) = urls
-            .into_iter()
-            .flatten()
-            .find_map(|url| split_remote(&url))
-        else {
+        let Some((host, path)) = repo.origin_location()? else {
             return Ok(None);
         };
         let by =

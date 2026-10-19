@@ -6,7 +6,6 @@
 
 use serde_json::{Value, json};
 
-use super::info;
 use crate::core::error::Result;
 use crate::core::shell::quote;
 use crate::git::Repo;
@@ -81,7 +80,8 @@ fn update(
             "it has diverged from {remote}/{tracked} ({ahead} ahead, {behind} behind)"
         )));
     }
-    let holder = info::entries(repo)?
+    let holder = repo
+        .worktrees()?
         .into_iter()
         .find(|entry| entry.branch.as_deref() == Some(name));
     let Some(holder) = holder else {

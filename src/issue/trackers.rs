@@ -222,9 +222,7 @@ pub fn destinations(
     filter: Option<&str>,
     automatic: bool,
 ) -> Result<()> {
-    let origin = repo
-        .origin_url()?
-        .and_then(|url| crate::git::split_remote(&url));
+    let origin = repo.origin_location()?;
     if automatic && filter.is_none() {
         config.issues.tracker.retain(|tracker| {
             origin.as_ref().is_some_and(|(host, path)| {

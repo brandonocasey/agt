@@ -390,17 +390,10 @@ fn execute(command: Command) -> Result<Output> {
             let base = match base {
                 Some(base) => base,
                 None => {
-                    let full = repo.default_branch(None).map_err(|error| {
-                        if error.0.starts_with("cannot find the default branch") {
-                            Error("cannot find the default branch; pass --base <branch>".into())
-                        } else {
-                            error
-                        }
+                    let full = repo.find_default_branch(None)?.ok_or_else(|| {
+                        Error("cannot find the default branch; pass --base <branch>".into())
                     })?;
-                    full.strip_prefix("refs/remotes/origin/")
-                        .or_else(|| full.strip_prefix("refs/heads/"))
-                        .unwrap_or(&full)
-                        .to_owned()
+                    crate::git::branch_name(&full).to_owned()
                 }
             };
             let made = match remote.origin.forge {

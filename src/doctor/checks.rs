@@ -12,7 +12,7 @@ use crate::core::config::{self, Config};
 use crate::core::local;
 use crate::forge::service::{Kind, SERVICES};
 use crate::forge::transport::Cli;
-use crate::git::{Repo, split_remote};
+use crate::git::Repo;
 use crate::store::model::Forge;
 use crate::store::{Namespace, Store};
 
@@ -35,8 +35,7 @@ pub fn all() -> Vec<Row> {
     let repo = Repo::discover().ok();
     let origin = repo
         .as_ref()
-        .and_then(|repo| repo.origin_url().ok().flatten())
-        .and_then(|url| split_remote(&url));
+        .and_then(|repo| repo.origin_location().ok().flatten());
     let mut rows = tools();
     rows.extend(forge_auth(origin.as_ref().map(|(host, _)| host.as_str())));
     rows.push(agt_version());

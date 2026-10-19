@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 pub mod base;
@@ -34,6 +34,16 @@ pub struct LogEntry {
     pub subject: String,
 }
 
+/// One entry of `git worktree list`.
+pub struct Worktree {
+    pub path: PathBuf,
+    pub head: String,
+    pub branch: Option<String>,
+    pub locked: bool,
+    pub bare: bool,
+    pub prunable: bool,
+}
+
 pub struct Repo {
     root: PathBuf,
     main_checkout: OnceLock<PathBuf>,
@@ -58,21 +68,10 @@ impl Repo {
     }
 
     pub fn discover() -> Result<Self> {
-        let output = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(ctx("run git"))?;
-        if !output.status.success() {
-            return fail("not inside a git work tree");
-        }
-        let root = text(output.stdout)?;
-        Ok(Self {
-            root: PathBuf::from(root),
-            main_checkout: OnceLock::new(),
-            env: Vec::new(),
-            _scratch: None,
-        })
+        let top = Self::at(".")
+            .git_opt(&["rev-parse", "--show-toplevel"])?
+            .ok_or_else(|| Error("not inside a git work tree".into()))?;
+        Ok(Self::at(top))
     }
 
     /// Sends object writes to a throwaway directory while existing objects stay readable, so a
@@ -289,30 +288,45 @@ impl Repo {
         Ok(time.map(|time| format!("{time} {sha}")))
     }
 
+    /// The commit `reference` (a full ref name) leads to, or `None` when it does not exist.
+    pub fn ref_commit(&self, reference: &str) -> Result<Option<String>> {
+        let spec = format!("{reference}^{{commit}}");
+        self.git_opt(&["rev-parse", "--verify", "--quiet", &spec])
+    }
+
     /// Returns the full ref of the default branch: `--default-branch`, then `origin/HEAD`, then a
     /// local `main`, `master` or `init.defaultBranch`.
     pub fn default_branch(&self, explicit: Option<&str>) -> Result<String> {
+        self.find_default_branch(explicit)?.map_or_else(
+            || fail("cannot find the default branch; pass --default-branch <ref>"),
+            Ok,
+        )
+    }
+
+    /// [`Self::default_branch`], with `None` for a repository where none is found, so a caller
+    /// can say how to name one itself.
+    pub fn find_default_branch(&self, explicit: Option<&str>) -> Result<Option<String>> {
         if let Some(name) = explicit {
             let local = format!("refs/heads/{name}");
-            if self.succeeds(&["show-ref", "--verify", "--quiet", &local])? {
-                return Ok(local);
+            if self.ref_commit(&local)?.is_some() {
+                return Ok(Some(local));
             }
             self.commit(name)?;
-            return Ok(name.to_owned());
+            return Ok(Some(name.to_owned()));
         }
         if let Some(remote) =
             self.git_opt(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?
         {
-            return Ok(remote);
+            return Ok(Some(remote));
         }
         let configured = self.git_opt(&["config", "init.defaultBranch"])?;
         for name in ["main", "master"].into_iter().chain(configured.as_deref()) {
             let local = format!("refs/heads/{name}");
-            if self.succeeds(&["show-ref", "--verify", "--quiet", &local])? {
-                return Ok(local);
+            if self.ref_commit(&local)?.is_some() {
+                return Ok(Some(local));
             }
         }
-        fail("cannot find the default branch; pass --default-branch <ref>")
+        Ok(None)
     }
 
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
@@ -683,9 +697,29 @@ impl Repo {
         self.git_opt(&["remote", "get-url", "origin"])
     }
 
+    /// The lowercase host and `owner/repo` path of `origin`; `None` without an origin or when no
+    /// URL of it names a repository. The URL git expands (`insteadOf`) is tried first, then the
+    /// one written in the config, so a rewritten URL that no longer parses still resolves.
+    pub fn origin_location(&self) -> Result<Option<(String, String)>> {
+        let written = self.git_opt(&["config", "--get", "remote.origin.url"])?;
+        Ok([self.origin_url()?, written]
+            .into_iter()
+            .flatten()
+            .find_map(|url| split_remote(&url)))
+    }
+
     /// The absolute git common dir, which names a `local/` repository.
     pub fn common_dir(&self) -> Result<String> {
         self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    }
+
+    /// Every worktree of the repository; the first is the main checkout.
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        Ok(parse_worktrees(&self.checked(
+            &["worktree", "list", "--porcelain", "-z"],
+            None,
+            &[],
+        )?))
     }
 
     pub fn main_checkout_root(&self) -> Result<PathBuf> {
@@ -695,14 +729,12 @@ impl Repo {
         if self.git(&["rev-parse", "--is-bare-repository"])? == "true" {
             return fail("repository-local state requires a non-bare main checkout");
         }
-        let listing = self.checked(&["worktree", "list", "--porcelain", "-z"], None, &[])?;
-        let first = listing.split(|byte| *byte == 0).next().unwrap_or_default();
-        let path = first
-            .strip_prefix(b"worktree ")
+        let first = self
+            .worktrees()?
+            .into_iter()
+            .next()
             .ok_or_else(|| Error("git did not report its main checkout".into()))?;
-        use std::os::unix::ffi::OsStrExt;
-        let root = fs::canonicalize(Path::new(std::ffi::OsStr::from_bytes(path)))
-            .map_err(ctx("main checkout is unavailable"))?;
+        let root = fs::canonicalize(first.path).map_err(ctx("main checkout is unavailable"))?;
         let main = Self::at(&root);
         if main.git(&["rev-parse", "--is-bare-repository"])? == "true"
             || fs::canonicalize(main.common_dir()?).map_err(ctx("resolve main git directory"))?
@@ -748,7 +780,50 @@ impl Repo {
     }
 }
 
-fn text(bytes: Vec<u8>) -> Result<String> {
+/// The short name of a full branch ref: a local branch or one of `origin`.
+pub fn branch_name(reference: &str) -> &str {
+    reference
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| reference.strip_prefix("refs/heads/"))
+        .unwrap_or(reference)
+}
+
+/// Reads the output of `git worktree list --porcelain -z`.
+pub fn parse_worktrees(listing: &[u8]) -> Vec<Worktree> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut found: Vec<Worktree> = Vec::new();
+    for field in listing.split(|byte| *byte == 0) {
+        if let Some(path) = field.strip_prefix(b"worktree ") {
+            found.push(Worktree {
+                path: PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+                head: String::new(),
+                branch: None,
+                locked: false,
+                bare: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(entry) = found.last_mut() else {
+            continue;
+        };
+        let line = String::from_utf8_lossy(field);
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            entry.head = head.to_owned();
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            entry.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).into());
+        } else if line == "locked" || line.starts_with("locked ") {
+            entry.locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            entry.prunable = true;
+        } else if line == "bare" {
+            entry.bare = true;
+        }
+    }
+    found
+}
+
+pub fn text(bytes: Vec<u8>) -> Result<String> {
     let text = String::from_utf8(bytes).map_err(ctx("git printed invalid UTF-8"))?;
     Ok(text.trim_end_matches('\n').to_owned())
 }
@@ -787,7 +862,50 @@ fn remote_key(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::remote_key;
+    use super::{Repo, branch_name, parse_worktrees, remote_key};
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn origin_location_falls_back_to_the_written_url_when_the_expanded_one_names_no_host() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repo::at(root.path());
+        git(root.path(), &["init", "-q"]);
+        assert_eq!(repo.origin_location().unwrap(), None);
+        git(
+            root.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://GitHub.com/owner/repo.git",
+            ],
+        );
+        let expected = Some(("github.com".to_owned(), "owner/repo".to_owned()));
+        assert_eq!(repo.origin_location().unwrap(), expected);
+        git(
+            root.path(),
+            &[
+                "config",
+                "url./srv/mirror/.insteadOf",
+                "https://GitHub.com/",
+            ],
+        );
+        assert_eq!(
+            repo.origin_url().unwrap().as_deref(),
+            Some("/srv/mirror/owner/repo.git")
+        );
+        assert_eq!(repo.origin_location().unwrap(), expected);
+    }
 
     #[test]
     fn parses_remote_urls() {
@@ -811,5 +929,26 @@ mod tests {
         for (url, expected) in cases {
             assert_eq!(remote_key(url).as_deref(), expected, "{url}");
         }
+    }
+
+    #[test]
+    fn parses_worktree_listings_with_awkward_paths() {
+        let listing = b"worktree /srv/main\0HEAD aaa\0branch refs/heads/main\0\0\
+worktree /srv/new\nline\0HEAD bbb\0detached\0locked why\0prunable gone\0\0\
+worktree /srv/bare.git\0bare\0\0";
+        let found = parse_worktrees(listing);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].branch.as_deref(), Some("main"));
+        assert_eq!(found[0].head, "aaa");
+        assert_eq!(found[1].path, std::path::Path::new("/srv/new\nline"));
+        assert!(found[1].locked && found[1].prunable && found[1].branch.is_none());
+        assert!(found[2].bare && !found[2].locked);
+    }
+
+    #[test]
+    fn branch_name_strips_local_and_origin_prefixes() {
+        assert_eq!(branch_name("refs/remotes/origin/main"), "main");
+        assert_eq!(branch_name("refs/heads/a/b"), "a/b");
+        assert_eq!(branch_name("v1"), "v1");
     }
 }

@@ -7,10 +7,10 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use super::backup::{self, FileMode, REF_PREFIX, Record};
-use super::info::{self, Entry};
+use super::info;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::git::Repo;
+use crate::git::{Repo, Worktree};
 
 pub struct Taken {
     pub record: Record,
@@ -21,7 +21,7 @@ pub struct Taken {
 
 /// Snapshots `entry`, whose repository's main checkout is `main`. Nothing in the worktree
 /// changes; its index is not touched.
-pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
+pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
     let created = clock::now_secs()?;
     let stamp = clock::format(created);
     let stamp = format!(
@@ -73,7 +73,7 @@ pub fn take(main: &Path, entry: &Entry) -> Result<Taken> {
 
 fn build(
     main: &Path,
-    entry: &Entry,
+    entry: &Worktree,
     shared: &Repo,
     dir: &Path,
     id: String,

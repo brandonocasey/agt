@@ -14,7 +14,7 @@ use super::{gate, info, roots};
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::forge::landed::Origin;
-use crate::git::Repo;
+use crate::git::{Repo, Worktree};
 
 /// The `agt cleanup` flags of the `worktrees` kind; each needs `--only worktrees`.
 #[derive(Args)]
@@ -279,7 +279,7 @@ fn kept_as(verdict: &str, subject: &Subject, path: Option<&PathBuf>, reason: &st
 /// Removes (or plans to remove) the worktree of a landed subject. `false` when it is kept.
 fn remove_worktree(
     scene: &Scene,
-    entry: &info::Entry,
+    entry: &Worktree,
     main: &Path,
     subject: &Subject,
     cli: &Options,
@@ -349,7 +349,7 @@ fn remove_worktree(
 /// Why the worktree must stay, if it must.
 fn blocker(
     scene: &Scene,
-    entry: &info::Entry,
+    entry: &Worktree,
     main: &Path,
     cli: &Options,
     cwds: &mut Cwds,

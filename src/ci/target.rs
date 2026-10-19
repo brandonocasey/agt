@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::core::error::{Error, Result, fail};
 use crate::forge::transport::Cli;
-use crate::git::{Repo, split_remote};
+use crate::git::Repo;
 
 pub static GITLAB_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^https?://([^/]+)/(.+?)/-/(merge_requests|pipelines)/(\d+)")
@@ -133,12 +133,9 @@ fn gitlab_host() -> Result<String> {
 }
 
 fn origin() -> Result<(String, String)> {
-    Repo::discover()?
-        .origin_url()?
-        .and_then(|url| split_remote(&url))
-        .ok_or_else(|| {
-            Error("the current repository has no origin remote to name the target".into())
-        })
+    Repo::discover()?.origin_location()?.ok_or_else(|| {
+        Error("the current repository has no origin remote to name the target".into())
+    })
 }
 
 pub fn resolve(target: Target) -> Result<Resolved> {

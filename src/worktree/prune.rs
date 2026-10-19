@@ -4,12 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use super::gate;
-use super::info::{self, Entry};
+use super::info;
 use super::landed::{Scene, recent};
 use super::roots;
 use crate::core::error::Result;
 use crate::core::{agents, clock};
-use crate::git::Repo;
+use crate::git::{Repo, Worktree};
 
 /// A merged worktree or branch that `agt cleanup --only worktrees` would remove.
 pub struct Found {
@@ -62,7 +62,7 @@ fn of(repo: &Repo) -> Result<Vec<Found>> {
 }
 
 /// Whether the worktree exists, is unlocked, clean, quiet for 3 days and without a live agent session.
-fn idle(scene: &Scene, entry: &Entry, main: &Path) -> Result<bool> {
+fn idle(scene: &Scene, entry: &Worktree, main: &Path) -> Result<bool> {
     if entry.locked || !entry.path.exists() || scene.holds_cwd(&entry.path) {
         return Ok(false);
     }

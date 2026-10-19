@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::info::{self, Entry};
+use super::info;
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::forge::landed::{Origin, State};
-use crate::git::Repo;
+use crate::git::{Repo, Worktree};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -60,7 +60,7 @@ fn finding(verdict: Verdict, evidence: impl Into<String>) -> Finding {
 
 /// A repository's worktrees and default branch, and what must never be touched.
 pub struct Scene {
-    pub entries: Vec<Entry>,
+    pub entries: Vec<Worktree>,
     /// The default branch's name and ref.
     pub name: String,
     pub reference: String,
@@ -74,7 +74,7 @@ impl Scene {
         let Some((name, reference)) = info::default_branch(repo)? else {
             return Ok(None);
         };
-        let entries = info::entries(repo)?;
+        let entries = repo.worktrees()?;
         let cwd = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
         let held = cwd.ok().and_then(|cwd| {
             entries
@@ -91,7 +91,7 @@ impl Scene {
         }))
     }
 
-    pub fn main(&self) -> &Entry {
+    pub fn main(&self) -> &Worktree {
         &self.entries[0]
     }
 
@@ -132,7 +132,7 @@ impl Scene {
     }
 
     /// The linked worktree that has `branch` checked out.
-    pub fn worktree_of(&self, branch: &str) -> Option<&Entry> {
+    pub fn worktree_of(&self, branch: &str) -> Option<&Worktree> {
         self.entries
             .iter()
             .skip(1)

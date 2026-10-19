@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use serde_json::{Value, json};
 
-use super::info::{self, main_checkout};
+use super::info::main_checkout;
 use super::setup::{self, Step};
 use super::{emit, fast_forward, hooks, port, prepare};
 use crate::core::error::{Result, ctx, fail};
@@ -57,7 +57,8 @@ pub fn run(cli: Cli) -> Result<Output> {
             "{branch} exists; --base applies to a new branch only"
         ));
     }
-    let checked_out = info::entries(&repo)?
+    let checked_out = repo
+        .worktrees()?
         .into_iter()
         .find(|entry| entry.branch.as_deref() == Some(branch));
     let mut fetched = Vec::new();
