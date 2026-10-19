@@ -30,6 +30,9 @@ pub struct Cli {
     /// 1 when it failed and 3 when `--max` passes first.
     #[arg(long, conflicts_with = "clone_deps")]
     wait: bool,
+    /// After the install, run the `[worktree.hooks] create` commands (to rerun hooks that failed).
+    #[arg(long, conflicts_with = "wait")]
+    hooks: bool,
     /// Give up waiting after this many seconds.
     #[arg(long, default_value_t = 270, requires = "wait", value_parser = clap::value_parser!(u64).range(1..))]
     max: u64,
@@ -39,7 +42,7 @@ pub struct Cli {
         hide = true,
         value_delimiter = ',',
         value_parser = ["prepare", "hooks"],
-        conflicts_with_all = ["clone_deps", "wait"]
+        conflicts_with_all = ["clone_deps", "wait", "hooks"]
     )]
     setup: Vec<String>,
 }
@@ -60,7 +63,13 @@ pub fn run(cli: Cli) -> Result<Output> {
             .collect();
         return setup::child(&dir, &steps);
     }
-    let (value, ok) = prepare(&dir, cli.clone_deps)?;
+    let (mut value, mut ok) = prepare(&dir, cli.clone_deps)?;
+    if cli.hooks {
+        let root = toplevel(&dir)?;
+        let (report, passed) = super::hooks::run(&root, super::hooks::Kind::Create)?;
+        value["hooks"] = report;
+        ok &= passed;
+    }
     emit(value, ok)
 }
 
@@ -236,6 +245,8 @@ pub(super) fn run_step(
     let status = Command::new(&command[0])
         .args(&command[1..])
         .current_dir(root)
+        // An inherited PORT must not leak into a step; the caller's `env` may set it.
+        .env_remove("PORT")
         .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(sink)

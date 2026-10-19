@@ -72,6 +72,19 @@ fn read_status(file: &Path) -> Result<Option<Value>> {
 /// `{"pid", "status", "log"}`.
 pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
     let status = status_path(root)?;
+    if let Some(existing) = read_status(&status)?
+        && existing["state"] == "running"
+    {
+        let pid = existing["pid"].as_u64().unwrap_or(0);
+        if pid == 0 || alive(pid) {
+            return Ok(json!({
+                "pid": pid,
+                "status": status,
+                "log": existing["log"],
+                "already_running": true,
+            }));
+        }
+    }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
