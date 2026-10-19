@@ -5,7 +5,8 @@ use std::sync::atomic::AtomicBool;
 use crate::core::error::{Result, ctx, fail};
 use crate::git::Repo;
 
-use super::{Namespace, Store, copy_tree, create_dir};
+use super::backup::copy_tree;
+use super::{Namespace, Store, create_dir};
 use crate::core::local::{lock_file, sync_dir, write_atomic};
 
 impl Store {
@@ -226,7 +227,7 @@ impl Store {
                                 path.display()
                             ));
                         }
-                        let Some(document) = super::read_document(&path)? else {
+                        let Some(document) = super::json::read_document(&path)? else {
                             continue;
                         };
                         if document.get("host").and_then(serde_json::Value::as_str)

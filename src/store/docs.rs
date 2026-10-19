@@ -9,8 +9,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use super::json::{lost_field, persist_json, read_document};
 use super::prune::{Removal, remove_with_lock};
-use super::{Store, create_dir, ctx, fail, lost_field, persist_json, read_document, validate_key};
+use super::{Store, create_dir, ctx, fail, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{lock_file, try_lock_file};
 

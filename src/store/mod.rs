@@ -1,65 +1,32 @@
+mod backup;
 mod docs;
 pub mod issues;
+mod json;
 pub mod model;
 pub mod prune;
 mod repository;
+mod schema;
+pub mod sidecars;
+
 use std::fs::{self, DirBuilder, File};
-use std::io::{ErrorKind, Read};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::io::ErrorKind;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
+use self::json::read_document;
+use self::schema::{
+    REVIEW_MIGRATIONS, Schema, is_target_document, is_target_file, parse_target, read_target,
+    read_target_for_write, read_target_intact, write_target,
+};
 use crate::core::error::{Result, ctx, fail};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-use crate::core::clock;
-use crate::core::local::{self, lock_file, sync_dir, try_lock_file, write_atomic};
-use crate::store::model::{Forge, Target, VERSION};
+use crate::core::local::{self, lock_file, try_lock_file};
+use crate::store::model::{Target, VERSION};
 
 const MAX_KEY: usize = 200;
-const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);
-const TARGET_KINDS: [&str; 3] = ["branch", "range", "commit"];
-const ACCOUNT_FILE: &str = ".account.json";
-const REPO_FILE: &str = ".repo.json";
-const LOOKUP_FILE: &str = ".auto-sync.json";
 
 /// Files left out of a read, each as its key and the warning that says why.
 pub type LeftOut = Vec<(String, String)>;
-
-/// How long `last_seen` in `.repo.json` may go without a refresh.
-const SEEN_REFRESH_SECS: i64 = 24 * 60 * 60;
-
-/// Where a `local/` repository lives and when agt last ran in it, so `prune` can tell it is
-/// gone. Older agt ignores the file, which is why this is not a field of the target.
-#[derive(Serialize, Deserialize)]
-pub struct RepoFile {
-    pub common_dir: String,
-    /// RFC 3339. Absent in files written before it existed; their modification time stands in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_seen: Option<String>,
-}
-
-/// The forge login `sync` authenticated as, cached per repository for author defaults.
-#[derive(Serialize, Deserialize)]
-pub struct Account {
-    pub forge: Forge,
-    pub host: String,
-    pub login: String,
-}
-
-/// What auto-sync remembers beside the documents it syncs: the branches it last asked the forge
-/// for a PR/MR and found none, and what it last failed to sync, each with when, so reads ask
-/// again only after a while. Older agt ignores the file, which is why this is not a field of
-/// the target or tracker.
-#[derive(Default, Serialize, Deserialize)]
-pub struct Lookups {
-    #[serde(default)]
-    pub misses: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    pub failures: std::collections::BTreeMap<String, String>,
-}
 
 /// A store area with its own directory and schema version, so a change to one cannot break
 /// another.
@@ -68,13 +35,6 @@ pub enum Namespace {
     Reviews,
     Issues,
     Tasks,
-}
-
-/// The current schema version of a namespace and the steps that bring older documents to it.
-#[derive(Clone, Copy)]
-struct Schema {
-    version: u32,
-    migrations: &'static [fn(&mut Value)],
 }
 
 impl Namespace {
@@ -141,72 +101,6 @@ impl Store {
             schema: namespace.schema(),
             backed_up: AtomicBool::new(false),
         }
-    }
-
-    /// Copies the namespace to `backups/<namespace>-v<old version>-<timestamp>/` before the first
-    /// overwrite of a document written under an older schema version. One backup per namespace
-    /// and old version, across processes: a later run that finds one does not copy again.
-    fn backup_before_migration(&self, path: &Path) -> Result<()> {
-        if self.backed_up.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let stored = read_document(path)?
-            .and_then(|document| document.get("version").and_then(Value::as_u64));
-        let Some(stored) = stored.filter(|version| *version < u64::from(self.schema.version))
-        else {
-            return Ok(());
-        };
-        let name = self.namespace.dir_name();
-        let prefix = format!("{name}-v{stored}-");
-        create_dir(&self.backups)?;
-        // Beside the backups, not in them, so the backups directory holds only backups.
-        let lock_path = self.backups.with_file_name(format!(".{name}-backup.lock"));
-        // One backup at a time per namespace, across processes: the check, the copy and the
-        // rename are one step, so no run deletes or renames another's copy.
-        let _guard = lock_file(&lock_path)?;
-        let done = fs::read_dir(&self.backups).is_ok_and(|entries| {
-            entries
-                .flatten()
-                .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
-        });
-        if done {
-            self.backed_up.store(true, Ordering::Release);
-            return Ok(());
-        }
-        // Copies that failed part way are no backup; under the lock none is in progress.
-        let leftover = format!(".{prefix}");
-        for entry in fs::read_dir(&self.backups)
-            .map_err(ctx(format!("read {}", self.backups.display())))?
-            .flatten()
-        {
-            let file = entry.file_name().to_string_lossy().into_owned();
-            if file.starts_with(&leftover) && file.ends_with(".partial") {
-                fs::remove_dir_all(entry.path())
-                    .map_err(ctx(format!("remove {}", entry.path().display())))?;
-            }
-        }
-        let stamp = crate::core::clock::now()?.replace(':', "-");
-        let mut target = self.backups.join(format!("{prefix}{stamp}"));
-        let mut attempt = 1;
-        while target.exists() {
-            attempt += 1;
-            target = self.backups.join(format!("{prefix}{stamp}-{attempt}"));
-        }
-        // Copy under a hidden name and rename when complete, so a failed copy never looks
-        // like a finished backup to the next run.
-        let partial = self.backups.join(format!(
-            ".{}.partial",
-            target.file_name().unwrap_or_default().to_string_lossy()
-        ));
-        copy_tree(&self.root, &partial)?;
-        fs::rename(&partial, &target).map_err(ctx(format!(
-            "rename {} to {}",
-            partial.display(),
-            target.display()
-        )))?;
-        sync_dir(&self.backups)?;
-        self.backed_up.store(true, Ordering::Release);
-        Ok(())
     }
 
     fn write(&self, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
@@ -502,57 +396,6 @@ impl Store {
         }
         Ok(result)
     }
-
-    pub fn load_account(&self, dir: &Path) -> Result<Option<Account>> {
-        read_json(&dir.join(ACCOUNT_FILE))
-    }
-
-    pub fn save_account(&self, dir: &Path, account: &Account) -> Result<()> {
-        create_dir(dir)?;
-        persist_json(&dir.join(ACCOUNT_FILE), account, || Ok(()))
-    }
-
-    /// The PR/MR lookup misses of the repository. A file that cannot be read counts as none:
-    /// the next lookup rewrites it.
-    pub fn load_lookups(&self, dir: &Path) -> Lookups {
-        read_json(&dir.join(LOOKUP_FILE))
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-    }
-
-    pub fn save_lookups(&self, dir: &Path, lookups: &Lookups) -> Result<()> {
-        create_dir(dir)?;
-        persist_json(&dir.join(LOOKUP_FILE), lookups, || Ok(()))
-    }
-
-    /// Writes the repository's absolute git common dir and `now` beside its targets. A record
-    /// that names the same directory and was refreshed within a day is left alone, so most
-    /// commands write nothing.
-    pub fn record_repo(&self, dir: &Path, common_dir: &str, now: i64) -> Result<()> {
-        let path = dir.join(REPO_FILE);
-        if let Ok(Some(known)) = read_json::<RepoFile>(&path)
-            && known.common_dir == common_dir
-            && let Some(seen) = known
-                .last_seen
-                .as_deref()
-                .and_then(|seen| clock::parse(seen).ok())
-            && (0..SEEN_REFRESH_SECS).contains(&(now - seen))
-        {
-            return Ok(());
-        }
-        create_dir(dir)?;
-        let file = RepoFile {
-            common_dir: common_dir.to_owned(),
-            last_seen: Some(clock::format(now)),
-        };
-        persist_json(&path, &file, || Ok(()))
-    }
-
-    /// The git common dir recorded by [`Store::record_repo`], if any.
-    pub fn recorded_repo(&self, dir: &Path) -> Result<Option<RepoFile>> {
-        read_json(&dir.join(REPO_FILE))
-    }
 }
 
 fn validate_key(key: &str) -> Result<()> {
@@ -569,230 +412,6 @@ fn validate_key(key: &str) -> Result<()> {
     }
 }
 
-/// Reads a JSON file that must be a regular file. Writers replace files by rename, so a file
-/// swapped between the check and the open is read again; only a path that keeps changing fails.
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    const ATTEMPTS: usize = 100;
-    for _ in 0..ATTEMPTS {
-        let meta = match fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return fail(format!("stat {}: {error}", path.display())),
-        };
-        if !meta.file_type().is_file() {
-            return fail(format!(
-                "{} must be a regular file, not a symbolic link",
-                path.display()
-            ));
-        }
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            // Replaced by a rename of a file that is gone again, or removed.
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return fail(format!("open {}: {error}", path.display())),
-        };
-        let opened = file
-            .metadata()
-            .map_err(ctx(format!("stat {}", path.display())))?;
-        if opened.ino() != meta.ino() || opened.dev() != meta.dev() {
-            continue;
-        }
-        let mut raw = String::new();
-        file.read_to_string(&mut raw)
-            .map_err(ctx(format!("read {}", path.display())))?;
-        return serde_json::from_str(&raw).map_err(ctx(format!("parse {}", path.display())));
-    }
-    fail(format!("{} changed while opening; retry", path.display()))
-}
-
-/// Whether the store file holds a target. Other documents may share a repository directory; a
-/// file whose `kind` is not a target kind belongs to them and is left alone.
-fn is_target_document(document: &Value) -> bool {
-    match document.get("kind").and_then(Value::as_str) {
-        Some(kind) => TARGET_KINDS.contains(&kind),
-        None => true,
-    }
-}
-
-fn is_target_file(path: &Path) -> Result<bool> {
-    Ok(read_document(path)?.is_some_and(|document| is_target_document(&document)))
-}
-
-/// Reads the target a caller asked for by key. A file of another document kind is an error so
-/// that a write never replaces it.
-fn read_target(path: &Path, schema: Schema) -> Result<Option<Target>> {
-    match read_document(path)? {
-        Some(document) => parse_target(path, document, schema).map(|(target, _)| Some(target)),
-        None => Ok(None),
-    }
-}
-
-/// Like [`read_target`], but the inner `Err` names the first field this build does not know, for
-/// a caller that must keep such a file as it is.
-fn read_target_intact(
-    path: &Path,
-    schema: Schema,
-) -> Result<Option<std::result::Result<Target, String>>> {
-    let Some(document) = read_document(path)? else {
-        return Ok(None);
-    };
-    if !is_target_document(&document) {
-        return Ok(None);
-    }
-    let (target, document) = parse_target(path, document, schema)?;
-    let written =
-        serde_json::to_value(&target).map_err(ctx(format!("encode {}", path.display())))?;
-    Ok(Some(match lost_field(&document, &written, "") {
-        Some(field) => Err(field),
-        None => Ok(target),
-    }))
-}
-
-/// Like [`read_target`], for a caller that will write the target back. Refuses a file holding
-/// fields this build does not know, because writing it would silently drop them.
-fn read_target_for_write(path: &Path, schema: Schema) -> Result<Option<Target>> {
-    let Some(document) = read_document(path)? else {
-        return Ok(None);
-    };
-    let (target, document) = parse_target(path, document, schema)?;
-    let written =
-        serde_json::to_value(&target).map_err(ctx(format!("encode {}", path.display())))?;
-    if let Some(field) = lost_field(&document, &written, "") {
-        return fail(format!(
-            "{} has field {field} that this agt does not know; it was probably written by a newer agt, so upgrade agt before changing it",
-            path.display()
-        ));
-    }
-    Ok(Some(target))
-}
-
-fn read_document(path: &Path) -> Result<Option<Value>> {
-    read_json(path)
-}
-
-/// The first field of `original` that `written` lacks, as a path.
-fn lost_field(original: &Value, written: &Value, at: &str) -> Option<String> {
-    match (original, written) {
-        (Value::Object(original), Value::Object(written)) => {
-            original.iter().find_map(|(name, value)| {
-                let path = if at.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{at}.{name}")
-                };
-                match written.get(name) {
-                    Some(written) => lost_field(value, written, &path),
-                    None => Some(path),
-                }
-            })
-        }
-        (Value::Array(original), Value::Array(written)) => original
-            .iter()
-            .zip(written)
-            .enumerate()
-            .find_map(|(index, (original, written))| {
-                lost_field(original, written, &format!("{at}[{index}]"))
-            }),
-        _ => None,
-    }
-}
-
-/// Parses a stored target, migrating older schema versions first. Returns the migrated
-/// document alongside the target.
-fn parse_target(path: &Path, mut document: Value, schema: Schema) -> Result<(Target, Value)> {
-    if !is_target_document(&document) {
-        return fail(format!("{} is not a target document", path.display()));
-    }
-    let version = document.get("version").and_then(Value::as_u64);
-    let version = match version.map(u32::try_from) {
-        Some(Ok(version)) => version,
-        _ => return fail(format!("{} has no valid schema version", path.display())),
-    };
-    if version > schema.version {
-        return fail(format!(
-            "{} uses schema version {version}, newer than the {} this agt (v{}) supports; upgrade agt to a release that supports schema version {version}",
-            path.display(),
-            schema.version,
-            env!("CARGO_PKG_VERSION"),
-        ));
-    }
-    if version == 0 {
-        return fail(format!("{} has unsupported version 0", path.display()));
-    }
-    migrate_with(&mut document, version, schema.migrations);
-    let target: Target = serde_json::from_value(document.clone())
-        .map_err(ctx(format!("parse {}", path.display())))?;
-    Ok((target, document))
-}
-
-/// One step per schema version: `MIGRATIONS[n - 1]` rewrites a version `n` document into
-/// version `n + 1`'s shape. Bumping [`VERSION`] means adding a step here and a frozen-JSON test.
-const REVIEW_MIGRATIONS: &[fn(&mut Value)] = &[];
-
-fn migrate_with(document: &mut Value, from: u32, steps: &[fn(&mut Value)]) {
-    let from = from as usize;
-    for step in steps.iter().skip(from - 1) {
-        step(document);
-    }
-    let to = steps.len() as u32 + 1;
-    if let Some(version) = document.get_mut("version") {
-        *version = Value::from(to);
-    }
-}
-
-/// Writes `value` as indented JSON to `path` durably, after `check` passes.
-fn persist_json(
-    path: &Path,
-    value: &impl Serialize,
-    check: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    let mut text =
-        serde_json::to_vec_pretty(value).map_err(ctx(format!("serialize {}", path.display())))?;
-    text.push(b'\n');
-    write_atomic(path, &text, true, check)
-}
-
-fn write_target(path: &Path, target: &Target, expected: Option<u64>, schema: Schema) -> Result<()> {
-    persist_json(path, target, || {
-        let on_disk = read_target(path, schema)?.map(|current| current.revision);
-        if on_disk != expected {
-            return fail(format!(
-                "target {} changed during update; retry",
-                target.key
-            ));
-        }
-        Ok(())
-    })
-}
-
-/// Copies regular files and directories from `from` into the new directory `to`, skipping lock
-/// files and anything that is not a plain file or directory.
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    create_dir(to)?;
-    let entries = match fs::read_dir(from) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return fail(format!("read {}: {error}", from.display())),
-    };
-    for entry in entries {
-        let entry = entry.map_err(ctx(format!("read {}", from.display())))?;
-        let kind = entry
-            .file_type()
-            .map_err(ctx(format!("stat {}", entry.path().display())))?;
-        let destination = to.join(entry.file_name());
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &destination)?;
-        } else if kind.is_file() && !entry.file_name().to_string_lossy().ends_with(".lock") {
-            fs::copy(entry.path(), &destination)
-                .map_err(ctx(format!("copy {}", entry.path().display())))?;
-            File::open(&destination)
-                .and_then(|copied| copied.sync_all())
-                .map_err(ctx(format!("sync {}", destination.display())))?;
-        }
-    }
-    sync_dir(to)
-}
-
 fn create_dir(dir: &Path) -> Result<()> {
     DirBuilder::new()
         .recursive(true)
@@ -803,6 +422,7 @@ fn create_dir(dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::schema::migrate_with;
     use super::*;
     use serde_json::{Value, json};
 
@@ -1262,33 +882,5 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(names[0].starts_with("reviews-v1-"), "{names:?}");
         assert!(!names[0].ends_with(".partial"), "{names:?}");
-    }
-}
-
-#[cfg(test)]
-mod read_race_tests {
-    use super::*;
-
-    #[test]
-    fn a_reader_survives_the_file_being_replaced_under_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.json");
-        persist_json(&path, &Value::from(0), || Ok(())).unwrap();
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let writer = {
-            let (path, stop) = (path.clone(), stop.clone());
-            std::thread::spawn(move || {
-                let mut n = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    n += 1;
-                    persist_json(&path, &Value::from(n), || Ok(())).unwrap();
-                }
-            })
-        };
-        for _ in 0..3000 {
-            read_json::<Value>(&path).unwrap().unwrap();
-        }
-        stop.store(true, Ordering::Relaxed);
-        writer.join().unwrap();
     }
 }

@@ -13,12 +13,12 @@ use crate::forge::anchors;
 use crate::forge::service::{self, Capabilities, ReviewService, ReviewSubject};
 use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
 use crate::git::Repo;
-use crate::store::Account;
 use crate::store::model::{
     Anchor, Author, Comment, FindingInfo, Forge, ImportedRecord, PostState, RecordPost,
     RemoteComment, RemoteKind, Resolution, Review, ReviewState, Run, Severity, Side, Target,
     TargetKind, Thread, ThreadType,
 };
+use crate::store::sidecars::Account;
 
 use crate::forge::markers::{self, agent_attempt, agent_id};
 

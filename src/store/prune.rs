@@ -5,10 +5,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use super::{
-    ACCOUNT_FILE, LOOKUP_FILE, Namespace, REPO_FILE, Store, ctx, fail, read_target_intact,
-    validate_key,
-};
+use super::schema::read_target_intact;
+use super::sidecars::{ACCOUNT_FILE, LOOKUP_FILE, REPO_FILE};
+use super::{Namespace, Store, ctx, fail, validate_key};
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::core::local::{is_current, try_lock_file};
