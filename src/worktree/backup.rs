@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::local;
 use crate::core::output::Output;
 use crate::git::Repo;
-use crate::store::{Namespace, Store};
 
 const FILE: &str = "backup.json";
 pub const REF_PREFIX: &str = "refs/agt/backups/";
@@ -97,7 +97,7 @@ fn summary(record: &Record, dir: &Path) -> Value {
 }
 
 pub fn root() -> Result<PathBuf> {
-    Ok(Store::open(Namespace::Tasks)?.backups_dir().to_owned())
+    local::backups_dir()
 }
 
 pub fn write(dir: &Path, record: &Record) -> Result<()> {

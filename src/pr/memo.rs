@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{Lock, private_dir, write_private};
-use crate::store::{Namespace, Store};
+use crate::core::local::{Lock, agents_state, private_dir, write_private};
 
 type Paused = BTreeMap<String, String>;
 
@@ -18,7 +17,7 @@ struct Files {
 }
 
 fn files() -> Result<Files> {
-    let folder = Store::open(Namespace::Tasks)?.agents_dir().join("pr");
+    let folder = agents_state()?.join("pr");
     private_dir(&folder)?;
     Ok(Files {
         document: folder.join("auto-merge.json"),

@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use super::emit;
 use super::info::{main_checkout, toplevel};
 use super::setup::{self, Step};
-use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::error::{Result, ctx, fail};
+use crate::core::local;
 use crate::core::output::Output;
 use crate::git::Repo;
 
@@ -210,16 +211,7 @@ fn identical(main: &Path, root: &Path, file: &str) -> bool {
 
 /// `$XDG_CACHE_HOME/agents/output`, creating it.
 pub(super) fn output_dir() -> Result<PathBuf> {
-    let cache = match std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
-        Some(path) if path.is_absolute() => path,
-        _ => {
-            let home = std::env::var_os("HOME")
-                .filter(|home| !home.is_empty())
-                .ok_or_else(|| Error("HOME is not set".into()))?;
-            PathBuf::from(home).join(".cache")
-        }
-    };
-    let dir = cache.join("agents").join("output");
+    let dir = local::agents_cache()?.join("output");
     fs::create_dir_all(&dir).map_err(ctx(format!("create {}", dir.display())))?;
     Ok(dir)
 }

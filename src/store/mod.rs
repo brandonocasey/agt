@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::clock;
+use crate::core::local;
 use crate::store::model::{Forge, Target, VERSION};
 
 const MAX_KEY: usize = 200;
@@ -114,16 +115,7 @@ pub struct Store {
 
 impl Store {
     pub fn open(namespace: Namespace) -> Result<Self> {
-        let base = match std::env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
-            Some(path) if path.is_absolute() => path,
-            _ => {
-                let home = std::env::var_os("HOME")
-                    .filter(|home| !home.is_empty())
-                    .ok_or_else(|| Error("HOME is not set".into()))?;
-                PathBuf::from(home).join(".local").join("state")
-            }
-        };
-        Ok(Self::at(&base, namespace))
+        Ok(Self::at(&local::state_home()?, namespace))
     }
 
     /// The namespace directory, for domains whose documents are not review targets.
@@ -134,11 +126,6 @@ impl Store {
     /// The shared backups directory, `agents/backups`.
     pub fn backups_dir(&self) -> &Path {
         &self.backups
-    }
-
-    /// The `agents` directory above every namespace.
-    pub fn agents_dir(&self) -> &Path {
-        &self.agents
     }
 
     /// Opens `namespace` under the state directory `base` (the parent of `agents`).

@@ -3,11 +3,10 @@
 use std::path::PathBuf;
 
 use crate::core::error::Result;
-use crate::core::local::private_dir;
-use crate::store::{Namespace, Store};
+use crate::core::local::{private_dir, tasks_dir};
 
 pub fn root() -> Result<PathBuf> {
-    Ok(Store::open(Namespace::Tasks)?.root().to_path_buf())
+    tasks_dir()
 }
 
 pub fn ensure_root() -> Result<PathBuf> {

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::files::measure;
 use crate::core::error::{Error, Result, ctx};
+use crate::core::local;
 use crate::core::shell::quote;
 use crate::store::{Namespace, Store};
 use crate::worktree::prune;
@@ -37,13 +38,6 @@ pub struct Candidate {
     pub section: &'static str,
     /// The command to run, or the path to look at.
     pub item: String,
-}
-
-fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| Error("HOME is not set".into()))
 }
 
 /// Merged worktrees and branches under the configured roots, each with the command that
@@ -158,7 +152,7 @@ fn playwright_roots(home: &Path) -> Vec<PathBuf> {
         return vec![PathBuf::from(path)];
     }
     let mut roots = vec![home.join("Library").join("Caches").join("ms-playwright")];
-    if let Ok(cache) = super::files::cache_root() {
+    if let Ok(cache) = local::cache_home() {
         roots.push(cache.join("ms-playwright"));
     }
     roots.push(home.join(".cache").join("ms-playwright"));
@@ -205,7 +199,7 @@ pub fn candidates() -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
     merged(&mut found)?;
     backups(&mut found)?;
-    let home = home()?;
+    let home = local::home()?;
     codex_releases(&home, &mut found);
     playwright(&home, &mut found);
     Ok(found)
@@ -226,8 +220,7 @@ pub fn json(candidates: &[Candidate]) -> Value {
 
 /// `$XDG_STATE_HOME/agents/reports/cleanup-candidates.md`.
 pub fn report_path() -> Result<PathBuf> {
-    Ok(Store::open(Namespace::Reviews)?
-        .agents_dir()
+    Ok(local::agents_state()?
         .join("reports")
         .join("cleanup-candidates.md"))
 }

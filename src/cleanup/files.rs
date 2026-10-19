@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::core::error::{Error, Result};
+use crate::core::local;
 use crate::store::prune::Removal;
 
 pub const OUTPUT_DAYS: i64 = 7;
@@ -27,27 +28,12 @@ pub struct Stale {
     pub bytes: u64,
 }
 
-fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| Error("HOME is not set".into()))
-}
-
-/// `$XDG_CACHE_HOME`, or `~/.cache` when it is unset or relative.
-pub fn cache_root() -> Result<PathBuf> {
-    match std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
-        Some(path) if path.is_absolute() => Ok(path),
-        _ => Ok(home()?.join(".cache")),
-    }
-}
-
 /// Where Claude Code keeps session scratchpads: `<tmp>/claude-<uid>/<cwd-slug>/<session>`.
 /// Settings point it at `~/.cache/claude-tmp`; older sessions used `/tmp`.
 pub fn harness_roots() -> Result<Vec<PathBuf>> {
     let uid = unsafe { libc::getuid() };
     let tmp = std::env::var_os(TMP_OVERRIDE).map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    Ok(vec![home()?.join(".cache").join("claude-tmp"), tmp]
+    Ok(vec![local::home()?.join(".cache").join("claude-tmp"), tmp]
         .into_iter()
         .map(|base| base.join(format!("claude-{uid}")))
         .collect())
@@ -186,7 +172,7 @@ fn own_root(path: PathBuf) -> PathBuf {
 
 /// Task directories and files in `agents/output`.
 pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
-    let root = own_root(cache_root()?.join("agents").join("output"));
+    let root = own_root(local::agents_cache()?.join("output"));
     Ok(stale_in(
         &root,
         std::slice::from_ref(&root),
@@ -199,7 +185,7 @@ pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
 
 /// Task directories in `agents/scratch`, and harness session directories.
 pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
-    let root = own_root(cache_root()?.join("agents").join("scratch"));
+    let root = own_root(local::agents_cache()?.join("scratch"));
     let mut found = stale_in(
         &root,
         std::slice::from_ref(&root),

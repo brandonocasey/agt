@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use crate::core::error::{Error, Result};
+use crate::core::local;
 use crate::core::transcripts::json::{count, get, text};
 
 pub struct Prices {
@@ -35,10 +36,7 @@ fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("AGT_PRICES").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .ok_or_else(|| Error("HOME is not set".into()))?;
-    Ok(PathBuf::from(home).join(".config/agents/model-prices.json"))
+    Ok(local::home()?.join(".config/agents/model-prices.json"))
 }
 
 fn rate(rates: &Value, key: &str) -> f64 {

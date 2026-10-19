@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::error::{Error, Result, fail};
+use crate::core::local;
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,16 +212,7 @@ fn merge_values(base: &mut toml::Value, overrides: toml::Value) {
 
 /// `$XDG_CONFIG_HOME/agt/config.toml`, falling back to `~/.config`.
 pub fn path() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-        Some(path) if path.is_absolute() => path,
-        _ => {
-            let home = std::env::var_os("HOME")
-                .filter(|home| !home.is_empty())
-                .ok_or_else(|| Error("HOME is not set".into()))?;
-            PathBuf::from(home).join(".config")
-        }
-    };
-    Ok(base.join("agt").join("config.toml"))
+    Ok(local::config_home()?.join("agt").join("config.toml"))
 }
 
 #[cfg(test)]

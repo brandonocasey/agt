@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::local;
 use serde_json::Value;
 
 #[derive(Clone)]
@@ -353,7 +354,7 @@ pub fn session_dirs() -> Vec<PathBuf> {
     if let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
         dirs.push(PathBuf::from(config).join("sessions"));
     }
-    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty())
+    if let Ok(home) = local::home()
         && let Ok(entries) = std::fs::read_dir(&home)
     {
         for entry in entries.flatten() {

@@ -107,3 +107,46 @@ pub fn home() -> Result<PathBuf> {
         .map(PathBuf::from)
         .ok_or_else(|| Error("HOME is not set".into()))
 }
+
+/// `$var` when it is an absolute path, else `~/<fallback>`.
+fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf> {
+    match std::env::var_os(var).map(PathBuf::from) {
+        Some(path) if path.is_absolute() => Ok(path),
+        _ => Ok(home()?.join(fallback)),
+    }
+}
+
+/// `$XDG_STATE_HOME`, or `~/.local/state` when it is unset or relative.
+pub fn state_home() -> Result<PathBuf> {
+    xdg_dir("XDG_STATE_HOME", ".local/state")
+}
+
+/// `$XDG_CONFIG_HOME`, or `~/.config` when it is unset or relative.
+pub fn config_home() -> Result<PathBuf> {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
+/// `$XDG_CACHE_HOME`, or `~/.cache` when it is unset or relative.
+pub fn cache_home() -> Result<PathBuf> {
+    xdg_dir("XDG_CACHE_HOME", ".cache")
+}
+
+/// `agents` under the state directory, which holds every namespace and the domains' state files.
+pub fn agents_state() -> Result<PathBuf> {
+    Ok(state_home()?.join("agents"))
+}
+
+/// `agents/tasks` under the state directory, where task records and the session index live.
+pub fn tasks_dir() -> Result<PathBuf> {
+    Ok(agents_state()?.join("tasks"))
+}
+
+/// `agents/backups` under the state directory, where migrations and worktree removal save copies.
+pub fn backups_dir() -> Result<PathBuf> {
+    Ok(agents_state()?.join("backups"))
+}
+
+/// `agents` under the cache directory, which holds command output and scratch files.
+pub fn agents_cache() -> Result<PathBuf> {
+    Ok(cache_home()?.join("agents"))
+}

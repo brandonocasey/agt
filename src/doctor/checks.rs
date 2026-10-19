@@ -9,6 +9,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::core::config::{self, Config};
+use crate::core::local;
 use crate::forge::service::{Kind, SERVICES};
 use crate::forge::transport::Cli;
 use crate::git::{Repo, split_remote};
@@ -262,15 +263,6 @@ fn agt_version() -> Row {
     }
 }
 
-fn home_config() -> Option<PathBuf> {
-    match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-        Some(path) if path.is_absolute() => Some(path),
-        _ => std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join(".config")),
-    }
-}
-
 fn excludes_file() -> Option<PathBuf> {
     let configured = git()
         .probe(&["config", "--path", "core.excludesFile"])
@@ -279,7 +271,7 @@ fn excludes_file() -> Option<PathBuf> {
         .filter(|path| !path.is_empty());
     configured
         .map(PathBuf::from)
-        .or_else(|| Some(home_config()?.join("git").join("ignore")))
+        .or_else(|| Some(local::config_home().ok()?.join("git").join("ignore")))
 }
 
 fn git_ignore(repo: Option<&Repo>) -> Row {
@@ -351,8 +343,8 @@ fn directory(name: &str, path: &Path) -> Row {
 
 fn state_and_config(repo: Option<&Repo>) -> Vec<Row> {
     let mut rows = Vec::new();
-    if let Ok(store) = Store::open(Namespace::Tasks) {
-        rows.push(directory("state dir", store.agents_dir()));
+    if let Ok(agents) = local::agents_state() {
+        rows.push(directory("state dir", &agents));
     }
     let Ok(global) = config::path() else {
         rows.push(Row::fail(

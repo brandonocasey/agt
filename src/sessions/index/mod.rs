@@ -13,11 +13,10 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{Lock, error_code, private_dir, write_private};
+use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_private};
 use crate::core::output::Output;
 use crate::core::transcripts::Turn;
 use crate::core::transcripts::json::head;
-use crate::store::{Namespace, Store};
 
 mod args;
 mod discover;
@@ -71,12 +70,8 @@ struct Indexed {
 }
 
 /// The index sits in the tasks directory, which agt creates private.
-fn tasks_root() -> Result<PathBuf> {
-    Ok(Store::open(Namespace::Tasks)?.root().to_path_buf())
-}
-
 fn index_root() -> Result<PathBuf> {
-    Ok(tasks_root()?.join("session-index"))
+    Ok(tasks_dir()?.join("session-index"))
 }
 
 fn index_file() -> Result<PathBuf> {
@@ -122,7 +117,7 @@ fn read_index() -> Result<Index> {
 }
 
 fn ensure_index_root() -> Result<PathBuf> {
-    private_dir(&tasks_root()?)?;
+    private_dir(&tasks_dir()?)?;
     let directory = index_root()?;
     if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return fail("session index directory must not be a symbolic link");

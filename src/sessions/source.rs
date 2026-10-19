@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use crate::core::local;
 use crate::core::transcripts::{
     Kind, Step, Transcript, Walker, claude_projects, codex_roots, is_scratch,
 };
@@ -19,9 +20,7 @@ fn modified(path: &Path) -> Option<f64> {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
+    local::home().unwrap_or_default()
 }
 
 fn wanted(scope: &Scope, kind: Kind) -> bool {

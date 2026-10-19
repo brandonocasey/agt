@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -9,6 +8,7 @@ use super::scope::Adoption;
 use super::{Ctx, Scope};
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
+use crate::core::local;
 use crate::forge::anchors;
 use crate::forge::service::{self, Capabilities, Kind, ReviewService, ReviewSubject, SERVICES};
 use crate::forge::{self, CommentData, Draft, Fetched, ThreadData};
@@ -206,12 +206,8 @@ struct HostEntry {
 
 /// The forge the hosts file names for `host`, if any.
 fn hosts_file(host: &str) -> Result<Option<Forge>> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-        Some(path) if path.is_absolute() => path,
-        _ => match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-            Some(home) => PathBuf::from(home).join(".config"),
-            None => return Ok(None),
-        },
+    let Ok(base) = local::config_home() else {
+        return Ok(None);
     };
     let path = base.join("agent-review").join("hosts.json");
     let text = match std::fs::read_to_string(&path) {

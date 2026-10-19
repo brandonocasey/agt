@@ -4,7 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::core::config::Config;
-use crate::core::error::{Error, Result};
+use crate::core::error::Result;
+use crate::core::local;
 
 const DEFAULT_ROOTS: [&str; 2] = ["~/Projects/*/*", "~/projects/*/*"];
 
@@ -15,10 +16,7 @@ pub fn repositories() -> Result<Vec<PathBuf>> {
         Some(roots) => roots,
         None => DEFAULT_ROOTS.map(str::to_owned).to_vec(),
     };
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| Error("HOME is not set".into()))?;
+    let home = local::home()?;
     let mut found = Vec::new();
     for pattern in patterns {
         let pattern = match pattern.strip_prefix("~/") {

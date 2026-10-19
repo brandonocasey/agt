@@ -11,8 +11,8 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::local;
 use crate::core::output::Output;
-use crate::store::{Namespace, Store};
 
 /// Below the ephemeral ranges of Linux (32768 and up) and macOS (49152 and up), so an
 /// outgoing connection never takes a recorded port.
@@ -76,9 +76,7 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
 
 /// `$XDG_STATE_HOME/agents/worktrees`, created when missing.
 pub(super) fn folder() -> Result<PathBuf> {
-    let folder = Store::open(Namespace::Tasks)?
-        .agents_dir()
-        .join("worktrees");
+    let folder = local::agents_state()?.join("worktrees");
     fs::create_dir_all(&folder).map_err(ctx(format!("create {}", folder.display())))?;
     Ok(folder)
 }
@@ -88,10 +86,7 @@ pub(super) fn recorded(dir: &Path) -> Result<Option<u16>> {
     let path = dir
         .canonicalize()
         .map_err(ctx(format!("resolve {}", dir.display())))?;
-    let file = Store::open(Namespace::Tasks)?
-        .agents_dir()
-        .join("worktrees")
-        .join("ports.json");
+    let file = local::agents_state()?.join("worktrees").join("ports.json");
     Ok(load(&file)?.get(path.to_string_lossy().as_ref()).copied())
 }
 
