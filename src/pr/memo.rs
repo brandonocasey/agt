@@ -2,12 +2,11 @@
 //! live in `$XDG_STATE_HOME/agents/pr/auto-merge.json`, keyed by `<host>/<repo>#<number>`.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{Lock, agents_state, private_dir, write_private};
+use crate::core::error::Result;
+use crate::core::local::{Lock, agents_state, private_dir, read_json, write_json};
 
 type Paused = BTreeMap<String, String>;
 
@@ -26,12 +25,7 @@ fn files() -> Result<Files> {
 }
 
 fn load(files: &Files) -> Result<Paused> {
-    match fs::read(&files.document) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(ctx(format!("parse {}", files.document.display()))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Paused::new()),
-        Err(error) => fail(format!("read {}: {error}", files.document.display())),
-    }
+    Ok(read_json(&files.document)?.unwrap_or_default())
 }
 
 /// Reads, changes and writes the document under its lock.
@@ -44,11 +38,7 @@ fn edit<T>(change: impl FnOnce(&mut Paused) -> T) -> Result<T> {
     )?;
     let mut paused = load(&files)?;
     let result = change(&mut paused);
-    let text = serde_json::to_vec_pretty(&paused).map_err(ctx("serialize paused auto-merge"))?;
-    let temporary = files
-        .document
-        .with_extension(format!("json.{}.tmp", std::process::id()));
-    write_private(&files.document, &temporary, &text, false)?;
+    write_json(&files.document, &paused, false)?;
     Ok(result)
 }
 

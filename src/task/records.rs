@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
-use crate::core::local::{Lock, hostname, write_private};
+use crate::core::local::{Lock, hostname, write_json};
 use crate::core::output::Output;
 use crate::task::args::{Check, Create, Target, Update};
 use crate::task::files;
@@ -82,10 +82,7 @@ fn with_lock<T>(id: &str, callback: impl FnOnce() -> Result<T>) -> Result<T> {
 fn write_task(task: &Value) -> Result<()> {
     let id = task.get("id").and_then(Value::as_str).unwrap_or_default();
     let file = task_path(id)?;
-    let temporary = files::root()?.join(format!(".{id}.{}.json", std::process::id()));
-    let mut data = serde_json::to_string_pretty(task).map_err(ctx("serialize task"))?;
-    data.push('\n');
-    write_private(&file, &temporary, data.as_bytes(), true)
+    write_json(&file, task, true)
 }
 
 fn git(args: &[&str], dir: &std::path::Path) -> Option<String> {

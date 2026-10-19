@@ -14,6 +14,7 @@ use super::info::{main_checkout, toplevel};
 use super::port;
 use crate::core::config::Config;
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::{read_json, update_json};
 use crate::core::output::Output;
 use crate::git::Repo;
 
@@ -137,29 +138,9 @@ fn store() -> Result<PathBuf> {
 
 /// Applies `change` under the lock and saves when it reports a change; returns that flag.
 fn update(change: impl FnOnce(&mut Trusted) -> bool) -> Result<bool> {
-    let file = store()?;
-    let _lock = port::lock(&file.with_extension("lock"))?;
-    let mut trusted = load(&file)?;
-    let changed = change(&mut trusted);
-    if changed {
-        save(&file, &trusted)?;
-    }
-    Ok(changed)
+    update_json(&store()?, |trusted| Ok(change(trusted)))
 }
 
 fn load(file: &Path) -> Result<Trusted> {
-    match fs::read(file) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(ctx(format!("parse {}", file.display())))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Trusted::new()),
-        Err(error) => fail(format!("read {}: {error}", file.display())),
-    }
-}
-
-fn save(file: &Path, trusted: &Trusted) -> Result<()> {
-    let temp = file.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(trusted).map_err(ctx("serialize trust"))?;
-    fs::write(&temp, text + "\n").map_err(ctx(format!("write {}", temp.display())))?;
-    fs::rename(&temp, file).map_err(ctx(format!("replace {}", file.display())))
+    Ok(read_json(file)?.unwrap_or_default())
 }

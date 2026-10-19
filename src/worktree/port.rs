@@ -2,7 +2,7 @@
 //! `$XDG_STATE_HOME/agents/worktrees/ports.json`, keyed by the worktree's absolute path.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::core::error::{Error, Result, ctx, fail};
-use crate::core::local;
+use crate::core::error::{Error, Result, ctx};
+use crate::core::local::{self, read_json, update_json};
 use crate::core::output::Output;
 
 /// Below the ephemeral ranges of Linux (32768 and up) and macOS (49152 and up), so an
@@ -53,24 +53,23 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
         .map_err(ctx(format!("resolve {}", dir.display())))?;
     let key = path.to_string_lossy().into_owned();
     let folder = folder()?;
-    let _lock = lock(&folder.join("ports.lock"))?;
     let file = folder.join("ports.json");
-    let mut ports = load(&file)?;
-    let before = ports.len();
-    ports.retain(|worktree, _| Path::new(worktree).exists());
-    let mut changed = ports.len() != before;
-    let port = match ports.get(&key) {
-        Some(port) => *port,
-        None => {
-            let port = pick(&ports.values().copied().collect())?;
-            ports.insert(key, port);
-            changed = true;
-            port
-        }
-    };
-    if changed {
-        save(&file, &ports)?;
-    }
+    let mut port = 0;
+    update_json::<Ports>(&file, |ports| {
+        let before = ports.len();
+        ports.retain(|worktree, _| Path::new(worktree).exists());
+        let mut changed = ports.len() != before;
+        port = match ports.get(&key) {
+            Some(port) => *port,
+            None => {
+                let port = pick(&ports.values().copied().collect())?;
+                ports.insert(key, port);
+                changed = true;
+                port
+            }
+        };
+        Ok(changed)
+    })?;
     Ok((path, port))
 }
 
@@ -87,37 +86,10 @@ pub(super) fn recorded(dir: &Path) -> Result<Option<u16>> {
         .canonicalize()
         .map_err(ctx(format!("resolve {}", dir.display())))?;
     let file = local::agents_state()?.join("worktrees").join("ports.json");
-    Ok(load(&file)?.get(path.to_string_lossy().as_ref()).copied())
-}
-
-pub(super) fn lock(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(ctx(format!("open {}", path.display())))?;
-    file.lock()
-        .map_err(ctx(format!("lock {}", path.display())))?;
-    Ok(file)
-}
-
-fn load(file: &Path) -> Result<Ports> {
-    match fs::read(file) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(ctx(format!("parse {}", file.display())))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Ports::new()),
-        Err(error) => fail(format!("read {}: {error}", file.display())),
-    }
-}
-
-fn save(file: &Path, ports: &Ports) -> Result<()> {
-    let temp = file.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(ports).map_err(ctx("serialize ports"))?;
-    fs::write(&temp, text + "\n").map_err(ctx(format!("write {}", temp.display())))?;
-    fs::rename(&temp, file).map_err(ctx(format!("replace {}", file.display())))
+    Ok(read_json::<Ports>(&file)?
+        .unwrap_or_default()
+        .get(path.to_string_lossy().as_ref())
+        .copied())
 }
 
 /// A free port that no recorded worktree owns, found from a random start in the range.

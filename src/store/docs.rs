@@ -10,11 +10,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::prune::{Removal, remove_with_lock};
-use super::{
-    Store, create_dir, ctx, fail, lock, lost_field, persist_json, read_document, try_lock,
-    validate_key,
-};
+use super::{Store, create_dir, ctx, fail, lost_field, persist_json, read_document, validate_key};
 use crate::core::error::Result;
+use crate::core::local::{lock_file, try_lock_file};
 
 impl Store {
     /// The directories directly under the namespace root.
@@ -111,7 +109,7 @@ impl Store {
     ) -> Result<R> {
         validate_key(name)?;
         create_dir(dir)?;
-        let _lock = lock(&dir.join(format!(".{name}.lock")))?;
+        let _lock = lock_file(&dir.join(format!(".{name}.lock")))?;
         let path = dir.join(format!("{name}.json"));
         let mut doc = match read_document(&path)? {
             Some(document) => {
@@ -129,7 +127,7 @@ impl Store {
         };
         let result = change(&mut doc)?;
         self.backup_before_migration(&path)?;
-        persist_json(dir, &path, &doc, || Ok(()))?;
+        persist_json(&path, &doc, || Ok(()))?;
         Ok(result)
     }
 
@@ -143,7 +141,7 @@ impl Store {
     ) -> Result<Removal> {
         validate_key(name)?;
         let lock_path = dir.join(format!(".{name}.lock"));
-        let Some(_lock) = try_lock(&lock_path)? else {
+        let Some(_lock) = try_lock_file(&lock_path)? else {
             return Ok(Removal::Busy);
         };
         let path = dir.join(format!("{name}.json"));
@@ -169,8 +167,8 @@ impl Store {
         } else {
             (&to_lock, &from_lock)
         };
-        let _first = lock(first)?;
-        let _second = lock(second)?;
+        let _first = lock_file(first)?;
+        let _second = lock_file(second)?;
         let target = dir.join(format!("{to}.json"));
         if target.exists() {
             return fail(format!("{} already exists", target.display()));

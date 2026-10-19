@@ -6,11 +6,12 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::{
-    ACCOUNT_FILE, LOOKUP_FILE, Namespace, REPO_FILE, Store, ctx, fail, is_current,
-    read_target_intact, try_lock, validate_key,
+    ACCOUNT_FILE, LOOKUP_FILE, Namespace, REPO_FILE, Store, ctx, fail, read_target_intact,
+    validate_key,
 };
 use crate::core::clock;
 use crate::core::error::Result;
+use crate::core::local::{is_current, try_lock_file};
 use crate::store::model::Target;
 
 /// How long a finished thing is kept before `prune` drops it.
@@ -121,13 +122,13 @@ impl Store {
     ) -> Result<Removal> {
         validate_key(key)?;
         let lock_path = dir.join(format!(".{key}.lock"));
-        let Some(_lock) = try_lock(&lock_path)? else {
+        let Some(_lock) = try_lock_file(&lock_path)? else {
             return Ok(Removal::Busy);
         };
         // A publish in flight has the target's comments in hand; deleting under it would lose them.
         let publish_path = dir.join(format!(".{key}.publish.lock"));
         let created = !publish_path.exists();
-        let Some(file) = try_lock(&publish_path)? else {
+        let Some(file) = try_lock_file(&publish_path)? else {
             return Ok(Removal::Busy);
         };
         // Taking the lock may have made its file; it goes again on every way out unless it
@@ -317,7 +318,7 @@ impl Store {
             validate_key(&target.key)?;
             for suffix in ["lock", "publish.lock"] {
                 let lock_path = dir.join(format!(".{}.{suffix}", target.key));
-                let Some(file) = try_lock(&lock_path)? else {
+                let Some(file) = try_lock_file(&lock_path)? else {
                     return Ok(Removal::Busy);
                 };
                 held.push(file);
@@ -423,7 +424,7 @@ impl Store {
             .parent()
             .unwrap_or(&self.backups)
             .with_file_name(format!(".{name}-backup.lock"));
-        let Some(_lock) = try_lock(&lock_path)? else {
+        let Some(_lock) = try_lock_file(&lock_path)? else {
             return Ok(Removal::Busy);
         };
         match fs::remove_dir_all(&backup.path) {

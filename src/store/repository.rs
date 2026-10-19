@@ -5,7 +5,8 @@ use std::sync::atomic::AtomicBool;
 use crate::core::error::{Result, ctx, fail};
 use crate::git::Repo;
 
-use super::{Namespace, Store, copy_tree, create_dir, lock, sync_dir};
+use super::{Namespace, Store, copy_tree, create_dir};
+use crate::core::local::{lock_file, sync_dir, write_atomic};
 
 impl Store {
     pub fn open_repo(namespace: Namespace, repo: &Repo, preview: bool) -> Result<Self> {
@@ -110,7 +111,7 @@ impl Store {
         let records = global.agents.join("repository-imports").join(identity);
         create_durable_dir(&records)?;
         let name = self.namespace.dir_name();
-        let _guard = lock(&records.join(format!(".{name}.lock")))?;
+        let _guard = lock_file(&records.join(format!(".{name}.lock")))?;
         let marker = records.join(format!("{name}.done"));
         if marker.exists() {
             return Ok(());
@@ -124,13 +125,14 @@ impl Store {
         let backup_record = records.join(format!("{name}.backup"));
         if !sources.is_empty() || backup_record.exists() {
             create_durable_dir(&self.backups)?;
-            let _backup_guard = lock(&self.backups.with_file_name(format!(".{name}-backup.lock")))?;
+            let _backup_guard =
+                lock_file(&self.backups.with_file_name(format!(".{name}-backup.lock")))?;
             let backup_name = if backup_record.exists() {
                 fs::read_to_string(&backup_record).map_err(ctx("read import backup record"))?
             } else {
                 let stamp = crate::core::clock::now()?.replace(':', "-");
                 let backup_name = format!("{name}-v0-{stamp}");
-                atomic_write(&backup_record, backup_name.as_bytes())?;
+                write_atomic(&backup_record, backup_name.as_bytes(), true, || Ok(()))?;
                 backup_name
             };
             if Path::new(&backup_name).components().count() != 1
@@ -168,7 +170,7 @@ impl Store {
             // merge can resume after checking every destination against the same snapshot.
             merge(&stage, &self.root)?;
         }
-        atomic_write(&marker, b"imported\n")?;
+        write_atomic(&marker, b"imported\n", true, || Ok(()))?;
         if stage.exists() {
             fs::remove_dir_all(&stage).map_err(ctx("remove completed import stage"))?;
         }
@@ -309,7 +311,7 @@ fn repository_identity(common: &Path, preview: bool) -> Result<String> {
         // An uninitialized clone MUST inspect legacy data without creating an identity or lock.
         return Ok("uninitialized".to_owned());
     }
-    let _guard = lock(&common.join(".agt-repository-id.lock"))?;
+    let _guard = lock_file(&common.join(".agt-repository-id.lock"))?;
     if let Some(identity) = read_repository_identity(&path)? {
         sync_dir(common)?;
         return Ok(identity);
@@ -376,22 +378,10 @@ fn merge(source: &Path, destination: &Path) -> Result<()> {
             merge(&entry.path(), &dest)?;
         } else if !dest.exists() {
             let bytes = fs::read(entry.path()).map_err(ctx("read staged file"))?;
-            atomic_write(&dest, &bytes)?;
+            write_atomic(&dest, &bytes, true, || Ok(()))?;
         }
     }
     sync_dir(destination)
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let parent = path.parent().expect("stored file has parent");
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(ctx("stage imported file"))?;
-    temp.write_all(bytes).map_err(ctx("write imported file"))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(ctx("sync imported file"))?;
-    temp.persist(path).map_err(ctx("persist imported file"))?;
-    sync_dir(parent)
 }
 
 fn require_directory(path: &Path) -> Result<()> {
@@ -500,7 +490,7 @@ fn snapshot_source(source: &Path, destination: &Path) -> Result<()> {
         } else if !entry.file_name().to_string_lossy().ends_with(".lock") {
             let _locks = document_locks(&path)?;
             let bytes = fs::read(&path).map_err(ctx("read legacy snapshot document"))?;
-            atomic_write(&dest, &bytes)?;
+            write_atomic(&dest, &bytes, true, || Ok(()))?;
         }
     }
     sync_dir(destination)

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::Scope;
+use crate::core::local::lock_file;
 use crate::store::model::{Comment, Forge};
 
 pub const VERSION: u32 = 1;
@@ -173,8 +174,8 @@ impl super::Store {
         name: &str,
     ) -> crate::core::error::Result<()> {
         super::validate_key(name)?;
-        let _source = super::lock(&source.join(format!(".{name}.lock")))?;
-        let _target = super::lock(&target.join(format!(".{name}.lock")))?;
+        let _source = lock_file(&source.join(format!(".{name}.lock")))?;
+        let _target = lock_file(&target.join(format!(".{name}.lock")))?;
         let destination = target.join(format!("{name}.json"));
         match std::fs::symlink_metadata(&destination) {
             Ok(_) => {

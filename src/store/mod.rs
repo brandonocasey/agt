@@ -3,19 +3,19 @@ pub mod issues;
 pub mod model;
 pub mod prune;
 mod repository;
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions, TryLockError};
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, DirBuilder, File};
+use std::io::{ErrorKind, Read};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::error::{Result, ctx, fail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::clock;
-use crate::core::local;
+use crate::core::local::{self, lock_file, sync_dir, try_lock_file, write_atomic};
 use crate::store::model::{Forge, Target, VERSION};
 
 const MAX_KEY: usize = 200;
@@ -163,7 +163,7 @@ impl Store {
         let lock_path = self.backups.with_file_name(format!(".{name}-backup.lock"));
         // One backup at a time per namespace, across processes: the check, the copy and the
         // rename are one step, so no run deletes or renames another's copy.
-        let _guard = lock(&lock_path)?;
+        let _guard = lock_file(&lock_path)?;
         let done = fs::read_dir(&self.backups).is_ok_and(|entries| {
             entries
                 .flatten()
@@ -209,9 +209,9 @@ impl Store {
         Ok(())
     }
 
-    fn write(&self, dir: &Path, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
+    fn write(&self, path: &Path, target: &Target, expected: Option<u64>) -> Result<()> {
         self.backup_before_migration(path)?;
-        write_target(dir, path, target, expected, self.schema)
+        write_target(path, target, expected, self.schema)
     }
 
     pub fn repo_dir(&self, repo_key: &str) -> Result<PathBuf> {
@@ -391,14 +391,14 @@ impl Store {
     pub fn publish_lock(&self, dir: &Path, key: &str) -> Result<File> {
         validate_key(key)?;
         create_dir(dir)?;
-        lock(&dir.join(format!(".{key}.publish.lock")))
+        lock_file(&dir.join(format!(".{key}.publish.lock")))
     }
 
     /// Like [`Store::publish_lock`], but gives up with `None` when another process holds it.
     pub fn try_publish_lock(&self, dir: &Path, key: &str) -> Result<Option<File>> {
         validate_key(key)?;
         create_dir(dir)?;
-        try_lock(&dir.join(format!(".{key}.publish.lock")))
+        try_lock_file(&dir.join(format!(".{key}.publish.lock")))
     }
 
     /// Runs `change` on the target under its lock and writes the result atomically. A missing
@@ -413,7 +413,7 @@ impl Store {
     ) -> Result<R> {
         validate_key(key)?;
         create_dir(dir)?;
-        let _lock = lock(&dir.join(format!(".{key}.lock")))?;
+        let _lock = lock_file(&dir.join(format!(".{key}.lock")))?;
         let path = dir.join(format!("{key}.json"));
         let current = read_target_for_write(&path, self.schema)?;
         let expected = current.as_ref().map(|target| target.revision);
@@ -421,7 +421,7 @@ impl Store {
         let result = change(&mut target)?;
         target.revision = expected.unwrap_or(0) + 1;
         target.updated_at = now.to_owned();
-        self.write(dir, &path, &target, expected)?;
+        self.write(&path, &target, expected)?;
         Ok(result)
     }
 
@@ -473,8 +473,8 @@ impl Store {
         } else {
             (&to_lock, &from_lock)
         };
-        let _first = lock(first)?;
-        let _second = lock(second)?;
+        let _first = lock_file(first)?;
+        let _second = lock_file(second)?;
         let from_path = dir.join(format!("{from}.json"));
         let to_path = dir.join(format!("{to}.json"));
         let old = read_target_for_write(&from_path, self.schema)?;
@@ -495,7 +495,7 @@ impl Store {
         let result = change(&mut target)?;
         target.revision = base_revision.unwrap_or(0) + 1;
         target.updated_at = now.to_owned();
-        self.write(dir, &to_path, &target, expected)?;
+        self.write(&to_path, &target, expected)?;
         if had_old {
             fs::remove_file(&from_path).map_err(ctx(format!("remove {}", from_path.display())))?;
             fs::remove_file(&from_lock).map_err(ctx(format!("remove {}", from_lock.display())))?;
@@ -509,7 +509,7 @@ impl Store {
 
     pub fn save_account(&self, dir: &Path, account: &Account) -> Result<()> {
         create_dir(dir)?;
-        persist_json(dir, &dir.join(ACCOUNT_FILE), account, || Ok(()))
+        persist_json(&dir.join(ACCOUNT_FILE), account, || Ok(()))
     }
 
     /// The PR/MR lookup misses of the repository. A file that cannot be read counts as none:
@@ -523,7 +523,7 @@ impl Store {
 
     pub fn save_lookups(&self, dir: &Path, lookups: &Lookups) -> Result<()> {
         create_dir(dir)?;
-        persist_json(dir, &dir.join(LOOKUP_FILE), lookups, || Ok(()))
+        persist_json(&dir.join(LOOKUP_FILE), lookups, || Ok(()))
     }
 
     /// Writes the repository's absolute git common dir and `now` beside its targets. A record
@@ -546,7 +546,7 @@ impl Store {
             common_dir: common_dir.to_owned(),
             last_seen: Some(clock::format(now)),
         };
-        persist_json(dir, &path, &file, || Ok(()))
+        persist_json(&path, &file, || Ok(()))
     }
 
     /// The git common dir recorded by [`Store::record_repo`], if any.
@@ -566,64 +566,6 @@ fn validate_key(key: &str) -> Result<()> {
         Ok(())
     } else {
         fail(format!("invalid target key: {key}"))
-    }
-}
-
-/// Takes the exclusive lock on `path`, retrying when the file was replaced while waiting so two
-/// processes never hold locks on different inodes for the same target.
-fn lock(path: &Path) -> Result<File> {
-    loop {
-        let file = open_lock(path)?;
-        file.lock()
-            .map_err(ctx(format!("lock {}", path.display())))?;
-        if is_current(&file, path)? {
-            return Ok(file);
-        }
-    }
-}
-
-/// Like [`lock`], but gives up with `None` when another process holds the lock.
-fn try_lock(path: &Path) -> Result<Option<File>> {
-    loop {
-        let file = open_lock(path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Error(error)) => {
-                return fail(format!("lock {}: {error}", path.display()));
-            }
-        }
-        if is_current(&file, path)? {
-            return Ok(Some(file));
-        }
-    }
-}
-
-fn open_lock(path: &Path) -> Result<File> {
-    if let Ok(meta) = fs::symlink_metadata(path)
-        && !meta.file_type().is_file()
-    {
-        return fail(format!("{} must be a regular file", path.display()));
-    }
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)
-        .map_err(ctx(format!("open {}", path.display())))
-}
-
-/// Whether `path` still names the file `held`, so a lock on it excludes every other holder.
-fn is_current(held: &File, path: &Path) -> Result<bool> {
-    let held = held
-        .metadata()
-        .map_err(ctx(format!("stat {}", path.display())))?;
-    match fs::symlink_metadata(path) {
-        Ok(meta) => Ok(meta.ino() == held.ino() && meta.dev() == held.dev()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => fail(format!("stat {}: {error}", path.display())),
     }
 }
 
@@ -798,43 +740,20 @@ fn migrate_with(document: &mut Value, from: u32, steps: &[fn(&mut Value)]) {
     }
 }
 
-/// Writes `value` to a temporary file in `dir`, fsyncs it, runs `check` and renames it over
-/// `path`.
+/// Writes `value` as indented JSON to `path` durably, after `check` passes.
 fn persist_json(
-    dir: &Path,
     path: &Path,
     value: &impl Serialize,
     check: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    let mut temp = tempfile::Builder::new()
-        .prefix(".tmp-")
-        .suffix(".json")
-        .tempfile_in(dir)
-        .map_err(ctx(format!("create temporary file in {}", dir.display())))?;
-    serde_json::to_writer_pretty(&mut temp, value)
-        .map_err(ctx(format!("serialize {}", path.display())))?;
-    temp.write_all(b"\n")
-        .map_err(ctx(format!("write {}", temp.path().display())))?;
-    temp.as_file()
-        .set_permissions(Permissions::from_mode(0o600))
-        .map_err(ctx(format!("chmod {}", temp.path().display())))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(ctx(format!("sync {}", temp.path().display())))?;
-    check()?;
-    temp.persist(path)
-        .map_err(|error| Error(format!("replace {}: {}", path.display(), error.error)))?;
-    sync_dir(dir)
+    let mut text =
+        serde_json::to_vec_pretty(value).map_err(ctx(format!("serialize {}", path.display())))?;
+    text.push(b'\n');
+    write_atomic(path, &text, true, check)
 }
 
-fn write_target(
-    dir: &Path,
-    path: &Path,
-    target: &Target,
-    expected: Option<u64>,
-    schema: Schema,
-) -> Result<()> {
-    persist_json(dir, path, target, || {
+fn write_target(path: &Path, target: &Target, expected: Option<u64>, schema: Schema) -> Result<()> {
+    persist_json(path, target, || {
         let on_disk = read_target(path, schema)?.map(|current| current.revision);
         if on_disk != expected {
             return fail(format!(
@@ -872,12 +791,6 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
         }
     }
     sync_dir(to)
-}
-
-fn sync_dir(dir: &Path) -> Result<()> {
-    File::open(dir)
-        .and_then(|handle| handle.sync_all())
-        .map_err(ctx(format!("sync {}", dir.display())))
 }
 
 fn create_dir(dir: &Path) -> Result<()> {
@@ -1292,7 +1205,7 @@ mod tests {
         let agents = base.path().join("agents");
         let backups = agents.join("backups");
         fs::create_dir_all(&backups).unwrap();
-        let guard = lock(&agents.join(".reviews-backup.lock")).unwrap();
+        let guard = lock_file(&agents.join(".reviews-backup.lock")).unwrap();
         std::thread::scope(|scope| {
             let migrating = scope.spawn(|| {
                 let mut next = Store::at(base.path(), Namespace::Reviews);
@@ -1360,15 +1273,15 @@ mod read_race_tests {
     fn a_reader_survives_the_file_being_replaced_under_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.json");
-        persist_json(dir.path(), &path, &Value::from(0), || Ok(())).unwrap();
+        persist_json(&path, &Value::from(0), || Ok(())).unwrap();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let writer = {
-            let (dir, path, stop) = (dir.path().to_owned(), path.clone(), stop.clone());
+            let (path, stop) = (path.clone(), stop.clone());
             std::thread::spawn(move || {
                 let mut n = 0;
                 while !stop.load(Ordering::Relaxed) {
                     n += 1;
-                    persist_json(&dir, &path, &Value::from(n), || Ok(())).unwrap();
+                    persist_json(&path, &Value::from(n), || Ok(())).unwrap();
                 }
             })
         };

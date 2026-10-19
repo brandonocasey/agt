@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_private};
+use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_atomic};
 use crate::core::output::Output;
 use crate::core::transcripts::Turn;
 use crate::core::transcripts::json::head;
@@ -130,12 +130,11 @@ fn write_index(index: &Index) -> Result<()> {
     let directory = ensure_index_root()?;
     let mut data = serde_json::to_string(index).map_err(ctx("serialize session index"))?;
     data.push('\n');
-    let temporary = directory.join(format!(".index.{}.json", std::process::id()));
-    write_private(
+    write_atomic(
         &directory.join("index.json"),
-        &temporary,
         data.as_bytes(),
         false,
+        || Ok(()),
     )
 }
 

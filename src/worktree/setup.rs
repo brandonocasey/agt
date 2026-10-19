@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::info::toplevel;
 use super::{emit, hooks, prepare};
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::local::{read_json, write_json};
 use crate::core::output::Output;
 use crate::git::Repo;
 
@@ -54,28 +55,11 @@ fn status_path(root: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(git_dir).join(STATUS_FILE))
 }
 
-fn write_status(file: &Path, value: &Value) -> Result<()> {
-    let temp = file.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(value).map_err(ctx("serialize the setup status"))?;
-    fs::write(&temp, text + "\n").map_err(ctx(format!("write {}", temp.display())))?;
-    fs::rename(&temp, file).map_err(ctx(format!("replace {}", file.display())))
-}
-
-fn read_status(file: &Path) -> Result<Option<Value>> {
-    match fs::read(file) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(ctx(format!("parse {}", file.display()))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => fail(format!("read {}: {error}", file.display())),
-    }
-}
-
 /// The report `{"pid", "status", "log", "already_running": true}` of a background setup that
 /// still runs in the worktree `root`.
 pub(super) fn running(root: &Path) -> Result<Option<Value>> {
     let status = status_path(root)?;
-    let Some(existing) = read_status(&status)? else {
+    let Some(existing) = read_json::<Value>(&status)? else {
         return Ok(None);
     };
     let pid = existing["pid"].as_u64().unwrap_or(0);
@@ -119,7 +103,11 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
     let again = sink.try_clone().map_err(ctx("duplicate the log handle"))?;
     // The child cannot write its own start before this returns, and a late write here could
     // overwrite its finish; so the file exists first, with pid 0 for "starting".
-    write_status(&status, &json!({"state": "running", "pid": 0, "log": log}))?;
+    write_json(
+        &status,
+        &json!({"state": "running", "pid": 0, "log": log}),
+        false,
+    )?;
     let list = steps.iter().map(|step| step.name()).collect::<Vec<_>>();
     let spawned = Command::new(std::env::current_exe().map_err(ctx("find the agt binary"))?)
         .args(["worktree", "prepare", "--setup", &list.join(",")])
@@ -143,11 +131,15 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
 pub(super) fn child(dir: &Path, steps: &[Step]) -> Result<Output> {
     let root = toplevel(dir)?;
     let file = status_path(&root)?;
-    let log = read_status(&file)?
+    let log = read_json::<Value>(&file)?
         .and_then(|value| value.get("log").cloned())
         .unwrap_or(Value::Null);
     let pid = std::process::id();
-    write_status(&file, &json!({"state": "running", "pid": pid, "log": log}))?;
+    write_json(
+        &file,
+        &json!({"state": "running", "pid": pid, "log": log}),
+        false,
+    )?;
     let mut done = json!({"state": "done", "pid": pid, "log": log});
     let ok = match execute(&root, steps, &mut done) {
         Ok(ok) => ok,
@@ -157,7 +149,7 @@ pub(super) fn child(dir: &Path, steps: &[Step]) -> Result<Output> {
         }
     };
     done["ok"] = json!(ok);
-    write_status(&file, &done)?;
+    write_json(&file, &done, false)?;
     emit(done, ok)
 }
 
@@ -205,7 +197,7 @@ pub(super) fn wait(dir: &Path, max: u64) -> Result<Output> {
     let file = status_path(&root)?;
     let start = Instant::now();
     loop {
-        let Some(status) = read_status(&file)? else {
+        let Some(status) = read_json::<Value>(&file)? else {
             return fail(format!("no background setup for {}", root.display()));
         };
         if status["state"] == "done" {
