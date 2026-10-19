@@ -14,7 +14,8 @@ use crate::issue::prune::prunable;
 use crate::review::commands::prune::expired;
 use crate::store::issues::{Issue, TRACKER_FILE};
 use crate::store::model::Target;
-use crate::store::prune::{Backup, PRUNE_AFTER_SECS};
+use crate::store::prune::PRUNE_AFTER_SECS;
+use crate::store::prune::backups::Backup;
 use crate::store::{Namespace, Store};
 use crate::task::prune::{Expired, expired as expired_tasks};
 

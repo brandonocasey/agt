@@ -1,84 +1,23 @@
 //! What `agt cleanup` may delete from the store, and the locked, non-blocking ways to delete it, so
 //! a prune never waits for or corrupts a concurrent agt run.
 
+pub mod backups;
+mod local_repo;
+mod presence;
+mod stray;
+
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::schema::read_target_intact;
-use super::sidecars::{ACCOUNT_FILE, LOOKUP_FILE, REPO_FILE};
-use super::{Namespace, Store, ctx, fail, validate_key};
-use crate::core::clock;
+use super::{Store, ctx, fail, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{is_current, try_lock_file};
 use crate::store::model::Target;
 
 /// How long a finished thing is kept before `prune` drops it.
 pub const PRUNE_AFTER_SECS: i64 = 90 * 24 * 60 * 60;
-
-/// How long a recorded repository must have gone unseen, with its path missing, to be gone.
-pub const GONE_AFTER_SECS: i64 = 30 * 24 * 60 * 60;
-
-/// Directories under which removable or network volumes appear. A path missing below one may
-/// only be unmounted, so it never marks a repository gone.
-const MOUNT_ROOTS: [&str; 4] = ["/Volumes", "/media", "/run/media", "/mnt"];
-
-/// What `.repo.json` says about the repository behind a `local/` directory.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Presence {
-    NoRecord,
-    Unreadable(String),
-    /// The recorded path exists.
-    Alive(String),
-    /// The path is missing but agt wrote there recently: the repository was probably moved.
-    Missing {
-        common_dir: String,
-        unseen_secs: i64,
-    },
-    /// The path is missing below a mount root: the volume may only be unmounted.
-    Unmounted(String),
-    /// The path is missing and agt has not run there for [`GONE_AFTER_SECS`].
-    Gone {
-        common_dir: String,
-        unseen_secs: i64,
-    },
-}
-
-impl Presence {
-    /// Whether the repository's targets may go at any age.
-    pub fn is_gone(&self) -> bool {
-        matches!(self, Self::Gone { .. })
-    }
-
-    /// Why the repository is, or is not, treated as gone, naming the rule that decided.
-    pub fn describe(&self) -> String {
-        let days = |secs: &i64| (secs / clock::SECS_PER_DAY).max(0);
-        match self {
-            Self::NoRecord => "no recorded path, so its existence cannot be checked".into(),
-            Self::Unreadable(why) => format!("its path record is unreadable ({why})"),
-            Self::Alive(path) => format!("its repository still exists at {path}"),
-            Self::Missing {
-                common_dir,
-                unseen_secs,
-            } => format!(
-                "{common_dir} is missing but agt last wrote there {} day(s) ago, under the {} days that mark a repository gone, so it may have moved",
-                days(unseen_secs),
-                GONE_AFTER_SECS / clock::SECS_PER_DAY
-            ),
-            Self::Unmounted(path) => {
-                format!("{path} is missing below a mount root, so its volume may only be unmounted")
-            }
-            Self::Gone {
-                common_dir,
-                unseen_secs,
-            } => format!(
-                "local repository is gone: {common_dir} no longer exists and agt last wrote there {} day(s) ago (path missing and unseen for {}+ days)",
-                days(unseen_secs),
-                GONE_AFTER_SECS / clock::SECS_PER_DAY
-            ),
-        }
-    }
-}
 
 /// The outcome of one guarded deletion.
 #[derive(Debug, PartialEq, Eq)]
@@ -89,18 +28,6 @@ pub enum Removal {
     Kept,
     /// Another process holds its lock.
     Busy,
-}
-
-/// A backup directory made by `agt` itself: `<namespace>-v<version>-<stamp>[-<n>]`, or the
-/// hidden `.<name>.partial` copy of one that did not finish.
-#[derive(Debug, Clone)]
-pub struct Backup {
-    pub path: PathBuf,
-    pub namespace: Namespace,
-    pub partial: bool,
-    /// When it was taken, Unix seconds, and the `-<n>` suffix that separates two in one second.
-    pub taken: (i64, u32),
-    pub bytes: u64,
 }
 
 pub(super) fn remove_with_lock(path: &Path, lock_path: &Path) -> Result<u64> {
@@ -149,308 +76,6 @@ impl Store {
         let bytes = remove_with_lock(&path, &lock_path)?;
         Ok(Removal::Removed(bytes))
     }
-
-    /// Lock files (`.<key>.lock`, `.<key>.publish.lock`) under the namespace whose document is
-    /// gone, so nothing will ever lock them again.
-    pub fn stray_locks(&self) -> Result<Vec<PathBuf>> {
-        let mut found = Vec::new();
-        let mut pending = vec![self.root.clone()];
-        while let Some(dir) = pending.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => return fail(format!("read {}: {error}", dir.display())),
-            };
-            for entry in entries {
-                let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
-                let kind = entry
-                    .file_type()
-                    .map_err(ctx(format!("stat {}", entry.path().display())))?;
-                if kind.is_dir() {
-                    pending.push(entry.path());
-                } else if kind.is_file()
-                    && lock_target_gone(&dir, &entry.file_name().to_string_lossy())
-                {
-                    found.push(entry.path());
-                }
-            }
-        }
-        found.sort();
-        Ok(found)
-    }
-
-    /// Deletes a lock file from [`Store::stray_locks`] unless it is held or its document came
-    /// back.
-    pub fn remove_stray_lock(&self, path: &Path) -> Result<Removal> {
-        match self.lock_stray(path)? {
-            StrayLock::Held(file) => delete_stray(&file, path),
-            StrayLock::Busy => Ok(Removal::Busy),
-            StrayLock::Kept => Ok(Removal::Kept),
-        }
-    }
-
-    /// Takes the lock of a stray lock file without waiting. Opening without `create`, so a lock
-    /// that vanished stays vanished.
-    pub(super) fn lock_stray(&self, path: &Path) -> Result<StrayLock> {
-        match fs::OpenOptions::new().read(true).write(true).open(path) {
-            Ok(file) => lock_stray_file(file, path),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(StrayLock::Kept),
-            Err(error) => fail(format!("open {}: {error}", path.display())),
-        }
-    }
-
-    /// What a `local/` repository directory holds, or `None` when it holds anything `prune` may
-    /// not delete: a subdirectory, a link, or a file that is not a target, cache or lock.
-    pub fn scan_local_repo(&self, dir: &Path, now: i64) -> Result<Option<LocalRepo>> {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return fail(format!("read {}: {error}", dir.display())),
-        };
-        let (mut extras, mut stray_locks, mut documents) = (Vec::new(), Vec::new(), 0);
-        for entry in entries {
-            let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
-            let kind = entry
-                .file_type()
-                .map_err(ctx(format!("stat {}", entry.path().display())))?;
-            if !kind.is_file() {
-                return Ok(None);
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == ACCOUNT_FILE || name == REPO_FILE || name == LOOKUP_FILE {
-                extras.push(entry.path());
-            } else if lock_target_gone(dir, &name) {
-                stray_locks.push(entry.path());
-            } else if name.starts_with('.') && name.ends_with(".lock") {
-                // A target's lock, deleted with the target.
-            } else if !name.starts_with('.') && name.ends_with(".json") {
-                documents += 1;
-            } else {
-                return Ok(None);
-            }
-        }
-        let (targets, _) = self.targets_intact(dir)?;
-        if targets.len() != documents {
-            return Ok(None);
-        }
-        extras.sort();
-        stray_locks.sort();
-        let idle_secs = now - last_write(dir, &extras);
-        Ok(Some(LocalRepo {
-            idle_secs,
-            targets,
-            extras,
-            stray_locks,
-            presence: self.presence(dir, now),
-        }))
-    }
-
-    /// Whether the repository recorded in `dir` still exists, as of `now`.
-    pub fn presence(&self, dir: &Path, now: i64) -> Presence {
-        let repo = match self.recorded_repo(dir) {
-            Ok(Some(repo)) => repo,
-            Ok(None) => return Presence::NoRecord,
-            Err(error) => return Presence::Unreadable(error.to_string()),
-        };
-        let common = Path::new(&repo.common_dir);
-        if !common.is_absolute() {
-            return Presence::Unreadable(format!("{} is not an absolute path", repo.common_dir));
-        }
-        match common.try_exists() {
-            Ok(true) => return Presence::Alive(repo.common_dir),
-            Ok(false) => {}
-            Err(error) => return Presence::Unreadable(format!("{}: {error}", repo.common_dir)),
-        }
-        if MOUNT_ROOTS.iter().any(|root| {
-            common
-                .strip_prefix(root)
-                .is_ok_and(|rest| rest.components().next().is_some())
-        }) {
-            return Presence::Unmounted(repo.common_dir);
-        }
-        // A record from before `last_seen` existed was last written when it was made.
-        let seen = match repo.last_seen.as_deref() {
-            Some(seen) => clock::parse(seen).ok(),
-            None => seen_by_mtime(&dir.join(REPO_FILE)),
-        };
-        let Some(seen) = seen else {
-            return Presence::Unreadable("no usable last-seen time".into());
-        };
-        let unseen_secs = now - seen;
-        if unseen_secs >= GONE_AFTER_SECS {
-            Presence::Gone {
-                common_dir: repo.common_dir,
-                unseen_secs,
-            }
-        } else {
-            Presence::Missing {
-                common_dir: repo.common_dir,
-                unseen_secs,
-            }
-        }
-    }
-
-    /// Deletes a `local/` repository directory: its targets when the repository is gone (else
-    /// none may be left), then its cache files and stray locks. Every lock is taken before the
-    /// first file goes, so a repository that is partly busy loses nothing.
-    ///
-    /// `had_targets` says the plan listed the directory because its targets had all expired, so
-    /// finding none left is the expected outcome. A directory that held none to begin with and is
-    /// not gone goes only once nothing has been written there for [`PRUNE_AFTER_SECS`].
-    pub fn remove_local_repo(&self, dir: &Path, now: i64, had_targets: bool) -> Result<Removal> {
-        let Some(repo) = self.scan_local_repo(dir, now)? else {
-            return Ok(Removal::Kept);
-        };
-        if repo.targets.is_empty()
-            && !repo.presence.is_gone()
-            && !had_targets
-            && repo.idle_secs < PRUNE_AFTER_SECS
-        {
-            return Ok(Removal::Kept);
-        }
-        if !repo.targets.is_empty() && !repo.presence.is_gone() {
-            return Ok(Removal::Kept);
-        }
-        let mut held = Vec::new();
-        let (mut documents, mut locks) = (Vec::new(), Vec::new());
-        for target in &repo.targets {
-            validate_key(&target.key)?;
-            for suffix in ["lock", "publish.lock"] {
-                let lock_path = dir.join(format!(".{}.{suffix}", target.key));
-                let Some(file) = try_lock_file(&lock_path)? else {
-                    return Ok(Removal::Busy);
-                };
-                held.push(file);
-                locks.push(lock_path);
-            }
-            documents.push(dir.join(format!("{}.json", target.key)));
-        }
-        for path in &repo.stray_locks {
-            match self.lock_stray(path)? {
-                StrayLock::Held(file) => held.push(file),
-                StrayLock::Busy => return Ok(Removal::Busy),
-                StrayLock::Kept => return Ok(Removal::Kept),
-            }
-            locks.push(path.clone());
-        }
-        // Documents first, then locks, then cache files: the order `remove_with_lock` uses, so a
-        // reader never finds a lock-less document.
-        let doomed: Vec<PathBuf> = documents
-            .into_iter()
-            .chain(locks)
-            .chain(repo.extras)
-            .collect();
-        // A writer that started after the scan has no lock of ours to wait on; if it left
-        // anything we do not know, the repository is in use and nothing is deleted.
-        if !only_holds(dir, &doomed)? {
-            return Ok(Removal::Busy);
-        }
-        let mut freed = 0;
-        for path in &doomed {
-            freed += fs::symlink_metadata(path).map_or(0, |meta| meta.len());
-            remove_if_present(path)?;
-        }
-        match fs::remove_dir(dir) {
-            Ok(()) => Ok(Removal::Removed(freed)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Removal::Kept),
-            Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => Ok(Removal::Busy),
-            Err(error) => fail(format!("remove {}: {error}", dir.display())),
-        }
-    }
-
-    /// The backups `agt` made, finished and partial, oldest first. Anything else in the backups
-    /// directory belongs to another tool and is not listed.
-    pub fn agt_backups(&self) -> Result<Vec<Backup>> {
-        let entries = match fs::read_dir(&self.backups) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return fail(format!("read {}: {error}", self.backups.display())),
-        };
-        let mut found = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(ctx(format!("read {}", self.backups.display())))?;
-            let kind = entry
-                .file_type()
-                .map_err(ctx(format!("stat {}", entry.path().display())))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !kind.is_dir() {
-                continue;
-            }
-            if name == "repositories" && self.backups == self.agents.join("backups") {
-                for clone in fs::read_dir(entry.path()).map_err(ctx("read clone backups"))? {
-                    let clone = clone.map_err(ctx("read clone backup"))?;
-                    let id = clone.file_name().to_string_lossy().into_owned();
-                    if clone
-                        .file_type()
-                        .map_err(ctx("stat clone backup"))?
-                        .is_dir()
-                        && id.len() == 40
-                        && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    {
-                        let mut store = Self::open(self.namespace)?;
-                        store.backups = clone.path();
-                        found.extend(store.agt_backups()?);
-                    }
-                }
-                continue;
-            }
-            let (partial, name) = match name
-                .strip_prefix('.')
-                .and_then(|name| name.strip_suffix(".partial"))
-            {
-                Some(inner) => (true, inner),
-                None => (false, name.as_str()),
-            };
-            if let Some((namespace, taken)) = parse_backup_name(name) {
-                found.push(Backup {
-                    bytes: tree_size(&entry.path()),
-                    path: entry.path(),
-                    namespace,
-                    partial,
-                    taken,
-                });
-            }
-        }
-        found.sort_by(|a, b| (a.taken, &a.path).cmp(&(b.taken, &b.path)));
-        Ok(found)
-    }
-
-    /// Deletes a backup unless a backup of its namespace is being made.
-    pub fn remove_backup(&self, backup: &Backup) -> Result<Removal> {
-        let name = backup.namespace.dir_name();
-        let lock_path = backup
-            .path
-            .parent()
-            .unwrap_or(&self.backups)
-            .with_file_name(format!(".{name}-backup.lock"));
-        let Some(_lock) = try_lock_file(&lock_path)? else {
-            return Ok(Removal::Busy);
-        };
-        match fs::remove_dir_all(&backup.path) {
-            Ok(()) => Ok(Removal::Removed(backup.bytes)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Removal::Kept),
-            Err(error) => fail(format!("remove {}: {error}", backup.path.display())),
-        }
-    }
-}
-
-/// What a `local/` repository directory holds; see [`Store::scan_local_repo`].
-pub struct LocalRepo {
-    pub targets: Vec<Target>,
-    /// Cache files (`.account.json`, `.repo.json`) deleted with the repository.
-    pub extras: Vec<PathBuf>,
-    /// Lock files whose document is gone.
-    pub stray_locks: Vec<PathBuf>,
-    pub presence: Presence,
-    /// Seconds since agt last wrote in the directory: `last_seen`, else the newest cache file.
-    pub idle_secs: i64,
-}
-
-/// A stray lock file after trying to take its lock.
-pub(super) enum StrayLock {
-    Held(fs::File),
-    Busy,
-    Kept,
 }
 
 /// A held publish lock that deletes its file when dropped and `unlink` is set, provided the path
@@ -469,69 +94,6 @@ impl Drop for PublishLock<'_> {
     }
 }
 
-/// When agt last wrote in `dir`, as `last_seen` in `.repo.json`, else the newest modification
-/// time of its cache files, else of the directory.
-fn last_write(dir: &Path, extras: &[PathBuf]) -> i64 {
-    let recorded = fs::read(dir.join(REPO_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|doc| {
-            doc["last_seen"]
-                .as_str()
-                .and_then(|seen| clock::parse(seen).ok())
-        });
-    recorded
-        .or_else(|| extras.iter().filter_map(|path| seen_by_mtime(path)).max())
-        .or_else(|| seen_by_mtime(dir))
-        .unwrap_or(0)
-}
-
-fn seen_by_mtime(path: &Path) -> Option<i64> {
-    clock::mtime_secs(&fs::metadata(path).ok()?)
-}
-
-/// Whether every entry of `dir` is one of `paths`.
-fn only_holds(dir: &Path, paths: &[PathBuf]) -> Result<bool> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
-        Err(error) => return fail(format!("read {}: {error}", dir.display())),
-    };
-    for entry in entries {
-        let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
-        if !paths.contains(&entry.path()) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// Locks an opened lock file and checks that it is still the one at `path` and still stray. A
-/// lock file replaced since the open is a different inode, and deleting it would break the
-/// lock its holder believes it has.
-fn lock_stray_file(file: fs::File, path: &Path) -> Result<StrayLock> {
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Ok(StrayLock::Busy),
-        Err(fs::TryLockError::Error(error)) => {
-            return fail(format!("lock {}: {error}", path.display()));
-        }
-    }
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-        return Ok(StrayLock::Kept);
-    };
-    if !is_current(&file, path)? || !lock_target_gone(dir, &name.to_string_lossy()) {
-        return Ok(StrayLock::Kept);
-    }
-    Ok(StrayLock::Held(file))
-}
-
-fn delete_stray(file: &fs::File, path: &Path) -> Result<Removal> {
-    let bytes = file.metadata().map_or(0, |meta| meta.len());
-    fs::remove_file(path).map_err(ctx(format!("remove {}", path.display())))?;
-    Ok(Removal::Removed(bytes))
-}
-
 fn remove_if_present(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -540,66 +102,16 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-/// Whether `name` is a lock file in `dir` whose document does not exist.
-fn lock_target_gone(dir: &Path, name: &str) -> bool {
-    let Some(stem) = name
-        .strip_prefix('.')
-        .and_then(|name| name.strip_suffix(".lock"))
-        .filter(|stem| !stem.is_empty())
-    else {
-        return false;
-    };
-    let exists = |stem: &str| dir.join(format!("{stem}.json")).exists();
-    // `agt issue push` holds `.push.publish.lock` for the whole tracker, which has no `push`
-    // document.
-    if stem == "push.publish" && exists("tracker") {
-        return false;
-    }
-    // A target key may itself end in `.publish`, so either reading keeps the lock.
-    !exists(stem) && !stem.strip_suffix(".publish").is_some_and(exists)
-}
-
-/// `reviews-v1-2026-07-01T10-20-30Z` or the same with `-2`: the namespace and when it was made.
-fn parse_backup_name(name: &str) -> Option<(Namespace, (i64, u32))> {
-    let namespace = Namespace::ALL
-        .into_iter()
-        .find(|namespace| name.starts_with(&format!("{}-v", namespace.dir_name())))?;
-    let rest = name.strip_prefix(&format!("{}-v", namespace.dir_name()))?;
-    let (version, stamp) = rest.split_once('-')?;
-    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let time = stamp.get(..20)?;
-    let attempt = match stamp.get(20..)? {
-        "" => 1,
-        suffix => suffix.strip_prefix('-')?.parse().ok().filter(|n| *n >= 2)?,
-    };
-    if time.as_bytes().get(10) != Some(&b'T') || !time.ends_with('Z') {
-        return None;
-    }
-    // The stamp is the timestamp with its time colons turned into dashes.
-    let iso = format!("{}{}", time.get(..11)?, time.get(11..)?.replace('-', ":"));
-    Some((namespace, (clock::parse(&iso).ok()?, attempt)))
-}
-
-fn tree_size(path: &Path) -> u64 {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    fs::read_dir(path).map_or(0, |entries| {
-        entries
-            .flatten()
-            .map(|entry| tree_size(&entry.path()))
-            .sum()
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use super::backups::parse_backup_name;
+    use super::local_repo::only_holds;
+    use super::presence::Presence;
+    use super::stray::{StrayLock, lock_stray_file, lock_target_gone};
     use super::*;
+    use crate::core::clock;
+    use crate::store::Namespace;
+    use crate::store::sidecars::REPO_FILE;
 
     /// Retries while `attempt` reports [`Removal::Busy`] for a few seconds. A lock is an open file
     /// description, and a thread that forks a child (other tests run `git`) hands it to the child
