@@ -208,6 +208,24 @@ fn pushed_reports_a_pull_request_head_and_its_checks() {
 }
 
 #[test]
+fn pushed_keeps_the_pull_request_when_only_the_checks_query_fails() {
+    let site = Site::new();
+    site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    let stale = "b".repeat(40);
+    site.pulls(&[pull(&stale)]);
+    // No answer is registered for the checks query, so the fake `gh` fails it.
+    let output = site.agt(&["pushed"]);
+    assert_eq!(output.status.code(), Some(4));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["pr"]["head_matches"], false);
+    assert_eq!(report["pr"]["head"], stale);
+    assert_eq!(report["pr"]["pipeline"]["exists"], Value::Null);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning: pipeline lookup failed"), "{stderr}");
+}
+
+#[test]
 fn landable_reports_counts_and_commits_already_in_the_target() {
     let site = Site::new();
     let picked = site.commit("a");

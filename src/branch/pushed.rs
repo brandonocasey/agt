@@ -108,12 +108,20 @@ fn pull_report(repo: &Repo, branch: &str, local: &str) -> Result<Option<Value>> 
     else {
         return Ok(None);
     };
+    // The PR stands without its checks: a failed check query leaves only `pipeline.exists` null.
+    let exists = pipeline_exists(&origin, &pull).map_or_else(
+        |error| {
+            eprintln!("warning: pipeline lookup failed, `pipeline.exists` is null: {error}");
+            Value::Null
+        },
+        Value::Bool,
+    );
     Ok(Some(json!({
         "number": pull.number,
         "url": pull.url,
         "head": pull.head_sha,
         "head_matches": pull.head_sha == local,
-        "pipeline": {"sha": pull.head_sha, "exists": pipeline_exists(&origin, &pull)?},
+        "pipeline": {"sha": pull.head_sha, "exists": exists},
     })))
 }
 
