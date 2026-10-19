@@ -76,12 +76,15 @@ fn fetch(repo: &Repo, remote: &str, branch: &str) -> Result<Option<String>> {
 fn uncommitted(repo: &Repo, branch: &str) -> Result<Option<usize>> {
     let listing = repo.git(&["worktree", "list", "--porcelain"])?;
     let wanted = format!("branch refs/heads/{branch}");
-    let mut path = None;
-    for line in listing.lines() {
-        if let Some(found) = line.strip_prefix("worktree ") {
-            path = Some(found);
-        } else if line == wanted {
-            let Some(path) = path else { continue };
+    for block in listing.split("\n\n") {
+        let lines: Vec<&str> = block.lines().collect();
+        let Some(path) = lines.iter().find_map(|line| line.strip_prefix("worktree ")) else {
+            continue;
+        };
+        // A worktree whose directory is gone has nothing to count.
+        let gone = lines.iter().any(|line| line.starts_with("prunable"))
+            || !std::path::Path::new(path).is_dir();
+        if lines.contains(&wanted.as_str()) && !gone {
             let status = Repo::at(path).git(&["status", "--porcelain"])?;
             return Ok(Some(status.lines().count()));
         }

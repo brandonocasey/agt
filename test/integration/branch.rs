@@ -134,6 +134,23 @@ fn pushed_equal_without_a_pull_request_exits_zero() {
 }
 
 #[test]
+fn pushed_skips_a_worktree_whose_directory_is_gone() {
+    let site = Site::new();
+    site.pulls(&[]);
+    site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    site.env.git(&["checkout", "-q", "main"]);
+    let tree = site.env.path("gone-tree");
+    site.env
+        .git(&["worktree", "add", "-q", tree.to_str().unwrap(), "topic"]);
+    std::fs::remove_dir_all(&tree).unwrap();
+    let (report, code) = site.report(&["pushed", "topic"]);
+    assert_eq!(code, 0);
+    assert_eq!(report["state"], "equal");
+    assert_eq!(report["uncommitted"], Value::Null);
+}
+
+#[test]
 fn pushed_counts_ahead_behind_diverged_and_missing() {
     let site = Site::new();
     site.pulls(&[]);
