@@ -416,19 +416,38 @@ fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() 
     review_json(&review_now(env, NOW, &["sync"], &[]));
     // Past the max age both the branch lookup and the sync of PR 42 are due.
     let (tool, pid) = slow_tool(env);
-    let started = Instant::now();
+    let calls = env.path("slow-calls");
+    let script = fs::read_to_string(&tool).unwrap();
+    fs::write(
+        &tool,
+        script.replacen(
+            "#!/bin/sh\n",
+            &format!("#!/bin/sh\necho invoked >> '{}'\n", calls.display()),
+            1,
+        ),
+    )
+    .unwrap();
     let output = review_now(
         env,
         NOW + 301,
         &["status"],
         &[("AGT_GH_BIN", &tool), ("AGT_SYNC_CAP_MS", "1500")],
     );
-    let elapsed = started.elapsed();
     assert_eq!(output.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(stderr.matches("sync skipped").count(), 1, "{stderr}");
-    // One deadline for the whole read: two caps would take 3 s.
-    assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+    assert!(stderr.contains("timed out after 1.5s"), "{stderr}");
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(repo_dir(&env.state()).join(".auto-sync.json")).unwrap())
+            .unwrap();
+    let failures = saved["failures"].as_object().unwrap();
+    assert_eq!(failures.len(), 2);
+    assert!(
+        failures.keys().any(|key| key.starts_with("branch-")),
+        "{saved}"
+    );
+    assert!(saved["failures"].get("pr-gh-42").is_some(), "{saved}");
     assert_gone(&pid);
 }
 

@@ -605,6 +605,35 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_forge_calls_share_the_remaining_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let tool = Cli {
+            program: "sh".into(),
+            name: "test forge",
+            env: [
+                "HOME",
+                "XDG_STATE_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_CACHE_HOME",
+            ]
+            .into_iter()
+            .map(|key| (key, root.path().display().to_string()))
+            .collect(),
+        };
+        set_deadline(Duration::from_millis(1500));
+        let started = Instant::now();
+        let first = tool.run(&["-c", "sleep 1"], None);
+        let second = tool.run(&["-c", "sleep 3"], None);
+        let elapsed = started.elapsed();
+        let exhausted = tool.run(&["-c", "exit 0"], None);
+        clear_deadline();
+        assert!(first.is_ok(), "{first:?}");
+        assert!(second.unwrap_err().message.contains("timed out after 1.5s"));
+        assert!(exhausted.is_err());
+        assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
+    }
+
+    #[test]
     fn gh_renders_its_api_flags() {
         let get = rest(Method::Get, "repos/o/r", None);
         assert_eq!(gh_args(&get), ["api", "--method", "GET", "repos/o/r"]);
