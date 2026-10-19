@@ -256,7 +256,6 @@ mod tests {
         fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
             self.calls.borrow_mut().push(request.clone());
             Ok(Response {
-                status: 200,
                 headers: Vec::new(),
                 body: self.body.clone(),
             })

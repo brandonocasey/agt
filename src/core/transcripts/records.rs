@@ -64,10 +64,22 @@ impl Transcript {
     /// calls are counted across records sharing the response id. Responses whose id is in `seen`
     /// were counted from an earlier file, such as those copied into a resumed session.
     pub fn api_calls(&self, since: &str, seen: &mut HashSet<String>) -> Vec<Call> {
+        Self::calls_with(|each| self.records(since, each), seen)
+    }
+
+    /// API responses from already adapted records, preserving cross-file deduplication.
+    pub fn calls_from_records(records: &[Value], seen: &mut HashSet<String>) -> Vec<Call> {
+        Self::calls_with(|each| records.iter().for_each(each), seen)
+    }
+
+    fn calls_with(
+        read: impl FnOnce(&mut dyn FnMut(&Value)),
+        seen: &mut HashSet<String>,
+    ) -> Vec<Call> {
         let mut calls: IndexMap<String, Call> = IndexMap::new();
         let mut tools: IndexMap<String, HashSet<String>> = IndexMap::new();
         let mut anonymous = 0usize;
-        self.records(since, |record| {
+        read(&mut |record| {
             let message = object(record, "message");
             if text(record, "type") != "assistant"
                 || !truthy(get(message, "usage"))

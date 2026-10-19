@@ -282,28 +282,8 @@ fn clone(main: &Path, root: &Path) -> Result<Vec<String>> {
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
         }
-        let mut copy = Command::new("cp");
-        copy.arg(if cfg!(target_os = "macos") {
-            "-cR"
-        } else {
-            "--reflink=auto"
-        });
-        if !cfg!(target_os = "macos") {
-            copy.arg("-R");
-        }
-        let output = copy
-            .arg(main.join(&relative))
-            .arg(&to)
-            .output()
-            .map_err(ctx("run cp"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return fail(format!(
-                "cp {} failed: {}",
-                relative.display(),
-                stderr.trim()
-            ));
-        }
+        super::copy::tree(&main.join(&relative), &to)
+            .map_err(ctx(format!("copy {}", relative.display())))?;
         copied.push(relative.to_string_lossy().into_owned());
     }
     Ok(copied)

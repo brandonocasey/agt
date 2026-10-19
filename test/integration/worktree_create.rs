@@ -737,6 +737,12 @@ fn clone_deps_copies_every_node_modules_then_runs_the_hooks_step() {
         fs::write(main.join(dir).join("index.js"), dir).unwrap();
     }
     fs::create_dir_all(main.join("node_modules/dep/node_modules/inner")).unwrap();
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let executable = main.join("node_modules/dep/index.js");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink("dep/index.js", main.join("node_modules/relative")).unwrap();
+    symlink("missing", main.join("node_modules/broken")).unwrap();
+    symlink("dep", main.join("node_modules/directory-link")).unwrap();
     fs::create_dir_all(worktree.join("packages/web")).unwrap();
     let value = prepared(&env, &tools, &worktree, &["prepare", "--clone-deps"]);
     assert_eq!(value["deps_from"], "clone");
@@ -760,6 +766,25 @@ fn clone_deps_copies_every_node_modules_then_runs_the_hooks_step() {
             .join("node_modules/dep/node_modules/inner")
             .is_dir()
     );
+    for (name, target) in [
+        ("relative", "dep/index.js"),
+        ("broken", "missing"),
+        ("directory-link", "dep"),
+    ] {
+        assert_eq!(
+            fs::read_link(worktree.join("node_modules").join(name)).unwrap(),
+            PathBuf::from(target)
+        );
+    }
+    let copied_file = worktree.join("node_modules/dep/index.js");
+    assert_eq!(
+        fs::metadata(&copied_file).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    fs::write(&copied_file, "changed copy").unwrap();
+    assert_eq!(fs::read_to_string(&executable).unwrap(), "node_modules/dep");
+    fs::write(&executable, "changed source").unwrap();
+    assert_eq!(fs::read_to_string(&copied_file).unwrap(), "changed copy");
     assert_eq!(fake_calls(&env), ["npm run prepare --if-present"]);
 }
 

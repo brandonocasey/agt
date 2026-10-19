@@ -217,7 +217,6 @@ impl Transport for Replay {
             .map(|(_, body)| body.clone())
             .ok_or_else(|| TransportError::new(format!("unexpected request: {key}")))?;
         Ok(Response {
-            status: 200,
             headers: Vec::new(),
             body,
         })

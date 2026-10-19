@@ -42,11 +42,13 @@ enum Command {
     /// Idle gaps that expired the prompt cache, and what ran before them.
     CacheGaps(GapArgs),
     /// Tool errors grouped by tool and message.
-    Errors(Common),
+    Errors(ErrorArgs),
     /// Permission denials grouped by source and reason.
     Denials(Common),
     /// Interrupts, corrections, short replies and repeated prompts.
     Friction(FrictionArgs),
+    /// Combine selected reports with one transcript scan.
+    Report(ReportArgs),
     /// Update the private session index and show coverage.
     Index(index::IndexArgs),
     /// Resolve an exact session id to its source.
@@ -125,6 +127,93 @@ struct FrictionArgs {
     /// TSV text width.
     #[arg(long, default_value_t = 300)]
     width: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ErrorKind {
+    Error,
+    Denial,
+    All,
+}
+
+#[derive(Args)]
+struct ErrorArgs {
+    #[command(flatten)]
+    common: Common,
+    /// Include tool errors, permission denials, or both.
+    #[arg(long, value_enum, default_value_t = ErrorKind::Error)]
+    kind: ErrorKind,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Section {
+    Cost,
+    Agents,
+    Tools,
+    CacheGaps,
+    Errors,
+    Denials,
+    Friction,
+}
+
+#[derive(Args)]
+struct ReportArgs {
+    #[command(flatten)]
+    common: Common,
+    /// Comma-separated reports to print, in this order.
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        default_value = "cost,agents,tools,cache-gaps,errors,denials,friction"
+    )]
+    sections: Vec<Section>,
+    /// Cost grouping: agent, model, project, session, file, harness.
+    #[arg(long, default_value = "agent,model")]
+    by: String,
+    /// Idle minutes that count as a cache gap.
+    #[arg(long)]
+    gap: Option<f64>,
+}
+
+enum Report {
+    Cost(spend::Cost, bool),
+    Agents(spend::Agents),
+    Tools(tools::Tools),
+    CacheGaps(tools::CacheGaps),
+    Failures(events::Failures),
+    Friction(events::Friction, bool, usize),
+}
+
+impl Report {
+    fn feed(&mut self, transcript: &source::Loaded) {
+        match self {
+            Self::Cost(report, _) => report.feed(transcript),
+            Self::Agents(report) => report.feed(transcript),
+            Self::Tools(report) => report.feed(transcript),
+            Self::CacheGaps(report) => report.feed(transcript),
+            Self::Failures(report) => report.feed(transcript),
+            Self::Friction(report, _, _) => report.feed(transcript),
+        }
+    }
+
+    fn render(self, scope: &Scope) -> Result<String> {
+        match self {
+            Self::Cost(report, json) => report.render(scope, json),
+            Self::Agents(report) => Ok(report.render()),
+            Self::Tools(report) => Ok(report.render(scope)),
+            Self::CacheGaps(report) => Ok(report.render(scope)),
+            Self::Failures(report) => Ok(report.render(scope)),
+            Self::Friction(report, tsv, width) => Ok(report.render(scope, tsv, width)),
+        }
+    }
+}
+
+fn single(scope: Scope, mut report: Report) -> Result<String> {
+    for transcript in source::load(&scope) {
+        report.feed(&transcript);
+    }
+    report.render(&scope)
 }
 
 /// What a report reads.
@@ -240,17 +329,73 @@ pub fn run(cli: Cli) -> Result<Output> {
             json,
             ..
         }) => spend::session(&id, json)?,
-        Command::Cost(args) => {
-            let scope = scope(args.common, args.files)?;
-            spend::cost(&scope, &args.by, args.json)?
-        }
-        Command::Agents(common) => spend::agents(&scope(common, Vec::new())?)?,
-        Command::Tools(common) => tools::tools(&scope(common, Vec::new())?),
-        Command::CacheGaps(args) => tools::cache_gaps(&scope(args.common, Vec::new())?, args.gap)?,
-        Command::Errors(common) => events::errors(&scope(common, Vec::new())?),
-        Command::Denials(common) => events::denials(&scope(common, Vec::new())?),
-        Command::Friction(args) => {
-            events::friction(&scope(args.common, Vec::new())?, args.tsv, args.width)
+        Command::Cost(args) => single(
+            scope(args.common, args.files)?,
+            Report::Cost(spend::Cost::new(&args.by)?, args.json),
+        )?,
+        Command::Agents(common) => single(
+            scope(common, Vec::new())?,
+            Report::Agents(spend::Agents::new()?),
+        )?,
+        Command::Tools(common) => single(
+            scope(common, Vec::new())?,
+            Report::Tools(tools::Tools::new()),
+        )?,
+        Command::CacheGaps(args) => single(
+            scope(args.common, Vec::new())?,
+            Report::CacheGaps(tools::CacheGaps::new(args.gap)?),
+        )?,
+        Command::Errors(args) => single(
+            scope(args.common, Vec::new())?,
+            Report::Failures(events::Failures::new(args.kind)),
+        )?,
+        Command::Denials(common) => single(
+            scope(common, Vec::new())?,
+            Report::Failures(events::Failures::new(ErrorKind::Denial)),
+        )?,
+        Command::Friction(args) => single(
+            scope(args.common, Vec::new())?,
+            Report::Friction(events::Friction::new(), args.tsv, args.width),
+        )?,
+        Command::Report(args) => {
+            let scope = scope(args.common, Vec::new())?;
+            let mut reports = args
+                .sections
+                .into_iter()
+                .map(|section| {
+                    Ok(match section {
+                        Section::Cost => ("Cost", Report::Cost(spend::Cost::new(&args.by)?, false)),
+                        Section::Agents => ("Agents", Report::Agents(spend::Agents::new()?)),
+                        Section::Tools => ("Tools", Report::Tools(tools::Tools::new())),
+                        Section::CacheGaps => (
+                            "Cache gaps",
+                            Report::CacheGaps(tools::CacheGaps::new(args.gap)?),
+                        ),
+                        Section::Errors => (
+                            "Errors",
+                            Report::Failures(events::Failures::new(ErrorKind::Error)),
+                        ),
+                        Section::Denials => (
+                            "Denials",
+                            Report::Failures(events::Failures::new(ErrorKind::Denial)),
+                        ),
+                        Section::Friction => (
+                            "Friction",
+                            Report::Friction(events::Friction::new(), false, 300),
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for transcript in source::load(&scope) {
+                for (_, report) in &mut reports {
+                    report.feed(&transcript);
+                }
+            }
+            reports
+                .into_iter()
+                .map(|(heading, report)| Ok(format!("{heading}:\n{}", report.render(&scope)?)))
+                .collect::<Result<Vec<_>>>()?
+                .join("\n")
         }
         Command::Index(args) => return index::index_command(&args),
         Command::Resolve(args) => return index::resolve(&args),

@@ -344,8 +344,6 @@ fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()>
     }
 }
 
-/// Posts a desktop notification. The text travels as arguments, never through a shell or as
-/// script source.
 fn notify(event: &Value) {
     let who = event["name"]
         .as_str()
@@ -353,25 +351,11 @@ fn notify(event: &Value) {
         .unwrap_or("a session");
     let title = format!("agt: {who} is blocked");
     let body = event["waiting_for"].as_str().unwrap_or("waiting for input");
-    let mut command = if cfg!(target_os = "macos") {
-        let mut command = Command::new("osascript");
-        command
-            .args([
-                "-e",
-                "on run argv",
-                "-e",
-                "display notification (item 2 of argv) with title (item 1 of argv)",
-                "-e",
-                "end run",
-            ])
-            .args([&title, body]);
-        command
-    } else {
-        let mut command = Command::new("notify-send");
-        command.args(["--", &title, body]);
-        command
-    };
-    if let Err(error) = command.stdin(Stdio::null()).status() {
+    if let Err(error) = notify_rust::Notification::new()
+        .summary(&title)
+        .body(body)
+        .show()
+    {
         eprintln!("warning: notification failed: {error}");
     }
 }

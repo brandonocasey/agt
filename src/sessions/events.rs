@@ -7,12 +7,11 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::core::transcripts::Transcript;
 use crate::core::transcripts::json::{get, head, key, text, truthy};
-use crate::sessions::Scope;
 use crate::sessions::fmt;
-use crate::sessions::source::transcripts;
+use crate::sessions::source::Loaded;
 use crate::sessions::spend::short_project;
+use crate::sessions::{ErrorKind, Scope};
 
 static DENIALS: LazyLock<Vec<(Regex, &str)>> =
     LazyLock::new(|| {
@@ -56,8 +55,8 @@ fn shown(value: &Value) -> String {
     }
 }
 
-struct Failure<'a> {
-    transcript: &'a Transcript,
+struct Failure {
+    session: String,
     timestamp: String,
     tool: String,
     summary: String,
@@ -65,53 +64,52 @@ struct Failure<'a> {
 }
 
 /// Every failed tool call: its tool, a summary of its input, and the error text.
-fn tool_errors<'a>(scope: &Scope, found: &'a [Transcript]) -> Vec<Failure<'a>> {
+fn tool_errors(transcript: &Loaded) -> Vec<Failure> {
     let mut failures = Vec::new();
-    for transcript in found {
-        let mut uses: HashMap<String, (String, String)> = HashMap::new();
-        transcript.records(&scope.since_iso, |record| {
-            let message = get(record, "message");
-            let Some(blocks) = get(message, "content").as_array() else {
-                return;
-            };
-            for block in blocks.iter().filter(|block| block.is_object()) {
-                match text(block, "type") {
-                    "tool_use" => {
-                        let input = get(block, "input");
-                        let input = if truthy(input) {
-                            input.clone()
-                        } else {
-                            Value::Object(serde_json::Map::new())
-                        };
-                        let summary = ["command", "file_path", "url"]
-                            .into_iter()
-                            .map(|name| get(&input, name))
-                            .find(|value| truthy(value))
-                            .map_or_else(|| input.to_string(), shown);
-                        let name = block.get("name").and_then(Value::as_str).unwrap_or("?");
-                        uses.insert(
-                            key(get(block, "id")),
-                            (name.to_owned(), head(&summary, 100).to_owned()),
-                        );
-                    }
-                    "tool_result" if truthy(get(block, "is_error")) => {
-                        let (tool, summary) = uses
-                            .get(&key(get(block, "tool_use_id")))
-                            .cloned()
-                            .unwrap_or_else(|| ("?".into(), String::new()));
-                        failures.push(Failure {
-                            transcript,
-                            timestamp: text(record, "timestamp").to_owned(),
-                            tool,
-                            summary,
-                            text: result_text(get(block, "content")),
-                        });
-                    }
-                    _ => {}
+
+    let mut uses: HashMap<String, (String, String)> = HashMap::new();
+    transcript.records(|record| {
+        let message = get(record, "message");
+        let Some(blocks) = get(message, "content").as_array() else {
+            return;
+        };
+        for block in blocks.iter().filter(|block| block.is_object()) {
+            match text(block, "type") {
+                "tool_use" => {
+                    let input = get(block, "input");
+                    let input = if truthy(input) {
+                        input.clone()
+                    } else {
+                        Value::Object(serde_json::Map::new())
+                    };
+                    let summary = ["command", "file_path", "url"]
+                        .into_iter()
+                        .map(|name| get(&input, name))
+                        .find(|value| truthy(value))
+                        .map_or_else(|| input.to_string(), shown);
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("?");
+                    uses.insert(
+                        key(get(block, "id")),
+                        (name.to_owned(), head(&summary, 100).to_owned()),
+                    );
                 }
+                "tool_result" if truthy(get(block, "is_error")) => {
+                    let (tool, summary) = uses
+                        .get(&key(get(block, "tool_use_id")))
+                        .cloned()
+                        .unwrap_or_else(|| ("?".into(), String::new()));
+                    failures.push(Failure {
+                        session: transcript.session.clone(),
+                        timestamp: text(record, "timestamp").to_owned(),
+                        tool,
+                        summary,
+                        text: result_text(get(block, "content")),
+                    });
+                }
+                _ => {}
             }
-        });
-    }
+        }
+    });
     failures
 }
 
@@ -180,62 +178,65 @@ fn grouped(out: &mut String, rows: Vec<(String, String, String, String)>, top: u
     );
 }
 
-pub fn errors(scope: &Scope) -> String {
-    let found = transcripts(scope);
-    let mut rows = Vec::new();
-    for failure in tool_errors(scope, &found) {
-        if denial_kind(&failure.text).is_some() {
-            continue;
-        }
-        let cleaned = ERROR_TAG.replace_all(&failure.text, "");
-        let mut lines: Vec<&str> = cleaned
-            .split('\n')
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        if lines.is_empty() {
-            lines.push("");
-        }
-        // "Exit code N" alone says nothing; the next line is usually the error.
-        let first = if lines[0].starts_with("Exit code") {
-            lines[..lines.len().min(2)].join(" | ")
-        } else {
-            lines[0].to_owned()
-        };
-        let group = format!(
-            "{}: {}",
-            failure.tool,
-            head(&DIGITS.replace_all(&first, "#"), 80)
-        );
-        rows.push((
-            group,
-            failure.transcript.session.clone(),
-            failure.timestamp,
-            failure.summary,
-        ));
-    }
-    let mut out = String::new();
-    grouped(&mut out, rows, scope.top);
-    out
+pub struct Failures {
+    kind: ErrorKind,
+    rows: Vec<(String, String, String, String)>,
 }
 
-pub fn denials(scope: &Scope) -> String {
-    let found = transcripts(scope);
-    let rows = tool_errors(scope, &found)
-        .into_iter()
-        .filter_map(|failure| {
-            let kind = denial_kind(&failure.text)?;
-            Some((
-                kind,
-                failure.transcript.session.clone(),
-                failure.timestamp,
-                format!("{}: {}", failure.tool, failure.summary),
-            ))
-        })
-        .collect();
-    let mut out = String::new();
-    grouped(&mut out, rows, scope.top);
-    out
+impl Failures {
+    pub fn new(kind: ErrorKind) -> Self {
+        Self {
+            kind,
+            rows: Vec::new(),
+        }
+    }
+
+    pub fn feed(&mut self, transcript: &Loaded) {
+        for failure in tool_errors(transcript) {
+            if let Some(denial) = denial_kind(&failure.text) {
+                if self.kind != ErrorKind::Error {
+                    self.rows.push((
+                        denial,
+                        failure.session,
+                        failure.timestamp,
+                        format!("{}: {}", failure.tool, failure.summary),
+                    ));
+                }
+                continue;
+            }
+            if self.kind == ErrorKind::Denial {
+                continue;
+            }
+            let cleaned = ERROR_TAG.replace_all(&failure.text, "");
+            let mut lines: Vec<&str> = cleaned
+                .split('\n')
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect();
+            if lines.is_empty() {
+                lines.push("");
+            }
+            // "Exit code N" alone says nothing; the next line is usually the error.
+            let first = if lines[0].starts_with("Exit code") {
+                lines[..lines.len().min(2)].join(" | ")
+            } else {
+                lines[0].to_owned()
+            };
+            let group = format!(
+                "{}: {}",
+                failure.tool,
+                head(&DIGITS.replace_all(&first, "#"), 80)
+            );
+            self.rows
+                .push((group, failure.session, failure.timestamp, failure.summary));
+        }
+    }
+
+    pub fn render(self, scope: &Scope) -> String {
+        let mut out = String::new();
+        grouped(&mut out, self.rows, scope.top);
+        out
+    }
 }
 
 static CORRECTIONS: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
@@ -334,16 +335,23 @@ fn sessions(seen: &Seen) -> usize {
         .len()
 }
 
-pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
-    // Day, project, session, text.
-    let mut messages: Vec<(String, String, String, String)> = Vec::new();
-    for transcript in transcripts(scope) {
-        if transcript.agent != "main" {
-            continue;
+pub struct Friction {
+    messages: Vec<(String, String, String, String)>,
+}
+
+impl Friction {
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
         }
-        transcript.records(&scope.since_iso, |record| {
+    }
+    pub fn feed(&mut self, transcript: &Loaded) {
+        if transcript.agent != "main" {
+            return;
+        }
+        transcript.records(|record| {
             if let Some(typed) = user_text(record) {
-                messages.push((
+                self.messages.push((
                     head(text(record, "timestamp"), 10).to_owned(),
                     transcript.project.clone(),
                     transcript.session.clone(),
@@ -352,101 +360,105 @@ pub fn friction(scope: &Scope, tsv: bool, width: usize) -> String {
             }
         });
     }
-    let mut out = String::new();
-    if tsv {
-        for (day, project, session, typed) in &messages {
-            let flat = typed.replace('\t', " ").replace('\n', " \\n ");
-            out.push_str(&format!(
-                "{day}\t{project}\t{session}\t{}\n",
-                head(&flat, width)
-            ));
-        }
-        return out;
-    }
-    let mut rows = Vec::new();
-    let mut short: IndexMap<String, Seen> = IndexMap::new();
-    let mut normalized: IndexMap<String, Seen> = IndexMap::new();
-    for (day, project, session, typed) in &messages {
-        let flat = typed.split_whitespace().collect::<Vec<_>>().join(" ");
-        if flat.starts_with("[Request interrupted") {
-            let label = if flat.contains("tool use") {
-                "interrupt (tool use)"
-            } else {
-                "interrupt"
-            };
-            rows.push((
-                label.to_owned(),
-                session.clone(),
-                day.clone(),
-                short_project(project),
-            ));
-            continue;
-        }
-        for (label, pattern) in CORRECTIONS.iter() {
-            if pattern.is_match(&flat) {
-                rows.push((
-                    format!("correction: {label}"),
-                    session.clone(),
-                    day.clone(),
-                    flat.clone(),
+
+    pub fn render(self, scope: &Scope, tsv: bool, width: usize) -> String {
+        let Self { messages } = self;
+        let mut out = String::new();
+        if tsv {
+            for (day, project, session, typed) in &messages {
+                let flat = typed.replace('\t', " ").replace('\n', " \\n ");
+                out.push_str(&format!(
+                    "{day}\t{project}\t{session}\t{}\n",
+                    head(&flat, width)
                 ));
             }
+            return out;
         }
-        let lower = flat.to_lowercase();
-        if flat.split_whitespace().count() <= 3 {
-            short
-                .entry(lower.clone())
+        let mut rows = Vec::new();
+        let mut short: IndexMap<String, Seen> = IndexMap::new();
+        let mut normalized: IndexMap<String, Seen> = IndexMap::new();
+        for (day, project, session, typed) in &messages {
+            let flat = typed.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flat.starts_with("[Request interrupted") {
+                let label = if flat.contains("tool use") {
+                    "interrupt (tool use)"
+                } else {
+                    "interrupt"
+                };
+                rows.push((
+                    label.to_owned(),
+                    session.clone(),
+                    day.clone(),
+                    short_project(project),
+                ));
+                continue;
+            }
+            for (label, pattern) in CORRECTIONS.iter() {
+                if pattern.is_match(&flat) {
+                    rows.push((
+                        format!("correction: {label}"),
+                        session.clone(),
+                        day.clone(),
+                        flat.clone(),
+                    ));
+                }
+            }
+            let lower = flat.to_lowercase();
+            if flat.split_whitespace().count() <= 3 {
+                short
+                    .entry(lower.clone())
+                    .or_default()
+                    .push((session.clone(), day.clone()));
+            }
+            normalized
+                .entry(PUNCTUATION.replace_all(&lower, "").into_owned())
                 .or_default()
                 .push((session.clone(), day.clone()));
         }
-        normalized
-            .entry(PUNCTUATION.replace_all(&lower, "").into_owned())
-            .or_default()
-            .push((session.clone(), day.clone()));
+        out.push_str(&format!(
+            "{} user messages since {}\n\n",
+            messages.len(),
+            scope.since
+        ));
+        out.push_str("Interrupts and corrections:\n");
+        grouped(&mut out, rows, scope.top);
+        out.push_str("\nShort replies (3 words or fewer), top 20:\n");
+        let mut replies: Vec<(String, Seen)> = short.into_iter().collect();
+        replies.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
+        let table: Vec<Vec<String>> = replies
+            .iter()
+            .take(20)
+            .map(|(reply, seen)| {
+                vec![
+                    seen.len().to_string(),
+                    sessions(seen).to_string(),
+                    last_day(seen),
+                    head(reply, 60).to_owned(),
+                ]
+            })
+            .collect();
+        fmt::table(&mut out, &["count", "sessions", "last", "reply"], &table);
+        out.push_str("\nSame prompt in 3 or more sessions:\n");
+        let mut repeated: Vec<(String, Seen)> = normalized
+            .into_iter()
+            .filter(|(_, seen)| sessions(seen) >= 3)
+            .collect();
+        repeated.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
+        let table: Vec<Vec<String>> = repeated
+            .iter()
+            .take(scope.top)
+            .map(|(prompt, seen)| {
+                vec![
+                    seen.len().to_string(),
+                    sessions(seen).to_string(),
+                    last_day(seen),
+                    head(prompt, 70).to_owned(),
+                ]
+            })
+            .collect();
+        fmt::table(&mut out, &["count", "sessions", "last", "prompt"], &table);
+        out
     }
-    out.push_str(&format!(
-        "{} user messages since {}\n\n",
-        messages.len(),
-        scope.since
-    ));
-    out.push_str("Interrupts and corrections:\n");
-    grouped(&mut out, rows, scope.top);
-    out.push_str("\nShort replies (3 words or fewer), top 20:\n");
-    let mut replies: Vec<(String, Seen)> = short.into_iter().collect();
-    replies.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let table: Vec<Vec<String>> = replies
-        .iter()
-        .take(20)
-        .map(|(reply, seen)| {
-            vec![
-                seen.len().to_string(),
-                sessions(seen).to_string(),
-                last_day(seen),
-                head(reply, 60).to_owned(),
-            ]
-        })
-        .collect();
-    fmt::table(&mut out, &["count", "sessions", "last", "reply"], &table);
-    out.push_str("\nSame prompt in 3 or more sessions:\n");
-    let mut repeated: Vec<(String, Seen)> = normalized
-        .into_iter()
-        .filter(|(_, seen)| sessions(seen) >= 3)
-        .collect();
-    repeated.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let table: Vec<Vec<String>> = repeated
-        .iter()
-        .take(scope.top)
-        .map(|(prompt, seen)| {
-            vec![
-                seen.len().to_string(),
-                sessions(seen).to_string(),
-                last_day(seen),
-                head(prompt, 70).to_owned(),
-            ]
-        })
-        .collect();
-    fmt::table(&mut out, &["count", "sessions", "last", "prompt"], &table);
-    out
 }
 
 #[cfg(test)]

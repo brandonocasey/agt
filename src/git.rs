@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{ErrorKind, Write};
-use std::os::unix::process::CommandExt;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -10,6 +9,7 @@ use std::sync::OnceLock;
 pub mod base;
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::process;
 
 // Fixed diff options so patch-ids and anchors do not depend on user diff config.
 const DIFF_FLAGS: [&str; 5] = [
@@ -105,36 +105,13 @@ impl Repo {
             .args(["--no-optional-locks", "-c", "core.quotepath=false"])
             .args(args)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .envs(env.iter().copied())
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(ctx("run git"))?;
-        // Input is written from another thread so a large output cannot fill the pipe and deadlock.
-        let writer = match (input, child.stdin.take()) {
-            (Some(data), Some(mut stdin)) => {
-                Some(std::thread::spawn(move || stdin.write_all(&data)))
-            }
-            _ => None,
-        };
-        let output = child
-            .wait_with_output()
+            .envs(env.iter().copied());
+        let captured = process::output(&mut command, input.as_deref(), None)
             .map_err(ctx(format!("run git {}", args.join(" "))))?;
-        if let Some(writer) = writer {
-            match writer.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) if error.kind() == ErrorKind::BrokenPipe => {}
-                Ok(Err(error)) => {
-                    return fail(format!("write to git {}: {error}", args.join(" ")));
-                }
-                Err(_) => return fail("git input writer panicked"),
-            }
-        }
-        Ok(output)
+        captured
+            .input
+            .map_err(ctx(format!("write to git {}", args.join(" "))))?;
+        Ok(captured.output)
     }
 
     pub fn checked(
@@ -156,11 +133,9 @@ impl Repo {
     /// (git, ssh, askpass helpers, credential managers), ssh in batch mode with a connect
     /// timeout, and git in its own process group so that a timeout or a signal to agt kills ssh with it.
     pub fn git_within(&self, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
-        let scratch = tempfile::tempdir().map_err(ctx("create temporary output directory"))?;
-        let path = scratch.path().join("out");
-        let out = fs::File::create(&path).map_err(ctx("create temporary output"))?;
         let ssh = self.batch_ssh_command(args);
-        let mut child = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .current_dir(&self.root)
             .args(["--no-optional-locks"])
             .args(args)
@@ -169,38 +144,22 @@ impl Repo {
             .env("SSH_ASKPASS", "false")
             .env("SSH_ASKPASS_REQUIRE", "never")
             .env("GCM_INTERACTIVE", "never")
-            .env("GIT_SSH_COMMAND", ssh)
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(out)
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(ctx("run git"))?;
-        // Held until return: a signal to agt kills the group too, not just git.
-        let _watch = crate::core::group::Watch::new(child.id());
+            .env("GIT_SSH_COMMAND", ssh);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-        loop {
-            match child.try_wait().map_err(ctx("wait for git"))? {
-                Some(status) if status.success() => {
-                    return fs::read(&path).map_err(ctx("read git output"));
-                }
-                Some(_) => return fail(format!("git {} failed", args.join(" "))),
-                None if std::time::Instant::now() >= deadline => {
-                    // The group, not just git: ssh would otherwise outlive agt.
-                    if let Ok(pid) = i32::try_from(child.id()) {
-                        // SAFETY: kill(2) with a negative pid signals only that process group.
-                        unsafe { libc::kill(-pid, libc::SIGKILL) };
-                    }
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return fail(format!(
-                        "git {} took longer than {seconds}s",
-                        args.join(" ")
-                    ));
-                }
-                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        let captured = process::output(&mut command, None, Some(deadline)).map_err(|error| {
+            if error.kind() == ErrorKind::TimedOut {
+                Error(format!(
+                    "git {} took longer than {seconds}s",
+                    args.join(" ")
+                ))
+            } else {
+                Error(format!("run git {}: {error}", args.join(" ")))
             }
+        })?;
+        if !captured.output.status.success() {
+            return fail(format!("git {} failed", args.join(" ")));
         }
+        Ok(captured.output.stdout)
     }
 
     /// The ssh command a remote check uses: the user's own (`GIT_SSH_COMMAND`, `core.sshCommand`,

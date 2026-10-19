@@ -1,30 +1,21 @@
-//! How a [`Request`] reaches a host: a CLI (`gh`, `glab`) that holds its own login, or HTTP with
-//! a token. Services build requests; a transport carries them out and reports the status and
-//! headers, which the CLIs' own output hides.
+//! How a [`Request`] reaches a host through a CLI (`gh`, `glab`) that holds its own login.
+//! Services build requests; the transport parses replies and extracts failure status codes.
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Output, Stdio};
+use std::io::ErrorKind;
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::process;
 use crate::forge::service::{Endpoint, Pagination, Request, Var};
 
 /// A successful reply (status 2xx); a non-2xx status is a [`TransportError`].
 pub struct Response {
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "set by every transport but read by no caller yet; tests assert it"
-        )
-    )]
-    pub status: u16,
     /// Lowercase names. Empty for a CLI, which prints no headers.
     pub headers: Vec<(String, String)>,
     /// `null` for an empty reply; every item of all pages for a paginated request.
@@ -176,80 +167,8 @@ fn deadline() -> Option<(Instant, Duration)> {
     DEADLINE.lock().ok().and_then(|deadline| *deadline)
 }
 
-/// Makes the child a process group of its own when a deadline is set, so a timeout can kill what
-/// the tool started as well.
-fn grouped(command: &mut Command) -> &mut Command {
-    if deadline().is_some() {
-        command.process_group(0);
-    }
-    command
-}
-
 fn timed_out(name: &str, limit: Duration) -> TransportError {
     TransportError::new(format!("{name} timed out after {limit:?}"))
-}
-
-fn reader<R: Read + Send + 'static>(
-    pipe: Option<R>,
-) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
-    let (send, receive) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = match pipe {
-            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
-            None => Ok(bytes),
-        };
-        let _ = send.send(read);
-    });
-    receive
-}
-
-/// Waits for `child` and collects its output. With a deadline set, a child still running at it
-/// is killed with its process group, and its output is abandoned.
-fn finish(mut child: Child, name: &str) -> std::result::Result<Output, TransportError> {
-    let wrap = |error: std::io::Error| TransportError::new(format!("run {name}: {error}"));
-    let Some((deadline, limit)) = deadline() else {
-        return child.wait_with_output().map_err(wrap);
-    };
-    // Held until return: a signal to agt kills the group too, not just the tool.
-    let _watch = crate::core::group::Watch::new(child.id());
-    let stdout = reader(child.stdout.take());
-    let stderr = reader(child.stderr.take());
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(wrap)? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            kill_group(&child);
-            let _ = child.wait();
-            return Err(timed_out(name, limit));
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let collect = |pipe: &std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
-        match pipe.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(bytes) => bytes.map_err(wrap),
-            // The tool left a process holding its output open.
-            Err(_) => Err(timed_out(name, limit)),
-        }
-    };
-    let stdout = collect(&stdout)?;
-    let stderr = collect(&stderr)?;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn kill_group(child: &Child) {
-    if let Ok(pid) = i32::try_from(child.id()) {
-        // SAFETY: `kill` takes plain integers and touches no memory. The child leads its own
-        // group, which only it and what it started belong to.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
 }
 
 /// A CLI process: `gh` or `glab` with its environment.
@@ -302,20 +221,7 @@ impl Cli {
     /// Whether a read-only command succeeded, with its stdout and stderr; `None` when the tool
     /// is missing or the deadline passed.
     pub fn probe(&self, args: &[&str]) -> Option<(bool, String, String)> {
-        if deadline().is_some_and(|(deadline, _)| Instant::now() >= deadline) {
-            return None;
-        }
-        let child = grouped(
-            Command::new(&self.program)
-                .args(args)
-                .envs(self.env.iter().map(|(key, value)| (key, value))),
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-        let output = finish(child, self.name).ok()?;
+        let output = self.capture(args, None).ok()?.output;
         Some((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -336,36 +242,8 @@ impl Cli {
         input: Option<&[u8]>,
     ) -> std::result::Result<Vec<u8>, TransportError> {
         let name = self.name;
-        if let Some((deadline, limit)) = deadline()
-            && Instant::now() >= deadline
-        {
-            return Err(timed_out(name, limit));
-        }
-        let mut child = grouped(
-            Command::new(&self.program)
-                .args(args)
-                .envs(self.env.iter().map(|(key, value)| (key, value))),
-        )
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(ctx(format!("run {name}")))?;
-        // Input is written from another thread so a tool that exits before reading it shows
-        // its own error, not a broken pipe, and a large reply cannot fill the pipe.
-        let writer = match (input, child.stdin.take()) {
-            (Some(input), Some(mut stdin)) => {
-                let input = input.to_vec();
-                Some(std::thread::spawn(move || stdin.write_all(&input)))
-            }
-            _ => None,
-        };
-        let output = finish(child, name)?;
-        let wrote = writer.map(std::thread::JoinHandle::join);
+        let captured = self.capture(args, input)?;
+        let output = captured.output;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(TransportError {
@@ -377,17 +255,27 @@ impl Cli {
                 ),
             });
         }
-        match wrote {
-            None | Some(Ok(Ok(()))) => {}
-            Some(Ok(Err(error))) if error.kind() == ErrorKind::BrokenPipe => {}
-            Some(Ok(Err(error))) => {
-                return Err(TransportError::new(format!("write to {name}: {error}")));
-            }
-            Some(Err(_)) => {
-                return Err(TransportError::new(format!("{name} input writer panicked")));
-            }
-        }
+        captured.input.map_err(ctx(format!("write to {name}")))?;
         Ok(output.stdout)
+    }
+
+    fn capture(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> std::result::Result<process::Captured, TransportError> {
+        let deadline = deadline();
+        process::output(
+            Command::new(&self.program)
+                .args(args)
+                .envs(self.env.iter().map(|(key, value)| (key, value))),
+            input,
+            deadline.map(|(end, _)| end),
+        )
+        .map_err(|error| match deadline {
+            Some((_, limit)) if error.kind() == ErrorKind::TimedOut => timed_out(self.name, limit),
+            _ => TransportError::new(format!("run {}: {error}", self.name)),
+        })
     }
 }
 
@@ -467,7 +355,6 @@ impl Transport for CliTransport {
             value
         };
         Ok(Response {
-            status: 200,
             headers: Vec::new(),
             body,
         })
@@ -581,15 +468,6 @@ pub(crate) fn as_seen_by_retries(status: u16, text: &str) -> u16 {
         status
     }
 }
-
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the seam for a service without a CLI; no service uses it yet, tests do"
-    )
-)]
-mod token;
 
 #[cfg(test)]
 mod tests {
@@ -801,7 +679,6 @@ mod tests {
 
     fn page(headers: &[(&str, &str)], body: Value) -> Response {
         Response {
-            status: 200,
             headers: headers
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
