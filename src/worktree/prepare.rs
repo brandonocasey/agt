@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use super::emit;
 use super::info::{main_checkout, toplevel};
+use super::setup::{self, Step};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -25,6 +26,22 @@ pub struct Cli {
     /// Copy the main checkout's `node_modules` directories copy-on-write instead of installing.
     #[arg(long)]
     clone_deps: bool,
+    /// Wait for the background setup `create --background` started, then print its report; exit
+    /// 1 when it failed and 3 when `--max` passes first.
+    #[arg(long, conflicts_with = "clone_deps")]
+    wait: bool,
+    /// Give up waiting after this many seconds.
+    #[arg(long, default_value_t = 270, requires = "wait", value_parser = clap::value_parser!(u64).range(1..))]
+    max: u64,
+    /// Internal: run these steps (`prepare`, `hooks`) as the background setup child.
+    #[arg(
+        long,
+        hide = true,
+        value_delimiter = ',',
+        value_parser = ["prepare", "hooks"],
+        conflicts_with_all = ["clone_deps", "wait"]
+    )]
+    setup: Vec<String>,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -32,6 +49,17 @@ pub fn run(cli: Cli) -> Result<Output> {
         Some(path) => path,
         None => std::env::current_dir().map_err(ctx("read the current directory"))?,
     };
+    if cli.wait {
+        return setup::wait(&dir, cli.max);
+    }
+    if !cli.setup.is_empty() {
+        let steps: Vec<_> = cli
+            .setup
+            .iter()
+            .filter_map(|name| Step::parse(name))
+            .collect();
+        return setup::child(&dir, &steps);
+    }
     let (value, ok) = prepare(&dir, cli.clone_deps)?;
     emit(value, ok)
 }
@@ -65,7 +93,7 @@ pub(super) fn prepare(dir: &Path, clone_deps: bool) -> Result<(Value, bool)> {
     );
     let mut clone_available = false;
     for (index, (command, lockfile)) in commands.iter().enumerate() {
-        let mut step = run_step(&root, command, index)?;
+        let mut step = run_step(&root, command, index, &[])?;
         let failed = step["ok"] != true;
         // A clone copies `node_modules` only, so it is offered for a failed node install whose
         // lockfile the main checkout shares and whose `node_modules` it has.
@@ -172,7 +200,7 @@ fn identical(main: &Path, root: &Path, file: &str) -> bool {
 }
 
 /// `$XDG_CACHE_HOME/agents/output`, creating it.
-fn output_dir() -> Result<PathBuf> {
+pub(super) fn output_dir() -> Result<PathBuf> {
     let cache = match std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
         Some(path) if path.is_absolute() => path,
         _ => {
@@ -187,7 +215,13 @@ fn output_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn run_step(root: &Path, command: &[String], index: usize) -> Result<Value> {
+/// Runs `command` in `root` with `env` added, logging its output; the report says how it went.
+pub(super) fn run_step(
+    root: &Path,
+    command: &[String],
+    index: usize,
+    env: &[(&str, String)],
+) -> Result<Value> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
@@ -202,6 +236,7 @@ fn run_step(root: &Path, command: &[String], index: usize) -> Result<Value> {
     let status = Command::new(&command[0])
         .args(&command[1..])
         .current_dir(root)
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(sink)
         .stderr(again)

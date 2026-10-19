@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::idle::Cwds;
 use super::info::{self, Entry};
-use super::{gate, snapshot};
+use super::{gate, hooks, snapshot};
 use crate::core::agents;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
@@ -18,6 +18,9 @@ pub struct Cli {
     /// Back the worktree up and remove it. Without it nothing changes and the plan is printed.
     #[arg(long)]
     yes: bool,
+    /// Skip the `[worktree.hooks] remove` commands.
+    #[arg(long)]
+    no_hooks: bool,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -44,6 +47,11 @@ pub fn run(cli: Cli) -> Result<Output> {
 
     let (modified, untracked) = info::dirty(&path)?;
     if !cli.yes {
+        let planned = if cli.no_hooks {
+            Vec::new()
+        } else {
+            hooks::configured(&main, hooks::Kind::Remove)?
+        };
         let ignored = info::ignored(&path)?;
         return Ok(Output::Json(json!({
             "plan": true,
@@ -53,19 +61,36 @@ pub fn run(cli: Cli) -> Result<Output> {
             "snapshot_files": modified + untracked,
             "copied_ignored": ignored.copy,
             "skipped_disposable": ignored.skipped,
+            "hooks": planned,
             "warnings": warnings,
             "next": "pass --yes to back up and remove",
         })));
     }
 
-    let mut done = removal(&main, &path, entry)?;
+    let mut done = removal(&main, &path, entry, !cli.no_hooks)?;
     done["warnings"] = json!(warnings);
     Ok(Output::Json(done))
 }
 
-/// Backs `entry` up, then removes its worktree; the caller has checked that it may go.
-pub(super) fn removal(main: &Path, path: &Path, entry: &Entry) -> Result<Value> {
+/// Runs the remove hooks when `run_hooks`, backs `entry` up, then removes its worktree; the
+/// caller has checked that it may go. A failing hook is an error before anything is touched.
+pub(super) fn removal(main: &Path, path: &Path, entry: &Entry, run_hooks: bool) -> Result<Value> {
     gate::check(path, main)?;
+    if run_hooks {
+        let (report, ok) = hooks::run(path, hooks::Kind::Remove)?;
+        if !ok {
+            let failed = report["remove"]
+                .as_array()
+                .and_then(|steps| steps.last())
+                .cloned()
+                .unwrap_or_default();
+            return fail(format!(
+                "remove hook `{}` failed; nothing was backed up or removed; see {}",
+                failed["command"].as_str().unwrap_or_default(),
+                failed["log"].as_str().unwrap_or_default()
+            ));
+        }
+    }
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;

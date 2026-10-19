@@ -10,7 +10,8 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::info::{self, main_checkout};
-use super::{emit, fast_forward, port, prepare};
+use super::setup::{self, Step};
+use super::{emit, fast_forward, hooks, port, prepare};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -33,6 +34,13 @@ pub struct Cli {
     /// Record a dev-server port afterwards (`agt worktree port`).
     #[arg(long)]
     port: bool,
+    /// Skip the `[worktree.hooks] create` commands.
+    #[arg(long)]
+    no_hooks: bool,
+    /// Run the install (with `--prepare`) and the create hooks in a detached process and return
+    /// at once; `agt worktree prepare --wait` collects the result.
+    #[arg(long)]
+    background: bool,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -86,6 +94,31 @@ pub fn run(cli: Cli) -> Result<Output> {
     value["warnings"] = json!(warnings);
     let dir = PathBuf::from(value["path"].as_str().unwrap_or_default());
     let mut ok = true;
+    let fresh = value["reused"] == false;
+    let run_hooks = fresh && !cli.no_hooks && {
+        let main = main_checkout(&repo)?.path;
+        !hooks::configured(&main, hooks::Kind::Create)?.is_empty()
+    };
+    if cli.background {
+        // The port is recorded first so the hooks see it as PORT.
+        if cli.port {
+            let (path, number) = port::assign(&dir)?;
+            value["port"] = port::report(&path, number);
+        }
+        let mut steps = Vec::new();
+        if cli.prepare {
+            steps.push(Step::Prepare);
+        }
+        if run_hooks {
+            steps.push(Step::Hooks);
+        }
+        if steps.is_empty() {
+            value["background"] = json!({"started": false, "reason": "nothing to run"});
+        } else {
+            value["background"] = setup::spawn(&dir, &steps)?;
+        }
+        return emit(value, ok);
+    }
     if cli.prepare {
         let (report, passed) = prepare::prepare(&dir, false)?;
         value["prepare"] = report;
@@ -94,6 +127,11 @@ pub fn run(cli: Cli) -> Result<Output> {
     if cli.port {
         let (path, number) = port::assign(&dir)?;
         value["port"] = port::report(&path, number);
+    }
+    if run_hooks {
+        let (report, passed) = hooks::run(&dir, hooks::Kind::Create)?;
+        value["hooks"] = report;
+        ok &= passed;
     }
     emit(value, ok)
 }

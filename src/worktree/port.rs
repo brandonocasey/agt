@@ -77,6 +77,18 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
     Ok((path, port))
 }
 
+/// The port already recorded for the worktree at `dir`; nothing is recorded or created.
+pub(super) fn recorded(dir: &Path) -> Result<Option<u16>> {
+    let path = dir
+        .canonicalize()
+        .map_err(ctx(format!("resolve {}", dir.display())))?;
+    let file = Store::open(Namespace::Tasks)?
+        .agents_dir()
+        .join("worktrees")
+        .join("ports.json");
+    Ok(load(&file)?.get(path.to_string_lossy().as_ref()).copied())
+}
+
 fn lock(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)

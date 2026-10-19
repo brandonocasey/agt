@@ -55,6 +55,21 @@ pub struct Worktree {
     /// Globs of repository directories `agt worktree list --all` scans; `~` is the home
     /// directory. `None` means the default layout.
     pub roots: Option<Vec<String>>,
+    #[serde(default)]
+    pub hooks: Hooks,
+}
+
+/// Shell commands `agt worktree` runs in a worktree's root, in order, stopping at the first
+/// failure.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hooks {
+    /// After `agt worktree create` makes a new worktree.
+    #[serde(default)]
+    pub create: Vec<String>,
+    /// Before a worktree is backed up and removed.
+    #[serde(default)]
+    pub remove: Vec<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
@@ -273,6 +288,24 @@ mod tests {
                 .0
                 .contains("duplicate field")
         );
+    }
+
+    #[test]
+    fn hooks_merge_per_key_and_reject_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        let local = dir.path().join("local.toml");
+        std::fs::write(
+            &global,
+            "[worktree.hooks]\ncreate = [\"a\"]\nremove = [\"b\"]\n",
+        )
+        .unwrap();
+        std::fs::write(&local, "[worktree.hooks]\ncreate = [\"c\", \"d\"]\n").unwrap();
+        let hooks = Config::load_paths(&global, &local).unwrap().worktree.hooks;
+        assert_eq!(hooks.create, ["c", "d"]);
+        assert_eq!(hooks.remove, ["b"]);
+        std::fs::write(&local, "[worktree.hooks]\nafter = []\n").unwrap();
+        assert!(Config::load_paths(&global, &local).is_err());
     }
 
     #[test]
