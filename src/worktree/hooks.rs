@@ -101,8 +101,10 @@ pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
     let main = main_checkout(&Repo::at(root))?.path;
     let resolved = resolve(&main)?;
     let commands = resolved.commands(kind);
+    // Not `--short`: it prints `heads/<name>` when a tag or remote ref has the same name.
     let branch = Repo::at(root)
-        .git_opt(&["symbolic-ref", "--quiet", "--short", "HEAD"])?
+        .git_opt(&["symbolic-ref", "--quiet", "HEAD"])?
+        .map(|full| full.strip_prefix("refs/heads/").unwrap_or(&full).to_owned())
         .unwrap_or_default();
     let mut env = vec![
         ("AGT_HOOK", kind.name().to_owned()),
@@ -110,7 +112,10 @@ pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
         ("AGT_MAIN_CHECKOUT", main.to_string_lossy().into_owned()),
         ("AGT_BRANCH", branch),
     ];
-    if let Some(number) = port::recorded(root)? {
+    // Read only when something runs, so a damaged ports file cannot block a hookless remove.
+    if !commands.is_empty()
+        && let Some(number) = port::recorded(root)?
+    {
         env.push(("PORT", number.to_string()));
     }
     let mut steps = Vec::new();

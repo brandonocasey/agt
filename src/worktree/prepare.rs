@@ -63,6 +63,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             .collect();
         return setup::child(&dir, &steps);
     }
+    setup::refuse_while_running(&toplevel(&dir)?)?;
     if cli.hooks {
         let root = toplevel(&dir)?;
         let (report, ok) = super::hooks::run(&root, super::hooks::Kind::Create)?;
