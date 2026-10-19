@@ -29,7 +29,8 @@ pub enum Command {
     Status,
     /// Find the issues for a PR/MR or a branch from the local data.
     Find(FindArgs),
-    /// Link an issue to a PR/MR, issue, review target, task or branch, locally only.
+    /// Link an issue to a PR/MR, issue, review target, task or branch, locally; `--pr --comment`
+    /// also queues a comment naming the PR/MR.
     Link(LinkArgs),
     /// Keep a private note on an issue; never sent.
     Note {
@@ -43,34 +44,9 @@ pub enum Command {
         /// The comment; `-` reads stdin.
         text: String,
     },
-    /// Queue closing the issue.
-    Close {
-        key: String,
-        /// Why it closed (GitHub only).
-        #[arg(long, value_enum)]
-        reason: Option<Reason>,
-    },
-    /// Queue reopening the issue.
-    Reopen { key: String },
-    /// Queue adding assignees.
-    Assign(People),
-    /// Queue removing assignees.
-    Unassign(People),
-    /// Queue adding or removing labels.
-    Label {
-        #[command(subcommand)]
-        action: LabelAction,
-    },
-    /// Queue a comment linking the issue to a PR/MR, and record the link.
-    LinkPr {
-        key: String,
-        /// A PR/MR number of the tracker's repository, or its URL.
-        #[arg(long)]
-        pr: String,
-    },
     /// Queue a new issue.
     Create(CreateArgs),
-    /// Queue a new title or body.
+    /// Queue a new title, body, state, labels or assignees.
     Edit(EditArgs),
     /// Send queued changes; explicit `push = false` denies a tracker.
     Push {
@@ -103,6 +79,12 @@ pub enum StateFilter {
     Open,
     Closed,
     All,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum State {
+    Open,
+    Closed,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -149,26 +131,9 @@ pub struct LinkArgs {
     pub task: Option<String>,
     #[arg(long, group = "target")]
     pub branch: Option<String>,
-}
-
-#[derive(Args)]
-pub struct People {
-    pub key: String,
-    #[arg(required = true)]
-    pub logins: Vec<String>,
-}
-
-#[derive(Subcommand)]
-pub enum LabelAction {
-    Add(Labels),
-    Remove(Labels),
-}
-
-#[derive(Args)]
-pub struct Labels {
-    pub key: String,
-    #[arg(required = true)]
-    pub labels: Vec<String>,
+    /// With `--pr`: also queue the comment `Linked: <url>`, once per PR/MR.
+    #[arg(long)]
+    pub comment: bool,
 }
 
 #[derive(Args)]
@@ -187,9 +152,23 @@ pub struct CreateArgs {
 #[derive(Args)]
 pub struct EditArgs {
     pub key: String,
-    #[arg(long, required_unless_present = "body")]
+    #[arg(long)]
     pub title: Option<String>,
     /// The body; `-` reads stdin.
-    #[arg(long, required_unless_present = "title")]
+    #[arg(long)]
     pub body: Option<String>,
+    #[arg(long, value_enum)]
+    pub state: Option<State>,
+    /// Why it closed (GitHub only); needs `--state closed`.
+    #[arg(long, value_enum, requires = "state")]
+    pub reason: Option<Reason>,
+    #[arg(long = "add-label", value_name = "LABEL")]
+    pub add_labels: Vec<String>,
+    #[arg(long = "remove-label", value_name = "LABEL")]
+    pub remove_labels: Vec<String>,
+    /// Removals apply first, so one call can swap a single assignee.
+    #[arg(long = "add-assignee", value_name = "LOGIN")]
+    pub add_assignees: Vec<String>,
+    #[arg(long = "remove-assignee", value_name = "LOGIN")]
+    pub remove_assignees: Vec<String>,
 }

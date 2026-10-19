@@ -5,7 +5,7 @@ use std::io::Read;
 
 use serde_json::Value;
 
-use super::cli::{CreateArgs, EditArgs, LabelAction, LinkArgs, Reason};
+use super::cli::{CreateArgs, EditArgs, LinkArgs, Reason, State};
 use super::trackers::{self, Tracker, doc_name};
 use super::view::summary;
 use crate::core::clock;
@@ -113,80 +113,75 @@ pub fn note(store: &Store, filter: Option<&str>, key: &str, text: &str) -> Resul
     })
 }
 
-pub fn set_state(
-    store: &Store,
-    filter: Option<&str>,
-    key: &str,
-    state: Category,
+fn set_state(
+    tracker: &Tracker,
+    issue: &mut Issue,
+    state: State,
     reason: Option<Reason>,
-) -> Result<Value> {
-    change(store, filter, key, |tracker, issue| {
-        let caps = tracker
-            .doc
-            .forge
-            .map(|forge| service::kind(forge).issue_caps);
-        if reason.is_some() && caps.is_some_and(|caps| !caps.close_reasons) {
-            return fail("this service takes no close reason");
+) -> Result<()> {
+    if reason.is_some() && matches!(state, State::Open) {
+        return fail("--reason needs --state closed");
+    }
+    let caps = tracker
+        .doc
+        .forge
+        .map(|forge| service::kind(forge).issue_caps);
+    if reason.is_some() && caps.is_some_and(|caps| !caps.close_reasons) {
+        return fail("this service takes no close reason");
+    }
+    match state {
+        State::Open => {
+            issue.fields.state = Category::Open;
+            issue.fields.reason = None;
         }
-        issue.fields.state = state;
-        issue.fields.reason = match state {
-            Category::Open => None,
+        State::Closed => {
+            issue.fields.state = Category::Closed;
             // The host records `completed` for a close sent without a reason, so the local
             // copy says it too; otherwise the next merge sees a reason both sides "changed".
-            Category::Closed => reason.map(|reason| reason.as_str().to_owned()).or_else(|| {
+            issue.fields.reason = reason.map(|reason| reason.as_str().to_owned()).or_else(|| {
                 caps.is_some_and(|caps| caps.close_reasons)
                     .then(|| "completed".to_owned())
-            }),
-        };
-        Ok(())
-    })
+            });
+        }
+    }
+    Ok(())
 }
 
-pub fn assign(
-    store: &Store,
-    filter: Option<&str>,
-    key: &str,
-    logins: &[String],
-    add: bool,
-) -> Result<Value> {
-    change(store, filter, key, |tracker, issue| {
-        let assignees = &mut issue.fields.assignees;
-        if add {
-            assignees.extend(logins.iter().cloned());
-            assignees.sort();
-            assignees.dedup();
-            let caps = tracker
-                .doc
-                .forge
-                .map(|forge| service::kind(forge).issue_caps);
-            if caps.is_some_and(|caps| !caps.multi_assignee) && assignees.len() > 1 {
-                return fail(
-                    "this service takes one assignee on an issue; unassign the current one first",
-                );
-            }
-        } else {
-            assignees.retain(|login| !logins.contains(login));
-        }
-        Ok(())
-    })
-}
-
-pub fn labels(store: &Store, filter: Option<&str>, action: &LabelAction) -> Result<Value> {
-    let (key, names, add) = match action {
-        LabelAction::Add(args) => (&args.key, &args.labels, true),
-        LabelAction::Remove(args) => (&args.key, &args.labels, false),
-    };
-    change(store, filter, key, |_, issue| {
-        if add {
-            issue.fields.labels.extend(names.iter().cloned());
-        } else {
-            issue.fields.labels.retain(|label| !names.contains(label));
-        }
-        Ok(())
-    })
+/// Removals apply first, so one call can swap the assignee on a single-assignee service.
+fn assign(tracker: &Tracker, issue: &mut Issue, add: &[String], remove: &[String]) -> Result<()> {
+    let assignees = &mut issue.fields.assignees;
+    assignees.retain(|login| !remove.contains(login));
+    if add.is_empty() {
+        return Ok(());
+    }
+    assignees.extend(add.iter().cloned());
+    assignees.sort();
+    assignees.dedup();
+    let caps = tracker
+        .doc
+        .forge
+        .map(|forge| service::kind(forge).issue_caps);
+    if caps.is_some_and(|caps| !caps.multi_assignee) && assignees.len() > 1 {
+        return fail(
+            "this service takes one assignee on an issue; remove the current one with --remove-assignee",
+        );
+    }
+    Ok(())
 }
 
 pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Value> {
+    if args.title.is_none()
+        && args.body.is_none()
+        && args.state.is_none()
+        && args.add_labels.is_empty()
+        && args.remove_labels.is_empty()
+        && args.add_assignees.is_empty()
+        && args.remove_assignees.is_empty()
+    {
+        return fail(
+            "edit needs a change: --title, --body, --state, --add-label, --remove-label, --add-assignee or --remove-assignee",
+        );
+    }
     let title = args
         .title
         .as_deref()
@@ -197,14 +192,20 @@ pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Valu
         .as_deref()
         .map(|body| read_text(body, "body", true))
         .transpose()?;
-    change(store, filter, &args.key, |_, issue| {
+    change(store, filter, &args.key, |tracker, issue| {
         if let Some(title) = title {
             issue.fields.title = title.trim().to_owned();
         }
         if let Some(body) = body {
             issue.fields.body = body;
         }
-        Ok(())
+        if let Some(state) = args.state {
+            set_state(tracker, issue, state, args.reason)?;
+        }
+        let labels = &mut issue.fields.labels;
+        labels.retain(|label| !args.remove_labels.contains(label));
+        labels.extend(args.add_labels.iter().cloned());
+        assign(tracker, issue, &args.add_assignees, &args.remove_assignees)
     })
 }
 
@@ -276,6 +277,9 @@ fn add_pr(issue: &mut Issue, link: PrLink) -> bool {
 }
 
 pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Value> {
+    if args.comment && args.pr.is_none() {
+        return fail("--comment needs --pr");
+    }
     change(store, filter, &args.key, |tracker, issue| {
         let links: &mut Links = &mut issue.links;
         let push = |list: &mut Vec<String>, value: &str| {
@@ -291,24 +295,17 @@ pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Valu
             &args.branch,
         ) {
             (Some(pr), ..) => {
-                add_pr(issue, pr_link(tracker, pr, LinkSource::Local)?);
+                let link = pr_link(tracker, pr, LinkSource::Local)?;
+                let url = link.url.clone().unwrap_or_default();
+                if add_pr(issue, link) && args.comment {
+                    queue_comment(tracker, issue, format!("Linked: {url}"));
+                }
             }
             (_, Some(other), ..) => push(&mut links.issues, other),
             (_, _, Some(review), ..) => push(&mut links.reviews, review),
             (_, _, _, Some(task), _) => push(&mut links.tasks, task),
             (_, _, _, _, Some(branch)) => push(&mut links.branches, branch),
             _ => return fail("link needs one of --pr, --issue, --review, --task, --branch"),
-        }
-        Ok(())
-    })
-}
-
-pub fn link_pr(store: &Store, filter: Option<&str>, key: &str, pr: &str) -> Result<Value> {
-    change(store, filter, key, |tracker, issue| {
-        let link = pr_link(tracker, pr, LinkSource::Local)?;
-        let url = link.url.clone().unwrap_or_default();
-        if add_pr(issue, link) {
-            queue_comment(tracker, issue, format!("Linked: {url}"));
         }
         Ok(())
     })

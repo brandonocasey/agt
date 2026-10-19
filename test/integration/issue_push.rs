@@ -86,11 +86,11 @@ fn text(body: &Value) -> String {
 fn queue_everything(env: &Env, fake: Fake) {
     fake.assignee_lookups(env, &["ann"]);
     env.issue(&["comment", "1", "Thanks"]);
-    env.issue(&["close", "1"]);
-    env.issue(&["assign", "1", "ann"]);
-    env.issue(&["label", "add", "1", "triage"]);
+    env.issue(&["edit", "1", "--state", "closed"]);
+    env.issue(&["edit", "1", "--add-assignee", "ann"]);
+    env.issue(&["edit", "1", "--add-label", "triage"]);
     env.issue(&["edit", "1", "--title", "New title"]);
-    env.issue(&["link-pr", "1", "--pr", "7"]);
+    env.issue(&["link", "1", "--pr", "7", "--comment"]);
 }
 
 fn expected_update() -> Update {
@@ -216,7 +216,7 @@ fn strs(list: &[String]) -> Vec<&str> {
 
 fn only_the_remote_changed_is_taken_and_the_local_change_is_sent(fake: Fake) {
     let env = pushable(fake, &[issue()]);
-    env.issue(&["label", "add", "1", "triage"]);
+    env.issue(&["edit", "1", "--add-label", "triage"]);
     let mut remote = Spec::new(1, "Login breaks")
         .labels(&["bug"])
         .updated("2026-10-12T10:00:00Z");
@@ -279,8 +279,8 @@ fn both_changed_a_scalar_remote_wins_and_force_sends_the_local_value(fake: Fake)
 
 fn labels_merge_when_both_sides_change(fake: Fake) {
     let env = pushable(fake, &[issue().labels(&["bug", "old"])]);
-    env.issue(&["label", "add", "1", "triage"]);
-    env.issue(&["label", "remove", "1", "old"]);
+    env.issue(&["edit", "1", "--add-label", "triage"]);
+    env.issue(&["edit", "1", "--remove-label", "old"]);
     let mut remote = Spec::new(1, "Login fails")
         .labels(&["bug", "old", "docs"])
         .updated("2026-10-12T10:00:00Z");
@@ -582,14 +582,14 @@ fn no_token_reaches_a_call_a_file_or_the_output(fake: Fake) {
 
 fn reopening_after_a_pushed_close_is_no_conflict(fake: Fake) {
     let env = pushable(fake, &[issue()]);
-    env.issue(&["close", "1"]);
+    env.issue(&["edit", "1", "--state", "closed"]);
     fake.accept_update(&env, 1);
     env.issue(&["push"]);
     // The host now shows the issue closed, with the reason it chose.
     let mut remote = issue().closed().updated("2026-10-18T10:00:00Z");
     remote.reason = Some("completed");
     fake.serve_issue(&env, &remote);
-    env.issue(&["reopen", "1"]);
+    env.issue(&["edit", "1", "--state", "open"]);
     let report = env.issue(&["push", "--dry-run"]);
     assert!(writes(&report, "conflicts").is_empty(), "{report}");
     assert_eq!(kinds(&writes(&report, "writes")), ["update"]);
@@ -692,7 +692,7 @@ fn a_killed_create_is_not_sent_again_despite_an_old_create_error(fake: Fake) {
 
 fn a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_conflict(fake: Fake) {
     let env = pushable(fake, &[issue()]);
-    env.issue(&["close", "1"]);
+    env.issue(&["edit", "1", "--state", "closed"]);
     // A document queued before closes carried a reason: drop it.
     let path = env.issue_state().join(fake.tracker()).join("1.json");
     let mut stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -714,7 +714,7 @@ fn a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_confl
     let mut remote = issue().closed().updated("2026-10-18T10:00:00Z");
     remote.reason = Some("completed");
     fake.serve_issue(&env, &remote);
-    env.issue(&["reopen", "1"]);
+    env.issue(&["edit", "1", "--state", "open"]);
     let report = env.issue(&["push", "--dry-run"]);
     assert!(writes(&report, "conflicts").is_empty(), "{report}");
     assert_eq!(kinds(&writes(&report, "writes")), ["update"]);

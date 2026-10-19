@@ -1242,7 +1242,7 @@ opt into remote access independently of automatic settings. `--offline` and
 | `search <text>` | Case-insensitive match over title, body, comments and notes; `matched` says where. |
 | `status` | Per tracker: counts, issues with queued changes, conflicts, errors, `push` and the last sync. |
 | `find --pr <n\|url>` / `find --branch <name>` / `--title <text>` | Issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which. |
-| `link <key> --pr\|--issue\|--review\|--task\|--branch <value>` | A local link, never sent. |
+| `link <key> --pr\|--issue\|--review\|--task\|--branch <value>` | A local link, never sent. With `--pr <n\|url> --comment` it also queues a comment `Linked: <url>`, once per PR/MR. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
 | `note <key> <text>` | A private note, never sent. |
 
 Queued writes (`<text>` is read from stdin when it is `-`):
@@ -1250,12 +1250,8 @@ Queued writes (`<text>` is read from stdin when it is `-`):
 | Command | Queues |
 | --- | --- |
 | `comment <key> <text>` | A comment. |
-| `close <key> [--reason completed\|not-planned]` / `reopen <key>` | A state change. A reason is GitHub only. |
-| `assign <key> <login>...` / `unassign ...` | Assignees. GitLab takes one assignee here. |
-| `label add\|remove <key> <label>...` | Labels. |
-| `link-pr <key> --pr <n\|url>` | A comment `Linked: <url>` and a local link. Sent once. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
 | `create --title T [--body B] [--label L]... [--assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. |
-| `edit <key> [--title T] [--body B]` | A new title or body. |
+| `edit <key> [--title T] [--body B] [--state open\|closed [--reason completed\|not-planned]] [--add-label L]... [--remove-label L]... [--add-assignee A]... [--remove-assignee A]...` | Any of these in one change; at least one is required. A reason is GitHub only. GitLab takes one assignee here; removals apply first, so one call can swap it. |
 
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
 one update with every changed field, then each comment. `--dry-run` prints the exact

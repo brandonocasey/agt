@@ -32,7 +32,7 @@ matrix!(
     close_with_a_reason_only_where_the_service_takes_one,
     assignees_follow_the_service_capability,
     labels_add_and_remove_by_set,
-    link_pr_queues_a_comment_and_a_local_link_once,
+    link_comment_queues_a_comment_and_a_local_link_once,
     create_queues_a_local_issue_that_takes_more_changes,
     queue_commands_reject_bad_input,
 );
@@ -51,8 +51,7 @@ fn comment_close_and_edit_queue_locally_and_show_as_queued(fake: Fake) {
     let commented = env.issue(&["comment", "1", "Thanks for the report"]);
     assert_eq!(commented["pending"], true);
     env.issue_stdin(&["comment", "1", "-"], "From stdin\n");
-    env.issue(&["close", "1"]);
-    env.issue(&["edit", "1", "--title", "Login breaks"]);
+    env.issue(&["edit", "1", "--state", "closed", "--title", "Login breaks"]);
     env.issue_stdin(&["edit", "1", "--body", "-"], "New body\n");
     let shown = env.issue(&["show", "1"]);
     assert_eq!(shown["state"], "closed");
@@ -77,7 +76,7 @@ fn comment_close_and_edit_queue_locally_and_show_as_queued(fake: Fake) {
         env.issue(&["status"])["trackers"][0]["pending"],
         json!([format!("{}#1", fake.repo())])
     );
-    env.issue(&["reopen", "1"]);
+    env.issue(&["edit", "1", "--state", "open"]);
     assert_eq!(env.issue(&["show", "1"])["queued"]["state"], Value::Null);
     assert_eq!(
         env.forge_calls().len(),
@@ -89,16 +88,19 @@ fn comment_close_and_edit_queue_locally_and_show_as_queued(fake: Fake) {
 fn close_with_a_reason_only_where_the_service_takes_one(fake: Fake) {
     let env = synced(fake, &[issue()]);
     if fake.name() == "github" {
-        let shown = env.issue(&["close", "1", "--reason", "not-planned"]);
+        let shown = env.issue(&["edit", "1", "--state", "closed", "--reason", "not-planned"]);
         assert_eq!(shown["reason"], "not_planned");
     } else {
-        let error = env.issue_fail(&["close", "1", "--reason", "completed"]);
+        let error = env.issue_fail(&["edit", "1", "--state", "closed", "--reason", "completed"]);
         assert!(error.contains("takes no close reason"), "{error}");
-        assert_eq!(env.issue(&["close", "1"])["state"], "closed");
+        assert_eq!(
+            env.issue(&["edit", "1", "--state", "closed"])["state"],
+            "closed"
+        );
     }
     // A close without a reason is `completed` on a service that has reasons.
     let env = synced(fake, &[issue()]);
-    let reason = env.issue(&["close", "1"])["reason"].clone();
+    let reason = env.issue(&["edit", "1", "--state", "closed"])["reason"].clone();
     assert_eq!(
         reason,
         if fake.name() == "github" {
@@ -112,42 +114,85 @@ fn close_with_a_reason_only_where_the_service_takes_one(fake: Fake) {
 fn assignees_follow_the_service_capability(fake: Fake) {
     let env = synced(fake, &[issue().assignees(&["zed"])]);
     if fake.name() == "github" {
-        let shown = env.issue(&["assign", "1", "ann", "bob"]);
+        let shown = env.issue(&[
+            "edit",
+            "1",
+            "--add-assignee",
+            "ann",
+            "--add-assignee",
+            "bob",
+        ]);
         assert_eq!(shown["assignees"], json!(["ann", "bob", "zed"]));
-        let shown = env.issue(&["unassign", "1", "zed", "ann"]);
+        let shown = env.issue(&[
+            "edit",
+            "1",
+            "--remove-assignee",
+            "zed",
+            "--remove-assignee",
+            "ann",
+        ]);
         assert_eq!(shown["assignees"], json!(["bob"]));
     } else {
-        let error = env.issue_fail(&["assign", "1", "ann"]);
+        let error = env.issue_fail(&["edit", "1", "--add-assignee", "ann"]);
         assert!(error.contains("one assignee"), "{error}");
-        assert_eq!(env.issue(&["unassign", "1", "zed"])["assignees"], json!([]));
         assert_eq!(
-            env.issue(&["assign", "1", "ann"])["assignees"],
+            env.issue(&["edit", "1", "--remove-assignee", "zed"])["assignees"],
+            json!([])
+        );
+        assert_eq!(
+            env.issue(&["edit", "1", "--add-assignee", "ann"])["assignees"],
             json!(["ann"])
         );
+        // Removals apply first, so one call swaps the single assignee.
+        let swapped = env.issue(&[
+            "edit",
+            "1",
+            "--remove-assignee",
+            "ann",
+            "--add-assignee",
+            "bob",
+        ]);
+        assert_eq!(swapped["assignees"], json!(["bob"]));
     }
 }
 
 fn labels_add_and_remove_by_set(fake: Fake) {
     let env = synced(fake, &[issue()]);
-    env.issue(&["label", "add", "1", "triage", "bug", "p1"]);
+    env.issue(&[
+        "edit",
+        "1",
+        "--add-label",
+        "triage",
+        "--add-label",
+        "bug",
+        "--add-label",
+        "p1",
+    ]);
     assert_eq!(
         doc(&env, fake)["fields"]["labels"],
         json!(["bug", "p1", "triage"])
     );
-    env.issue(&["label", "remove", "1", "bug", "absent"]);
+    env.issue(&[
+        "edit",
+        "1",
+        "--remove-label",
+        "bug",
+        "--remove-label",
+        "absent",
+    ]);
     let stored = doc(&env, fake);
     assert_eq!(stored["fields"]["labels"], json!(["p1", "triage"]));
     assert_eq!(stored["base"]["labels"], json!(["bug"]));
 }
 
-fn link_pr_queues_a_comment_and_a_local_link_once(fake: Fake) {
+fn link_comment_queues_a_comment_and_a_local_link_once(fake: Fake) {
     let env = synced(fake, &[issue()]);
     let url = match fake.name() {
         "github" => "https://github.com/o/r/pull/7",
         _ => "https://gitlab.com/g/p/-/merge_requests/7",
     };
-    env.issue(&["link-pr", "1", "--pr", "7"]);
-    env.issue(&["link-pr", "1", "--pr", url]);
+    env.issue(&["link", "1", "--pr", "7", "--comment"]);
+    env.issue(&["link", "1", "--pr", url, "--comment"]);
     let stored = doc(&env, fake);
     assert_eq!(stored["links"]["prs"].as_array().unwrap().len(), 1);
     assert_eq!(stored["links"]["prs"][0]["url"], url);
@@ -157,7 +202,7 @@ fn link_pr_queues_a_comment_and_a_local_link_once(fake: Fake) {
     let elsewhere = url
         .replace("github.com", "git.example.com")
         .replace("gitlab.com", "git.example.com");
-    let error = env.issue_fail(&["link-pr", "1", "--pr", &elsewhere]);
+    let error = env.issue_fail(&["link", "1", "--pr", &elsewhere, "--comment"]);
     assert!(error.contains("not on the tracker's host"), "{error}");
 }
 
@@ -179,8 +224,8 @@ fn create_queues_a_local_issue_that_takes_more_changes(fake: Fake) {
     assert_eq!(created["number"], Value::Null);
     assert_eq!(created["pending"], true);
     env.issue(&["comment", &key, "First!"]);
-    env.issue(&["label", "add", &key, "p1"]);
-    env.issue(&["close", &key]);
+    env.issue(&["edit", &key, "--add-label", "p1"]);
+    env.issue(&["edit", &key, "--state", "closed"]);
     let shown = env.issue(&["show", &key]);
     assert_eq!(shown["queued"]["create"], true);
     assert_eq!(shown["labels"], json!(["bug", "p1"]));
@@ -211,6 +256,18 @@ fn queue_commands_reject_bad_input(fake: Fake) {
     assert!(
         env.issue_fail(&["edit", "1", "--title", ""])
             .contains("title must not be empty")
+    );
+    assert!(
+        env.issue_fail(&["edit", "1"])
+            .contains("edit needs a change")
+    );
+    assert!(
+        env.issue_fail(&["edit", "1", "--state", "open", "--reason", "completed"])
+            .contains("needs --state closed")
+    );
+    assert!(
+        env.issue_fail(&["link", "1", "--branch", "b", "--comment"])
+            .contains("--pr")
     );
     let long = "x".repeat(70_000);
     assert!(env.issue_fail(&["comment", "1", &long]).contains("exceeds"));

@@ -21,7 +21,6 @@ use crate::core::config::Config;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
-use crate::store::issues::Category;
 use crate::store::{Namespace, Store};
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -58,14 +57,6 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Link(args) => local::link(&store, filter, args)?,
         Command::Note { key, text } => local::note(&store, filter, key, text)?,
         Command::Comment { key, text } => local::comment(&store, filter, key, text)?,
-        Command::Close { key, reason } => {
-            local::set_state(&store, filter, key, Category::Closed, *reason)?
-        }
-        Command::Reopen { key } => local::set_state(&store, filter, key, Category::Open, None)?,
-        Command::Assign(args) => local::assign(&store, filter, &args.key, &args.logins, true)?,
-        Command::Unassign(args) => local::assign(&store, filter, &args.key, &args.logins, false)?,
-        Command::Label { action } => local::labels(&store, filter, action)?,
-        Command::LinkPr { key, pr } => local::link_pr(&store, filter, key, pr)?,
         Command::Create(args) => {
             let config = if filter.is_some() && filter != Some("local") {
                 Config::load_for_repo(&repo)?
@@ -93,17 +84,10 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
     };
     if matches!(
-        cli.command,
-        Command::Create(_)
-            | Command::Edit(_)
-            | Command::Comment { .. }
-            | Command::Close { .. }
-            | Command::Reopen { .. }
-            | Command::Assign(_)
-            | Command::Unassign(_)
-            | Command::Label { .. }
-            | Command::LinkPr { .. }
-    ) {
+        &cli.command,
+        Command::Create(_) | Command::Edit(_) | Command::Comment { .. }
+    ) || matches!(&cli.command, Command::Link(args) if args.comment)
+    {
         auto::push_changed(&store, &repo, filter, cli.offline, &mut value);
     }
     Ok(Output::Json(value))
