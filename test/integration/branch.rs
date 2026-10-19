@@ -222,7 +222,10 @@ fn pushed_keeps_the_pull_request_when_only_the_checks_query_fails() {
     assert_eq!(report["pr"]["head"], stale);
     assert_eq!(report["pr"]["pipeline"]["exists"], Value::Null);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("warning: pipeline lookup failed"), "{stderr}");
+    assert!(
+        stderr.contains("warning: pipeline lookup failed"),
+        "{stderr}"
+    );
 }
 
 #[test]
