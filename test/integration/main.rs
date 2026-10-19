@@ -12,6 +12,7 @@ mod ps;
 mod publish;
 mod review_auto_sync;
 mod reviewed;
+mod secrets;
 mod session_index;
 mod sessions;
 mod support;

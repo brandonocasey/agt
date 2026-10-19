@@ -6,6 +6,7 @@ use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::issue;
 use crate::review;
+use crate::secrets;
 use crate::sessions;
 use crate::task;
 use crate::wait;
@@ -37,6 +38,8 @@ enum Command {
     Ps(sessions::live::Cli),
     /// Worktrees: create, prepare, port, list, remove after a backup, restore.
     Worktree(worktree::Cli),
+    /// Scan for leaked credentials without printing them.
+    Secrets(secrets::Cli),
     /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
     Wait(wait::Cli),
 }
@@ -51,6 +54,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Sessions(args) => sessions::run(args),
         Command::Ps(args) => sessions::live::run(args),
         Command::Worktree(args) => worktree::run(args),
+        Command::Secrets(args) => secrets::run(args),
         Command::Wait(args) => wait::run(args),
     }
 }

@@ -1066,6 +1066,18 @@ it in `$XDG_STATE_HOME/agents/worktrees/ports.json` under a lock, keyed by the w
 path; later calls return it. A port recorded for another worktree is never handed out, and
 entries whose path no longer exists are dropped on every write. `--env` prints `PORT=<n>`.
 
+## Secrets
+
+`agt secrets scan [PATH...] [--staged] [--json]` looks for leaked credentials without ever printing
+them. It reads the files `git ls-files -co --exclude-standard` lists (tracked and unignored), or
+only the staged blobs with `--staged`, limited to `PATH`s when given, and skips binary files.
+Output is `path:line rule` per hit, or with `--json` rows of `{path, line, rule}`; the matched
+text is never printed, not even in errors. Rules (one table in `src/secrets/rules.rs`):
+`github-token`, `gitlab-token`, `slack-token`, `aws-key-id`, `private-key`, `jwt` and
+`generic-assignment` (`key`, `token`, `secret` or `password` set to a quoted value of 8 or more
+characters that is not a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
+containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error.
+
 ## Wait
 
 `agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every

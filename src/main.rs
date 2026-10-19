@@ -6,6 +6,7 @@ mod forge;
 mod git;
 mod issue;
 mod review;
+mod secrets;
 mod sessions;
 mod store;
 mod task;
