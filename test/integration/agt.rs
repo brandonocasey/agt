@@ -127,8 +127,8 @@ fn the_pre_0_5_override_names_still_work() {
 }
 
 /// Domain modules, which the foundation modules must not import.
-const DOMAINS: [&str; 7] = [
-    "review", "issue", "ci", "task", "sessions", "worktree", "secrets",
+const DOMAINS: [&str; 10] = [
+    "review", "issue", "ci", "task", "sessions", "worktree", "secrets", "pr", "branch", "doctor",
 ];
 const FOUNDATIONS: [&str; 4] = ["core", "store", "git", "forge"];
 

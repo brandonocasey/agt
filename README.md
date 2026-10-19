@@ -858,6 +858,30 @@ Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/ta
 write must name (record `version` 1). Commands that find or search sessions are
 `agt sessions index`, `resolve` and `search`.
 
+## Branch
+
+`agt branch` replaces hand-built git checks with two read-only reports, both JSON.
+
+```sh
+agt branch pushed [BRANCH] [--remote origin]
+agt branch landable [BRANCH] [--target BRANCH]
+```
+
+`BRANCH` defaults to the current branch. `pushed` fetches `refs/heads/<branch>` from the remote,
+pins the fetched commit and compares it with the local tip: `state` is `equal`, `ahead`, `behind`,
+`diverged` or `missing` (not on the remote), with `ahead` and `behind` counts. `uncommitted`
+counts the changed paths of the worktree that has the branch checked out (null when none does).
+When an open PR/MR of the branch exists in the repository `origin` names, `pr` holds its `number`,
+`url`, `head`, `head_matches` (its head equals the local tip) and `pipeline` (`sha` and `exists`: a
+check run, status or pipeline exists for the PR/MR head). Exit 0 only when `state` is `equal` and
+any PR/MR head matches; exit 4 otherwise; exit 1 on an error.
+
+`landable` compares the branch with the target, which defaults to the newest default base among
+every remote's live default branch and the local one (the choice `agt worktree create` makes).
+It reports `behind` and `ahead` counts, `conflicts` (the paths `git merge-tree --write-tree`
+cannot merge) and `already_in_target` (commits of the branch whose patch the target has, from
+`git cherry`). Exit 0 without conflicts, 5 with conflicts, 1 on an error.
+
 ## CI
 
 `agt ci` waits for PR/MR checks and triages GitLab failures.

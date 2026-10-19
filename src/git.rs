@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
+pub mod base;
+
 use crate::core::error::{Error, Result, ctx, fail};
 
 // Fixed diff options so patch-ids and anchors do not depend on user diff config.
@@ -634,6 +636,42 @@ impl Repo {
         }
         let printed = text(output.stdout)?;
         Ok(printed.lines().next().map(str::to_owned))
+    }
+
+    /// The paths git cannot merge when it merges `theirs` into `ours`; empty for a clean merge.
+    /// It writes objects, so it only runs on a read-only repository.
+    pub fn merge_conflicts(&self, ours: &str, theirs: &str) -> Result<Vec<String>> {
+        if self._scratch.is_none() {
+            return fail("merge-tree needs a read-only repository");
+        }
+        let args = [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "--end-of-options",
+            ours,
+            theirs,
+        ];
+        let output = self.exec(&args, None, &[])?;
+        match output.status.code() {
+            Some(0) => Ok(Vec::new()),
+            // Exit 1 means conflicts: the merged tree, then one line per conflicted path.
+            Some(1) => {
+                let mut paths: Vec<String> = text(output.stdout)?
+                    .lines()
+                    .skip(1)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                paths.dedup();
+                Ok(paths)
+            }
+            _ => fail(format!(
+                "git merge-tree failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+        }
     }
 
     pub fn range_patch_id(&self, from: Option<&str>, to: &str) -> Result<Option<String>> {

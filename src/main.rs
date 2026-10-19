@@ -1,3 +1,4 @@
+mod branch;
 mod ci;
 mod cleanup;
 mod cli;

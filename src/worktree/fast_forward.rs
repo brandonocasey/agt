@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-use super::create::Candidate;
+use crate::git::base::Candidate;
 use super::info;
 use crate::core::error::Result;
 use crate::core::shell::quote;

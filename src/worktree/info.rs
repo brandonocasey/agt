@@ -9,6 +9,7 @@ use super::disposable::is_disposable;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
 use crate::git::Repo;
+use crate::git::base::default_names;
 
 pub struct Entry {
     pub path: PathBuf,
@@ -60,22 +61,6 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf> {
         .git(&["rev-parse", "--show-toplevel"])
         .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))?;
     Ok(PathBuf::from(root))
-}
-
-/// The names the default branch may have, best first: the branch `origin/HEAD` names, `main`,
-/// `master`.
-pub fn default_names(repo: &Repo) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    if let Some(remote) = repo.git_opt(&[
-        "symbolic-ref",
-        "--quiet",
-        "--short",
-        "refs/remotes/origin/HEAD",
-    ])? {
-        names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
-    }
-    names.extend(["main".to_owned(), "master".to_owned()]);
-    Ok(names)
 }
 
 /// The default branch's name and its ref: the first of [`default_names`] that exists, as a
