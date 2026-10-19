@@ -68,6 +68,7 @@ fn mr(node: &Value) -> Pr {
             _ => true,
         },
         squash,
+        merge_queue: false,
     }
 }
 

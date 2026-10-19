@@ -7,7 +7,7 @@ use crate::core::error::{Error, Result, fail};
 use crate::forge::service::{Method, Request, Var};
 use crate::forge::transport::Transport;
 
-const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isCrossRepository";
+const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
 
 fn split(repo: &str) -> (&str, &str) {
     repo.split_once('/').unwrap_or_default()
@@ -58,6 +58,7 @@ fn pr(node: &Value) -> Pr {
         squash: false,
         mergeable: mergeable.to_owned(),
         merge_state,
+        merge_queue: node["isMergeQueueEnabled"].as_bool().unwrap_or(false),
     }
 }
 

@@ -113,7 +113,8 @@ enum Command {
     /// or bypasses protections.
     ///
     /// With --auto, merge when checks pass; GitHub needs --method unless auto-merge was on, and
-    /// merges a PR that can merge now at once, as gh does.
+    /// merges a PR that can merge now at once, as gh does, unless its base requires a merge
+    /// queue (then auto-merge queues it).
     /// GitLab cannot rebase on merge.
     Merge {
         number: String,
@@ -171,6 +172,8 @@ pub struct Pr {
     pub same_repo: bool,
     /// GitLab: the MR squashes on merge.
     pub squash: bool,
+    /// GitHub: the base branch requires a merge queue.
+    pub merge_queue: bool,
 }
 
 impl Pr {
@@ -262,8 +265,11 @@ impl Remote {
                     .or_else(|| pr.auto_merge.as_deref().and_then(How::named))
                     .ok_or_else(|| Error("GitHub auto-merge needs --method".into()))?;
                 // GitHub offers auto-merge only while a PR cannot merge yet; like gh, merge a
-                // PR that can merge now.
-                if matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable") {
+                // PR that can merge now, unless the base requires a merge queue: auto-merge
+                // is what queues it.
+                if !pr.merge_queue
+                    && matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable")
+                {
                     return github::merge(t, repo, pr.number, sha, Some(how));
                 }
                 github::enable_auto(t, pr, sha, how)
