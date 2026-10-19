@@ -22,6 +22,9 @@ const STATUS_FILE: &str = "agt-setup.json";
 /// Exit status when `--max` passes first, as for `agt wait`.
 const TIMED_OUT: u8 = 3;
 
+/// How long a status without a child pid counts as starting.
+const STARTING_GRACE: Duration = Duration::from_secs(30);
+
 /// A step the background child runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
@@ -76,7 +79,7 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
         && existing["state"] == "running"
     {
         let pid = existing["pid"].as_u64().unwrap_or(0);
-        if pid == 0 || alive(pid) {
+        if live(pid, &status) {
             return Ok(json!({
                 "pid": pid,
                 "status": status,
@@ -151,6 +154,20 @@ fn execute(root: &Path, steps: &[Step], done: &mut Value) -> Result<bool> {
     Ok(ok)
 }
 
+/// Whether the run recorded in `file` with `pid` still runs. Pid 0 means the child has not
+/// recorded itself yet; it does so at once, so a pid 0 older than `STARTING_GRACE` is a child
+/// that died first or a parent killed before the spawn.
+fn live(pid: u64, file: &Path) -> bool {
+    if pid != 0 {
+        return alive(pid);
+    }
+    fs::metadata(file)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < STARTING_GRACE)
+}
+
 fn alive(pid: u64) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -173,11 +190,15 @@ pub(super) fn wait(dir: &Path, max: u64) -> Result<Output> {
             return emit(status.clone(), status["ok"] == true);
         }
         let pid = status["pid"].as_u64().unwrap_or(0);
-        if pid != 0 && !alive(pid) {
-            return Err(Error(format!(
-                "the background setup (pid {pid}) is gone without finishing; see its log {}",
-                status["log"].as_str().unwrap_or("(none)")
-            )));
+        if !live(pid, &file) {
+            let log = status["log"].as_str().unwrap_or("(none)");
+            return Err(Error(if pid == 0 {
+                format!("the background setup never started; see its log {log}")
+            } else {
+                format!(
+                    "the background setup (pid {pid}) is gone without finishing; see its log {log}"
+                )
+            }));
         }
         if start.elapsed().as_secs() >= max {
             println!("agt worktree prepare --wait: setup still running after {max}s; wait again");

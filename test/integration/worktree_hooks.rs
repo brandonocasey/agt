@@ -284,6 +284,42 @@ fn a_second_background_create_reports_the_running_setup() {
 }
 
 #[test]
+fn a_status_stuck_at_starting_does_not_block_a_new_setup() {
+    let env = repo();
+    let first = json(&agt(&env, &env.repo, &["create", "stuck"]));
+    let tree = Path::new(first["path"].as_str().unwrap()).to_path_buf();
+    let git_dir = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(&tree)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let status = Path::new(git_dir.trim()).join("agt-setup.json");
+    fs::write(&status, r#"{"state":"running","pid":0,"log":null}"#).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    fs::File::options()
+        .write(true)
+        .open(&status)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let waited = agt(&env, &tree, &["prepare", "--wait", "--max", "5"]);
+    assert_eq!(waited.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&waited.stderr).contains("never started"));
+    let again = json(&agt(
+        &env,
+        &env.repo,
+        &["create", "stuck", "--background", "--prepare"],
+    ));
+    assert!(again["background"]["already_running"].is_null());
+    let done = agt(&env, &tree, &["prepare", "--wait", "--max", "60"]);
+    assert!(done.status.success());
+}
+
+#[test]
 fn prepare_hooks_reruns_a_failed_create_hook() {
     let env = repo();
     repo_config(
