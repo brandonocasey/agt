@@ -1256,6 +1256,8 @@ fail the scan with exit status 2 and identify the path.
 `--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. Agents run it in the background so they wake within the prompt cache's five
 minutes to look at a long job. Exit status: 0 the check passed (`agt wait: done after Ns`), 3
 `--max` passed first, 2 usage.
+The deadline includes checks and pauses between checks. An overdue check and its children
+are terminated; a check finishing after the deadline cannot report success.
 
 ## Doctor
 

@@ -68,3 +68,31 @@ fn bad_usage_exits_2() {
         assert_eq!(wait(&env, args).0, Some(2), "{args:?}");
     }
 }
+
+#[test]
+fn a_sleep_interval_never_extends_the_deadline() {
+    let env = Env::new();
+    let started = Instant::now();
+    let (code, _) = wait(&env, &["--max", "1", "--every", "4", "--", "false"]);
+    assert_eq!(code, Some(3));
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn an_overdue_check_cannot_report_late_success() {
+    let env = Env::new();
+    let started = Instant::now();
+    let (code, _) = wait(&env, &["--max", "1", "--", "sh", "-c", "sleep 3; exit 0"]);
+    assert_eq!(code, Some(3));
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn an_overdue_check_loses_its_descendants() {
+    let env = Env::new();
+    let pid = env.path("child.pid");
+    let script = format!("sleep 3 & echo $! > '{}'; wait", pid.display());
+    let (code, _) = wait(&env, &["--max", "1", "--", "sh", "-c", &script]);
+    assert_eq!(code, Some(3));
+    crate::support::process::assert_gone(&pid);
+}

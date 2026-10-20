@@ -44,10 +44,12 @@ pub fn output(
     let stdout = reader(child.stdout.take().expect("stdout is piped"));
     let stderr = reader(child.stderr.take().expect("stderr is piped"));
     let result = collect(&mut child, input, stdout, stderr, deadline);
+    finish(&mut child, result, deadline.is_some())
+}
+
+fn finish<T>(child: &mut Child, result: io::Result<T>, group: bool) -> io::Result<T> {
     if result.is_err() {
-        if deadline.is_some()
-            && let Ok(pid) = i32::try_from(child.id())
-        {
+        if group && let Ok(pid) = i32::try_from(child.id()) {
             // SAFETY: the child leads this group, so only its descendants receive the signal.
             unsafe { libc::kill(-pid, libc::SIGKILL) };
         }
@@ -75,6 +77,34 @@ pub fn status(command: &mut Command, input: Option<&[u8]>) -> io::Result<ExitSta
     child.wait()
 }
 
+/// Runs a check with the caller's output streams and kills its group if the deadline passes.
+pub fn status_until(command: &mut Command, deadline: Instant) -> io::Result<ExitStatus> {
+    if Instant::now() >= deadline {
+        return Err(timeout());
+    }
+    command.stdin(Stdio::null()).process_group(0);
+    let mut child = command.spawn()?;
+    let _watch = super::group::Watch::new(child.id());
+    let result = wait(&mut child, Some(deadline));
+    finish(&mut child, result, true)
+}
+
+fn wait(child: &mut Child, deadline: Option<Instant>) -> io::Result<ExitStatus> {
+    let Some(end) = deadline else {
+        return child.wait();
+    };
+    loop {
+        let remaining = end.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(timeout());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(5).min(remaining));
+    }
+}
+
 fn collect(
     child: &mut Child,
     input: Option<Receiver<io::Result<()>>>,
@@ -82,19 +112,7 @@ fn collect(
     stderr: Receiver<io::Result<Vec<u8>>>,
     deadline: Option<Instant>,
 ) -> io::Result<Captured> {
-    let status = match deadline {
-        None => child.wait()?,
-        Some(end) => loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            let remaining = end.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(timeout());
-            }
-            std::thread::sleep(Duration::from_millis(5).min(remaining));
-        },
-    };
+    let status = wait(child, deadline)?;
     Ok(Captured {
         output: Output {
             status,
