@@ -59,6 +59,9 @@ pub fn head(text: &str, n: usize) -> &str {
         .map_or(text, |(at, _)| &text[..at])
 }
 
+/// How many characters of a session id name a session in reports.
+pub const SHORT_ID: usize = 8;
+
 /// The last `n` characters of `text`.
 pub fn tail(text: &str, n: usize) -> &str {
     let total = text.chars().count();

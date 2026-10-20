@@ -11,12 +11,14 @@ mod spend;
 mod tools;
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::core::clock;
 use crate::core::error::{Result, fail};
 use crate::core::harness::Harness;
+use crate::core::local;
 use crate::core::output::Output;
 
 /// Cost, context, tools, cache gaps, errors and friction from Claude Code and Codex
@@ -251,9 +253,11 @@ pub struct Scope {
     pub files: Vec<String>,
     pub top: usize,
     pub harness: Which,
+    pub home: PathBuf,
 }
 
 fn scope(common: Common, files: Vec<String>) -> Result<Scope> {
+    let home = local::home()?;
     let since = match common.since {
         Some(since) => since,
         None => clock::days_back(clock::now_secs()?, common.days),
@@ -285,6 +289,7 @@ fn scope(common: Common, files: Vec<String>) -> Result<Scope> {
         files,
         top: common.top,
         harness: common.harness,
+        home,
     })
 }
 

@@ -353,7 +353,11 @@ impl CacheGaps {
         let rows: Vec<Vec<String>> = most_common(per, scope.top)
             .into_iter()
             .map(|((agent, project), tokens)| {
-                vec![agent, short_project(&project), tok(tokens as f64)]
+                vec![
+                    agent,
+                    short_project(&project, &scope.home),
+                    tok(tokens as f64),
+                ]
             })
             .collect();
         fmt::table(&mut out, &["agent", "project", "rewrite tok"], &rows);
@@ -374,7 +378,7 @@ impl CacheGaps {
                     format!("{minutes:.0}"),
                     tok(tokens as f64),
                     agent,
-                    short_project(&project),
+                    short_project(&project, &scope.home),
                     session,
                 ]
             })

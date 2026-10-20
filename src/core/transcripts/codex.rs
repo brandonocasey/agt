@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use super::json::{count, get, tail, text};
+use super::json::{SHORT_ID, count, get, tail, text};
 use super::turns::injected;
 
 /// Who wrote a rollout file, from its first line.
@@ -91,7 +91,7 @@ pub fn meta(first: &Value) -> Option<Meta> {
         cwd: text(payload, "cwd").to_owned(),
         // Thread ids are UUIDv7, whose first characters are a timestamp shared by sessions
         // started in the same minute; the last ones are random.
-        session: tail(session, 8).to_owned(),
+        session: tail(session, SHORT_ID).to_owned(),
         agent: agent.to_owned(),
         scripted: text(payload, "source") == "exec",
     })

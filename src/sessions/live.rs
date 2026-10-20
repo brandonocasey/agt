@@ -10,14 +10,15 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::fmt::{grouped, round, table, tok};
-use super::source::home;
 use super::spend::session_cost;
 use crate::core::agents::{self, CodexProc};
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx};
 use crate::core::harness::Harness;
+use crate::core::local;
 use crate::core::output::Output;
 use crate::core::process;
+use crate::core::transcripts::json::{SHORT_ID, head};
 use crate::core::transcripts::{codex_sessions, session_files};
 use crate::git::Repo;
 
@@ -72,8 +73,9 @@ pub fn run(cli: Cli) -> Result<Output> {
         return Ok(Output::Exit(0));
     }
     let now = clock::now_secs()?;
+    let home = local::home()?;
     let mut warned = false;
-    let mut rows = claude_rows(now, true, &mut warned);
+    let mut rows = claude_rows(now, Some(&home), &mut warned);
     let codex = agents::codex_procs();
     let mut shared: HashMap<PathBuf, usize> = HashMap::new();
     for proc in &codex {
@@ -86,8 +88,9 @@ pub fn run(cli: Cli) -> Result<Output> {
             &proc,
             shared.get(proc.cwd.as_deref().unwrap_or(Path::new(""))),
             now,
+            &home,
         );
-        spend(&mut row, &mut warned);
+        spend(&mut row, &home, &mut warned);
         if let Some(cwd) = &proc.cwd {
             place(&mut row, cwd);
         }
@@ -102,11 +105,11 @@ pub fn run(cli: Cli) -> Result<Output> {
     if cli.json {
         return Ok(Output::Json(json!({ "agents": rows })));
     }
-    Ok(Output::Text(render(&rows)))
+    Ok(Output::Text(render(&rows, &home)))
 }
 
-/// One row per live Claude Code session; `detail` adds cost and place.
-fn claude_rows(now: i64, detail: bool, warned: &mut bool) -> Vec<Value> {
+/// One row per live Claude Code session; with the `home` directory, cost and place are added.
+fn claude_rows(now: i64, detail: Option<&Path>, warned: &mut bool) -> Vec<Value> {
     let mut rows = Vec::new();
     for live in agents::live() {
         let record = &live.record;
@@ -124,8 +127,8 @@ fn claude_rows(now: i64, detail: bool, warned: &mut bool) -> Vec<Value> {
             "session": text("sessionId"),
             "note": null,
         });
-        if detail {
-            spend(&mut row, warned);
+        if let Some(home) = detail {
+            spend(&mut row, home, warned);
             place(&mut row, &live.cwd);
         }
         rows.push(row);
@@ -133,7 +136,7 @@ fn claude_rows(now: i64, detail: bool, warned: &mut bool) -> Vec<Value> {
     rows
 }
 
-fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64) -> Value {
+fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64, home: &Path) -> Value {
     let mut row = json!({
         "harness": Harness::Codex.id(),
         "pid": proc.proc.pid,
@@ -151,12 +154,12 @@ fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64) -> Value {
             Some("several codex processes share this directory".to_owned())
         }
         Some(cwd) => {
-            match codex_sessions(&home(), cwd, proc.proc.start)
+            match codex_sessions(home, cwd, proc.proc.start)
                 .into_iter()
                 .next()
             {
                 Some(session) => {
-                    if let Some(file) = session_files(&home(), &session).first() {
+                    if let Some(file) = session_files(home, &session).first() {
                         let (status, since) = codex_status(&file.path);
                         row["status"] = json!(status);
                         row["status_secs"] = json!(since.map(|at| (now - at).max(0)));
@@ -222,7 +225,7 @@ fn watch(cli: &Cli) -> Result<()> {
     let mut polls = 0;
     loop {
         let now = clock::now_secs()?;
-        let mut rows = claude_rows(now, false, &mut false);
+        let mut rows = claude_rows(now, None, &mut false);
         let mut events = Vec::new();
         // A session missing from one poll while its process runs keeps its previous state.
         let gone = |pid: &i64| !agents::exists(i32::try_from(*pid).unwrap_or_default());
@@ -366,8 +369,8 @@ fn notify(event: &Value) {
 
 /// Adds model, context tokens and cost from the session's transcripts. When they or the price
 /// file cannot be read the cost stays `null` and the first such failure is warned about.
-fn spend(row: &mut Value, warned: &mut bool) {
-    if let Err(error) = try_spend(row)
+fn spend(row: &mut Value, home: &Path, warned: &mut bool) {
+    if let Err(error) = try_spend(row, home)
         && !*warned
     {
         eprintln!("warning: cost left unpriced: {error}");
@@ -375,7 +378,7 @@ fn spend(row: &mut Value, warned: &mut bool) {
     }
 }
 
-fn try_spend(row: &mut Value) -> Result<()> {
+fn try_spend(row: &mut Value, home: &Path) -> Result<()> {
     row["model"] = Value::Null;
     row["context_tokens"] = Value::Null;
     row["usd"] = Value::Null;
@@ -383,7 +386,7 @@ fn try_spend(row: &mut Value) -> Result<()> {
     let Some(session) = row["session"].as_str().map(str::to_owned) else {
         return Ok(());
     };
-    if session_files(&home(), &session).is_empty() {
+    if session_files(home, &session).is_empty() {
         return Ok(());
     }
     let cost = session_cost(&session)?;
@@ -455,11 +458,10 @@ fn tilde(place: &str, home: &Path) -> String {
     }
 }
 
-fn render(rows: &[Value]) -> String {
+fn render(rows: &[Value], home: &Path) -> String {
     if rows.is_empty() {
         return "No agents are running.\n".into();
     }
-    let home = home();
     let cell = |row: &Value, key: &str| row[key].as_str().unwrap_or("-").to_owned();
     let table_rows: Vec<Vec<String>> = rows
         .iter()
@@ -481,13 +483,13 @@ fn render(rows: &[Value]) -> String {
                 cell(row, "status"),
                 row["status_secs"].as_i64().map_or("-".into(), age),
                 cell(row, "branch"),
-                tilde(place, &home),
+                tilde(place, home),
                 cell(row, "model"),
                 row["context_tokens"]
                     .as_i64()
                     .map_or("-".into(), |tokens| tok(tokens as f64)),
                 usd,
-                cell(row, "session").chars().take(8).collect(),
+                head(&cell(row, "session"), SHORT_ID).to_owned(),
             ]
         })
         .collect();

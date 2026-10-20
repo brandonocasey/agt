@@ -248,6 +248,16 @@ fn harness_picks_one_side_of_a_mixed_scan() {
 }
 
 #[test]
+fn reports_need_a_home_directory() {
+    let env = Env::new();
+    let mut command = sessions(&env, &["cost"]);
+    command.env_remove("HOME");
+    let (code, _, err) = run(command);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("HOME is not set"), "{err}");
+}
+
+#[test]
 fn bad_input_fails_with_a_reason() {
     let env = Env::new();
     let (code, _, err) = run(sessions(

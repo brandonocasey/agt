@@ -1,11 +1,13 @@
 //! `cost` and `agents`: USD and context per group of API responses.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 
 use crate::core::error::{Result, fail};
+use crate::core::local;
 use crate::core::output;
 use crate::core::transcripts::json::{tail, text};
 use crate::core::transcripts::{Call, session_files};
@@ -61,6 +63,7 @@ pub struct Cost {
     unpriced: IndexMap<String, i64>,
     fast: i64,
     seen: HashSet<String>,
+    home: PathBuf,
 }
 
 impl Cost {
@@ -76,6 +79,7 @@ impl Cost {
             unpriced: IndexMap::new(),
             fast: 0,
             seen: HashSet::new(),
+            home: local::home()?,
         })
     }
     pub fn feed(&mut self, transcript: &Loaded) {
@@ -84,7 +88,7 @@ impl Cost {
                 match name {
                     "agent" => transcript.agent.clone(),
                     "model" => call.model.clone(),
-                    "project" => short_project(&transcript.project),
+                    "project" => short_project(&transcript.project, &self.home),
                     "session" => transcript.session.clone(),
                     "file" => transcript.path.to_string_lossy().into_owned(),
                     _ => transcript.harness.id().to_owned(),
@@ -215,7 +219,7 @@ pub fn session_cost(session: &str) -> Result<SessionCost> {
     let mut seen = HashSet::new();
     let mut cost = SessionCost::default();
     let mut group = Group::default();
-    let found = session_files(&super::source::home(), session);
+    let found = session_files(&local::home()?, session);
     if found.is_empty() {
         return fail(format!("session {session} has no transcripts"));
     }
@@ -340,10 +344,8 @@ impl Agents {
 }
 
 /// A Claude Code project directory name under the home directory as `~/<rest>`.
-pub fn short_project(name: &str) -> String {
-    let home = super::source::home()
-        .to_string_lossy()
-        .replace(['/', '.'], "-");
+pub fn short_project(name: &str, home: &Path) -> String {
+    let home = home.to_string_lossy().replace(['/', '.'], "-");
     match name.strip_prefix(home.as_str()) {
         Some(rest) => format!("~/{}", rest.chars().skip(1).collect::<String>()),
         None => name.to_owned(),

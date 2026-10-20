@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::core::harness::Harness;
-use crate::core::local;
 use crate::core::transcripts::{
     Step, Transcript, Walker, claude_projects, codex_roots, is_scratch,
 };
@@ -18,10 +17,6 @@ fn modified(path: &Path) -> Option<f64> {
         Ok(after) => after.as_secs_f64(),
         Err(before) => -before.duration().as_secs_f64(),
     })
-}
-
-pub fn home() -> PathBuf {
-    local::home().unwrap_or_default()
 }
 
 fn wanted(scope: &Scope, harness: Harness) -> bool {
@@ -48,14 +43,14 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
             .filter(|transcript| wanted(scope, transcript.harness))
             .collect();
     }
-    let home = home();
+    let home = &scope.home;
     // A root named on the command line can hold either harness; each file says which.
     let roots: Vec<(PathBuf, Option<Harness>)> = if scope.roots.is_empty() {
-        claude_projects(&home)
+        claude_projects(home)
             .into_iter()
             .map(|root| (root, Some(Harness::Claude)))
             .chain(
-                codex_roots(&home)
+                codex_roots(home)
                     .into_iter()
                     .map(|root| (root, Some(Harness::Codex))),
             )
@@ -64,7 +59,7 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
         scope
             .roots
             .iter()
-            .map(|root| (expand(root, &home), None))
+            .map(|root| (expand(root, home), None))
             .collect()
     };
     let mut found = Vec::new();
@@ -247,6 +242,7 @@ mod tests {
             files: vec![path.to_string_lossy().into_owned()],
             top: 25,
             harness: crate::sessions::Which::All,
+            home: dir.path().to_owned(),
         };
         let found: Vec<_> = load(
             &scope,

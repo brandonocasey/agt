@@ -403,7 +403,7 @@ impl Friction {
                     label.to_owned(),
                     session.clone(),
                     day.clone(),
-                    short_project(project),
+                    short_project(project, &scope.home),
                 ));
                 continue;
             }

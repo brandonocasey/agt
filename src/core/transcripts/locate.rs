@@ -10,7 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::codex;
-use super::json::{get, head, tail, text};
+use super::json::{SHORT_ID, get, head, tail, text};
 use crate::core::clock;
 use crate::core::harness::{self, Harness};
 
@@ -221,7 +221,7 @@ impl Transcript {
         if hint == Some(Harness::Codex) {
             return Self {
                 project: String::new(),
-                session: tail(&stem(&path), 8).to_owned(),
+                session: tail(&stem(&path), SHORT_ID).to_owned(),
                 agent: "main".into(),
                 scripted: false,
                 harness: Harness::Codex,
@@ -248,7 +248,7 @@ impl Transcript {
         };
         Self {
             project: parts.first().cloned().unwrap_or_default(),
-            session: head(&session, 8).to_owned(),
+            session: head(&session, SHORT_ID).to_owned(),
             agent,
             scripted: false,
             harness: Harness::Claude,
