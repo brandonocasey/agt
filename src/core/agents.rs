@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::clock;
 use crate::core::harness;
 use crate::core::local;
 use serde_json::Value;
@@ -370,8 +371,7 @@ fn parse_lstart(text: &str) -> Option<(i64, i64)> {
         return None;
     }
     let mut utc = tm;
-    tm.tm_isdst = -1;
-    let local = unsafe { libc::mktime(&raw mut tm) };
+    let local = clock::mktime_local(&mut tm);
     let utc = unsafe { libc::timegm(&raw mut utc) };
     (local != -1 && utc != -1).then_some((local, utc))
 }
@@ -563,12 +563,10 @@ mod tests {
     /// `lstart` text for `secs`, in UTC or local time.
     fn lstart(secs: i64, utc: bool) -> String {
         let mut buffer = [0 as libc::c_char; 64];
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let mut tm = clock::local_tm(secs);
         unsafe {
             if utc {
                 libc::gmtime_r(&secs, &raw mut tm);
-            } else {
-                libc::localtime_r(&secs, &raw mut tm);
             }
             libc::strftime(
                 buffer.as_mut_ptr(),

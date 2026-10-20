@@ -1,6 +1,9 @@
 use std::fs;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use regex::Regex;
 
 use crate::core::error::{Error, Result, fail};
 
@@ -153,6 +156,94 @@ pub fn parse(text: &str) -> Result<i64> {
     )
 }
 
+/// Microseconds since the epoch for a transcript timestamp. Unlike [`parse`] it also takes a
+/// space for the `T`, no seconds, no zone (read as UTC) and zones such as `+0100` or `+01`.
+pub fn parse_micros(stamp: &str) -> Option<i128> {
+    let (date, time) = stamp.split_once(['T', ' '])?;
+    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
+    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
+    let split = time.find(['Z', 'z', '+', '-']).unwrap_or(time.len());
+    let (clock, zone) = time.split_at(split);
+    let (whole, fraction) = clock.split_once('.').unwrap_or((clock, ""));
+    let mut parts = whole.split(':').map(|part| part.parse::<i64>().ok());
+    let (hour, minute) = (parts.next()??, parts.next()??);
+    let second = parts.next().flatten().unwrap_or(0);
+    let micros: i64 = format!("{:0<6}", fraction.chars().take(6).collect::<String>())
+        .parse()
+        .ok()?;
+    let offset = match zone {
+        "" | "Z" | "z" => 0,
+        _ => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let digits: String = zone[1..].chars().filter(char::is_ascii_digit).collect();
+            let hours: i64 = digits.get(..2)?.parse().ok()?;
+            let minutes: i64 = digits.get(2..4).unwrap_or("0").parse().ok()?;
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    let secs =
+        days_from_civil(year, month, day) * SECS_PER_DAY + hour * 3600 + minute * 60 + second
+            - offset;
+    Some(i128::from(secs) * 1_000_000 + i128::from(micros))
+}
+
+/// The broken-down local time of `secs`.
+pub fn local_tm(secs: i64) -> libc::tm {
+    // SAFETY: `localtime_r` writes only into the `tm` it is given.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let time: libc::time_t = secs as libc::time_t;
+        libc::localtime_r(&raw const time, &raw mut tm);
+        tm
+    }
+}
+
+/// Unix seconds of a local `tm`, normalizing its fields; daylight saving is worked out.
+pub fn mktime_local(tm: &mut libc::tm) -> i64 {
+    tm.tm_isdst = -1;
+    // SAFETY: `mktime` reads and normalizes the `tm` it is given.
+    unsafe { libc::mktime(tm) }
+}
+
+/// The local date `days` days before `now`, as `YYYY-MM-DD`.
+pub fn days_back(now: i64, days: i64) -> String {
+    let mut tm = local_tm(now);
+    tm.tm_mday -= days as libc::c_int;
+    mktime_local(&mut tm);
+    format!(
+        "{:04}-{:02}-{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
+}
+
+static DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{1,2})-(\d{1,2})$").expect("valid pattern"));
+
+/// Local midnight of a `YYYY-MM-DD` date in Unix seconds, or `None` when it is not a real date.
+pub fn local_midnight(date: &str) -> Option<f64> {
+    let found = DATE.captures(date)?;
+    let [year, month, day] = [1, 2, 3].map(|index| found[index].parse::<i32>().unwrap_or(0));
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let length = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=length).contains(&day) {
+        return None;
+    }
+    // SAFETY: an all-zero `tm` is a valid value to fill in.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    Some(mktime_local(&mut tm) as f64)
+}
+
 /// Rewrites a forge timestamp in the store's `YYYY-MM-DDTHH:MM:SSZ` form.
 pub fn normalize(text: &str) -> Result<String> {
     Ok(format(parse(text)?))
@@ -199,6 +290,23 @@ mod tests {
         assert!(parse("2026-10-16 12:00:00Z").is_err());
         assert!(parse("2026-13-16T12:00:00Z").is_err());
         assert!(parse("2026-10-16T12:00:00").is_err());
+    }
+
+    #[test]
+    fn transcript_timestamps_parse_to_microseconds() {
+        assert_eq!(parse_micros("1970-01-01T00:00:01.5Z"), Some(1_500_000));
+        assert_eq!(parse_micros("1970-01-01T01:00:00+01:00"), Some(0));
+        assert_eq!(parse_micros("1970-01-01 00:01"), Some(60_000_000));
+        assert_eq!(parse_micros("nope"), None);
+    }
+
+    #[test]
+    fn dates_must_be_real() {
+        assert!(local_midnight("2026-02-29").is_none());
+        assert!(local_midnight("2024-02-29").is_some());
+        assert!(local_midnight("2026-1-5").is_some());
+        assert!(local_midnight("26-01-05").is_none());
+        assert!(local_midnight("2026-13-01").is_none());
     }
 
     #[test]

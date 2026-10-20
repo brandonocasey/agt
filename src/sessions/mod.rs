@@ -11,10 +11,8 @@ mod spend;
 mod tools;
 
 use std::io::Write;
-use std::sync::LazyLock;
 
 use clap::{Args, Subcommand, ValueEnum};
-use regex::Regex;
 
 use crate::core::clock;
 use crate::core::error::{Result, fail};
@@ -245,67 +243,12 @@ pub struct Scope {
     pub harness: Harness,
 }
 
-static DATE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{1,2})-(\d{1,2})$").expect("valid pattern"));
-
-fn local(secs: i64) -> libc::tm {
-    // SAFETY: `localtime_r` writes only into the `tm` it is given.
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        let time: libc::time_t = secs as libc::time_t;
-        libc::localtime_r(&raw const time, &raw mut tm);
-        tm
-    }
-}
-
-fn make(tm: &mut libc::tm) -> i64 {
-    tm.tm_isdst = -1;
-    // SAFETY: `mktime` reads and normalizes the `tm` it is given.
-    unsafe { libc::mktime(tm) }
-}
-
-/// The local date `days` days before `now`, as `YYYY-MM-DD`.
-fn days_back(now: i64, days: i64) -> String {
-    let mut tm = local(now);
-    tm.tm_mday -= days as libc::c_int;
-    make(&mut tm);
-    format!(
-        "{:04}-{:02}-{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday
-    )
-}
-
-/// Local midnight of `date` in Unix seconds, or `None` when it is not a real date.
-fn midnight(date: &str) -> Option<f64> {
-    let found = DATE.captures(date)?;
-    let [year, month, day] = [1, 2, 3].map(|index| found[index].parse::<i32>().unwrap_or(0));
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let length = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if !(1..=length).contains(&day) {
-        return None;
-    }
-    // SAFETY: an all-zero `tm` is a valid value to fill in.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month - 1;
-    tm.tm_mday = day;
-    Some(make(&mut tm) as f64)
-}
-
 fn scope(common: Common, files: Vec<String>) -> Result<Scope> {
     let since = match common.since {
         Some(since) => since,
-        None => days_back(clock::now_secs()?, common.days),
+        None => clock::days_back(clock::now_secs()?, common.days),
     };
-    let Some(cutoff) = midnight(&since) else {
+    let Some(cutoff) = clock::local_midnight(&since) else {
         return fail("--since needs YYYY-MM-DD");
     };
     // A file that cannot be read must not price as nothing.
@@ -424,19 +367,5 @@ pub fn run(cli: Cli) -> Result<Output> {
             fail(format!("write stdout: {error}"))
         }
         _ => Ok(Output::Exit(0)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dates_must_be_real() {
-        assert!(midnight("2026-02-29").is_none());
-        assert!(midnight("2024-02-29").is_some());
-        assert!(midnight("2026-1-5").is_some());
-        assert!(midnight("26-01-05").is_none());
-        assert!(midnight("2026-13-01").is_none());
     }
 }

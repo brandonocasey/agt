@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use crate::core::clock;
 use crate::core::error::Result;
 use crate::core::harness;
 use crate::core::transcripts::Kind;
@@ -183,33 +184,6 @@ impl Tools {
     }
 }
 
-/// Microseconds since the epoch for an ISO 8601 time, `Z` or an offset.
-fn parse_ts(stamp: &str) -> Option<i128> {
-    let (date, time) = stamp.split_once(['T', ' '])?;
-    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
-    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
-    let split = time.find(['Z', 'z', '+', '-']).unwrap_or(time.len());
-    let (clock, zone) = time.split_at(split);
-    let (whole, fraction) = clock.split_once('.').unwrap_or((clock, ""));
-    let mut parts = whole.split(':').map(|part| part.parse::<i64>().ok());
-    let (hour, minute) = (parts.next()??, parts.next()??);
-    let second = parts.next().flatten().unwrap_or(0);
-    let micros: i64 = format!("{:0<6}", head(fraction, 6)).parse().ok()?;
-    let offset = match zone {
-        "" | "Z" | "z" => 0,
-        _ => {
-            let sign = if zone.starts_with('-') { -1 } else { 1 };
-            let digits: String = zone[1..].chars().filter(char::is_ascii_digit).collect();
-            let hours: i64 = digits.get(..2)?.parse().ok()?;
-            let minutes: i64 = digits.get(2..4).unwrap_or("0").parse().ok()?;
-            sign * (hours * 3600 + minutes * 60)
-        }
-    };
-    let days = crate::core::clock::days_from_civil(year, month, day);
-    let secs = days * 86_400 + hour * 3600 + minute * 60 + second - offset;
-    Some(i128::from(secs) * 1_000_000 + i128::from(micros))
-}
-
 struct Previous {
     at: i128,
     context: i64,
@@ -295,7 +269,7 @@ impl CacheGaps {
             if !truthy(usage) || seen.contains(&id_key) || model == "<synthetic>" {
                 return;
             }
-            let Some(at) = parse_ts(stamp) else {
+            let Some(at) = clock::parse_micros(stamp) else {
                 return;
             };
             seen.insert(id_key);
@@ -444,12 +418,5 @@ mod tests {
             tool_key("Read", &json!({"file_path": "/a/skills/x.md"})),
             "Read:skills/rules"
         );
-    }
-
-    #[test]
-    fn timestamps_parse_to_microseconds() {
-        assert_eq!(parse_ts("1970-01-01T00:00:01.5Z"), Some(1_500_000));
-        assert_eq!(parse_ts("1970-01-01T01:00:00+01:00"), Some(0));
-        assert_eq!(parse_ts("nope"), None);
     }
 }
