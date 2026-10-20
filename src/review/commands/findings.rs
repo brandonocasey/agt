@@ -1,10 +1,7 @@
-use std::path::Path;
-
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, ctx, fail};
-use crate::core::local::read_source;
 use crate::forge;
 use crate::review::cli::{AuthorArgs, CommentArgs, ReplyArgs, ResolveArgs};
 use crate::store::model::{
@@ -68,8 +65,6 @@ pub(super) fn author(
         || args.effort.is_some()
         || args.harness.is_some()
         || args.harness_version.is_some()
-        || args.run.is_some()
-        || args.pass.is_some()
         || args.reviewer.is_some()
         || args.session.is_some();
     if let Some(login) = &args.author {
@@ -85,13 +80,28 @@ pub(super) fn author(
         return default
             .ok_or_else(|| Error("no author: pass --author or set git user.name".into()));
     }
-    let stored = match (&args.run, &args.pass, &args.reviewer) {
-        (Some(run), Some(pass), Some(id)) => find_pass(target, run, pass)?
+    let named = match &args.reviewer {
+        Some(id) => {
+            let mut parts = id.splitn(3, '.');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(run), Some(pass), Some(reviewer)) if !reviewer.is_empty() => {
+                    Some((run, pass, reviewer))
+                }
+                _ => {
+                    return fail(format!(
+                        "--reviewer must be <run>.<pass>.<reviewer>, such as rv-7k2m.c1p0.r1: {id}"
+                    ));
+                }
+            }
+        }
+        None => None,
+    };
+    let stored = match named {
+        Some((run, pass, id)) => find_pass(target, run, pass)?
             .reviewers
             .iter()
-            .find(|reviewer| reviewer.id == *id),
-        (_, _, Some(_)) => return fail("--reviewer needs --run and --pass"),
-        _ => None,
+            .find(|reviewer| reviewer.id == id),
+        None => None,
     };
     let model = args
         .model
@@ -115,9 +125,9 @@ pub(super) fn author(
             .harness_version
             .clone()
             .or_else(|| stored.and_then(|reviewer| reviewer.harness_version.clone())),
-        run: args.run.clone(),
-        pass: args.pass.clone(),
-        reviewer: args.reviewer.clone(),
+        run: named.map(|(run, _, _)| run.to_owned()),
+        pass: named.map(|(_, pass, _)| pass.to_owned()),
+        reviewer: named.map(|(_, _, reviewer)| reviewer.to_owned()),
         session: args
             .session
             .clone()
@@ -179,7 +189,7 @@ pub(super) fn finding_kill(ctx: &Ctx, id: &str, reason: &str) -> Result<Value> {
     Ok(json!({ "target": scope.key, "killed": killed }))
 }
 
-/// One reviewer finding as `finding add` reads it; see README "Finding input".
+/// One reviewer finding as `pass end --findings` reads it; see README "Finding input".
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FindingInput {
@@ -191,7 +201,6 @@ pub(super) struct FindingInput {
     pub(super) old_line: Option<u32>,
     pub(super) side: Option<Side>,
     pub(super) start_line: Option<u32>,
-    #[serde(alias = "body")]
     pub(super) scenario: String,
     pub(super) evidence: Option<String>,
     #[serde(default)]
@@ -201,15 +210,8 @@ pub(super) struct FindingInput {
     #[serde(default)]
     pub(super) killed: bool,
     pub(super) reason: Option<String>,
-    /// Reviewer id, for `pass end --findings`; `finding add` takes `--reviewer`.
+    /// Reviewer id; `pass end --reviewer` names it for findings that carry none.
     pub(super) reviewer: Option<String>,
-}
-
-/// Findings from `source` (`-` for stdin); `allow_empty` accepts `[]` (a clean pass).
-pub(super) fn read_findings(source: &Path, allow_empty: bool) -> Result<Vec<FindingInput>> {
-    let value: Value = serde_json::from_str(&read_source(source, "findings")?)
-        .map_err(ctx("parse findings JSON"))?;
-    parse_findings(value, allow_empty)
 }
 
 pub(super) fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<FindingInput>> {
@@ -248,30 +250,6 @@ pub(super) fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<Find
         findings.push(finding);
     }
     Ok(findings)
-}
-
-pub(super) fn finding_add(
-    ctx: &Ctx,
-    run_id: &str,
-    pass_id: &str,
-    reviewer_id: &str,
-) -> Result<Value> {
-    let scope = ctx.scope()?;
-    let findings = read_findings(Path::new("-"), false)?;
-    if let Some(index) = findings.iter().position(|finding| {
-        finding
-            .reviewer
-            .as_deref()
-            .is_some_and(|id| id != reviewer_id)
-    }) {
-        return fail(format!(
-            "finding {index}: its reviewer differs from --reviewer {reviewer_id}"
-        ));
-    }
-    let (added, killed) = ctx.update(&scope, |target, now| {
-        add_findings(target, run_id, pass_id, reviewer_id, findings, now)
-    })?;
-    Ok(json!({ "target": scope.key, "added": added, "killed": killed }))
 }
 
 /// Stores one reviewer's findings on a pass; returns the new thread and killed ids.
@@ -463,32 +441,6 @@ pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 
-pub(super) fn normalize_resolution(ctx: &Ctx, resolution: &str) -> Result<Resolution> {
-    if resolution == "stale" {
-        return Ok(Resolution::Stale);
-    }
-    if resolution == "answered" {
-        return Ok(Resolution::Answered);
-    }
-    if let Some(reason) = resolution.strip_prefix("not fixed:") {
-        let reason = limited(reason.trim().to_owned(), "not fixed reason")?;
-        return Ok(Resolution::NotFixed { reason });
-    }
-    if let Some(reason) = resolution.strip_prefix("rejected:") {
-        let reason = limited(reason.trim().to_owned(), "rejected reason")?;
-        return Ok(Resolution::Rejected { reason });
-    }
-    if let Some(rev) = resolution.strip_prefix("fixed ") {
-        return Ok(Resolution::Fixed {
-            sha: ctx.repo.commit(rev.trim())?,
-        });
-    }
-    fail(
-        "resolution must be `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, \
-         `stale` or `answered`",
-    )
-}
-
 /// `✅ Fixed in [<sha> <subject>](<commit URL>).`; the link text alone before the target is
 /// linked to a PR/MR.
 fn fixed_reply(sha: &str, subject: &str, review: Option<&Review>) -> String {
@@ -510,58 +462,49 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
     if scope.existing.is_none() {
         return fail(format!("thread {} not found", args.ids[0]));
     }
-    // `--fixed`, `--not-fixed` and `--rejected` are shorthands for the triage, resolution and
-    // reply of a fix, a failed fix check and a finding that will not be fixed.
-    let (triage, resolution, reopen, default_reply) = match (&args.fixed, &args.not_fixed) {
-        (None, None) if let Some(reason) = &args.rejected => {
-            let reason = reason.trim().trim_end_matches('.');
-            (
-                None,
-                Some(format!("rejected: {reason}")),
-                false,
-                Some(format!("🚫 Rejected: {reason}.")),
-            )
-        }
-        (Some(sha), _) => {
-            let sha = ctx.repo.commit(sha)?;
-            let review = scope
-                .existing
-                .as_ref()
-                .and_then(|target| target.review.as_ref());
-            let reply = fixed_reply(&sha, &ctx.repo.subject(&sha)?, review);
-            (
-                Some(Triage::Fixed),
-                Some(format!("fixed {sha}")),
-                false,
-                Some(reply),
-            )
-        }
-        (None, Some(reason)) => {
-            let reason = reason.trim().trim_end_matches('.');
-            (
-                None,
-                Some(format!("not fixed: {reason}")),
-                true,
-                Some(format!("❌ Not fixed: {reason}.")),
-            )
-        }
-        (None, None) => (args.triage, args.resolution.clone(), args.reopen, None),
+    // Each outcome flag sets the triage, resolution and default reply of its case; no flag
+    // resolves the thread as it is.
+    let review = scope
+        .existing
+        .as_ref()
+        .and_then(|target| target.review.as_ref());
+    let (triage, resolution, reopen, default_reply) = if let Some(sha) = &args.fixed {
+        let sha = ctx.repo.commit(sha)?;
+        let reply = fixed_reply(&sha, &ctx.repo.subject(&sha)?, review);
+        (
+            Some(Triage::Fixed),
+            Some(Resolution::Fixed { sha }),
+            false,
+            Some(reply),
+        )
+    } else if let Some(reason) = &args.not_fixed {
+        let reason = reason.trim().trim_end_matches('.');
+        (
+            None,
+            Some(Resolution::NotFixed {
+                reason: limited(reason.to_owned(), "not fixed reason")?,
+            }),
+            true,
+            Some(format!("❌ Not fixed: {reason}.")),
+        )
+    } else if let Some(reason) = &args.rejected {
+        let reason = reason.trim().trim_end_matches('.');
+        (
+            None,
+            Some(Resolution::Rejected {
+                reason: limited(reason.to_owned(), "rejected reason")?,
+            }),
+            false,
+            Some(format!("🚫 Rejected: {reason}.")),
+        )
+    } else if args.stale {
+        (Some(Triage::Stale), Some(Resolution::Stale), false, None)
+    } else if args.answered {
+        (None, Some(Resolution::Answered), false, None)
+    } else {
+        (args.triage.map(Triage::from), None, false, None)
     };
-    let resolution = resolution
-        .as_deref()
-        .map(|text| normalize_resolution(ctx, text))
-        .transpose()?;
     let records_only = matches!(triage, Some(Triage::Valid | Triage::Question));
-    if !reopen && records_only && resolution.is_some() {
-        return fail("--resolution needs a resolving triage (fixed or stale)");
-    }
-    let resolution = match (triage, resolution) {
-        (Some(Triage::Stale), None) if !reopen => Some(Resolution::Stale),
-        (Some(Triage::Fixed), None) if !reopen => {
-            return fail("--triage fixed needs --resolution 'fixed <sha>'");
-        }
-        (_, resolution) => resolution,
-    };
     let reply = match (&args.reply, default_reply) {
         (Some(body), _) => Some(read_body(body)?),
         (None, reply) => reply,

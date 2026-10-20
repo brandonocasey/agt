@@ -79,7 +79,8 @@ A target is one thing under review. Commands pick it like this:
 
 - By default, the current branch. The target key is the branch plus its
   merge-base with the default branch (`origin/HEAD`, else local `main`,
-  `master` or `init.defaultBranch`; override with `--default-branch <ref>`).
+  `master` or `init.defaultBranch`; override with `--default-branch <ref>`, which the
+  target remembers as `default_branch`, so later commands on it need not repeat the flag).
   The target also stores the branch's reflog birth (time and sha of the oldest
   `refs/heads/<branch>` reflog entry, shared by linked worktrees). Lookup takes,
   in order: a target of this branch with the same reflog birth; the exact key;
@@ -114,19 +115,18 @@ covers its commits, advances `last_reviewed_head` and `review_from`, and
 A run groups a review and its repairs. A pass records one round within that run.
 Commands in this section use the `agt review` prefix.
 
-Start a run, then passes inside it. A `full` pass opens a new cycle (`c1p0`,
-`c2p0`); `fix-check` and `reveal` passes continue the current cycle (`c1p1`,
-`c1p2`).
+A `full` pass without `--run` starts a run and its first pass. A `full` pass opens a
+new cycle (`c1p0`, `c2p0`); `fix-check` and `reveal` passes continue the current
+cycle (`c1p1`, `c1p2`) and need `--run`.
 
 ```sh
-agt review run start
-# {"run": "rv-7k2m", "target": "branch-feat%2Flogin-1a2b..."}
-
-agt review pass start --run rv-7k2m --kind full --reviewers - <<'EOF'
+agt review pass start --kind full --reviewers - <<'EOF'
 [{"model": "claude-opus-5-5", "effort": "xhigh", "harness": "claude-code",
   "harness_version": "2.1.296", "starting_context": "fresh",
   "session": "a0b5ad828155531d2"}]
 EOF
+# {"target": "branch-feat%2Flogin-1a2b...", "run": "rv-7k2m", "pass": {"id": "c1p0", ...}}
+agt review pass start --run rv-7k2m --kind fix-check --reviewers - < reviewers.json
 ```
 
 Reviewer ids are `r<n>`, assigned in order unless you pass `"id"`. Two ids are
@@ -146,16 +146,9 @@ reviews a later head, such as a fix for a fix check; it MUST descend from the
 target's end, else the pass is refused. Pass output leaves out the per-commit
 patch-ids (`commit_count` gives their number); `show <run>.<pass>` prints them.
 
-`run start --kind <kind>` also starts the run's first pass and takes the same
-`--base`, `--reviewers` and `--head`, saving a call:
+A first pass that fails to start leaves no run behind.
 
 ```sh
-agt review run start --kind full --base 1a2b3c4 --reviewers - < reviewers.json
-# {"target": "...", "run": "rv-7k2m", "pass": {"id": "c1p0", ...}}
-```
-
-```sh
-agt review finding add --run rv-7k2m --pass c1p0 --reviewer r1 < findings.json
 agt review pass end --run rv-7k2m --pass c1p0 --lock
 agt review pass end --run rv-7k2m --pass c1p0 --findings - --reviewer r1 < all.json
 agt review finding kill rv-7k2m.c1p0.r1.f2 --reason "The caller checks it."
@@ -163,16 +156,16 @@ agt review run end --run rv-7k2m
 agt review run end --run rv-7k2m --reveal-agree 2 --reveal-disagree 0
 ```
 
-`pass end --findings <file|->` adds findings and ends the pass in one write, as
-`finding add` would for each reviewer: each finding names its `"reviewer"`, or
+`pass end --findings <file|->` adds findings and ends the pass in one write:
+each finding names its `"reviewer"`, or
 takes `--reviewer`; `[]` ends a clean pass. Output lists the new ids under
 `added` and `killed`, each in input order. The input may instead be an object,
 `{"findings": [...], "usage": [{"reviewer": "r1", "tokens": 52000,
 "duration_ms": 61000, "tool_uses": 9}]}`, which also stores what each reviewer
 spent (as its harness reports it) on the pass. `pass end --lock` freezes the pass for a blind review:
-`finding add` to it then fails. `finding kill` moves a surviving finding to its pass's killed list, also
+adding findings to it then fails. `finding kill` moves a surviving finding to its pass's killed list, also
 on a locked pass; `finding kill` refuses a finding that is posted or being posted to the
-PR/MR, so resolve it with `--triage stale` instead. `run end` closes the run, records commit patch-ids
+PR/MR, so resolve it with `--stale` instead. `run end` closes the run, records commit patch-ids
 for every pass whose reviewed tree now equals `HEAD`'s tree (see below), records
 `HEAD` (on a range or commit target, its end or `--head <rev>`, which MUST
 descend from the end) as the run's `repaired_head` (commits after the last pass
@@ -185,31 +178,33 @@ stores what the main session spent, as an array of `{"role": "fix", "tokens",
 outside them (`fixing_secs`), and the reported reviewer and main-session
 tokens; the summary's steps show each run's time.
 
-`approve` records an approval of the head as a general thread, refused while a
-`bug`, `requirement` or `question` is open; approving the same head again
-returns the same thread, and `--formal` upgrades a comment approval. `publish` posts it as a comment (default text
-`Approved at <sha>.`, or `--body`; a GitLab note, which never blocks merging).
-`approve --formal` also submits the host's approval: a GitHub `APPROVE` review,
+`publish --approve` first records an approval of the head as a general thread,
+refused while a `bug`, `requirement` or `question` is open; approving the same
+head again reuses the same thread, and `--formal` upgrades a comment approval.
+`publish` then posts it as a comment (default text `Approved at <sha>.`, or
+`--body`; a GitLab note, which never blocks merging). The author flags (`--author`,
+`--reviewer`, `--model`, ...) sign the approval as for `comment`. With `--dry-run`
+the approval is still recorded locally, and nothing is posted.
+`--approve --formal` also submits the host's approval: a GitHub `APPROVE` review,
 or GitLab's `approve` at that head. On your own GitHub PR, which GitHub refuses
 to approve, the comment still posts and `skipped` lists `<id>/formal`. A host
 refusal of the formal approval (an HTTP 4xx: already approved, not allowed)
 shows as an `error` under `posted`, blocks nothing and is remembered, so
-`publish` does not send it again; `approve --formal` again retries only the host's
+`publish` does not send it again; `publish --approve --formal` again retries only the host's
 approval. A failure that is not a refusal (a timeout, a 5xx, the tool failing)
 shows as an `error` too but is not remembered: the next `publish` sends the
 approval again. An accepted approval is never sent again. An approval posts
 only while the PR/MR head is the head it approved and no blocking finding is
 open, never counts as open, and goes to someone else's PR/MR with
-`publish --not-own --only <id>`.
+`publish --not-own --approve` (the approval is named for you).
 
 A wrong run, pass or reviewer id fails with the valid ones named: the open
 runs, the run's passes, or the pass's reviewers. Run ids are unique in the repository. With no `--target` or `--range`, a
-command that names a run (`--run`, or a thread, killed finding or pass id that
-starts with one) works on the range, commit or PR/MR target holding that run,
-unless the current branch's own target holds it; so a `--range` review needs
-`--range` only on `run start`. Another branch's target is never picked, since it
-would evaluate that branch's tip rather than the checked-out work. `run start
---kind` that fails to start its pass leaves no run behind.
+command that names a run (`--run`, a `--reviewer <run>.<pass>.<id>`, or a thread, killed
+finding or pass id that starts with one) works on the range, commit or PR/MR target holding
+that run, unless the current branch's own target holds it; so a `--range` review needs
+`--range` only on the first `pass start`. Another branch's target is never picked, since it
+would evaluate that branch's tip rather than the checked-out work.
 
 Threads for humans and agents:
 
@@ -218,18 +213,16 @@ agt review comment --body "Why 3 retries?" --path src/net.rs --line 42
 agt review comment --body - --type question < note.md   # general comment
 agt review reply h1 --body "Matches the API limit."
 agt review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
-  --run rv-7k2m --pass c1p0 --reviewer fix --model claude-opus-5-5 --harness claude-code \
+  --reviewer rv-7k2m.c1p0.fix --model claude-opus-5-5 --harness claude-code \
   --session dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f
-agt review resolve h1 --resolution answered
-agt review resolve rv-7k2m.c1p0.r1.f1 --triage fixed --resolution "fixed 9e8d7c6"
+agt review resolve h1 --answered
 agt review resolve rv-7k2m.c1p0.r1.f2 --triage question     # held, stays open
-agt review resolve rv-7k2m.c1p0.r1.f1 --reopen --resolution "not fixed: still loses data"
 # Fixed: triage, resolution and a "✅ Fixed in <sha> <subject>." reply for each, in one write
 agt review resolve rv-7k2m.c1p0.r1.f1 rv-7k2m.c1p0.r2.f1 --fixed 9e8d7c6 \
-  --run rv-7k2m --pass c1p1 --reviewer fix
+  --reviewer rv-7k2m.c1p1.fix
 # A fix check disagrees: reopen with a "❌ Not fixed: <reason>." reply
 agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
-  --run rv-7k2m --pass c1p1 --reviewer r1
+  --reviewer rv-7k2m.c1p1.r1
 ```
 
 - `comment` options: `--type bug|question|requirement|nit|comment` (default
@@ -237,32 +230,30 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   `--side new|old`, `--start-line`, `--commit <rev>`. Line numbers refer to
   `--commit`, else `HEAD`, else the uncommitted work tree when it is dirty.
 - Author: `--author <login>` for a human, or agent flags `--model`,
-  `--effort`, `--harness`, `--harness-version`, `--run`, `--pass`,
-  `--reviewer`, `--session`. `--reviewer` with `--run` and `--pass` fills the
-  rest from the stored reviewer; `--session` is the harness's id for the agent,
+  `--effort`, `--harness`, `--harness-version`, `--reviewer`, `--session`.
+  `--reviewer <run>.<pass>.<id>` (such as `rv-7k2m.c1p0.r1`) names a reviewer of a stored
+  pass and fills the rest from it, and records that run, pass and reviewer on the author; `--session` is the harness's id for the agent,
   such as the main session's. With no author flags the author is the forge login that
   `sync` last authenticated as for this repository, else git `user.name`,
   which the next `sync` (or `publish`) replaces with the forge login.
 - `reply --local` keeps the reply in the store only, such as the user's answer
   to a held question: `list --format prompt` shows it and `publish` never posts
   it.
-- `resolve`: `--resolution` is one of `fixed <sha>`, `not fixed: <reason>`,
-  `rejected: <reason>`, `stale` or `answered`. `--triage fixed|stale` resolves (`stale` implies the
-  `stale` resolution; `fixed` needs `--resolution "fixed <sha>"`).
-  `--triage valid|question` only records the triage and leaves the thread open;
-  `question` marks it held. `--reopen` marks it unresolved. `resolve` takes
-  several ids and changes them all in one write, or none when one is missing.
-  `--fixed <sha>` means `--triage fixed --resolution "fixed <sha>"` plus a reply
-  `✅ Fixed in [<sha> <subject>](<commit URL>).` (the link once the target is
-  linked to a PR/MR); `--not-fixed <reason>` means `--reopen --resolution
-  "not fixed: <reason>"` plus a reply `❌ Not fixed: <reason>.`; `--rejected
-  <reason>` resolves a finding that will not be fixed, with `rejected: <reason>`
-  and a reply `🚫 Rejected: <reason>.`, and the summary counts it as
-  `<n> rejected`. A finding rejected before it was ever posted is not posted, as
-  with `stale`, and the summary lists it by its first sentence only; another store that syncs the reply reads the rejection back. `--reply <text>`
-  replaces that text, or adds a reply to any `resolve`; the author flags sign
-  it. With one id the output is the `thread`; with more, `threads` lists each
-  id with `resolved`, `resolution` and `held`.
+- `resolve` takes one outcome flag, or none to resolve the thread as it is:
+  `--fixed <sha>` (triage `fixed`, resolution `fixed <sha>`, plus a reply
+  `✅ Fixed in [<sha> <subject>](<commit URL>).`, linked once the target is linked
+  to a PR/MR); `--not-fixed <reason>` (reopens with resolution `not fixed: <reason>`
+  and a reply `❌ Not fixed: <reason>.`); `--rejected <reason>` (resolves a finding
+  that will not be fixed with `rejected: <reason>` and a reply `🚫 Rejected: <reason>.`;
+  the summary counts it as `<n> rejected`); `--stale` (triage and resolution `stale`);
+  `--answered` (resolution `answered`); `--triage valid|question` (only records the triage and
+  leaves the thread open; `question` marks it held). A finding rejected or stale before it
+  was ever posted is not posted, and the summary lists a rejected one by its first sentence
+  only; another store that syncs the reply reads the rejection back. `--reply <text>`
+  replaces the default reply, or adds a reply to any `resolve`; the author flags sign it.
+  `resolve` takes several ids and changes them all in one write, or none when one is
+  missing. With one id the output is the `thread`; with more, `threads` lists each id with
+  `resolved`, `resolution` and `held`.
 
 Reading:
 
@@ -276,6 +267,7 @@ agt review show rv-7k2m.c1p0                     # pass
 agt review status
 agt review status --head 1a2b3c4
 agt review status --full                         # plus commits, runs, records
+agt review status --sync                         # import the PR/MR first
 ```
 
 `list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
@@ -287,7 +279,9 @@ locally or by the authenticated forge user; every other comment shows as
 `(comment by another author, text hidden)`, so reviewers never read other
 people's comments. A posted thread also shows its forge URL on a `URL:` line.
 `--head <rev>` maps anchors to that commit instead of the target's head, such
-as a fix after a range target's end.
+as a fix after a range target's end. `status` and `list` never write, unless `--sync`
+(with `--pr <number|url>` to name the PR/MR) first imports the PR/MR of this branch as
+`sync` does; `--offline` refuses it.
 
 `status` never writes: not to the store, not to the git index or object
 database. By default it leaves out `commits`, `runs` and tree ids; `--full`
@@ -617,11 +611,12 @@ local reads continue.
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
   threads imported from the host (other people's threads); our findings, local
-  threads and the summary are listed under `skipped`. `--not-own --findings
-  --only <id,...>`, when the user asks for it, also posts the named surviving
-  findings and local threads the user wrote, with their replies and resolves;
-  `--findings` without `--only` is refused, and the summary never goes to
-  someone else's PR/MR.
+  threads and the summary are listed under `skipped`. `--not-own --only
+  <id,...>`, when the user asks for it, also posts the named surviving
+  findings and local threads the user wrote, with their replies and resolves
+  (naming them is the consent); the summary never goes to someone else's PR/MR.
+  `--approve` (with `--formal` and `--body`) records the head approval before publishing;
+  on someone else's PR/MR it is named for you.
 - `--only <id>[,<id>...]` limits writes to those threads and their pending
   replies and resolves; every other thread and the summary are listed under
   `skipped`.
@@ -739,6 +734,7 @@ Target file:
   "branch_birth": "1792152000 5d6e7f...",
   "base": "1a2b3c...",
   "head": null,
+  "default_branch": "develop",
   "created_at": "2026-10-16T12:00:00Z",
   "updated_at": "2026-10-16T13:10:00Z",
   "review": {
@@ -856,14 +852,14 @@ the forge has it; `remote` and the target's `review` and `records` are filled by
 
 ## Finding input
 
-`finding add` reads one JSON object or an array of them from stdin. Unknown
-fields are rejected.
+`pass end --findings` reads one JSON object or an array of them (or the object form
+described above). Unknown fields are rejected.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `type` | `bug`, `question`, `requirement`, `nit`, `comment` | yes | Finding class |
 | `severity` | `high`, `medium`, `low` | for `bug` | Bug severity |
-| `scenario` (alias `body`) | string | yes | Failure scenario; becomes the first comment |
+| `scenario` | string | yes | Failure scenario; becomes the first comment |
 | `path` | string | with any line field | File, relative to the repository root |
 | `line` | integer | no | New-side line; omit with `path` for a file-level finding |
 | `start_line` | integer | no | First line of a new-side multi-line range ending at `line` |

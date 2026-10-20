@@ -34,11 +34,7 @@ fn tracked_ignored_file_stays_in_tree_id() {
     env.write("keep.log", "v2\n");
     let staged_before = env.git(&["ls-files", "-s", "keep.log"]);
 
-    let run = env.run(&["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let pass = env.run(&["pass", "start", "--run", &run, "--kind", "full"])["pass"].clone();
+    let pass = env.run(&["pass", "start", "--kind", "full"])["pass"].clone();
     assert_eq!(pass["dirty"], true);
     let tree = pass["tree"].as_str().unwrap();
     let blob = env.git(&["rev-parse", &format!("{tree}:keep.log")]);
@@ -179,11 +175,10 @@ fn conflict_resolved_commit_shows_unreviewed() {
 fn uncommitted_review_then_commit_stays_reviewed() {
     let env = Env::with_branch();
     env.write("a.txt", &numbered(10, &[(3, "three")]));
-    let run = env.run(&["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let pass = env.reviewed_pass(&run, "full");
+    let started = env.run(&["pass", "start", "--kind", "full"]);
+    let run = started["run"].as_str().unwrap().to_owned();
+    let pass = started["pass"]["id"].as_str().unwrap().to_owned();
+    env.run(&["pass", "end", "--run", &run, "--pass", &pass]);
     let shown = env.run(&["show", &format!("{run}.{pass}")]);
     assert_eq!(shown["pass"]["dirty"], true);
 
@@ -235,7 +230,7 @@ fn reused_branch_name_starts_new_target() {
     let status = env.run(&["status"]);
     assert!(status["target"].is_null(), "{status}");
     assert_eq!(status["reviewed"], false);
-    let new = env.run(&["run", "start"])["target"].clone();
+    let new = env.run(&["pass", "start", "--kind", "full"])["target"].clone();
     assert_ne!(new, old);
 }
 
@@ -244,38 +239,27 @@ fn count_full_reviews_and_clean_fix_checks() {
     let env = Env::with_branch();
     env.write("a.txt", &numbered(10, &[(3, "three")]));
     env.commit_all("one");
-    let run = env.run(&["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     let pass = env.run_stdin(
-        &[
-            "pass",
-            "start",
-            "--run",
-            &run,
-            "--kind",
-            "full",
-            "--reviewers",
-            "-",
-        ],
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
         r#"[{"model":"a","harness":"codex"},{"model":"b","harness":"claude-code"}]"#,
     );
     assert_eq!(pass["pass"]["reviewers"][1]["id"], "r2");
+    let run = pass["run"].as_str().unwrap().to_owned();
     env.run_stdin(
         &[
-            "finding",
-            "add",
+            "pass",
+            "end",
             "--run",
             &run,
             "--pass",
             "c1p0",
+            "--findings",
+            "-",
             "--reviewer",
             "r1",
         ],
         r#"{"type":"bug","severity":"medium","path":"a.txt","line":3,"scenario":"broken"}"#,
     );
-    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
     let at_review = env.run(&["status"]);
     assert_eq!(at_review["reviews_at_head"], 1);
 
@@ -301,18 +285,19 @@ fn count_full_reviews_and_clean_fix_checks() {
     );
     env.run_stdin(
         &[
-            "finding",
-            "add",
+            "pass",
+            "end",
             "--run",
             &run,
             "--pass",
             "c1p2",
+            "--findings",
+            "-",
             "--reviewer",
             "r1",
         ],
         r#"{"type":"bug","severity":"high","scenario":"still broken"}"#,
     );
-    env.run(&["pass", "end", "--run", &run, "--pass", "c1p2"]);
     let status = env.run(&["status"]);
     assert_eq!(status["covered_by"].as_array().unwrap().len(), 2);
     assert_eq!(status["reviews_at_head"], 1);
@@ -365,7 +350,7 @@ fn recreated_branch_from_same_base_starts_new_target() {
 
     let status = env.run(&["status"]);
     assert!(status["target"].is_null(), "{status}");
-    let new = env.run(&["run", "start"])["target"].clone();
+    let new = env.run(&["pass", "start", "--kind", "full"])["target"].clone();
     assert_ne!(new, old);
 }
 
@@ -411,13 +396,10 @@ fn partial_pass_does_not_cover_earlier_commits() {
     env.write("a.txt", &numbered(10, &[(2, "two")]));
     env.commit_all("A unreviewed");
     env.write("a.txt", &numbered(10, &[(2, "two"), (8, "eight")]));
-    let run = env.run(&["run", "start"])["run"]
+    let run = env.run(&["pass", "start", "--kind", "full", "--base", "HEAD"])["run"]
         .as_str()
         .unwrap()
         .to_owned();
-    env.run(&[
-        "pass", "start", "--run", &run, "--kind", "full", "--base", "HEAD",
-    ]);
     env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
     env.commit_all("B reviewed");
     env.run(&["run", "end", "--run", &run]);
@@ -471,13 +453,10 @@ fn review_from_starts_at_oldest_unreviewed_commit() {
         commits.push(env.commit_all(text));
     }
     let range = format!("{}..{}", commits[1], commits[2]);
-    let run = env.run(&["--range", &range, "run", "start"])["run"]
+    let run = env.run(&["--range", &range, "pass", "start", "--kind", "full"])["run"]
         .as_str()
         .unwrap()
         .to_owned();
-    env.run(&[
-        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
-    ]);
     env.run(&[
         "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
     ]);
@@ -523,13 +502,10 @@ fn range_review_clears_branch_commits() {
     env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B")]));
     let b = env.commit_all("B");
     let range = format!("{main}..{b}");
-    let run = env.run(&["--range", &range, "run", "start"])["run"]
+    let run = env.run(&["--range", &range, "pass", "start", "--kind", "full"])["run"]
         .as_str()
         .unwrap()
         .to_owned();
-    env.run(&[
-        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
-    ]);
     env.run(&[
         "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
     ]);
@@ -548,44 +524,40 @@ fn range_review_of_the_branch_head_counts_and_names_its_run() {
     env.write("a.txt", &numbered(10, &[(2, "A")]));
     let a = env.commit_all("A");
     let range = format!("{main}..{a}");
-    let run = env.run(&["--range", &range, "run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let key = env.run(&["--range", &range, "status"])["target"].clone();
-    env.run_stdin(
+    let run = env.run_stdin(
         &[
             "--range",
             &range,
             "pass",
             "start",
-            "--run",
-            &run,
             "--kind",
             "full",
             "--reviewers",
             "-",
         ],
         r#"[{"model":"a","harness":"codex"}]"#,
-    );
+    )["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = env.run(&["--range", &range, "status"])["target"].clone();
     let added = env.run_stdin(
         &[
             "--range",
             &range,
-            "finding",
-            "add",
+            "pass",
+            "end",
             "--run",
             &run,
             "--pass",
             "c1p0",
+            "--findings",
+            "-",
             "--reviewer",
             "r1",
         ],
         r#"{"type":"bug","severity":"high","path":"a.txt","line":2,"scenario":"broken"}"#,
     );
-    env.run(&[
-        "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
-    ]);
     env.run(&["--range", &range, "run", "end", "--run", &run]);
     let status = env.run(&["status"]);
     assert_eq!(status["reviewed"], true, "{status}");
@@ -695,13 +667,8 @@ fn default_branch_pass_with_base_reviews_the_branch() {
     let a = env.commit_all("A");
     env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B")]));
     let b = env.commit_all("B");
-    let run = env.run(&["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let started = env.run(&[
-        "pass", "start", "--run", &run, "--kind", "full", "--base", &a,
-    ]);
+    let started = env.run(&["pass", "start", "--kind", "full", "--base", &a]);
+    let run = started["run"].as_str().unwrap().to_owned();
     assert_eq!(started["pass"]["partial"], false, "{started}");
     env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
     env.run(&["run", "end", "--run", &run]);
@@ -710,15 +677,12 @@ fn default_branch_pass_with_base_reviews_the_branch() {
     assert_eq!(status["last_reviewed_head"], b);
     assert_eq!(status["review_from"], b);
 
-    let run = env.run(&["run", "start"])["run"]
+    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B"), (8, "C")]));
+    env.commit_all("C");
+    let run = env.run(&["pass", "start", "--kind", "full", "--base", &b])["run"]
         .as_str()
         .unwrap()
         .to_owned();
-    env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B"), (8, "C")]));
-    env.commit_all("C");
-    env.run(&[
-        "pass", "start", "--run", &run, "--kind", "full", "--base", &b,
-    ]);
     env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
     env.write("a.txt", &numbered(10, &[(2, "A"), (5, "B"), (8, "C2")]));
     let fix = env.commit_all("fix C");
@@ -735,13 +699,10 @@ fn range_repair_clears_fix_commits_on_the_branch() {
     env.write("a.txt", &numbered(10, &[(2, "A")]));
     let a = env.commit_all("A");
     let range = format!("{main}..{a}");
-    let run = env.run(&["--range", &range, "run", "start"])["run"]
+    let run = env.run(&["--range", &range, "pass", "start", "--kind", "full"])["run"]
         .as_str()
         .unwrap()
         .to_owned();
-    env.run(&[
-        "--range", &range, "pass", "start", "--run", &run, "--kind", "full",
-    ]);
     env.run(&[
         "--range", &range, "pass", "end", "--run", &run, "--pass", "c1p0",
     ]);
@@ -774,7 +735,7 @@ fn sha256_repository_reviews_and_tracks_commits() {
     env.commit_all("change");
     let started = env.run_stdin(
         &[
-            "run",
+            "pass",
             "start",
             "--kind",
             "full",
@@ -818,7 +779,7 @@ fn sha256_repository_reviews_and_tracks_commits() {
     // A range target names 64-character ids.
     let head = env.git(&["rev-parse", "HEAD"]);
     let range = format!("{main}..{head}");
-    let started = env.run(&["--range", &range, "run", "start"]);
+    let started = env.run(&["--range", &range, "pass", "start", "--kind", "full"]);
     assert!(
         started["target"].as_str().unwrap().contains(&head),
         "{started}"

@@ -89,9 +89,9 @@ pub(super) fn coverage<'a>(
 }
 
 /// Passes covering `head` itself; a changed merge the caller found unreviewed voids them all.
-pub(super) fn head_coverage<'a>(
+fn head_coverage<'a>(
     repo: &Repo,
-    targets: &[&'a Target],
+    targets: &Targets<'a>,
     base: Option<&str>,
     head: &str,
     head_tree: &str,
@@ -102,8 +102,7 @@ pub(super) fn head_coverage<'a>(
         _ => None,
     };
     let range_patch_id = repo.range_patch_id(base, head)?;
-    Ok(coverage(
-        targets,
+    Ok(targets.covered_at(
         head_tree,
         range_patch_id.as_deref(),
         head_patch_id.as_deref(),
@@ -136,7 +135,10 @@ pub(super) fn run_reviews_at(ctx: &Ctx, target: &Target, run: &str, head: &str) 
         return Ok(0);
     }
     let base = match (target.kind, &target.branch) {
-        (TargetKind::Branch, Some(branch)) => Some(ctx.branch_base(branch, head)?.0),
+        (TargetKind::Branch, Some(branch)) => Some(
+            ctx.branch_base(branch, head, target.default_branch.as_deref())?
+                .0,
+        ),
         _ => target.base.clone(),
     };
     let history = ctx.repo.log(base.as_deref(), head)?;
@@ -147,8 +149,13 @@ pub(super) fn run_reviews_at(ctx: &Ctx, target: &Target, run: &str, head: &str) 
     }
     let commits = ctx.repo.commits(base.as_deref(), head)?;
     let tree = ctx.repo.tree_of(head)?;
+    // Only the run's own target counts for its record.
+    let targets = Targets {
+        target: Some(target),
+        others: &[],
+    };
     let covered: Vec<_> =
-        head_coverage(&ctx.repo, &[target], base.as_deref(), head, &tree, &commits)?
+        head_coverage(&ctx.repo, &targets, base.as_deref(), head, &tree, &commits)?
             .into_iter()
             .filter(|covered| covered.run == run)
             .collect();
@@ -336,12 +343,14 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let covered = if merge_after {
         Vec::new()
     } else {
-        let head_patch_id = match commits.as_slice() {
-            [only] if only.sha == head => only.patch_id.clone(),
-            _ => None,
-        };
-        let range = ctx.repo.range_patch_id(scope.base.as_deref(), &head)?;
-        targets.covered_at(&head_tree, range.as_deref(), head_patch_id.as_deref())
+        head_coverage(
+            &ctx.repo,
+            &targets,
+            scope.base.as_deref(),
+            &head,
+            &head_tree,
+            &commits,
+        )?
     };
 
     let (reviewed, repaired) = targets.reviewed();

@@ -399,6 +399,10 @@ impl FakeService for Github {
             &self.created(Call::Reply("PRRT_f1"), 801),
         );
         env.respond(
+            &strs(&mutation("PRRT_o", "AddReply", true)),
+            &self.created(Call::Reply("PRRT_o"), 802),
+        );
+        env.respond(
             &strs(&mutation("PRRT_f1", "ResolveThread", false)),
             &self.created(Call::Resolve("PRRT_f1"), 0),
         );
@@ -462,7 +466,7 @@ impl FakeService for Github {
             "General note from me.\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
         ));
         assert_eq!(dry["skipped"][0]["item"], "h2");
-        super::super::scenario::assert_summary(setup, writes[7]["input"]["body"].as_str().unwrap());
+        super::super::scenario::assert_summary(setup, writes[8]["input"]["body"].as_str().unwrap());
     }
 
     fn assert_posted(&self, setup: &Setup) {
@@ -470,7 +474,9 @@ impl FakeService for Github {
         let inputs = env.forge_inputs();
         let reply = inputs
             .iter()
-            .find(|(call, _)| call.contains("query=AddReply"))
+            .find(|(call, input)| {
+                call.contains("query=AddReply") && input.contains("Fixed in the same commit.")
+            })
             .unwrap();
         assert!(reply.1.starts_with(
             "> Fixed in the same commit. <sub>m2 high · Claude Code 2.1.300 · session \

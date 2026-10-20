@@ -91,50 +91,33 @@ impl Setup {
     }
 }
 
-/// Starts a run, takes one full pass of `review` and returns the run id. The pass ends locked
-/// when `lock` is set.
+/// Starts a run with one full pass of `review` and returns the run id. The pass ends with its
+/// findings, locked when `lock` is set.
 pub fn start_review(env: &Env, review: &Review, lock: bool) -> String {
-    let run = env.run(&["run", "start"])["run"]
+    let run = env.run_stdin(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        review.reviewers,
+    )["run"]
         .as_str()
         .unwrap()
         .to_owned();
-    add_pass(env, &run, review);
-    let mut end = vec!["pass", "end", "--run", &run, "--pass", "c1p0"];
+    let mut end = vec![
+        "pass",
+        "end",
+        "--run",
+        &run,
+        "--pass",
+        "c1p0",
+        "--findings",
+        "-",
+        "--reviewer",
+        "r1",
+    ];
     if lock {
         end.push("--lock");
     }
-    env.run(&end);
+    env.run_stdin(&end, review.findings);
     run
-}
-
-/// Starts the full pass `c1p0` of `run` with `review`'s reviewer and adds its findings.
-pub fn add_pass(env: &Env, run: &str, review: &Review) {
-    env.run_stdin(
-        &[
-            "pass",
-            "start",
-            "--run",
-            run,
-            "--kind",
-            "full",
-            "--reviewers",
-            "-",
-        ],
-        review.reviewers,
-    );
-    env.run_stdin(
-        &[
-            "finding",
-            "add",
-            "--run",
-            run,
-            "--pass",
-            "c1p0",
-            "--reviewer",
-            "r1",
-        ],
-        review.findings,
-    );
 }
 
 /// The text a comment carries so a later sync recognizes it as this store's own.
@@ -290,9 +273,11 @@ pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
         "alice",
     ]);
     env.run(&[
-        "reply",
+        "resolve",
         &f1,
-        "--body",
+        "--fixed",
+        &setup.head,
+        "--reply",
         "Fixed in the same commit.",
         "--model",
         "m2",
@@ -302,24 +287,12 @@ pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
         "claude-code",
         "--harness-version",
         "2.1.300",
-        "--run",
-        &setup.run,
-        "--pass",
-        "c1p0",
         "--reviewer",
-        "fix",
+        &format!("{}.c1p0.fix", setup.run),
         "--session",
         "dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f",
     ]);
-    env.run(&[
-        "resolve",
-        &f1,
-        "--triage",
-        "fixed",
-        "--resolution",
-        &format!("fixed {}", setup.head),
-    ]);
-    env.run(&["resolve", reopen, "--reopen"]);
+    env.run(&["resolve", reopen, "--not-fixed", "reopened"]);
     env.run(&["reply", answer, "--body", "Thanks, done.", "--author", "me"]);
     env.run(&["run", "end", "--run", &setup.run]);
 }

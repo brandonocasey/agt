@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, Result, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
-use crate::review::cli::{Cli, Command, FindingAction, PassAction, RunAction};
+use crate::review::cli::{AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction};
 use crate::store::Store;
 use crate::store::model::{
-    Pass, Reveal, RoleUsage, Run, Severity, Target, TargetKind, Thread, ThreadType,
+    Pass, PassKind, Reveal, RoleUsage, Run, Severity, Target, TargetKind, Thread, ThreadType,
 };
 
 mod approve;
@@ -22,7 +22,7 @@ mod sync;
 mod usage;
 mod view;
 use self::approve::approve;
-use self::findings::{comment, finding_add, finding_kill, reply, resolve};
+use self::findings::{comment, finding_kill, reply, resolve};
 use self::run::{pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::usage::UsageInput;
@@ -58,6 +58,8 @@ struct Scope {
     /// False only for a reading command on a branch target with no branch, PR/MR head or
     /// pass; `head` is then empty.
     head_known: bool,
+    /// The default branch the base was taken against: `--default-branch`, else the target's.
+    default_branch: Option<String>,
     existing: Option<Target>,
 }
 
@@ -67,24 +69,36 @@ pub fn run(cli: Cli) -> Result<Output> {
         range: cli.range,
         default_branch: cli.default_branch,
     };
+    let approving = matches!(
+        &cli.command,
+        Command::Publish { approval, .. } if approval.approve
+    );
     let read_only = matches!(
         cli.command,
-        Command::Status { .. }
-            | Command::List(_)
-            | Command::Show { .. }
-            | Command::Publish { dry_run: true, .. }
-    );
+        Command::Status { .. } | Command::List(_) | Command::Show { .. }
+    ) || matches!(cli.command, Command::Publish { dry_run: true, .. })
+        && !approving;
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
     if matches!(cli.command, Command::Sync { .. } | Command::Publish { .. }) {
         cli.offline.forbid("review sync and publish")?;
     }
-    let mut ctx = Ctx::new(
-        selection,
-        read_only,
-        scratch_git,
-        matches!(cli.command, Command::Publish { dry_run: true, .. }),
-    )?;
+    let sync_first = match &cli.command {
+        Command::Status { sync, .. } => Some(sync),
+        Command::List(args) => Some(&args.sync),
+        _ => None,
+    }
+    .filter(|first| first.sync);
+    if sync_first.is_some() {
+        cli.offline.forbid("review status and list --sync")?;
+    }
+    let preview = matches!(cli.command, Command::Publish { dry_run: true, .. }) && !approving;
+    // `--sync` writes through its own repository so the read itself stays read-only.
+    if let Some(first) = sync_first {
+        let writer = Ctx::new(selection.clone(), false, false, false)?;
+        sync::sync(&writer, first.pr.as_deref())?;
+    }
+    let mut ctx = Ctx::new(selection, read_only, scratch_git, preview)?;
     if let Some(run) = run_hint(&cli.command) {
         ctx.select_run_target(&run)?;
     }
@@ -97,42 +111,6 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     let status_selection = ctx.selection.clone();
     let value = match cli.command {
-        Command::Run {
-            action:
-                RunAction::Start {
-                    kind,
-                    base,
-                    reviewers,
-                    head,
-                },
-        } => {
-            let started = run_start(&ctx)?;
-            match kind {
-                Some(kind) => {
-                    let run = started["run"].as_str().unwrap_or_default().to_owned();
-                    let pass = pass_start(
-                        &ctx,
-                        &run,
-                        kind,
-                        base.as_deref(),
-                        reviewers.as_deref(),
-                        head.as_deref(),
-                    );
-                    // A first pass that fails leaves no empty run behind.
-                    if pass.is_err() {
-                        let scope = ctx.scope()?;
-                        ctx.update(&scope, |target, _| {
-                            target
-                                .runs
-                                .retain(|known| known.id != run || !known.passes.is_empty());
-                            Ok(())
-                        })?;
-                    }
-                    pass?
-                }
-                None => started,
-            }
-        }
         Command::Run {
             action:
                 RunAction::End {
@@ -191,14 +169,40 @@ pub fn run(cli: Cli) -> Result<Output> {
                     reviewers,
                     head,
                 },
-        } => pass_start(
-            &ctx,
-            &run,
-            kind,
-            base.as_deref(),
-            reviewers.as_deref(),
-            head.as_deref(),
-        )?,
+        } => match run {
+            Some(run) => pass_start(
+                &ctx,
+                &run,
+                kind,
+                base.as_deref(),
+                reviewers.as_deref(),
+                head.as_deref(),
+            )?,
+            None if kind == PassKind::Full => {
+                let started = run_start(&ctx)?;
+                let run = started["run"].as_str().unwrap_or_default().to_owned();
+                let pass = pass_start(
+                    &ctx,
+                    &run,
+                    kind,
+                    base.as_deref(),
+                    reviewers.as_deref(),
+                    head.as_deref(),
+                );
+                // A first pass that fails leaves no empty run behind.
+                if pass.is_err() {
+                    let scope = ctx.scope()?;
+                    ctx.update(&scope, |target, _| {
+                        target
+                            .runs
+                            .retain(|known| known.id != run || !known.passes.is_empty());
+                        Ok(())
+                    })?;
+                }
+                pass?
+            }
+            None => return fail("--run is required unless --kind is full, which starts the run"),
+        },
         Command::Pass {
             action:
                 PassAction::End {
@@ -217,23 +221,14 @@ pub fn run(cli: Cli) -> Result<Output> {
             reviewer.as_deref(),
         )?,
         Command::Finding {
-            action:
-                FindingAction::Add {
-                    run,
-                    pass,
-                    reviewer,
-                },
-        } => finding_add(&ctx, &run, &pass, &reviewer)?,
-        Command::Finding {
             action: FindingAction::Kill { id, reason },
         } => finding_kill(&ctx, &id, &reason)?,
         Command::Comment(args) => comment(&ctx, &args)?,
         Command::Reply(args) => reply(&ctx, &args)?,
         Command::Resolve(args) => resolve(&ctx, &args)?,
-        Command::Approve(args) => approve(&ctx, &args)?,
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,
-        Command::Status { head, full } => {
+        Command::Status { head, full, .. } => {
             let status = status(&ctx, head.as_deref())?;
             if full { status } else { brief_status(status) }
         }
@@ -241,20 +236,31 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Publish {
             dry_run,
             not_own,
-            findings,
-            only,
+            mut only,
             pr,
-        } => publish::publish(
-            &mut ctx,
-            pr.as_deref(),
-            &publish::Options {
-                dry_run,
-                not_own,
-                findings,
-                only,
-                run: None,
-            },
-        )?,
+            approval,
+        } => {
+            if !approval.approve && (approval.author.is_set()) {
+                return fail("author flags on publish need --approve");
+            }
+            if approval.approve {
+                let approved = approve(&ctx, &approval)?;
+                // A foreign PR/MR posts only the threads named, so name the approval.
+                if not_own && let Some(id) = approved["thread"]["id"].as_str() {
+                    only.push(id.to_owned());
+                }
+            }
+            publish::publish(
+                &mut ctx,
+                pr.as_deref(),
+                &publish::Options {
+                    dry_run,
+                    not_own,
+                    only,
+                    run: None,
+                },
+            )?
+        }
     };
     Ok(Output::Json(value))
 }
@@ -270,24 +276,29 @@ fn run_hint(command: &Command) -> Option<String> {
             action: RunAction::End { run, .. },
         }
         | Command::Pass {
-            action: PassAction::Start { run, .. } | PassAction::End { run, .. },
-        }
-        | Command::Finding {
-            action: FindingAction::Add { run, .. },
+            action: PassAction::End { run, .. },
         } => Some(run.clone()),
+        Command::Pass {
+            action: PassAction::Start { run, .. },
+        } => run.clone(),
         Command::Finding {
             action: FindingAction::Kill { id, .. },
         }
         | Command::Show { id } => from_id(id),
-        Command::Reply(args) => args.author.run.clone().or_else(|| from_id(&args.id)),
-        Command::Resolve(args) => args
-            .author
-            .run
-            .clone()
-            .or_else(|| args.ids.first().and_then(|id| from_id(id))),
+        Command::Reply(args) => author_run(&args.author).or_else(|| from_id(&args.id)),
+        Command::Resolve(args) => {
+            author_run(&args.author).or_else(|| args.ids.first().and_then(|id| from_id(id)))
+        }
+        Command::Publish { approval, .. } => author_run(&approval.author),
         Command::List(args) => args.run.clone(),
         _ => None,
     }
+}
+
+/// The run of an agent author's `--reviewer <run>.<pass>.<reviewer>`.
+fn author_run(author: &AuthorArgs) -> Option<String> {
+    let run = author.reviewer.as_deref()?.split('.').next()?;
+    is_run_id(run).then(|| run.to_owned())
 }
 
 fn passes(target: &Target) -> impl Iterator<Item = &Pass> {

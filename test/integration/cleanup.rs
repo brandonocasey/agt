@@ -627,7 +627,7 @@ fn agt_records_the_common_dir_of_a_local_repo() {
     };
     prune.env.write("a.txt", "one\n");
     prune.env.commit_all("change");
-    prune.env.run(&["run", "start"]);
+    prune.env.run(&["pass", "start", "--kind", "full"]);
     let recorded: Value =
         serde_json::from_slice(&fs::read(prune.env.state().join(".repo.json")).unwrap()).unwrap();
     let git = prune.env.repo.join(".git");
@@ -1613,7 +1613,7 @@ fn repository_storage_is_shared_with_linked_worktrees() {
     let env = Env::with_branch();
     let linked = env.path("linked");
     env.git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
-    let started = env.run(&["run", "start"]);
+    let started = env.run(&["pass", "start", "--kind", "full"]);
     let key = started["target"].as_str().unwrap();
     assert!(env.state().join(format!("{key}.json")).exists());
     let output = env
@@ -1860,7 +1860,7 @@ fn repository_storage_identity_survives_relocation_after_private_edits() {
     fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
     env.issue(&["list"]);
     env.issue(&["note", "1", "Private relocation note"]);
-    let review = env.run(&["run", "start"]);
+    let review = env.run(&["pass", "start", "--kind", "full"]);
     let review_key = review["target"].as_str().unwrap();
     let records = env.path("state").join("agents/repository-imports");
     let backups = env.path("state").join("agents/backups/repositories");

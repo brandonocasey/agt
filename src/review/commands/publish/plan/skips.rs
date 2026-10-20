@@ -71,8 +71,8 @@ impl std::fmt::Display for Skip {
                 held: Held::Threads,
             } => write!(
                 f,
-                "{whose}: --not-own posts only replies and resolves on others' threads (add \
-                 --findings for ours)"
+                "{whose}: --not-own posts only replies and resolves on others' threads (name \
+                 ours with --only)"
             ),
             Self::Foreign {
                 whose,
@@ -224,11 +224,9 @@ impl Planner<'_> {
     }
 
     /// Why a thread of ours is held: not named by `--only`, or on someone else's PR/MR
-    /// without `--findings`. An approval the user named with `--only` may go there.
+    /// with no `--only` naming threads to post there.
     pub(super) fn held(&self, thread: &Thread) -> Option<Skip> {
-        let named_approval = thread.approval.is_some() && self.only.contains(&thread.id);
-        self.unnamed(thread)
-            .or_else(|| self.foreign_threads().filter(|_| !named_approval))
+        self.unnamed(thread).or_else(|| self.foreign_threads())
     }
 
     pub(super) fn selected_thread(&self, thread: &Thread) -> bool {
@@ -248,11 +246,11 @@ impl Planner<'_> {
         (!self.only.is_empty() && !self.only.contains(&thread.id)).then_some(Skip::NotNamed)
     }
 
-    /// Why our findings and local threads are held on someone else's PR/MR, unless
-    /// `--findings` asks for them.
+    /// Why our findings and local threads are held on someone else's PR/MR, unless `--only`
+    /// names threads, which posts exactly those.
     pub(super) fn foreign_threads(&self) -> Option<Skip> {
         self.foreign()
-            .filter(|_| !self.findings)
+            .filter(|_| self.only.is_empty())
             .map(|whose| Skip::Foreign {
                 whose,
                 held: Held::Threads,
@@ -260,7 +258,7 @@ impl Planner<'_> {
     }
 
     /// Whose PR/MR this is when it is not ours (`--not-own`): a final record there would
-    /// speak for its author, and our findings and threads go out only with `--findings`.
+    /// speak for its author, and our findings and threads go out only when `--only` names them.
     pub(super) fn foreign(&self) -> Option<String> {
         let author = self.review.author.as_deref();
         (author != Some(self.connection.login.as_str())).then(|| {
@@ -290,7 +288,7 @@ mod tests {
         assert_eq!(
             foreign(Held::Threads).to_string(),
             "https://h/pull/1 is authored by bob: --not-own posts only replies and resolves on \
-             others' threads (add --findings for ours)"
+             others' threads (name ours with --only)"
         );
         let head = Skip::HeadMoved {
             approved: "aaaaaaa".into(),
