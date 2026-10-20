@@ -120,15 +120,12 @@ fn connect(target: &target::Target, repo: Option<&str>) -> Result<Project> {
     Project::connect(repo.or(target.repo.as_deref()), target.host.as_deref())
 }
 
-/// Runs the command; an error exits 2 with `agt ci: <message>`.
+/// Runs the command; an error exits 2 rather than 1.
 pub fn run(cli: Cli) -> Result<Output> {
-    Ok(Output::Exit(match execute(cli) {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("agt ci: {error}");
-            2
-        }
-    }))
+    Ok(match execute(cli) {
+        Ok(code) => Output::Exit(code),
+        Err(error) => Output::Failure(error, 2),
+    })
 }
 
 fn execute(cli: Cli) -> Result<u8> {

@@ -9,11 +9,8 @@ use std::time::{Duration, Instant};
 use clap::Args;
 
 use crate::core::error::Result;
-use crate::core::output::Output;
+use crate::core::output::{Output, TIMED_OUT};
 use crate::core::process;
-
-/// Exit status when `--max` passes before the check succeeds.
-const TIMED_OUT: u8 = 3;
 
 #[derive(Args)]
 pub struct Cli {

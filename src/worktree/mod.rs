@@ -29,7 +29,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use crate::core::error::Result;
-use crate::core::output::{self, Output};
+use crate::core::output::Output;
 
 #[derive(Args)]
 pub struct Cli {
@@ -72,9 +72,5 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Prints `value`; a failed step still prints its report but exits 1.
 fn emit(value: Value, ok: bool) -> Result<Output> {
-    if ok {
-        return Ok(Output::Json(value));
-    }
-    output::print(Output::Json(value))?;
-    Ok(Output::Exit(1))
+    Ok(Output::Json(value).exiting(u8::from(!ok)))
 }

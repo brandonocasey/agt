@@ -17,12 +17,6 @@ use crate::task::args::{Check, Create, Target, Update};
 use crate::task::files;
 use crate::task::text::limited;
 
-pub fn pretty(value: &Value) -> Result<Output> {
-    let mut text = serde_json::to_string_pretty(value).map_err(ctx("serialize output"))?;
-    text.push('\n');
-    Ok(Output::Text(text))
-}
-
 /// `[a-z0-9][a-z0-9._-]{0,63}`
 pub(super) fn is_id(id: &str) -> bool {
     let mut bytes = id.bytes();
@@ -273,7 +267,7 @@ pub fn check(args: &Check) -> Result<Output> {
 }
 
 fn show_task(id: &str) -> Result<Output> {
-    pretty(&read_task(id)?)
+    Output::pretty(&read_task(id)?)
 }
 
 pub fn show(target: &Target) -> Result<Output> {
@@ -318,5 +312,5 @@ pub fn list() -> Result<Output> {
             })
         })
         .collect();
-    pretty(&Value::Array(summaries))
+    Output::pretty(&Value::Array(summaries))
 }

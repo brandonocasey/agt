@@ -7,5 +7,5 @@
  "responses": [],
  "code": 2,
  "stdout": "",
- "stderr": "agt ci: expected an id, !id, or URL, got 'abc'\n"
+ "stderr": "agt: error: expected an id, !id, or URL, got 'abc'\n"
 }

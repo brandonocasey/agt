@@ -2,13 +2,43 @@ use std::io::{IsTerminal, Write};
 
 use serde_json::Value;
 
-use super::error::{Result, ctx};
+use super::error::{Error, Result, ctx};
+
+/// Exit status when a wait passes its time limit before the awaited thing happens.
+pub const TIMED_OUT: u8 = 3;
 
 pub enum Output {
     Json(Value),
     Text(String),
     /// Everything is already printed; exit with this status.
     Exit(u8),
+    /// Print the inner output, then exit with this status.
+    Report(Box<Output>, u8),
+    /// Print `agt: error: <message>` to stderr and exit with this status.
+    Failure(Error, u8),
+}
+
+impl Output {
+    /// Always-indented JSON text, even when piped.
+    pub fn pretty(value: &Value) -> Result<Output> {
+        pretty(value).map(Output::Text)
+    }
+
+    /// This output, then exit `code`; a zero code is a plain success.
+    pub fn exiting(self, code: u8) -> Output {
+        if code == 0 {
+            self
+        } else {
+            Output::Report(Box::new(self), code)
+        }
+    }
+}
+
+/// `value` as indented JSON plus a newline, for output that is always indented.
+pub fn pretty(value: &Value) -> Result<String> {
+    let mut text = serde_json::to_string_pretty(value).map_err(ctx("serialize output"))?;
+    text.push('\n');
+    Ok(text)
 }
 
 pub fn print(output: Output) -> Result<()> {
@@ -25,7 +55,8 @@ pub fn print(output: Output) -> Result<()> {
             text
         }
         Output::Text(text) => text,
-        Output::Exit(_) => return Ok(()),
+        Output::Report(inner, _) => return print(*inner),
+        Output::Exit(_) | Output::Failure(..) => return Ok(()),
     };
     std::io::stdout()
         .lock()

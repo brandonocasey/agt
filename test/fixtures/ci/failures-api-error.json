@@ -20,5 +20,5 @@
  ],
  "code": 2,
  "stdout": "",
- "stderr": "agt ci: glab api failed: glab: 404 Not Found\n"
+ "stderr": "agt: error: glab api failed: glab: 404 Not Found\n"
 }

@@ -28,5 +28,5 @@
  ],
  "code": 2,
  "stdout": "",
- "stderr": "agt ci: !5 has no pipeline\n"
+ "stderr": "agt: error: !5 has no pipeline\n"
 }

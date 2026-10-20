@@ -89,12 +89,6 @@ fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
     }
 }
 
-fn pretty(value: &Value) -> Result<Output> {
-    let mut text = serde_json::to_string_pretty(value).map_err(ctx("serialize output"))?;
-    text.push('\n');
-    Ok(Output::Text(text))
-}
-
 fn read_index() -> Result<Index> {
     let file = index_file()?;
     let raw = match fs::symlink_metadata(&file) {
@@ -382,7 +376,7 @@ pub fn index_command(args: &IndexArgs) -> Result<Output> {
     if let Value::Object(coverage) = coverage_value(&indexed.coverage)? {
         report.extend(coverage);
     }
-    pretty(&Value::Object(report))
+    Output::pretty(&Value::Object(report))
 }
 
 fn matching<'a>(turns: &'a [Merged], session: &str) -> Vec<&'a Merged> {
@@ -404,7 +398,7 @@ pub fn resolve(args: &ResolveArgs) -> Result<Output> {
         return fail(format!("session {session} was not found"));
     };
     let sources = unique(turns.iter().flat_map(|merged| merged.sources.clone()));
-    pretty(&json!({
+    Output::pretty(&json!({
         "sessionId": session,
         "host": first.turn.host,
         "sources": sources,
@@ -483,5 +477,5 @@ pub fn search(args: &SearchArgs) -> Result<Output> {
         "{}",
         json!({ "coverage": coverage_value(&indexed.coverage)? })
     );
-    pretty(&Value::Array(results))
+    Output::pretty(&Value::Array(results))
 }

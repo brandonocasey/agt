@@ -17,5 +17,5 @@
  ],
  "code": 2,
  "stdout": "",
- "stderr": "agt ci: failures takes an MR, not a pipeline\n"
+ "stderr": "agt: error: failures takes an MR, not a pipeline\n"
 }

@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 
-use crate::core::error::{Result, ctx, fail};
+use crate::core::error::{Result, fail};
+use crate::core::output;
 use crate::core::transcripts::json::{count, tail, text};
 use crate::core::transcripts::session_files;
 use crate::sessions::Scope;
@@ -134,10 +135,7 @@ impl Cost {
                 })
                 .collect();
             let report = json!({"rows": rows, "unpriced": unpriced, "fast_calls": fast});
-            let mut text =
-                serde_json::to_string_pretty(&report).map_err(ctx("serialize report"))?;
-            text.push('\n');
-            return Ok(text);
+            return output::pretty(&report);
         }
         let total: f64 = rows.iter().map(|row| row.usd).sum();
         let grand = if total == 0.0 { 1.0 } else { total };
@@ -252,10 +250,7 @@ pub fn session(id: &str, as_json: bool) -> Result<String> {
         }
         object.insert("usd".into(), json!(round(cost.usd, 4)));
         object.insert("unpriced_calls".into(), json!(cost.unpriced_calls));
-        let mut text = serde_json::to_string_pretty(&Value::Object(object))
-            .map_err(ctx("serialize report"))?;
-        text.push('\n');
-        return Ok(text);
+        return output::pretty(&Value::Object(object));
     }
     let [input, write, read, output] = cost.tokens.map(|tokens| tok(tokens as f64));
     let mut line = format!(

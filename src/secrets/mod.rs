@@ -10,7 +10,7 @@ use clap::Args;
 use serde_json::json;
 
 use crate::core::error::{Result, ctx, fail};
-use crate::core::output::{self, Output};
+use crate::core::output::Output;
 use crate::git::Repo;
 
 use rules::RULES;
@@ -34,10 +34,7 @@ pub struct Cli {
 pub fn run(cli: Cli) -> Result<Output> {
     match scan(&cli) {
         Ok(rows) => report(&cli, &rows),
-        Err(error) => {
-            eprintln!("agt: error: {error}");
-            Ok(Output::Exit(FAILED))
-        }
+        Err(error) => Ok(Output::Failure(error, FAILED)),
     }
 }
 
@@ -55,8 +52,7 @@ fn report(args: &Cli, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<
                 .collect(),
         )
     };
-    output::print(output)?;
-    Ok(Output::Exit(if rows.is_empty() { 0 } else { FOUND }))
+    Ok(output.exiting(if rows.is_empty() { 0 } else { FOUND }))
 }
 
 fn scan(args: &Cli) -> Result<BTreeSet<(String, usize, &'static str)>> {

@@ -8,7 +8,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
 use crate::core::error::{Result, fail};
-use crate::core::output::{self, Output};
+use crate::core::output::Output;
 use crate::git::Repo;
 
 /// Exit status of `pushed` when the remote branch is not equal to the local one, or its PR/MR
@@ -149,11 +149,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 /// Prints `value`, then exits with `code` unless it is 0.
 fn finish(value: Value, code: u8) -> Result<Output> {
-    if code == 0 {
-        return Ok(Output::Json(value));
-    }
-    output::print(Output::Json(value))?;
-    Ok(Output::Exit(code))
+    Ok(Output::Json(value).exiting(code))
 }
 
 /// The branch named, or the current one, and its tip.

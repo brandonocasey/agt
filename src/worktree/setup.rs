@@ -16,13 +16,10 @@ use super::{emit, hooks, prepare};
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{read_json, write_json};
-use crate::core::output::Output;
+use crate::core::output::{Output, TIMED_OUT};
 use crate::git::Repo;
 
 const STATUS_FILE: &str = "agt-setup.json";
-
-/// Exit status when `--max` passes first, as for `agt wait`.
-const TIMED_OUT: u8 = 3;
 
 /// How long a status without a child pid counts as starting.
 const STARTING_GRACE: Duration = Duration::from_secs(30);

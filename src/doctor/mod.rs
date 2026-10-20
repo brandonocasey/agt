@@ -10,7 +10,7 @@ use clap::Args;
 use serde_json::json;
 
 use crate::core::error::Result;
-use crate::core::output::{self, Output};
+use crate::core::output::Output;
 use crate::forge::transport::{clear_deadline, set_deadline};
 
 /// All checks together may take this long; later subprocesses then report as unavailable.
@@ -118,8 +118,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         Output::Text(table(&rows))
     };
-    output::print(output)?;
-    Ok(Output::Exit(match worst {
+    Ok(output.exiting(match worst {
         Status::Ok => 0,
         Status::Fail => 1,
         Status::Warn => 2,
