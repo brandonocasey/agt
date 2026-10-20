@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::auto_sync::{LOCAL, SKIPPED, assert_gone, skipped_reason, slow_tool};
-use crate::support::Env;
 use crate::support::forge::{assert_read_only, github};
 use crate::support::issue::NOW;
 use crate::support::scenario::Setup;
+use crate::support::{Env, executable};
 
 const ORIGIN: &str = "git@github.com:me/repo.git";
 
@@ -418,15 +418,14 @@ fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() 
     let (tool, pid) = slow_tool(env);
     let calls = env.path("slow-calls");
     let script = fs::read_to_string(&tool).unwrap();
-    fs::write(
-        &tool,
+    executable(
+        Path::new(&tool),
         script.replacen(
             "#!/bin/sh\n",
             &format!("#!/bin/sh\necho invoked >> '{}'\n", calls.display()),
             1,
         ),
-    )
-    .unwrap();
+    );
     let output = review_now(
         env,
         NOW + 301,

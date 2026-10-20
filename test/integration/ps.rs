@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
+use crate::support::{Env, executable};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agt");
 
@@ -559,7 +559,7 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
     // The first event unblocks the session; the second ends it.
     let log = env.path("events.log");
     let script = env.path("on-event.sh");
-    fs::write(
+    executable(
         &script,
         format!(
             "#!/bin/sh\ncat >> '{log}'\necho \"$AGT_PS_EVENT:$AGT_PS_WAITING_FOR:$AGT_PS_REASON\" >> '{log}.env'\n\
@@ -568,11 +568,7 @@ fn watch_reports_a_cleared_and_an_ended_session_and_runs_the_command_per_event()
             idle = idle.display(),
             live = live.display(),
         ),
-    )
-    .unwrap();
-    let mut mode = fs::metadata(&script).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
-    fs::set_permissions(&script, mode).unwrap();
+    );
 
     let events = watch(&env, now, "6", &["--exec", &script.to_string_lossy()]);
     let kinds: Vec<&str> = events
@@ -618,7 +614,7 @@ fn watch_reports_a_new_waiting_stretch_behind_a_blocked_one() {
     let script = env.path("restretch.sh");
     executable(
         &script,
-        &format!("#!/bin/sh\ncp '{}' '{}'\n", again.display(), live.display()),
+        format!("#!/bin/sh\ncp '{}' '{}'\n", again.display(), live.display()),
     );
     // Polls at +0, +30, +60, +90, +120: the new stretch is 20s old at +30 and 80s old at +90.
     let events = watch(&env, now, "5", &["--exec", &script.to_string_lossy()]);
@@ -628,13 +624,6 @@ fn watch_reports_a_new_waiting_stretch_behind_a_blocked_one() {
         .collect();
     assert_eq!(kinds, ["blocked", "cleared", "blocked"], "{events:?}");
     assert_eq!(events[1]["reason"], "new_prompt");
-}
-
-fn executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    let mut mode = fs::metadata(path).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
-    fs::set_permissions(path, mode).unwrap();
 }
 
 #[test]
@@ -652,7 +641,7 @@ fn watch_does_not_end_a_session_whose_process_still_runs() {
     // The record disappears after the first event while the process keeps running.
     let live = env.path(&format!("home/.claude/sessions/{pid}.json"));
     let script = env.path("drop-record.sh");
-    executable(&script, &format!("#!/bin/sh\nrm -f '{}'\n", live.display()));
+    executable(&script, format!("#!/bin/sh\nrm -f '{}'\n", live.display()));
     let events = watch(&env, now, "4", &["--exec", &script.to_string_lossy()]);
     let kinds: Vec<&str> = events
         .iter()

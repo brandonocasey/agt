@@ -1,11 +1,8 @@
 //! `agt doctor`: rows, fix hints and exit status, with fake gh/glab/mise and an isolated repo.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-
 use serde_json::Value;
 
-use crate::support::Env;
+use crate::support::{Env, executable};
 
 const AUTH: [&str; 4] = ["auth", "status", "--hostname", "github.com"];
 
@@ -23,8 +20,7 @@ fn setup(pin: &str) -> Env {
     let mise = env.path("mise");
     let listing =
         format!(r#"{{"github:brandonocasey/agt":[{{"version":"{pin}","active":true}}]}}"#);
-    fs::write(&mise, format!("#!/bin/sh\necho '{listing}'\n")).unwrap();
-    fs::set_permissions(&mise, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&mise, format!("#!/bin/sh\necho '{listing}'\n"));
     env
 }
 
@@ -115,11 +111,10 @@ fn a_failing_mise_shows_its_error_and_a_matching_fix() {
     let env = setup("0.0.1");
     env.respond(&AUTH, "Logged in to github.com account octo (keyring)");
     let mise = env.path("mise");
-    fs::write(
+    executable(
         &mise,
         "#!/bin/sh\necho 'mise ERROR Config files are not trusted' >&2\necho 'more' >&2\nexit 1\n",
-    )
-    .unwrap();
+    );
     let (_, report) = doctor(&env);
     let version = row(&report, "agt version");
     assert_eq!(version["status"], "warn");
@@ -133,11 +128,10 @@ fn a_failing_mise_shows_its_error_and_a_matching_fix() {
     assert!(!version["detail"].as_str().unwrap().contains("more"));
     assert_eq!(version["fix"], "mise trust");
 
-    fs::write(
+    executable(
         &mise,
         "#!/bin/sh\necho 'mise WARN old config' >&2\necho 'mise ERROR real cause' >&2\necho 'trailer' >&2\nexit 1\n",
-    )
-    .unwrap();
+    );
     let (_, report) = doctor(&env);
     let detail = row(&report, "agt version")["detail"].to_string();
     assert!(
@@ -145,11 +139,10 @@ fn a_failing_mise_shows_its_error_and_a_matching_fix() {
         "{detail}"
     );
 
-    fs::write(
+    executable(
         &mise,
         "#!/bin/sh\necho 'warming up' >&2\necho 'boom' >&2\nexit 1\n",
-    )
-    .unwrap();
+    );
     let (_, report) = doctor(&env);
     let detail = row(&report, "agt version")["detail"].to_string();
     assert!(
@@ -157,7 +150,7 @@ fn a_failing_mise_shows_its_error_and_a_matching_fix() {
         "{detail}"
     );
 
-    fs::write(&mise, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").unwrap();
+    executable(&mise, "#!/bin/sh\necho 'boom' >&2\nexit 1\n");
     let (_, report) = doctor(&env);
     assert_eq!(
         row(&report, "agt version")["fix"],

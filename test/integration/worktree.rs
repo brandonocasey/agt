@@ -1594,29 +1594,11 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
     assert!(update.wait().unwrap().success());
 
     // A `git` in front of the real one that counts how often it is run.
-    let bin = f.env.path("counting-bin");
-    fs::create_dir_all(&bin).unwrap();
     let count = f.env.path("git-runs");
-    let real = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("git")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let wrapper = bin.join("git");
-    fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\necho . >> '{}'\nexec '{}' \"$@\"\n",
-            count.display(),
-            real.trim()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let path = f.env.git_wrapper(
+        "counting-bin",
+        &format!("echo . >> '{}'\n", count.display()),
+    );
     let output = f
         .env
         .command(BIN, &f.env.repo)
@@ -1877,27 +1859,15 @@ fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
         let (f, _sub) = with_unheld_tag();
         // A git that, asked to ls-remote, records its environment, starts a child that would
         // outlive it (as ssh does) and then hangs.
-        let bin = f.env.path("hanging-bin");
-        fs::create_dir_all(&bin).unwrap();
         let (record, child_pid) = (f.env.path("ls-remote-env"), f.env.path("child-pid"));
-        let real = String::from_utf8(
-            std::process::Command::new("which")
-                .arg("git")
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        let script = format!(
-            "#!/bin/sh\ncase \"$*\" in\n*ls-remote*)\n  env > '{}'\n  sleep 60 &\n  echo $! > '{}'\n  sleep 60\n  ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
-            record.display(),
-            child_pid.display(),
-            real.trim()
+        let path = f.env.git_wrapper(
+            "hanging-bin",
+            &format!(
+                "case \"$*\" in\n*ls-remote*)\n  env > '{}'\n  sleep 60 &\n  echo $! > '{}'\n  sleep 60\n  exit 0\n  ;;\nesac\n",
+                record.display(),
+                child_pid.display()
+            ),
         );
-        let wrapper = bin.join("git");
-        fs::write(&wrapper, script).unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
         let mut command = f.env.command(BIN, &f.env.repo);
         command
             .env("PATH", path)
@@ -1969,27 +1939,15 @@ fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
         if let Some(configured) = configured {
             wgit(&f.env, &sub, &["config", "core.sshCommand", configured]);
         }
-        let bin = f.env.path("recording-bin");
-        fs::create_dir_all(&bin).unwrap();
         let record = f.env.path("ls-remote-env");
-        let real = String::from_utf8(
-            std::process::Command::new("which")
-                .arg("git")
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
         // A git that, asked to ls-remote, records its environment and advertises nothing.
-        let script = format!(
-            "#!/bin/sh\ncase \"$*\" in\n*ls-remote*) env > '{}' ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
-            record.display(),
-            real.trim()
+        let path = f.env.git_wrapper(
+            "recording-bin",
+            &format!(
+                "case \"$*\" in\n*ls-remote*) env > '{}'; exit 0 ;;\nesac\n",
+                record.display()
+            ),
         );
-        let wrapper = bin.join("git");
-        fs::write(&wrapper, script).unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
         let mut run = f.env.command(BIN, &f.env.repo);
         run.env("PATH", path)
             .args(["worktree", "remove", &f.wt.to_string_lossy()]);
@@ -2032,27 +1990,15 @@ fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
             "../gone",
         ],
     );
-    let bin = f.env.path("recording-bin");
-    fs::create_dir_all(&bin).unwrap();
     let record = f.env.path("ls-remote-env");
-    let real = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("git")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
     // A git that, asked to ls-remote, records its environment and advertises nothing.
-    let script = format!(
-        "#!/bin/sh\ncase \"$*\" in\n*ls-remote*) env > '{}' ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
-        record.display(),
-        real.trim()
+    let path = f.env.git_wrapper(
+        "recording-bin",
+        &format!(
+            "case \"$*\" in\n*ls-remote*) env > '{}'; exit 0 ;;\nesac\n",
+            record.display()
+        ),
     );
-    let wrapper = bin.join("git");
-    fs::write(&wrapper, script).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let mut run = f.env.command(BIN, &f.env.repo);
     run.env("PATH", path)
         .env_remove("GIT_SSH_COMMAND")
@@ -2067,26 +2013,14 @@ fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
 /// A `PATH` whose git, asked to ls-remote, starts a child (as ssh is) and then hangs, and the
 /// file that child's pid lands in.
 fn hanging_ls_remote(f: &Fixture) -> (String, PathBuf) {
-    let bin = f.env.path("hanging-bin");
-    fs::create_dir_all(&bin).unwrap();
     let child_pid = f.env.path("child-pid");
-    let real = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("git")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let script = format!(
-        "#!/bin/sh\ncase \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  ;;\n*) exec '{}' \"$@\" ;;\nesac\n",
-        child_pid.display(),
-        real.trim()
+    let path = f.env.git_wrapper(
+        "hanging-bin",
+        &format!(
+            "case \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  exit 0\n  ;;\nesac\n",
+            child_pid.display()
+        ),
     );
-    let wrapper = bin.join("git");
-    fs::write(&wrapper, script).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     (path, child_pid)
 }
 

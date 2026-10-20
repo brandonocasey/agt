@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -121,6 +122,21 @@ impl Env {
         command
     }
 
+    /// A `git` in front of the real one, in the directory `dir` of this environment: it runs the
+    /// shell `prelude` first (which may `exit` to keep a call from reaching git), then the real
+    /// git. Returns the `PATH` that puts it first.
+    pub fn git_wrapper(&self, dir: &str, prelude: &str) -> String {
+        let bin = self.path(dir);
+        fs::create_dir_all(&bin).unwrap();
+        let real =
+            String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+        executable(
+            &bin.join("git"),
+            format!("#!/bin/sh\n{prelude}exec '{}' \"$@\"\n", real.trim()),
+        );
+        path_with(&bin)
+    }
+
     /// Registers a canned fake gh/glab response for exactly these arguments, with a GraphQL
     /// query given as `query=<operation name>`.
     pub fn respond(&self, args: &[&str], body: &str) {
@@ -200,6 +216,21 @@ impl Env {
             .map(str::to_owned)
             .collect()
     }
+}
+
+/// Writes `body` to `path` as an executable script.
+pub fn executable(path: &Path, body: impl AsRef<[u8]>) {
+    fs::write(path, body).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// `dir` in front of the current `PATH`.
+pub fn path_with(dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
 }
 
 /// A fixture of `test/fixtures` (`github/threads-1.json`) with `{{NAME}}` placeholders replaced.

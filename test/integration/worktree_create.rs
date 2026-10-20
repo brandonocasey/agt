@@ -2,13 +2,12 @@
 //! managers on a temporary PATH and a temporary state directory.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde_json::Value;
 
-use crate::support::Env;
+use crate::support::{Env, executable, path_with};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agt");
 const FAKE_TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-tool.sh");
@@ -537,9 +536,7 @@ fn fake_tools(env: &Env) -> PathBuf {
     for name in [
         "mise", "npm", "pnpm", "yarn", "bun", "uv", "poetry", "cargo", "go",
     ] {
-        let file = bin.join(name);
-        fs::write(&file, &script).unwrap();
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&bin.join(name), &script);
     }
     bin
 }
@@ -556,11 +553,7 @@ fn prepared(env: &Env, tools: &Path, dir: &Path, args: &[&str]) -> Value {
 }
 
 fn prepare_output(env: &Env, tools: &Path, dir: &Path, args: &[&str], fail: &str) -> Output {
-    let path = format!(
-        "{}:{}",
-        tools.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let path = path_with(tools);
     env.command(BIN, dir)
         .arg("worktree")
         .args(args)

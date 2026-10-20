@@ -2,7 +2,6 @@
 //! `AGT_NOW` override, so no test waits.
 
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
@@ -1439,29 +1438,11 @@ fn manual_report_skips_a_worktree_whose_submodule_holds_a_stash() {
 
 /// A `git` in front of the real one that records every command line it is given.
 fn recording_git(prune: &Prune) -> (String, PathBuf) {
-    let bin = prune.env.path("recording-bin");
-    fs::create_dir_all(&bin).unwrap();
     let log = prune.env.path("git-calls");
-    let real = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("git")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let wrapper = bin.join("git");
-    fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
-            log.display(),
-            real.trim()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let path = prune.env.git_wrapper(
+        "recording-bin",
+        &format!("echo \"$@\" >> '{}'\n", log.display()),
+    );
     (path, log)
 }
 

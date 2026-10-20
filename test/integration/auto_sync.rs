@@ -3,7 +3,6 @@
 //! scenarios run against GitHub and GitLab, the review ones against GitHub.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 use std::time::{Duration, Instant};
@@ -11,8 +10,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::issue_read::synced;
-use crate::support::Env;
 use crate::support::issue::{Github, Gitlab, IssueFake, NOW, Spec};
+use crate::support::{Env, executable};
 
 type Fake<'a> = &'a dyn IssueFake;
 
@@ -213,15 +212,13 @@ fn a_missing_tool_leaves_the_local_read_and_one_line(fake: Fake) {
 pub(crate) fn slow_tool(env: &Env) -> (String, std::path::PathBuf) {
     let tool = env.path("slow-forge.sh");
     let pid = env.path("slow.pid");
-    fs::write(
+    executable(
         &tool,
         format!(
             "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
             pid.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     (tool.display().to_string(), pid)
 }
 

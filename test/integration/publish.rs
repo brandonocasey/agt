@@ -9,7 +9,7 @@ use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{
     PUBLISH, Setup, assert_never_posted, count_calls, ids, kinds, open_ids, sent, thread,
 };
-use crate::support::{Env, args, fixture, numbered, strs};
+use crate::support::{Env, args, executable, fixture, numbered, strs};
 
 // GitHub
 
@@ -277,9 +277,8 @@ fn a_marker_quoted_in_a_finding_is_not_the_summary_s() {
 
 #[test]
 fn concurrent_publish_posts_a_pending_comment_once() {
-    use std::fs::{self, OpenOptions, Permissions};
+    use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
@@ -299,7 +298,9 @@ fn concurrent_publish_posts_a_pending_comment_once() {
     env.reset_calls();
 
     let wrapper = env.path("publish-forge.sh");
-    fs::write(&wrapper, r#"#!/bin/sh
+    executable(
+        &wrapper,
+        r#"#!/bin/sh
 set -eu
 case "$*" in
   'api -X GET --paginate projects/me%2Fproj/merge_requests/3/discussions?per_page=100')
@@ -317,8 +318,8 @@ case "$*" in
     ;;
 esac
 exec "$FAKE_FORGE_REAL" "$@"
-"#).unwrap();
-    fs::set_permissions(&wrapper, Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let fifo = env.path("forge/release");
     assert!(
         env.command("mkfifo", &env.repo)
