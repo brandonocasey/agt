@@ -5,7 +5,7 @@ use std::process::Output;
 
 use serde_json::Value;
 
-use crate::support::forge::github::Github;
+use crate::support::forge::github::{self, Github};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{Review, Setup, write_text};
 use crate::support::{Env, numbered};
@@ -92,11 +92,12 @@ fn the_latest_check_of_a_name_counts_until_the_content_changes() {
     assert_eq!(status["qa"]["checks"][1]["id"], retest.as_str());
     assert_eq!(status["qa"]["approvable"], true, "{status}");
 
-    // New content makes both checks stale; a dirty work tree does too.
+    // New content makes both checks stale; a dirty work tree does too, in both statuses.
     env.write("a.txt", &numbered(10, &[(3, "four")]));
     let status = qa(&env, &["status"]);
     assert_eq!(status["qa"]["stale"], 2);
     assert_eq!(status["qa"]["approvable"], false);
+    assert_eq!(env.run(&["status"])["qa"], status["qa"]);
     assert!(qa_fail(&env, &["approve"]).contains("uncommitted"));
     env.commit_all("more");
     assert!(qa_fail(&env, &["approve"]).contains("is stale: login"));
@@ -172,8 +173,8 @@ fn show_finds_qa_runs_and_checks_and_ended_runs_take_no_checks() {
 }
 
 /// A review run with no findings, linked to PR 42, then an ended QA run with one failing check
-/// and, with `finding`, a bug it found.
-fn published_setup(svc: &Github, finding: bool) -> (Setup, String) {
+/// and, with `finding`, a bug it found. `before_end` runs just before the QA run ends.
+fn published_setup(svc: &Github, finding: bool, before_end: impl FnOnce(&Env)) -> (Setup, String) {
     let setup = Setup::branch(
         svc.origin(),
         &Review {
@@ -214,6 +215,7 @@ fn published_setup(svc: &Github, finding: bool) -> (Setup, String) {
             ],
         );
     }
+    before_end(env);
     qa(env, &["run", "end", "--run", &run]);
     (setup, run)
 }
@@ -221,8 +223,15 @@ fn published_setup(svc: &Github, finding: bool) -> (Setup, String) {
 #[test]
 fn publish_adds_a_qa_section_to_the_summary() {
     let svc = Github::new();
-    let (setup, run) = published_setup(&svc, true);
+    let (setup, run) = published_setup(&svc, true, |_| {});
     let dry = qa(&setup.env, &["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(
+        qa(
+            &setup.env,
+            &["publish", "--pr", "42", "--dry-run", "--not-own"]
+        )["writes"],
+        dry["writes"]
+    );
     let finding = write_text(&dry, "body", "Payment hangs.");
     assert!(
         finding.starts_with("**🐛 bug (high) · 🧪 QA: pay with a card:** Payment hangs."),
@@ -251,7 +260,7 @@ fn publish_adds_a_qa_section_to_the_summary() {
 #[test]
 fn sync_claims_the_qa_record_of_its_own_summary() {
     let svc = Github::new();
-    let (setup, run) = published_setup(&svc, false);
+    let (setup, run) = published_setup(&svc, false, |_| {});
     let env = &setup.env;
     svc.lose(env, Call::PostNote);
     exec(env, &["publish", "--pr", "42"]);
@@ -277,4 +286,35 @@ fn sync_claims_the_qa_record_of_its_own_summary() {
                 .is_some_and(|body| body.contains("Agent QA"))),
         "the summary is not imported as a thread: {list}"
     );
+}
+
+/// The automatic publish of an ended QA run posts and counts the findings of its checks, also
+/// those of a human tester, which carry no agent run.
+#[test]
+fn auto_publish_of_a_qa_run_carries_its_human_findings() {
+    let svc = Github::new();
+    let (setup, run) = published_setup(&svc, true, |env| {
+        env.write_config("[sync]\nauto_push = true\n");
+        github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+        svc.accept(env, Call::PostThread, 801);
+        svc.accept(env, Call::PostNote, 802);
+    });
+    let env = &setup.env;
+    let tester = &qa(env, &["show", &run])["run"]["tester"];
+    assert_eq!(tester["kind"], "human", "{tester}");
+    let inputs: Vec<String> = env
+        .forge_inputs()
+        .into_iter()
+        .map(|(_, input)| input)
+        .collect();
+    assert!(
+        inputs.iter().any(|input| input.contains("Payment hangs.")),
+        "{inputs:?}"
+    );
+    let record = inputs
+        .iter()
+        .find(|input| input.contains("Agent QA"))
+        .unwrap_or_else(|| panic!("no QA record posted: {inputs:?}"));
+    assert!(record.contains("1 finding open"), "{record}");
+    assert!(!record.contains("✅ Agent QA"), "{record}");
 }

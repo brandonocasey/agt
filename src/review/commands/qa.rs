@@ -2,6 +2,8 @@
 //! check found, and the QA approval. They live in the review target, so threads, `status` and
 //! `publish` are shared with the review.
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use super::approve::is_open;
@@ -70,13 +72,18 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
         QaCommand::Show { id } => view::show(&ctx, &id)?,
         QaCommand::Status { head } => status(&ctx, head.as_deref())?,
         QaCommand::Approve => approve(&ctx)?,
-        QaCommand::Publish { dry_run, pr } => publish::publish(
+        QaCommand::Publish {
+            dry_run,
+            not_own,
+            only,
+            pr,
+        } => publish::publish(
             &mut ctx,
             pr.as_deref(),
             &publish::Options {
                 dry_run,
-                not_own: false,
-                only: Vec::new(),
+                not_own,
+                only,
                 approval: None,
                 run: None,
             },
@@ -290,10 +297,17 @@ fn run_start(ctx: &Ctx, env: Vec<String>, tester: &AuthorArgs) -> Result<Value> 
     let scope = ctx.scope()?;
     let env = facts(env)?;
     let default = ctx.default_author()?;
+    // QA run ids are unique in the repository, so `--run` alone finds the target.
+    let taken: HashSet<String> = ctx
+        .store
+        .targets(&ctx.dir)?
+        .into_iter()
+        .flat_map(|target| target.qa_runs.into_iter().map(|run| run.id))
+        .collect();
     let run = ctx.update(&scope, |target, now| {
         let id = loop {
             let id = crate::core::random::token(QA_ID_PREFIX, QA_ID_CHARS);
-            if !target.qa_runs.iter().any(|run| run.id == id) {
+            if !taken.contains(&id) && !target.qa_runs.iter().any(|run| run.id == id) {
                 break id;
             }
         };
