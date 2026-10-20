@@ -365,8 +365,8 @@ fn sha_waits_for_the_head_to_reach_the_commit() {
                 &open(&[run_node("t", "COMPLETED", Some("SUCCESS"))]),
             ),
         ],
-        "owner/repo#42",
-        &["--sha", "abc123"],
+        "owner/repo#42@abc123",
+        &[],
         &[],
     );
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
@@ -377,17 +377,10 @@ fn sha_waits_for_the_head_to_reach_the_commit() {
 }
 
 #[test]
-fn sha_needs_one_pull_request_or_merge_request() {
-    let both = run_args(&[], &["o/r#1", "o/r#2"], &["--sha", "abc123"], &[]);
-    assert_eq!(both.status, 2);
-    assert!(both.stderr.contains("--sha"), "{}", both.stderr);
-    let pipeline = run_args(
-        &[],
-        &["https://gitlab.example.test/g/p/-/pipelines/9"],
-        &["--sha", "abc123"],
-        &[],
-    );
-    assert_eq!(pipeline.status, 2);
+fn the_sha_flag_is_gone_in_favour_of_the_target_suffix() {
+    let flag = run_args(&[], &["o/r#1"], &["--sha", "abc123"], &[]);
+    assert_eq!(flag.status, 2);
+    assert!(flag.stderr.contains("--sha"), "{}", flag.stderr);
 }
 
 #[test]
@@ -924,8 +917,8 @@ fn sha_waits_for_a_gitlab_pipeline_on_the_commit() {
             ),
             step(&format!("{GET} {mr}"), &current("success")),
         ],
-        "group/sub/project!7",
-        &["--sha", "abc123"],
+        "group/sub/project!7@abc123",
+        &[],
         &[("GITLAB_HOST", "gitlab.example.test")],
     );
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
@@ -954,8 +947,8 @@ fn a_merged_results_pipeline_runs_the_commit_its_parent_names() {
             ),
             step(&format!("{GET} {mr}"), &merged_results),
         ],
-        "group/sub/project!7",
-        &["--sha", "abc123"],
+        "group/sub/project!7@abc123",
+        &[],
         &[("GITLAB_HOST", "gitlab.example.test")],
     );
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);

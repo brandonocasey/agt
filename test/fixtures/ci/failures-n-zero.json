@@ -1,10 +1,8 @@
 {
  "args": [
   "failures",
-  "5",
-  "-R",
-  "group/proj",
-  "-n",
+  "group/proj!5",
+  "--limit",
   "0"
  ],
  "env": {},

@@ -29,7 +29,7 @@ pub struct Target {
     pub pipeline: bool,
     pub number: u64,
     pub sha: Option<String>,
-    /// `--sha`: the commit may not show on the host yet.
+    /// `@SHA` on a PR or MR: the commit may not show on the host yet.
     pub awaiting: bool,
 }
 
@@ -69,7 +69,7 @@ pub fn parse_as(arg: &str, bare_pipeline: bool) -> Result<Target> {
             pipeline,
             number: number(count)?,
             sha: sha.clone(),
-            awaiting: false,
+            awaiting: sha.is_some() && !pipeline,
         })
     };
     if let Ok(PrRef {

@@ -33,10 +33,10 @@ pub struct Cli {
 enum Command {
     /// Failed jobs and specs of an MR versus the default branch.
     ///
-    /// <MR> is 123, !123, or an MR URL. Without -R or a URL, the project is the current
-    /// directory's repository. It lists failed and retried jobs of the MR's head pipeline, the
+    /// <MR> is 123, !123, group/project!123 or an MR URL. Without a group/project!N or a URL, the project is the
+    /// current directory's repository. It lists failed and retried jobs of the MR's head pipeline, the
     /// failing specs in their logs (Playwright, WebdriverIO, Karma, Jest), and how often each
-    /// spec failed in the last N finished default-branch pipelines, including retried attempts.
+    /// spec failed in the last --limit finished default-branch pipelines, including retried attempts.
     /// Verdicts:
     ///   new           never failed on the default branch
     ///   pre-existing  also fails in the latest default-branch pipeline that ran the job
@@ -49,18 +49,15 @@ enum Command {
         #[arg(value_name = "MR")]
         target: String,
         /// Default-branch pipelines to compare.
-        #[arg(short = 'n', default_value_t = 10)]
-        n: i64,
-        /// group/project (default: current repository or the URL).
-        #[arg(short = 'R', long = "repo")]
-        repo: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: i64,
     },
     /// Poll PRs, MRs and pipelines until their checks finish, fail or change.
     ///
     /// Each TARGET is GitHub OWNER/REPO#PR[@SHA], GitLab GROUP/PROJECT!IID[@SHA], a PR or MR URL,
     /// #PR or !IID in the current repository, or a GitLab pipeline id or URL. Without @SHA, the
-    /// head read at the start is pinned. Right after a push, pass --sha "$(git rev-parse HEAD)"
-    /// with one target to wait for checks on that commit first.
+    /// head read at the start is pinned. Right after a push, pass `<target>@$(git rev-parse HEAD)`
+    /// to wait for checks on that commit first (a PR or MR; a pipeline pins it only).
     ///
     /// Stdout gets one JSON event per line: `initial` and `change` per target, then `final` with
     /// each target's state and failed jobs or checks. Exit codes: 0 all targets passed or
@@ -79,9 +76,6 @@ enum Command {
         /// The longest wait between polls, in seconds.
         #[arg(long, value_name = "SEC", default_value_t = 120.0, value_parser = positive)]
         max_interval: f64,
-        /// Wait for checks on this commit (one target; use after a push).
-        #[arg(long)]
-        sha: Option<String>,
     },
 }
 
@@ -116,8 +110,8 @@ fn parse_target(value: &str) -> Result<target::Target> {
     Ok(parsed)
 }
 
-fn connect(target: &target::Target, repo: Option<&str>) -> Result<Project> {
-    Project::connect(repo.or(target.repo.as_deref()), target.host.as_deref())
+fn connect(target: &target::Target) -> Result<Project> {
+    Project::connect(target.repo.as_deref(), target.host.as_deref())
 }
 
 /// Runs the command; an error exits 2 rather than 1.
@@ -131,19 +125,19 @@ pub fn run(cli: Cli) -> Result<Output> {
 fn execute(cli: Cli) -> Result<u8> {
     let out = Out;
     let code = match cli.command {
-        Command::Failures { target, n, repo } => {
-            if n < 1 {
-                return fail("-n must be at least 1");
+        Command::Failures { target, limit } => {
+            if limit < 1 {
+                return fail("--limit must be at least 1");
             }
             let target = parse_target(&target)?;
-            let gitlab = connect(&target, repo.as_deref())?;
+            let gitlab = connect(&target)?;
             if target.pipeline {
                 return fail("failures takes an MR, not a pipeline");
             }
             failures::run(
                 &gitlab,
                 target.number,
-                usize::try_from(n).unwrap_or(1),
+                usize::try_from(limit).unwrap_or(1),
                 &out,
             )?;
             0
@@ -153,8 +147,7 @@ fn execute(cli: Cli) -> Result<u8> {
             timeout,
             interval,
             max_interval,
-            sha,
-        } => return wait_targets(&targets, timeout, interval, max_interval, sha),
+        } => return wait_targets(&targets, timeout, interval, max_interval),
     };
     Ok(code)
 }
@@ -164,27 +157,13 @@ fn wait_targets(
     timeout: f64,
     interval: f64,
     max_interval: f64,
-    sha: Option<String>,
 ) -> Result<u8> {
     if interval > max_interval {
         return fail("--interval cannot exceed --max-interval");
     }
-    let mut parsed = targets
+    let resolved = targets
         .iter()
-        .map(|arg| target::parse(arg))
-        .collect::<Result<Vec<_>>>()?;
-    if let Some(sha) = sha {
-        match parsed.as_mut_slice() {
-            [only] if !only.pipeline => {
-                only.sha = Some(sha);
-                only.awaiting = true;
-            }
-            _ => return fail("--sha needs exactly one PR or MR target"),
-        }
-    }
-    let resolved = parsed
-        .into_iter()
-        .map(target::resolve)
+        .map(|arg| target::parse(arg).and_then(target::resolve))
         .collect::<Result<Vec<_>>>()?;
     let mut seen = HashSet::new();
     if let Some(duplicate) = resolved.iter().find(|target| !seen.insert(&target.key)) {
