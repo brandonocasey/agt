@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env, proc_start, unix_now};
+use crate::support::{BIN, Env, Sealed, proc_start, unix_now};
 
 const DAY: i64 = 86_400;
 /// 2027-01-01T00:00:00Z.
@@ -873,15 +873,14 @@ fn cleanup_lists_a_review_it_could_not_remove_as_skipped() {
 #[cfg(unix)]
 #[test]
 fn an_unreadable_repository_directory_is_a_warning_and_the_pass_goes_on() {
-    use std::os::unix::fs::PermissionsExt;
     let prune = Prune::new();
     let old = prune.target("github.com/o/a", "old", 120);
     let closed = prune.target("github.com/o/b", "hidden", 120);
     let dir = closed.parent().unwrap().to_path_buf();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+    let sealed = Sealed::new(&dir);
     let report = prune.run(&["--only", "reviews"]);
     let plan = prune.run(&[]);
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    drop(sealed);
     // A reader that ignores permissions (root) sees both; otherwise one is a warning.
     let seen = report["plan"]["reviews"].as_array().unwrap().len();
     let warned = report["warnings"].as_array().unwrap().len();
@@ -1319,15 +1318,6 @@ fn manual_report_skips_a_worktree_holding_an_ignored_nested_repository() {
 
 #[test]
 fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_directory() {
-    use std::os::unix::fs::PermissionsExt;
-
-    struct Sealed(PathBuf);
-    impl Drop for Sealed {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
-        }
-    }
-
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1354,8 +1344,7 @@ fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_direct
     ]);
     let locked = repo.join(".worktrees/z-sealed/locked");
     fs::create_dir_all(&locked).unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-    let _sealed = Sealed(locked);
+    let _sealed = Sealed::new(&locked);
 
     let report = prune.run_at(later(), &["--only", "manual"]);
     let listed = report["manual"]["worktrees"].as_array().unwrap();

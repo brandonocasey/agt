@@ -229,6 +229,22 @@ pub fn executable(path: &Path, body: impl AsRef<[u8]>) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// A directory made unreadable, readable again when dropped so the temporary tree can go.
+pub struct Sealed(PathBuf);
+
+impl Sealed {
+    pub fn new(dir: &Path) -> Self {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        Self(dir.to_owned())
+    }
+}
+
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// The `procStart` Claude Code records for `pid`: clock ticks since boot on Linux, `ps`'s
 /// `lstart` text on macOS.
 pub fn proc_start(pid: u32) -> String {

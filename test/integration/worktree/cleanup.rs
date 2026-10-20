@@ -7,7 +7,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{Env, proc_start, unix_now};
+use crate::support::{Env, Sealed, proc_start, unix_now};
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -878,25 +878,6 @@ fn only_acts_on_the_named_rows_and_skips_the_rest_with_a_reason() {
     assert_eq!(site.branches(), ["dirty", "main"]);
 }
 
-/// A directory made unreadable, readable again when dropped so the temporary tree can go.
-struct Sealed(PathBuf);
-
-impl Sealed {
-    fn new(dir: &Path) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        fs::create_dir_all(dir).unwrap();
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
-        Self(dir.to_owned())
-    }
-}
-
-impl Drop for Sealed {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
-    }
-}
-
 #[test]
 fn an_unreadable_directory_keeps_its_worktree_and_the_pass_goes_on() {
     let site = Site::new();
@@ -905,7 +886,9 @@ fn an_unreadable_directory_keeps_its_worktree_and_the_pass_goes_on() {
     for name in ["a-first", "z-sealed"] {
         site.env.git(&["merge", "-q", name]);
     }
-    let _sealed = Sealed::new(&sealed.join("locked"));
+    let locked = sealed.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    let _sealed = Sealed::new(&locked);
 
     let report = site.run(&["--yes", "--dirty"]);
     assert_eq!(report["deleted"][0]["branch"], "a-first", "{report}");
