@@ -224,6 +224,7 @@ fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
                 "config",
                 "-f",
                 ".gitmodules",
+                "-z",
                 "--get-regexp",
                 r"^submodule\..*\.path$",
             ])
@@ -231,8 +232,8 @@ fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
             .flatten()
             .unwrap_or_default();
         for path in listed
-            .lines()
-            .filter_map(|line| line.split_once(' ').map(|(_, path)| path))
+            .split('\0')
+            .filter_map(|record| record.split_once('\n').map(|(_, path)| path))
         {
             if let Err(error) = inside.git(&[
                 "-c",

@@ -1181,3 +1181,61 @@ fn offline_create_skips_network_submodules_with_a_warning_and_still_runs_the_hoo
     assert!(env.repo.join(".worktrees/off/hooked").exists());
     assert!(!env.repo.join(".worktrees/off/vendor/lib.txt").exists());
 }
+
+#[test]
+fn offline_create_with_an_empty_gitmodules_runs_the_hooks_and_succeeds() {
+    let (env, _) = repo_with_commit();
+    commit(&env, &env.repo.clone(), ".gitmodules", "");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch hooked\"]\n");
+    assert!(agt(&env, &env.repo, &["trust"]).status.success());
+    let output = env
+        .bin(&env.repo)
+        .args(["--offline", "worktree", "create", "off"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["warnings"].as_array().unwrap().len(), 0);
+    assert_eq!(value["hooks"]["ok"], true);
+    assert!(env.repo.join(".worktrees/off/hooked").exists());
+}
+
+#[test]
+fn offline_create_initializes_a_file_url_submodule_whose_name_has_a_space() {
+    let (env, _) = repo_with_commit();
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(&env, &library, &["init", "-q", "-b", "main"]);
+    commit(&env, &library, "lib.txt", "lib");
+    let main = env.repo.clone();
+    git(
+        &env,
+        &main,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "--name",
+            "my lib",
+            library.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    git(&env, &main, &["commit", "-q", "-m", "add submodule"]);
+    git(
+        &env,
+        &main,
+        &["config", "--remove-section", "submodule.my lib"],
+    );
+    let output = env
+        .bin(&env.repo)
+        .args(["--offline", "worktree", "create", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["warnings"].as_array().unwrap().len(), 0, "{value}");
+    assert!(env.repo.join(".worktrees/off/vendor/lib.txt").exists());
+}
