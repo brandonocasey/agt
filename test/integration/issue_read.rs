@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
 use crate::support::issue::{FIRST_SINCE, Github, Gitlab, IssueFake, Spec};
+use crate::support::{Env, strs};
 
 type Fake<'a> = &'a dyn IssueFake;
 
@@ -419,10 +419,6 @@ fn involved_scope_lists_each_way_a_user_is_involved_and_dedupes() {
             .count();
         assert_eq!(listed, variants.len(), "{}", fake.name());
     }
-}
-
-fn strs(list: &[String]) -> Vec<&str> {
-    list.iter().map(String::as_str).collect()
 }
 
 #[test]

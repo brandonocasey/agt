@@ -7,10 +7,9 @@ use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{
-    PUBLISH, Setup, args, assert_never_posted, count_calls, ids, kinds, open_ids, sent, strs,
-    thread,
+    PUBLISH, Setup, assert_never_posted, count_calls, ids, kinds, open_ids, sent, thread,
 };
-use crate::support::{Env, fixture, numbered};
+use crate::support::{Env, args, fixture, numbered, strs};
 
 // GitHub
 

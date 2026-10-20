@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 
-use super::super::scenario::{Setup, args, ids, marked, sent, strs, thread};
-use super::super::{Env, fixture};
+use super::super::scenario::{Setup, ids, marked, sent, thread};
+use super::super::{Env, args, fixture, strs};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
 
 pub const REVIEWS: &str = "repos/me/repo/pulls/42/reviews";

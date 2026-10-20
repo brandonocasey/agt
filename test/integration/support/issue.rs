@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 
-use super::Env;
+use super::{Env, args, strs};
 
 /// `AGT_NOW` of every issue command: 2026-10-17T12:00:00Z.
 pub const NOW: i64 = 1_792_238_400;
@@ -18,12 +18,6 @@ pub const FIRST_SINCE: &str = "2026-07-19T12%3A00%3A00Z";
 impl Env {
     pub fn issue_state(&self) -> PathBuf {
         self.repo.join(".agt").join("issues")
-    }
-
-    pub fn write_config(&self, text: &str) {
-        let dir = self.path("config").join("agt");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.toml"), text).unwrap();
     }
 
     pub fn issue_exec(&self, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
@@ -224,14 +218,6 @@ impl Spec {
         self.is_pr = true;
         self
     }
-}
-
-pub fn args(list: &[&str]) -> Vec<String> {
-    list.iter().map(|arg| (*arg).to_owned()).collect()
-}
-
-fn strs(list: &[String]) -> Vec<&str> {
-    list.iter().map(String::as_str).collect()
 }
 
 /// What a service's calls look like for one repository on one host.

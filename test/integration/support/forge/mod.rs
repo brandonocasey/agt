@@ -8,8 +8,8 @@
 
 use serde_json::Value;
 
-use super::Env;
-use super::scenario::{Setup, count_calls, strs};
+use super::scenario::{Setup, count_calls};
+use super::{Env, strs};
 
 pub mod github;
 pub mod gitlab;

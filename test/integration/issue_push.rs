@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
 use crate::support::issue::{IssueFake, Spec, Update};
+use crate::support::{Env, strs};
 
 type Fake<'a> = &'a dyn IssueFake;
 
@@ -208,10 +208,6 @@ fn login_body(fake: Fake) -> &'static str {
     } else {
         r#"{"username":"me"}"#
     }
-}
-
-fn strs(list: &[String]) -> Vec<&str> {
-    list.iter().map(String::as_str).collect()
 }
 
 fn only_the_remote_changed_is_taken_and_the_local_change_is_sent(fake: Fake) {

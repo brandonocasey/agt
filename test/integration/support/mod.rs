@@ -260,6 +260,18 @@ impl Env {
             .success()
     }
 
+    /// Writes the global `$XDG_CONFIG_HOME/agt/config.toml`.
+    pub fn write_config(&self, text: &str) {
+        let dir = self.path("config").join("agt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), text).unwrap();
+    }
+
+    /// Writes the repository's `.config/agt.toml`.
+    pub fn write_repo_config(&self, text: &str) {
+        self.write(".config/agt.toml", text);
+    }
+
     pub fn write(&self, path: &str, content: &str) {
         let file = self.repo.join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -377,6 +389,14 @@ impl Env {
         env.git(&["switch", "-q", "-c", "feat"]);
         env
     }
+}
+
+pub fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
+pub fn strs(list: &[String]) -> Vec<&str> {
+    list.iter().map(String::as_str).collect()
 }
 
 /// Lines `1..=count`, with `(line, text)` replacements.

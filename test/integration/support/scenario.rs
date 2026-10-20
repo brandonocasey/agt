@@ -151,14 +151,6 @@ pub fn sent(env: &Env, thread_id: &str) -> String {
         .to_owned()
 }
 
-pub fn args(list: &[&str]) -> Vec<String> {
-    list.iter().map(|arg| (*arg).to_owned()).collect()
-}
-
-pub fn strs(list: &[String]) -> Vec<&str> {
-    list.iter().map(String::as_str).collect()
-}
-
 /// Forge calls whose arguments are exactly `list`.
 pub fn count_calls(env: &Env, list: &[String]) -> usize {
     let wanted = list.join(" ");

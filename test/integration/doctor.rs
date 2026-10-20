@@ -85,7 +85,7 @@ fn missing_auth_for_the_origin_forge_fails_with_exit_1() {
 fn a_broken_repo_config_fails_and_names_the_file() {
     let env = setup("0.0.1");
     env.respond(&AUTH, "Logged in to github.com account octo (keyring)");
-    env.write(".config/agt.toml", "[sync]\nauto_pul = true\n");
+    env.write_repo_config("[sync]\nauto_pul = true\n");
     let (code, report) = doctor(&env);
     assert_eq!(code, Some(1), "{report}");
     let config = row(&report, "repo config");

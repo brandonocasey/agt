@@ -40,24 +40,11 @@ fn repo() -> Env {
     env
 }
 
-/// Writes the repository config without trusting it.
-fn untrusted_config(env: &Env, text: &str) {
-    let dir = env.repo.join(".config");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("agt.toml"), text).unwrap();
-}
-
 /// Writes the repository config and trusts it.
 fn repo_config(env: &Env, text: &str) {
-    untrusted_config(env, text);
+    env.write_repo_config(text);
     let output = agt(env, &env.repo, &["trust"]);
     assert!(output.status.success(), "{output:?}");
-}
-
-fn global_config(env: &Env, text: &str) {
-    let dir = env.path("config/agt");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("config.toml"), text).unwrap();
 }
 
 #[test]
@@ -96,10 +83,7 @@ fn a_recorded_port_reaches_the_hook_as_port() {
 #[test]
 fn the_repository_config_overrides_the_global_hooks_per_key() {
     let env = repo();
-    global_config(
-        &env,
-        "[worktree.hooks]\ncreate = [\"touch global\"]\nremove = [\"true\"]\n",
-    );
+    env.write_config("[worktree.hooks]\ncreate = [\"touch global\"]\nremove = [\"true\"]\n");
     repo_config(&env, "[worktree.hooks]\ncreate = [\"touch local\"]\n");
     json(&agt(&env, &env.repo, &["create", "o"]));
     let tree = env.repo.join(".worktrees/o");
@@ -268,7 +252,7 @@ fn an_inherited_port_is_not_passed_when_none_is_recorded() {
 #[test]
 fn an_invalid_config_fails_before_the_worktree_is_created() {
     let env = repo();
-    untrusted_config(&env, "[worktree.hooks]\ncreate = 5\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = 5\n");
     let output = agt(&env, &env.repo, &["create", "inv"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(!env.repo.join(".worktrees/inv").exists());
@@ -444,8 +428,7 @@ fn hooks_of(report: &Value) -> &Value {
 #[test]
 fn untrusted_repository_hooks_do_not_run_and_are_reported() {
     let env = repo();
-    untrusted_config(
-        &env,
+    env.write_repo_config(
         "[worktree.hooks]\ncreate = [\"touch ran\"]\nremove = [\"touch gone\"]\n",
     );
     let output = agt(&env, &env.repo, &["create", "feature"]);
@@ -482,7 +465,7 @@ fn trusting_makes_the_hooks_run_and_editing_untrusts_them() {
             .exists()
     );
     assert!(hooks_of(&report).get("untrusted").is_none());
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"touch ran2\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch ran2\"]\n");
     let report = json(&agt(&env, &env.repo, &["create", "two"]));
     assert!(
         !Path::new(report["path"].as_str().unwrap())
@@ -495,8 +478,8 @@ fn trusting_makes_the_hooks_run_and_editing_untrusts_them() {
 #[test]
 fn global_hooks_run_when_the_repository_hooks_are_untrusted() {
     let env = repo();
-    global_config(&env, "[worktree.hooks]\ncreate = [\"touch global\"]\n");
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"touch local\"]\n");
+    env.write_config("[worktree.hooks]\ncreate = [\"touch global\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch local\"]\n");
     let report = json(&agt(&env, &env.repo, &["create", "feature"]));
     let path = Path::new(report["path"].as_str().unwrap());
     assert!(path.join("global").exists());
@@ -507,7 +490,7 @@ fn global_hooks_run_when_the_repository_hooks_are_untrusted() {
 #[test]
 fn a_repository_without_hooks_reports_nothing_untrusted() {
     let env = repo();
-    untrusted_config(&env, "[sync]\nauto_pull = false\n");
+    env.write_repo_config("[sync]\nauto_pull = false\n");
     let report = json(&agt(&env, &env.repo, &["create", "feature"]));
     assert!(report.get("hooks").is_none());
 }
@@ -515,7 +498,7 @@ fn a_repository_without_hooks_reports_nothing_untrusted() {
 #[test]
 fn background_child_reports_untrusted_hooks() {
     let env = repo();
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"touch local\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch local\"]\n");
     let created = json(&agt(
         &env,
         &env.repo,
@@ -531,7 +514,7 @@ fn background_child_reports_untrusted_hooks() {
 #[test]
 fn remove_plan_and_yes_honor_the_trust() {
     let env = repo();
-    untrusted_config(&env, "[worktree.hooks]\nremove = [\"touch ../gone\"]\n");
+    env.write_repo_config("[worktree.hooks]\nremove = [\"touch ../gone\"]\n");
     let created = json(&agt(&env, &env.repo, &["create", "feature"]));
     let path = created["path"].as_str().unwrap();
     let plan = json(&agt(&env, &env.repo, &["remove", path]));
@@ -545,20 +528,20 @@ fn remove_plan_and_yes_honor_the_trust() {
 #[test]
 fn trust_remove_and_list() {
     let env = repo();
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"touch ran\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch ran\"]\n");
     let trusted = json(&agt(&env, &env.repo, &["trust"]));
     assert_eq!(trusted["create"][0], "touch ran");
     assert_eq!(trusted["sha256"].as_str().unwrap().len(), 64);
     let listed = json(&agt(&env, &env.repo, &["trust", "--list"]));
     assert_eq!(listed["trusted"][0]["current"], true);
     assert_eq!(listed["trusted"][0]["sha256"], trusted["sha256"]);
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"touch other\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch other\"]\n");
     let listed = json(&agt(&env, &env.repo, &["trust", "--list"]));
     assert_eq!(listed["trusted"][0]["current"], false);
     fs::remove_file(env.repo.join(".config/agt.toml")).unwrap();
     let listed = json(&agt(&env, &env.repo, &["trust", "--list"]));
     assert_eq!(listed["trusted"][0]["current"], "missing");
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"touch ran\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch ran\"]\n");
     let removed = json(&agt(&env, &env.repo, &["trust", "--remove"]));
     assert_eq!(removed["removed"], true);
     let listed = json(&agt(&env, &env.repo, &["trust", "--list"]));
@@ -569,7 +552,7 @@ fn trust_remove_and_list() {
 fn trust_list_reports_a_config_replaced_by_a_symlink() {
     let env = repo();
     let text = "[worktree.hooks]\ncreate = [\"touch ran\"]\n";
-    untrusted_config(&env, text);
+    env.write_repo_config(text);
     agt(&env, &env.repo, &["trust"]);
     let elsewhere = env.repo.parent().unwrap().join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
@@ -590,14 +573,14 @@ fn trust_list_reports_a_config_replaced_by_a_symlink() {
 fn trust_errors_without_a_file_or_hooks() {
     let env = repo();
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());
-    untrusted_config(&env, "[sync]\nauto_pull = false\n");
+    env.write_repo_config("[sync]\nauto_pull = false\n");
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());
 }
 
 #[test]
 fn the_next_command_quotes_the_path() {
     let env = repo();
-    untrusted_config(&env, "[worktree.hooks]\ncreate = [\"true\"]\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"true\"]\n");
     let report = json(&agt(&env, &env.repo, &["create", "feature"]));
     let next = hooks_of(&report)["untrusted"]["next"].as_str().unwrap();
     assert!(
@@ -658,7 +641,7 @@ fn remove_no_hooks_ignores_a_bad_repository_config() {
     let env = repo();
     let created = json(&agt(&env, &env.repo, &["create", "feature"]));
     let path = created["path"].as_str().unwrap();
-    untrusted_config(&env, "[worktree.hooks]\ncreate = 5\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = 5\n");
     let plan = agt(&env, &env.repo, &["remove", path, "--no-hooks"]);
     assert!(plan.status.success(), "{plan:?}");
     assert!(!agt(&env, &env.repo, &["remove", path]).status.success());

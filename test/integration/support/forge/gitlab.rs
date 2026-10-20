@@ -4,9 +4,9 @@
 use serde_json::{Value, json};
 
 use super::super::scenario::{
-    Setup, args, assert_never_posted, assert_summary, input_of, marked, sent, strs, thread,
+    Setup, assert_never_posted, assert_summary, input_of, marked, sent, thread,
 };
-use super::super::{Env, fixture};
+use super::super::{Env, args, fixture, strs};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
 
 pub const MR: &str = "projects/me%2Fproj/merge_requests/3";

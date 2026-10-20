@@ -512,12 +512,7 @@ fn list_reports_counts_ahead_and_merged_for_this_repo_and_all_roots() {
         &other,
         &["worktree", "add", "-q", "-b", "o", &tree.to_string_lossy()],
     );
-    fs::create_dir_all(f.env.path("config/agt")).unwrap();
-    fs::write(
-        f.env.path("config/agt/config.toml"),
-        "[worktree]\nroots = [\"~/code/*\"]\n",
-    )
-    .unwrap();
+    f.env.write_config("[worktree]\nroots = [\"~/code/*\"]\n");
     let all = f.json(&["list", "--all"]);
     let rows = all["worktrees"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{all}");
@@ -718,12 +713,7 @@ fn list_all_warns_about_an_unreadable_repository_and_lists_the_rest() {
             &f.env.path("trees/o").to_string_lossy(),
         ],
     );
-    fs::create_dir_all(f.env.path("config/agt")).unwrap();
-    fs::write(
-        f.env.path("config/agt/config.toml"),
-        "[worktree]\nroots = [\"~/code/*\"]\n",
-    )
-    .unwrap();
+    f.env.write_config("[worktree]\nroots = [\"~/code/*\"]\n");
     let all = f.json(&["list", "--all"]);
     let rows = all["worktrees"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{all}");
