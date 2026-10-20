@@ -382,7 +382,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   unfinished `.<namespace>-v<n>-<stamp>.partial` copies (`partial_backups`). Other
   names in the same backups directory belong to other tools and are never touched.
   Repository schema backups use `agents/backups/repositories/<clone-id>/`; newest-backup
-  protection applies separately per clone and namespace. Legacy-import backups follow the same per-clone retention rules.
+  protection applies separately per clone and namespace.
 
 Cache files go by age. Each top-level entry goes whole, and only once nothing in it changed
 for the whole period, so a task that is still writing keeps all of its files:
@@ -709,13 +709,9 @@ non-bare main checkout, issue and review commands fail clearly.
 Git's common directory holds a private `agt-repository-id` shared by linked worktrees.
 It keeps migration and backup ownership stable when the checkout moves.
 
-First use imports matching legacy records from `$XDG_STATE_HOME/agents/reviews/`
-and `agents/issues/` (default state root `~/.local/state`). Originals remain intact.
-Imports install a saved snapshot. Writes through older versions after that snapshot
-stay in the legacy store. This includes writes overlapping import.
-Imports are locked, backed up globally and marked complete per clone. Existing
-conflicting records stop import instead of being overwritten. Dry-runs inspect
-existing data without importing it. Tasks, session indexes, ports and backups
+Records an older agt kept under `$XDG_STATE_HOME/agents/reviews/` and `agents/issues/`
+are no longer imported; `agt cleanup` still prunes them by age.
+Tasks, session indexes, ports and backups
 remain global. Add `/.agt/` to your global Git ignore; agt does not edit that file.
 
 Each target is one JSON file, mode 0600, in a 0700

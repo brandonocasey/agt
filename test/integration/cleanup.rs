@@ -1504,91 +1504,7 @@ fn the_manual_report_never_asks_a_remote_and_does_not_list_a_worktree_holding_an
 }
 
 #[test]
-fn repository_storage_imports_once_preserves_sources_and_skips_locks() {
-    let prune = Prune {
-        env: Env::with_branch(),
-    };
-    prune
-        .env
-        .git(&["remote", "add", "origin", "git@github.com:owner/repo.git"]);
-    let source = prune.target("github.com/owner/repo", "branch-old", 100);
-    let original = fs::read(&source).unwrap();
-    let lock = source.parent().unwrap().join(".branch-old.lock");
-    fs::write(&lock, "live lock").unwrap();
-    prune.env.run(&["list"]);
-    let local = prune.env.state().join("branch-old.json");
-    assert_eq!(fs::read(&local).unwrap(), original);
-    assert_eq!(fs::read(&source).unwrap(), original);
-    assert!(!prune.env.state().join(".branch-old.lock").exists());
-    let clones = prune.agents().join("backups/repositories");
-    let clone = fs::read_dir(clones)
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_type().unwrap().is_dir())
-        .unwrap()
-        .path();
-    let backup = fs::read_dir(clone)
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.file_type().unwrap().is_dir())
-        .unwrap()
-        .path()
-        .join("branch-old.json");
-    assert_eq!(fs::read(backup).unwrap(), original);
-    fs::remove_dir_all(prune.env.repo.join(".agt")).unwrap();
-    prune.env.run(&["list"]);
-    assert!(
-        !local.exists(),
-        "a durable import marker prevents resurrection"
-    );
-}
-
-#[test]
-fn repository_storage_conflict_fails_after_backup_without_overwriting() {
-    let prune = Prune {
-        env: Env::with_branch(),
-    };
-    prune.env.git(&[
-        "remote",
-        "add",
-        "origin",
-        "https://github.com/owner/repo.git",
-    ]);
-    let source = prune.target("github.com/owner/repo", "branch-old", 100);
-    let local = prune.env.state().join("branch-old.json");
-    fs::create_dir_all(local.parent().unwrap()).unwrap();
-    fs::write(&local, "local content").unwrap();
-    let error = prune.env.fail(&["list"], None);
-    assert!(error.contains("legacy import conflict"), "{error}");
-    assert_eq!(fs::read_to_string(local).unwrap(), "local content");
-    assert!(source.exists());
-    assert!(prune.agents().join("backups/repositories").exists());
-    let original = fs::read(&source).unwrap();
-    fs::write(&source, "changed after backup").unwrap();
-    let records = fs::read_dir(prune.agents().join("repository-imports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    fs::remove_dir_all(records.join(".reviews.stage")).unwrap();
-    fs::create_dir(records.join(".reviews.stage.partial")).unwrap();
-    fs::write(
-        records.join(".reviews.stage.partial/incomplete.json"),
-        "incomplete",
-    )
-    .unwrap();
-    fs::remove_file(prune.env.state().join("branch-old.json")).unwrap();
-    prune.env.run(&["list"]);
-    assert_eq!(
-        fs::read(prune.env.state().join("branch-old.json")).unwrap(),
-        original
-    );
-    assert_eq!(fs::read_to_string(source).unwrap(), "changed after backup");
-}
-
-#[test]
-fn cleanup_discovers_local_state_without_importing_or_removing_agt() {
+fn cleanup_discovers_local_state_without_creating_it() {
     let prune = Prune::new();
     prune.env.git(&[
         "remote",
@@ -1599,7 +1515,6 @@ fn cleanup_discovers_local_state_without_importing_or_removing_agt() {
     let source = prune.target("github.com/owner/repo", "branch-old", 100);
     prune.run(&["--only", "reviews"]);
     assert!(!prune.env.repo.join(".agt").exists());
-    assert!(!prune.agents().join("repository-imports").exists());
     let local = prune.env.state().join("branch-old.json");
     fs::create_dir_all(local.parent().unwrap()).unwrap();
     fs::copy(&source, &local).unwrap();
@@ -1679,172 +1594,6 @@ fn cleanup_configured_and_current_linked_roots_are_deduplicated() {
         .filter(|item| item["path"] == local.to_str().unwrap())
         .count();
     assert_eq!(matching, 1, "{report}");
-    assert!(!prune.agents().join("repository-imports").exists());
-}
-
-#[test]
-fn repository_storage_preview_reads_legacy_issues_without_writes() {
-    use crate::support::issue::{Github, IssueFake, Spec};
-    for overlay in [false, true] {
-        let env = Env::new();
-        env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
-        env.write_config(&Github.config(true));
-        (&Github as &dyn IssueFake).serve(&env, &[Spec::new(1, "Old title")]);
-        env.issue(&["sync"]);
-        env.issue(&["edit", "1", "--title", "Queued title"]);
-        let local = env.repo.join(".agt/issues");
-        let legacy = env.path("state").join("agents/issues");
-        fs::rename(&local, &legacy).unwrap();
-        fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
-        let before = fs::read(legacy.join(Github.tracker()).join("1.json")).unwrap();
-        if overlay {
-            fs::create_dir_all(local.join(Github.tracker())).unwrap();
-            fs::copy(
-                legacy.join(Github.tracker()).join("tracker.json"),
-                local.join(Github.tracker()).join("tracker.json"),
-            )
-            .unwrap();
-        }
-        let report = env.issue(&["push", "--dry-run"]);
-        assert_eq!(report["dry_run"], true);
-        assert_eq!(
-            report["trackers"][0]["writes"][0]["kind"], "update",
-            "{report}"
-        );
-        assert_eq!(local.exists(), overlay);
-        assert!(!local.join(Github.tracker()).join("1.json").exists());
-        assert!(!env.path("state").join("agents/backups").exists());
-        assert!(!env.path("state").join("agents/repository-imports").exists());
-        assert_eq!(
-            fs::read(legacy.join(Github.tracker()).join("1.json")).unwrap(),
-            before
-        );
-        assert!(env.forge_writes(&Github).is_empty());
-        env.issue(&["list"]);
-        assert_eq!(
-            fs::read(local.join(Github.tracker()).join("1.json")).unwrap(),
-            before
-        );
-        assert_eq!(
-            fs::read(legacy.join(Github.tracker()).join("1.json")).unwrap(),
-            before
-        );
-        let records = fs::read_dir(env.path("state").join("agents/repository-imports"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        fs::remove_file(records.join("issues.done")).unwrap();
-        fs::remove_dir_all(&local).unwrap();
-        fs::write(
-            legacy.join(Github.tracker()).join("1.json"),
-            "changed source",
-        )
-        .unwrap();
-        let resumed = env.issue(&["push", "--dry-run"]);
-        assert_eq!(
-            resumed["trackers"][0]["writes"][0]["kind"], "update",
-            "{resumed}"
-        );
-        assert!(!local.exists());
-        assert!(!records.join("issues.done").exists());
-        assert_eq!(
-            fs::read_to_string(legacy.join(Github.tracker()).join("1.json")).unwrap(),
-            "changed source"
-        );
-    }
-}
-
-#[test]
-fn repository_storage_imports_many_locked_issues_with_low_descriptor_limit() {
-    use crate::support::issue::{Github, IssueFake, Spec};
-    let env = Env::new();
-    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
-    env.write_config(&Github.config(true));
-    let specs: Vec<_> = (1..=300)
-        .map(|number| Spec::new(number, "Legacy issue"))
-        .collect();
-    (&Github as &dyn IssueFake).serve(&env, &specs);
-    env.issue(&["sync"]);
-    let local = env.repo.join(".agt/issues");
-    let legacy = env.path("state").join("agents/issues");
-    fs::rename(&local, &legacy).unwrap();
-    fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
-    for number in 1..=300 {
-        File::create(
-            legacy
-                .join(Github.tracker())
-                .join(format!(".{number}.lock")),
-        )
-        .unwrap();
-    }
-    for args in [vec!["issue", "push", "--dry-run"], vec!["issue", "list"]] {
-        let output = env
-            .command("sh", &env.repo)
-            .args(["-c", "ulimit -n 128 && exec \"$@\"", "sh", BIN])
-            .args(&args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if args.contains(&"--dry-run") {
-            assert!(!local.exists());
-            assert!(!env.path("state").join("agents/repository-imports").exists());
-            assert!(!env.path("state").join("agents/backups").exists());
-        }
-    }
-    let records = fs::read_dir(env.path("state").join("agents/repository-imports"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    assert!(records.join("issues.done").is_file());
-    assert!(!records.join(".issues.stage").exists());
-    let backup_name = fs::read_to_string(records.join("issues.backup")).unwrap();
-    let identity = records.file_name().unwrap();
-    let backup = env
-        .path("state")
-        .join("agents/backups/repositories")
-        .join(identity)
-        .join(backup_name);
-    for number in 1..=300 {
-        let relative = PathBuf::from(Github.tracker()).join(format!("{number}.json"));
-        let original = fs::read(legacy.join(&relative)).unwrap();
-        assert_eq!(fs::read(local.join(&relative)).unwrap(), original);
-        assert_eq!(fs::read(backup.join(&relative)).unwrap(), original);
-    }
-}
-
-#[test]
-fn repository_storage_refuses_busy_and_symbolic_legacy_sources() {
-    let prune = Prune {
-        env: Env::with_branch(),
-    };
-    prune.env.git(&[
-        "remote",
-        "add",
-        "origin",
-        "https://github.com/owner/repo.git",
-    ]);
-    let source = prune.target("github.com/owner/repo", "branch-old", 100);
-    let lock = source.with_file_name(".branch-old.publish.lock");
-    let guard = File::create(&lock).unwrap();
-    guard.lock().unwrap();
-    let error = prune.env.fail(&["list"], None);
-    assert!(error.contains("legacy source is busy"), "{error}");
-    assert!(!prune.env.state().exists());
-    assert!(!prune.agents().join("backups").exists());
-    drop(guard);
-    fs::remove_file(lock).unwrap();
-    std::os::unix::fs::symlink(&source, source.with_file_name("linked.json")).unwrap();
-    let error = prune.env.fail(&["list"], None);
-    assert!(error.contains("symbolic link"), "{error}");
-    assert!(!prune.env.state().exists());
 }
 
 #[test]
@@ -1853,19 +1602,13 @@ fn repository_storage_identity_survives_relocation_after_private_edits() {
     let mut env = Env::with_branch();
     env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
     env.write_config(&Github.config(true));
-    (&Github as &dyn IssueFake).serve(&env, &[Spec::new(1, "Legacy issue")]);
+    (&Github as &dyn IssueFake).serve(&env, &[Spec::new(1, "Moved issue")]);
     env.issue(&["sync"]);
-    let legacy = env.path("state").join("agents/issues");
-    fs::rename(env.repo.join(".agt/issues"), &legacy).unwrap();
-    fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
     env.issue(&["list"]);
     env.issue(&["note", "1", "Private relocation note"]);
     let review = env.run(&["run", "start"]);
     let review_key = review["target"].as_str().unwrap();
-    let records = env.path("state").join("agents/repository-imports");
-    let backups = env.path("state").join("agents/backups/repositories");
-    let before_records = fs::read_dir(&records).unwrap().count();
-    let before_backups = fs::read_dir(&backups).unwrap().count();
+    let identity = fs::read(env.repo.join(".git/agt-repository-id")).unwrap();
     let moved = env.path("moved-repo");
     fs::rename(&env.repo, &moved).unwrap();
     env.repo = moved;
@@ -1877,9 +1620,10 @@ fn repository_storage_identity_survives_relocation_after_private_edits() {
     );
     let reviews = env.run(&["list"]);
     assert!(reviews.to_string().contains(review_key), "{reviews}");
-    assert_eq!(fs::read_dir(records).unwrap().count(), before_records);
-    assert_eq!(fs::read_dir(backups).unwrap().count(), before_backups);
-    assert!(legacy.join(Github.tracker()).join("1.json").exists());
+    assert_eq!(
+        fs::read(env.repo.join(".git/agt-repository-id")).unwrap(),
+        identity
+    );
 }
 
 #[test]
@@ -1917,12 +1661,6 @@ fn repository_storage_identity_is_private_shared_and_validated() {
     ]);
     assert!(env.agt(&linked).args(["list"]).status().unwrap().success());
     assert_eq!(fs::read(&identity).unwrap(), original);
-    assert_eq!(
-        fs::read_dir(env.path("state").join("agents/repository-imports"))
-            .unwrap()
-            .count(),
-        1
-    );
     let saved = env.path("saved-id");
     fs::rename(&identity, &saved).unwrap();
     symlink(&saved, &identity).unwrap();

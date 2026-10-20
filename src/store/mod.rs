@@ -14,6 +14,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+use self::docs::read_entries;
 use self::json::read_json;
 use self::schema::{
     REVIEW_MIGRATIONS, Schema, is_target_document, is_target_file, parse_target, read_target,
@@ -65,7 +66,6 @@ impl Namespace {
 pub struct Store {
     root: PathBuf,
     local: bool,
-    fallback: Vec<(PathBuf, PathBuf)>,
     agents: PathBuf,
     backups: PathBuf,
     namespace: Namespace,
@@ -94,7 +94,6 @@ impl Store {
         Self {
             root: agents.join(namespace.dir_name()),
             local: false,
-            fallback: Vec::new(),
             agents: agents.clone(),
             backups: agents.join("backups"),
             namespace,
@@ -141,14 +140,11 @@ impl Store {
 
     pub fn load(&self, dir: &Path, key: &str) -> Result<Option<Target>> {
         validate_key(key)?;
-        read_target(
-            &self.read_path(&dir.join(format!("{key}.json"))),
-            self.schema,
-        )
+        read_target(&dir.join(format!("{key}.json")), self.schema)
     }
 
     pub fn targets(&self, dir: &Path) -> Result<Vec<Target>> {
-        let entries = self.read_entries(dir)?;
+        let entries = read_entries(dir)?;
         let mut targets = Vec::new();
         for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -187,7 +183,7 @@ impl Store {
 
     /// Like [`Store::targets_intact`], with each file left out as its key and warning.
     pub fn targets_intact_by_key(&self, dir: &Path) -> Result<(Vec<Target>, LeftOut)> {
-        let entries = self.read_entries(dir)?;
+        let entries = read_entries(dir)?;
         let (mut targets, mut warnings) = (Vec::new(), Vec::new());
         for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();

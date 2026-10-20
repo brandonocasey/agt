@@ -15,10 +15,24 @@ use super::{Store, create_dir, ctx, fail, lock_path, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{lock_file, try_lock_file};
 
+/// The entries of `dir` in name order; a missing directory has none.
+pub(super) fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    let found = match std::fs::read_dir(dir) {
+        Ok(found) => found,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return fail(format!("read {}: {error}", dir.display())),
+    };
+    let mut entries = found
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(ctx("read store entry"))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    Ok(entries)
+}
+
 impl Store {
     /// The directories directly under the namespace root.
     pub fn child_dirs(&self) -> Result<Vec<PathBuf>> {
-        let entries = self.read_entries(&self.root)?;
+        let entries = read_entries(&self.root)?;
         let mut dirs = Vec::new();
         for entry in entries {
             let kind = entry
@@ -35,7 +49,7 @@ impl Store {
     pub fn load_doc<T: DeserializeOwned>(&self, dir: &Path, name: &str) -> Result<Option<T>> {
         validate_key(name)?;
         let path = dir.join(format!("{name}.json"));
-        read_json::<Value>(&self.read_path(&path))?
+        read_json::<Value>(&path)?
             .map(|document| self.parse_doc(&path, document))
             .transpose()
     }
@@ -199,7 +213,7 @@ impl Store {
 
 impl Store {
     fn doc_paths(&self, dir: &Path, skip: &[&str]) -> Result<Vec<PathBuf>> {
-        let entries = self.read_entries(dir)?;
+        let entries = read_entries(dir)?;
         let mut paths = Vec::new();
         for entry in entries {
             let name = entry.file_name().to_string_lossy().into_owned();
