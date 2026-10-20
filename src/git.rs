@@ -1038,11 +1038,27 @@ mod tests {
     use super::{Repo, branch_name, parse_worktrees, remote_key};
     use crate::core::testing::Sandbox;
 
+    /// The repository of `sandbox`, whose git calls see only the sandbox's home and global
+    /// config, not the developer's.
+    fn sandboxed(sandbox: &Sandbox) -> Repo {
+        let root = sandbox.path();
+        let mut repo = Repo::at(sandbox.repo());
+        for (key, value) in [
+            ("HOME", root.join("home")),
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
+        ] {
+            repo.env.push((key.into(), value.into_os_string()));
+        }
+        repo.env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+        repo
+    }
+
     #[test]
     fn origin_location_falls_back_to_the_written_url_when_the_expanded_one_names_no_host() {
         let sandbox = Sandbox::new();
         let root = sandbox.repo();
-        let repo = Repo::at(&root);
+        let repo = sandboxed(&sandbox);
         sandbox.git(&root, &["init", "-q"]);
         assert_eq!(repo.origin_location().unwrap(), None);
         sandbox.git(
@@ -1075,7 +1091,7 @@ mod tests {
     fn current_branch_is_not_confused_by_a_tag_of_the_same_name() {
         let sandbox = Sandbox::new();
         let root = sandbox.repo();
-        let repo = Repo::at(&root);
+        let repo = sandboxed(&sandbox);
         sandbox.git(&root, &["init", "-q", "-b", "topic"]);
         sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
         assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
@@ -1089,7 +1105,7 @@ mod tests {
     fn the_default_branch_honours_init_default_branch_everywhere() {
         let sandbox = Sandbox::new();
         let root = sandbox.repo();
-        let repo = Repo::at(&root);
+        let repo = sandboxed(&sandbox);
         sandbox.git(&root, &["init", "-q", "-b", "trunk"]);
         sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
         assert_eq!(repo.default_branch_ref().unwrap(), None);
