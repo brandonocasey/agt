@@ -101,11 +101,7 @@ pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
     let main = main_checkout(&Repo::at(root))?.path;
     let resolved = resolve(&main)?;
     let commands = resolved.commands(kind);
-    // Not `--short`: it prints `heads/<name>` when a tag or remote ref has the same name.
-    let branch = Repo::at(root)
-        .git_opt(&["symbolic-ref", "--quiet", "HEAD"])?
-        .map(|full| full.strip_prefix("refs/heads/").unwrap_or(&full).to_owned())
-        .unwrap_or_default();
+    let branch = Repo::at(root).current_branch()?.unwrap_or_default();
     let mut env = vec![
         ("AGT_HOOK", kind.name().to_owned()),
         ("AGT_WORKTREE", root.to_string_lossy().into_owned()),

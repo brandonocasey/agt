@@ -160,7 +160,7 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
     if known()? {
         return Ok(true);
     }
-    if !repo.succeeds(&["remote", "get-url", "origin"])? {
+    if !repo.origin_url()?.is_some() {
         return Ok(false);
     }
     // `ls-remote --exit-code` exits 2 when the ref is absent and otherwise non-zero only on

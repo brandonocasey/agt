@@ -259,7 +259,10 @@ impl Repo {
     }
 
     pub fn current_branch(&self) -> Result<Option<String>> {
-        self.git_opt(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        // Not `--short`: it prints `heads/<name>` when a tag or remote ref has the same name.
+        Ok(self
+            .git_opt(&["symbolic-ref", "--quiet", "HEAD"])?
+            .map(|full| local_branch_name(&full).to_owned()))
     }
 
     /// `<unix time> <sha>` of the oldest reflog entry of a local branch, which stays the same
@@ -692,7 +695,7 @@ impl Repo {
         Ok(String::from_utf8_lossy(&diff).into_owned())
     }
 
-    /// `<host>/<owner>/<repo>` from `origin`, else `local/<name>-<hash of the git common dir>`.
+    /// The URL of `origin` as git expands it, `None` without an origin.
     pub fn origin_url(&self) -> Result<Option<String>> {
         self.git_opt(&["remote", "get-url", "origin"])
     }
@@ -701,11 +704,11 @@ impl Repo {
     /// URL of it names a repository. The URL git expands (`insteadOf`) is tried first, then the
     /// one written in the config, so a rewritten URL that no longer parses still resolves.
     pub fn origin_location(&self) -> Result<Option<(String, String)>> {
+        if let Some(location) = self.origin_url()?.and_then(|url| split_remote(&url)) {
+            return Ok(Some(location));
+        }
         let written = self.git_opt(&["config", "--get", "remote.origin.url"])?;
-        Ok([self.origin_url()?, written]
-            .into_iter()
-            .flatten()
-            .find_map(|url| split_remote(&url)))
+        Ok(written.and_then(|url| split_remote(&url)))
     }
 
     /// The absolute git common dir, which names a `local/` repository.
@@ -788,6 +791,11 @@ pub fn branch_name(reference: &str) -> &str {
         .unwrap_or(reference)
 }
 
+/// The name of a local branch ref; anything else is returned as it is.
+pub fn local_branch_name(reference: &str) -> &str {
+    reference.strip_prefix("refs/heads/").unwrap_or(reference)
+}
+
 /// Reads the output of `git worktree list --porcelain -z`.
 pub fn parse_worktrees(listing: &[u8]) -> Vec<Worktree> {
     use std::os::unix::ffi::OsStrExt;
@@ -811,7 +819,7 @@ pub fn parse_worktrees(listing: &[u8]) -> Vec<Worktree> {
         if let Some(head) = line.strip_prefix("HEAD ") {
             entry.head = head.to_owned();
         } else if let Some(branch) = line.strip_prefix("branch ") {
-            entry.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).into());
+            entry.branch = Some(local_branch_name(branch).into());
         } else if line == "locked" || line.starts_with("locked ") {
             entry.locked = true;
         } else if line == "prunable" || line.starts_with("prunable ") {
@@ -905,6 +913,32 @@ mod tests {
             Some("/srv/mirror/owner/repo.git")
         );
         assert_eq!(repo.origin_location().unwrap(), expected);
+    }
+
+    #[test]
+    fn current_branch_is_not_confused_by_a_tag_of_the_same_name() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repo::at(root.path());
+        git(root.path(), &["init", "-q", "-b", "topic"]);
+        git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        );
+        assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
+        git(root.path(), &["tag", "topic"]);
+        assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
+        git(root.path(), &["checkout", "-q", "--detach"]);
+        assert_eq!(repo.current_branch().unwrap(), None);
     }
 
     #[test]

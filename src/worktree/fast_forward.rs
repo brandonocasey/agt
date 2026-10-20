@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 
 use crate::core::error::Result;
 use crate::core::shell::quote;
-use crate::git::Repo;
 use crate::git::base::Candidate;
+use crate::git::{Repo, local_branch_name};
 
 /// The report on the local default branch and, when it may still be behind, the warning; `None`
 /// when there is no local default branch or no remote to bring it up to.
@@ -43,7 +43,7 @@ fn update(
     // Without an upstream, origin's branch of the same name is the one `create` weighed it against.
     let remote = config("remote")?.unwrap_or_else(|| "origin".to_owned());
     let merge = config("merge")?.unwrap_or_else(|| format!("refs/heads/{name}"));
-    let tracked = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+    let tracked = local_branch_name(&merge);
     let Some(upstream) = found
         .iter()
         .find(|c| c.remote.as_deref() == Some(remote.as_str()))
