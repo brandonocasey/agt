@@ -364,9 +364,7 @@ fn find_pass_mut<'a>(target: &'a mut Target, run: &str, pass: &str) -> Result<&'
 
 fn find_thread_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Thread> {
     target
-        .threads
-        .iter_mut()
-        .find(|thread| thread.id == id)
+        .thread_mut(id)
         .ok_or_else(|| Error(format!("thread {id} not found")))
 }
 

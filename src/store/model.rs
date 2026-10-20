@@ -31,6 +31,20 @@ pub fn last_number(ids: impl IntoIterator<Item = impl AsRef<str>>, prefix: &str)
 }
 
 impl Target {
+    pub fn thread_mut(&mut self, id: &str) -> Option<&mut Thread> {
+        self.threads.iter_mut().find(|thread| thread.id == id)
+    }
+
+    pub fn comments_mut(&mut self) -> impl Iterator<Item = &mut Comment> {
+        self.threads
+            .iter_mut()
+            .flat_map(|thread| thread.comments.iter_mut())
+    }
+
+    pub fn comment_mut(&mut self, id: &str) -> Option<&mut Comment> {
+        self.comments_mut().find(|comment| comment.id == id)
+    }
+
     /// Adds `thread` without losing anything: the same remote thread (or the same finding) gains
     /// the comments it lacks; a different thread under a taken id (human `h<n>` ids restart per
     /// target) gets the next free id.
@@ -360,13 +374,7 @@ impl Thread {
         }
         if self.comments.iter().any(|known| known.id == comment.id) {
             let prefix = format!("{}/c", self.id);
-            let next = self
-                .comments
-                .iter()
-                .filter_map(|known| known.id.strip_prefix(&prefix)?.parse::<u32>().ok())
-                .max()
-                .unwrap_or(0)
-                + 1;
+            let next = last_number(self.comments.iter().map(|known| &known.id), &prefix) + 1;
             comment.id = format!("{prefix}{next}");
         }
         self.comments.push(comment);

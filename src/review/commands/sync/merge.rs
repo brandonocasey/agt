@@ -155,11 +155,7 @@ fn merge_threads(
 /// Comments written before the first sync name git `user.name`; they are the authenticated
 /// user's.
 pub(super) fn claim_git_names(target: &mut Target, login: &str) {
-    for comment in target
-        .threads
-        .iter_mut()
-        .flat_map(|thread| thread.comments.iter_mut())
-    {
+    for comment in target.comments_mut() {
         if let Author::Human {
             login: name,
             git_name,

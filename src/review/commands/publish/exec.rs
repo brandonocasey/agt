@@ -8,9 +8,7 @@ use crate::forge::service::Inline;
 use crate::review::commands::Ctx;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::sync::merge::landed;
-use crate::store::model::{
-    Approval, Comment, Delivery, PostState, RecordPost, RemoteComment, Target,
-};
+use crate::store::model::{Approval, Delivery, PostState, RecordPost, RemoteComment, Target};
 
 /// Runs writes in order. Each item is marked `posting` and saved before its call and gets its
 /// remote id right after, so a rerun can match a write whose response was lost.
@@ -114,19 +112,9 @@ pub(super) fn change<R>(
     ctx.store.update_existing(&ctx.dir, base, &now, edit)
 }
 
-pub(super) fn comment_mut<'a>(target: &'a mut Target, id: &str) -> Option<&'a mut Comment> {
-    target
-        .threads
-        .iter_mut()
-        .flat_map(|thread| thread.comments.iter_mut())
-        .find(|comment| comment.id == id)
-}
-
 pub(super) fn set_approval(target: &mut Target, thread: &str, edit: impl FnOnce(&mut Approval)) {
     if let Some(approval) = target
-        .threads
-        .iter_mut()
-        .find(|local| local.id == thread)
+        .thread_mut(thread)
         .and_then(|local| local.approval.as_mut())
     {
         edit(approval);
@@ -134,7 +122,7 @@ pub(super) fn set_approval(target: &mut Target, thread: &str, edit: impl FnOnce(
 }
 
 pub(super) fn clear_pending(target: &mut Target, id: &str) {
-    if let Some(thread) = target.threads.iter_mut().find(|thread| thread.id == id) {
+    if let Some(thread) = target.thread_mut(id) {
         thread.resolve_pending = None;
     }
 }
@@ -188,7 +176,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     };
     for id in ids {
         let text = texts.next().flatten();
-        if let Some(comment) = comment_mut(target, &id) {
+        if let Some(comment) = target.comment_mut(&id) {
             comment.delivery.begin(attempt, text);
         }
     }
@@ -234,7 +222,7 @@ pub(super) fn save(
                 .collect();
             change(ctx, target, |target| {
                 for (local, remote) in found {
-                    if let Some(comment) = comment_mut(target, &local) {
+                    if let Some(comment) = target.comment_mut(&local) {
                         comment.delivery.post = PostState::Posted;
                         comment.remote = Some(remote);
                     }
@@ -248,7 +236,7 @@ pub(super) fn save(
                 .comment_created(review_url, response)
                 .ok_or_else(|| Error(format!("no comment id returned for {comment}")))?;
             change(ctx, target, |target| {
-                if let Some(local) = comment_mut(target, comment) {
+                if let Some(local) = target.comment_mut(comment) {
                     local.delivery.post = PostState::Posted;
                     local.remote = Some(own(id.clone(), url, login, None));
                 }
@@ -264,7 +252,7 @@ pub(super) fn save(
                 ))
             })?;
             change(ctx, target, |target| {
-                if let Some(local) = comment_mut(target, comment) {
+                if let Some(local) = target.comment_mut(comment) {
                     local.draft_id = Some(draft.clone());
                 }
                 Ok(())
