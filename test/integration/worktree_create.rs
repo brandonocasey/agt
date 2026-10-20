@@ -1127,3 +1127,53 @@ fn offline_background_setup_does_not_install() {
     assert!(fake_calls(&env).is_empty(), "{:?}", fake_calls(&env));
 }
 
+#[test]
+fn offline_create_skips_network_submodules_with_a_warning_and_still_runs_the_hooks() {
+    let (env, _) = repo_with_commit();
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(&env, &library, &["init", "-q", "-b", "main"]);
+    commit(&env, &library, "lib.txt", "lib");
+    let main = env.repo.clone();
+    git(
+        &env,
+        &main,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            library.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    // The recorded URL is a network one that this host reaches only through the local clone.
+    let modules = fs::read_to_string(main.join(".gitmodules")).unwrap();
+    fs::write(
+        main.join(".gitmodules"),
+        modules.replace(library.to_str().unwrap(), "https://example.invalid/lib.git"),
+    )
+    .unwrap();
+    git(&env, &main, &["add", "-A"]);
+    git(&env, &main, &["commit", "-q", "-m", "add submodule"]);
+    // Without the main checkout's registration, the worktree falls back to the recorded URL.
+    git(&env, &main, &["config", "--remove-section", "submodule.vendor"]);
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch hooked\"]\n");
+    assert!(agt(&env, &env.repo, &["trust"]).status.success());
+    let output = env
+        .bin(&env.repo)
+        .args(["--offline", "worktree", "create", "off"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warnings = value["warnings"].as_array().unwrap();
+    assert!(
+        warnings[0].as_str().unwrap().contains("submodule vendor"),
+        "{warnings:?}"
+    );
+    assert_eq!(value["hooks"]["ok"], true);
+    assert!(env.repo.join(".worktrees/off/hooked").exists());
+    assert!(!env.repo.join(".worktrees/off/vendor/lib.txt").exists());
+}

@@ -95,7 +95,12 @@ pub fn run(cli: Cli) -> Result<Output> {
             finish(&dir, branch, value)?
         }
     };
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = value["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| warning.as_str().map(str::to_owned))
+        .collect();
     if let Some((report, warning)) = fast_forward::local_default(&repo, &fetched) {
         value["local_default"] = report;
         warnings.extend(warning);
@@ -206,22 +211,44 @@ fn add_new(
 fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
     let inside = Repo::at(dir);
     let submodules = dir.join(".gitmodules").exists();
-    if submodules {
-        // Offline, only submodules already cloned under the main checkout's `.git/modules`
-        // can be filled: git refuses every network transport.
-        let offline = Offline::current().is_set();
-        let mut args = vec![
-            "-c",
-            "protocol.allow=never",
-            "-c",
-            "protocol.file.allow=always",
-        ];
-        if !offline {
-            args.clear();
+    let mut warnings = Vec::new();
+    if submodules && Offline::current().is_set() {
+        // Git takes a submodule's URL from the shared config when the main checkout has
+        // registered it, else from `.gitmodules`; offline only `file` URLs can be cloned, so
+        // the others are skipped with a warning and the worktree and its hooks carry on.
+        let listed = inside.git(&[
+            "config",
+            "-f",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ])?;
+        for path in listed
+            .lines()
+            .filter_map(|line| line.split_once(' ').map(|(_, path)| path))
+        {
+            if let Err(error) = inside.git(&[
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+                "--",
+                path,
+            ]) {
+                warnings.push(format!(
+                    "submodule {path} not initialized offline; run `git submodule update --init` online: {}",
+                    error.0.lines().last().unwrap_or_default()
+                ));
+            }
         }
-        args.extend(["submodule", "update", "--init", "--recursive"]);
-        inside.git(&args)?;
+    } else if submodules {
+        inside.git(&["submodule", "update", "--init", "--recursive"])?;
     }
+    value["warnings"] = json!(warnings);
     value["path"] = json!(dir);
     value["branch"] = json!(branch);
     value["commit"] = json!(inside.git(&["rev-parse", "HEAD"])?);
