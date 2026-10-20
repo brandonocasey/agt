@@ -1,4 +1,4 @@
-//! `cost` and `agents`: USD and context per group of API responses.
+//! The cost report: USD per group of API responses, and the cost of one session.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use crate::core::output;
 use crate::core::transcripts::json::{tail, text};
 use crate::core::transcripts::{Call, session_files};
 use crate::sessions::Scope;
-use crate::sessions::fmt::{self, grouped, median, round, tok};
+use crate::sessions::fmt::{self, grouped, round, tok};
 use crate::sessions::prices::{Parts, Prices, USAGE_KEYS, context, tokens};
 use crate::sessions::source::Loaded;
 
@@ -159,7 +159,7 @@ impl Cost {
         ]);
         let table: Vec<Vec<String>> = rows
             .iter()
-            .take(scope.top)
+            .take(scope.limit)
             .map(|row| {
                 let base = if row.usd == 0.0 { 1.0 } else { row.usd };
                 let share = |part: f64| format!("{:.0}", 100.0 * part / base);
@@ -177,10 +177,10 @@ impl Cost {
             })
             .collect();
         fmt::table(&mut out, &headers, &table);
-        if rows.len() > scope.top {
+        if rows.len() > scope.limit {
             out.push_str(&format!(
-                "({} more groups; --top raises the limit)\n",
-                rows.len() - scope.top
+                "({} more groups; --limit raises the limit)\n",
+                rows.len() - scope.limit
             ));
         }
         if !unpriced.is_empty() {
@@ -240,107 +240,6 @@ pub fn session_cost(session: &str) -> Result<SessionCost> {
     cost.calls = group.calls;
     cost.tokens = group.tokens;
     Ok(cost)
-}
-
-/// `cost --session`: one session's cost, as a line or as JSON.
-pub fn session(id: &str, as_json: bool) -> Result<String> {
-    let cost = session_cost(id)?;
-    if as_json {
-        let mut object = Map::new();
-        object.insert("session".into(), json!(id));
-        object.insert("calls".into(), json!(cost.calls));
-        insert_tokens(&mut object, cost.tokens);
-        object.insert("usd".into(), json!(round(cost.usd, 4)));
-        object.insert("unpriced_calls".into(), json!(cost.unpriced_calls));
-        return output::pretty(&Value::Object(object));
-    }
-    let [input, write, read, output] = cost.tokens.map(|tokens| tok(tokens as f64));
-    let mut line = format!(
-        "Session {id}: ${} over {} calls (in {input}, write {write}, read {read}, out {output})\n",
-        grouped(cost.usd, 2),
-        cost.calls
-    );
-    if cost.unpriced_calls > 0 {
-        line.push_str(&format!(
-            "{} calls to models the price file does not list\n",
-            cost.unpriced_calls
-        ));
-    }
-    Ok(line)
-}
-
-pub struct Agents {
-    prices: Prices,
-    by: IndexMap<String, Vec<[f64; 4]>>,
-    seen: HashSet<String>,
-}
-
-impl Agents {
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            prices: Prices::load()?,
-            by: IndexMap::new(),
-            seen: HashSet::new(),
-        })
-    }
-    pub fn feed(&mut self, transcript: &Loaded) {
-        let calls = transcript.api_calls(&mut self.seen);
-        if calls.is_empty() {
-            return;
-        }
-        let context: Vec<i64> = calls.iter().map(|call| context(&call.usage)).collect();
-        let usd = calls.iter().fold(0.0, |sum, call| {
-            sum + self
-                .prices
-                .usd(&call.model, &call.usage)
-                .map_or(0.0, |parts| parts.total())
-        });
-        self.by.entry(transcript.agent.clone()).or_default().push([
-            context[0] as f64,
-            context.iter().copied().max().unwrap_or_default() as f64,
-            calls.len() as f64,
-            usd,
-        ]);
-    }
-
-    pub fn render(self) -> String {
-        let Self { by, .. } = self;
-        let total = |runs: &[[f64; 4]]| runs.iter().fold(0.0, |sum, run| sum + run[3]);
-        let mut agents: Vec<(String, Vec<[f64; 4]>)> = by.into_iter().collect();
-        agents.sort_by(|a, b| total(&b.1).total_cmp(&total(&a.1)));
-        let rows: Vec<Vec<String>> = agents
-            .iter()
-            .map(|(agent, runs)| {
-                let median: Vec<f64> = (0..4)
-                    .map(|index| median(runs.iter().map(|run| run[index]).collect()))
-                    .collect();
-                vec![
-                    agent.clone(),
-                    runs.len().to_string(),
-                    tok(median[0]),
-                    tok(median[1]),
-                    format!("{}", median[2].trunc() as i64),
-                    format!("{:.2}", median[3]),
-                    grouped(total(runs), 2),
-                ]
-            })
-            .collect();
-        let mut out = String::new();
-        fmt::table(
-            &mut out,
-            &[
-                "agent",
-                "runs",
-                "med start ctx",
-                "med peak ctx",
-                "med calls",
-                "med USD",
-                "total USD",
-            ],
-            &rows,
-        );
-        out
-    }
 }
 
 /// A Claude Code project directory name under the home directory as `~/<rest>`.

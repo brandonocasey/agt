@@ -1,4 +1,4 @@
-//! `agt sessions index`, `resolve` and `search`: the private session index and what it finds.
+//! `agt sessions search`: the private session index and what it finds.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -46,7 +46,7 @@ fn indexes_metadata_ids_and_searches_human_turns_with_bounded_context() {
         .map(|turn| turn["role"].as_str().unwrap())
         .collect();
     assert_eq!(roles, ["user", "assistant"]);
-    let resolved = task.run(&["resolve", "--session", "codex-session", "--file", file]);
+    let resolved = task.run(&["search", "--session", "codex-session", "--file", file]);
     assert_eq!(resolved["sources"][0], file);
     let excessive = task.fail(&[
         "search", "--query", "needle", "--file", file, "--limit", "101",
@@ -96,8 +96,8 @@ fn filters_injected_and_inherited_duplicate_events_from_index_counts() {
     let meta = json!({"type": "user", "isMeta": true, "sessionId": "shared", "message": {"role": "user", "content": "meta needle"}});
     task.write(&first, &lines(&[duplicate, meta]));
     task.write(&second, &lines(&[transcript]));
-    task.run(&["index", "--file", first.to_str().unwrap()]);
-    let stats = task.run(&["index", "--file", second.to_str().unwrap()]);
+    task.run(&["search", "--file", first.to_str().unwrap()]);
+    let stats = task.run(&["search", "--file", second.to_str().unwrap()]);
     assert_eq!(stats["humanTurns"], 1);
     let results = task.run(&[
         "search",
@@ -122,7 +122,7 @@ fn incrementally_handles_append_truncation_malformed_lines_and_private_modes() {
         &source,
         &format!("{}\n{{bad}}\n", user("one", "first needle")),
     );
-    assert_eq!(task.run(&["index", "--file", file])["malformedLines"], 1);
+    assert_eq!(task.run(&["search", "--file", file])["malformedLines"], 1);
     let mut appended = fs::read_to_string(&source).unwrap();
     appended.push_str(&format!("{}\n", user("one", "second needle")));
     fs::write(&source, appended).unwrap();
@@ -136,7 +136,7 @@ fn incrementally_handles_append_truncation_malformed_lines_and_private_modes() {
     let index = task.tasks().join("session-index/index.json");
     assert_eq!(mode(index.parent().unwrap()), 0o700);
     assert_eq!(mode(&index), 0o600);
-    assert_eq!(task.run(&["index", "--file", file])["indexedTurns"], 1);
+    assert_eq!(task.run(&["search", "--file", file])["indexedTurns"], 1);
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn detects_same_size_rewrites_outside_the_prefix() {
 }
 
 #[test]
-fn prioritizes_an_exact_session_filename_beyond_a_discovery_cap() {
+fn finds_an_exact_session_among_other_transcripts() {
     let task = Task::sessions();
     let directory = task.home().join(".codex/sessions");
     for index in 0..4 {
@@ -211,9 +211,9 @@ fn prioritizes_an_exact_session_filename_beyond_a_discovery_cap() {
             message,
         ]),
     );
-    let resolved = task.run(&["resolve", "--session", "target-session", "--max-files", "1"]);
+    let resolved = task.run(&["search", "--session", "target-session"]);
     assert_eq!(resolved["sources"], json!([target.to_str().unwrap()]));
-    assert_eq!(resolved["coverage"]["scanLimitReached"], true);
+    assert_eq!(resolved["turns"], 1);
 }
 
 #[test]
@@ -246,11 +246,11 @@ fn excludes_inherited_fork_turns_from_human_effort_but_resolves_them() {
             message(2, "new fork request"),
         ]),
     );
-    let stats = task.run(&["index", "--file", file]);
+    let stats = task.run(&["search", "--file", file]);
     assert_eq!(stats["humanTurns"], 1);
     assert_eq!(stats["inheritedTurns"], 1);
     assert_eq!(
-        task.run(&["resolve", "--session", "fork-id", "--file", file])["turns"],
+        task.run(&["search", "--session", "fork-id", "--file", file])["turns"],
         2
     );
     let hidden = task.run(&["search", "--query", "inherited", "--file", file]);
@@ -261,21 +261,19 @@ fn excludes_inherited_fork_turns_from_human_effort_but_resolves_them() {
 }
 
 #[test]
-fn advances_through_an_oversized_line_under_an_explicit_byte_budget() {
+fn skips_an_oversized_line_and_indexes_the_lines_after_it() {
     let task = Task::sessions();
     let source = task.file("oversized.jsonl");
     let file = source.to_str().unwrap();
     task.write(
         &source,
         &lines(&[
-            user("large", &"x".repeat(1_100_000)),
+            user("large", &"x".repeat(3_000_000)),
             user("after", "after needle"),
         ]),
     );
-    let first = task.run(&["index", "--file", file, "--byte-limit", "600000"]);
-    assert_eq!(first["byteLimitReached"], true);
-    let second = task.run(&["index", "--file", file, "--byte-limit", "600000"]);
-    assert_eq!(second["oversizedLines"], 1);
+    let coverage = task.run(&["search", "--file", file]);
+    assert_eq!(coverage["oversizedLines"], 1);
     let found = task.run(&["search", "--query", "after needle", "--file", file]);
     assert_eq!(found.as_array().unwrap().len(), 1);
 }
@@ -287,7 +285,7 @@ fn refuses_a_symbolic_link_session_index_directory() {
     fs::create_dir_all(task.tasks()).unwrap();
     fs::create_dir(&target).unwrap();
     symlink(&target, task.tasks().join("session-index")).unwrap();
-    let error = task.fail(&["index"]);
+    let error = task.fail(&["search"]);
     assert!(error.contains("must not be a symbolic link"), "{error}");
 }
 
@@ -305,7 +303,7 @@ fn valid_eof_records_stay_visible_and_partial_utf8_appends_do_not_duplicate_them
     };
     fs::write(&source, record("needle caf\u{e9}")).unwrap();
     assert_eq!(count(), 1);
-    assert_eq!(task.run(&["index", "--file", file])["scannedBytes"], 0);
+    assert_eq!(task.run(&["search", "--file", file])["scannedBytes"], 0);
     let second = record("needle second");
     let mut text = fs::read_to_string(&source).unwrap();
     text.push('\n');
@@ -357,7 +355,7 @@ fn a_growing_rewrite_near_the_old_tail_rebuilds_the_source() {
     let prelude = format!("{}\n", json!({"type": "meta", "padding": "x".repeat(5000)}));
     let row = |text: &str| format!("{}\n", user("rewrite", text));
     task.write(&source, &format!("{prelude}{}", row("old needle")));
-    task.run(&["index", "--file", file]);
+    task.run(&["search", "--file", file]);
     fs::write(
         &source,
         format!("{prelude}{}", row("replacement needle that is longer")),
@@ -366,7 +364,7 @@ fn a_growing_rewrite_near_the_old_tail_rebuilds_the_source() {
     let found = task.run(&["search", "--query", "needle", "--file", file]);
     assert_eq!(texts(&found), ["replacement needle that is longer"]);
     assert_eq!(
-        task.run(&["index", "--rebuild", "--file", file])["humanTurns"],
+        task.run(&["search", "--rebuild", "--file", file])["humanTurns"],
         1
     );
 }
@@ -414,7 +412,7 @@ fn the_index_file_keeps_its_format() {
     let task = Task::sessions();
     let source = task.file("format.jsonl");
     task.write(&source, &lines(&[user("fmt", "needle")]));
-    task.run(&["index", "--file", source.to_str().unwrap()]);
+    task.run(&["search", "--file", source.to_str().unwrap()]);
     let index: Value = serde_json::from_str(
         &fs::read_to_string(task.tasks().join("session-index/index.json")).unwrap(),
     )
@@ -470,26 +468,23 @@ fn input_errors_fail_with_a_reason() {
         assert_eq!(output.status.code(), Some(2), "{args:?}: {error}");
         assert!(error.contains(reason), "{args:?}: {error}");
     };
-    usage(&["search"], "--query <QUERY>");
+    usage(&["search", "--session"], "a value is required");
     usage(
         &["search", "--query", "x", "--limit", "0"],
         "0 is not in 1..=100",
     );
-    usage(&["index", "--max-files", "0"], "0 is not in 1..");
+    usage(
+        &["search", "--max-files", "0"],
+        "unexpected argument '--max-files'",
+    );
+    usage(&["search", "nope-id"], "unexpected argument 'nope-id'");
+    usage(&["resolve"], "unrecognized subcommand 'resolve'");
     assert!(
         task.fail(&["search", "--query", ""])
             .contains("query must not be empty")
     );
     assert!(
-        task.fail(&["resolve", "nope-id"])
+        task.fail(&["search", "--session", "nope-id"])
             .contains("session nope-id was not found")
-    );
-    let mut command = task.command(&["index"]);
-    command.env("AGENT_TASK_MAX_FILES", "many");
-    let output = command.output().unwrap();
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("AGENT_TASK_MAX_FILES must be a positive integer")
     );
 }

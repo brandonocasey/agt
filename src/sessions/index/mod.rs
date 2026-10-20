@@ -1,5 +1,5 @@
 //! The private session index (`agents/tasks/session-index/index.json`, version 4) and the
-//! `index`, `resolve` and `search` commands built on it.
+//! `search` command built on it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::clock;
-use crate::core::env;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_atomic};
 use crate::core::output::Output;
@@ -24,8 +23,7 @@ mod args;
 mod discover;
 mod scan;
 
-use self::args::Sources;
-pub use self::args::{IndexArgs, ResolveArgs, SearchArgs};
+pub use self::args::SearchArgs;
 
 use self::discover::{Coverage, Unreadable, discover, unique};
 use self::scan::{FileState, Stat, scan_file, visible_turns};
@@ -33,7 +31,6 @@ use self::scan::{FileState, Stat, scan_file, visible_turns};
 const INDEX_VERSION: u64 = 4;
 const CONTEXT_TURNS: usize = 2;
 const LOCK_WAIT: Duration = Duration::from_secs(5);
-const UNLIMITED: u64 = u64::MAX;
 /// The longest session id or query accepted.
 const MAX_ARGUMENT: usize = 16_384;
 
@@ -150,14 +147,6 @@ fn resolve_path(path: &str) -> String {
     resolved.to_string_lossy().into_owned()
 }
 
-/// The limit from its option, else from the environment variable, else none.
-fn limit(option: Option<u64>, variable: &str) -> Result<u64> {
-    if let Some(number) = option {
-        return Ok(number);
-    }
-    Ok(env::positive(variable)?.unwrap_or(UNLIMITED))
-}
-
 fn timestamp_key(timestamp: &Value) -> String {
     match timestamp {
         Value::Number(number) => {
@@ -235,7 +224,7 @@ fn deduplicate(turns: Vec<Turn>) -> Vec<Merged> {
     unique
 }
 
-fn index_sessions(options: &Sources, session: Option<&str>) -> Result<Indexed> {
+fn index_sessions(options: &SearchArgs, session: Option<&str>) -> Result<Indexed> {
     let directory = ensure_index_root()?;
     let _lock = Lock::acquire(
         directory.join(".lock"),
@@ -247,11 +236,8 @@ fn index_sessions(options: &Sources, session: Option<&str>) -> Result<Indexed> {
     } else {
         read_index()?
     };
-    let max_files = limit(options.max_files, "AGENT_TASK_MAX_FILES")?;
-    let byte_limit = limit(options.byte_limit, "AGENT_TASK_BYTE_LIMIT")?;
-    let discovered = discover(max_files, session)?;
+    let discovered = discover(session)?;
     let mut coverage = discovered.coverage;
-    coverage.byte_limit = (byte_limit != UNLIMITED).then_some(byte_limit);
     let extra = options.file.as_deref().map(resolve_path);
     let paths = unique(extra.into_iter().chain(discovered.files));
     let present: std::collections::HashSet<&String> = paths.iter().collect();
@@ -286,11 +272,6 @@ fn index_sessions(options: &Sources, session: Option<&str>) -> Result<Indexed> {
                 continue;
             }
         };
-        if coverage.scanned_bytes >= byte_limit {
-            coverage.skipped_files += 1;
-            coverage.byte_limit_reached = true;
-            continue;
-        }
         let stat = Stat::of(&metadata);
         let previous = index.files.get(file);
         if previous.is_some_and(|previous| {
@@ -304,17 +285,9 @@ fn index_sessions(options: &Sources, session: Option<&str>) -> Result<Indexed> {
             coverage.indexed += 1;
             continue;
         }
-        match scan_file(
-            file,
-            &stat,
-            previous,
-            byte_limit.saturating_sub(coverage.scanned_bytes),
-        ) {
+        match scan_file(file, &stat, previous) {
             Ok(scanned) => {
                 coverage.scanned_bytes += scanned.bytes;
-                if scanned.state.offset < stat.size {
-                    coverage.byte_limit_reached = true;
-                }
                 index.files.insert(file.clone(), scanned.state);
             }
             Err(error) => {
@@ -358,8 +331,8 @@ fn coverage_value(coverage: &Coverage) -> Result<Value> {
     serde_json::to_value(coverage).map_err(ctx("serialize coverage"))
 }
 
-pub fn index_command(args: &IndexArgs) -> Result<Output> {
-    let indexed = index_sessions(&args.sources, args.session.as_deref())?;
+/// The index coverage as `updatedAt` and the coverage fields.
+fn coverage_report(indexed: &Indexed) -> Result<Output> {
     let mut report = serde_json::Map::new();
     report.insert("updatedAt".into(), json!(indexed.updated_at));
     if let Value::Object(coverage) = coverage_value(&indexed.coverage)? {
@@ -375,10 +348,9 @@ fn matching<'a>(turns: &'a [Merged], session: &str) -> Vec<&'a Merged> {
         .collect()
 }
 
-pub fn resolve(args: &ResolveArgs) -> Result<Output> {
-    let session = required(args.session(), "session")?.to_owned();
-    let indexed = index_sessions(&args.sources, Some(&session))?;
-    let turns = matching(&indexed.turns, &session);
+/// `search --session ID` without a query: where the session lives.
+fn resolve(indexed: &Indexed, session: &str) -> Result<Output> {
+    let turns = matching(&indexed.turns, session);
     let Some(first) = turns.first() else {
         eprintln!(
             "{}",
@@ -398,9 +370,22 @@ pub fn resolve(args: &ResolveArgs) -> Result<Output> {
 }
 
 pub fn search(args: &SearchArgs) -> Result<Output> {
-    let query = required(Some(&args.query), "query")?.to_lowercase();
+    let session = match args.session.as_deref() {
+        Some(session) => Some(required(Some(session), "session")?),
+        None => None,
+    };
+    let query = match args.query.as_deref() {
+        Some(query) => Some(required(Some(query), "query")?.to_lowercase()),
+        None => None,
+    };
     let limit = usize::from(args.limit);
-    let indexed = index_sessions(&args.sources, args.session.as_deref())?;
+    let indexed = index_sessions(args, session)?;
+    let Some(query) = query else {
+        return match session {
+            Some(session) => resolve(&indexed, session),
+            None => coverage_report(&indexed),
+        };
+    };
     let turns: Vec<&Merged> = match args.session.as_deref() {
         Some(session) => matching(&indexed.turns, session),
         None => indexed

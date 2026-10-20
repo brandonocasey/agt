@@ -1,4 +1,0 @@
-agent     runs  med start ctx  med peak ctx  med calls  med USD  total USD
---------  ----  -------------  ------------  ---------  -------  ---------
-main         4           3.0k          3.0k          1     0.01       2.03
-explorer     2          10.0k         10.1k          2     0.04       0.09

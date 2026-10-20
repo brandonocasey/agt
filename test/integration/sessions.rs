@@ -13,6 +13,29 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("test/fixtures/sessions")
 }
 
+/// A report name and its flags as `agt sessions report` arguments: the name picks the section.
+fn report_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    match args.split_first() {
+        Some((name, rest))
+            if [
+                "cost",
+                "tools",
+                "cache-gaps",
+                "errors",
+                "denials",
+                "friction",
+            ]
+            .contains(name) =>
+        {
+            ["report", "--sections", name]
+                .into_iter()
+                .chain(rest.iter().copied())
+                .collect()
+        }
+        _ => args.to_vec(),
+    }
+}
+
 /// `agt sessions` in the isolated environment, reading fixtures by relative path.
 fn bare(env: &Env, args: &[&str]) -> Command {
     let mut command = env.bin(&fixtures());
@@ -20,7 +43,7 @@ fn bare(env: &Env, args: &[&str]) -> Command {
         .env("AGT_PRICES", fixtures().join("prices.json"))
         .env("TZ", "UTC")
         .arg("sessions")
-        .args(args);
+        .args(report_args(args));
     command
 }
 
@@ -66,8 +89,8 @@ fn claude_reports_print_the_expected_tables() {
             "cost --scratch --project repo",
             "cost_--scratch_--project_repo",
         ),
-        ("cost --top 2", "cost_--top_2"),
-        ("agents", "agents"),
+        ("cost --limit 2", "cost_--limit_2"),
+        ("cost --by agent", "cost_--by_agent"),
         ("tools", "tools"),
         ("cache-gaps", "cache-gaps"),
         ("cache-gaps --gap 0.5", "cache-gaps_--gap_0_5"),
@@ -341,41 +364,36 @@ fn link_transcripts(env: &Env) {
 fn one_session_prices_with_its_subagents() {
     let env = Env::new();
     link_transcripts(&env);
-    let out = stdout(sessions(&env, &["cost", "--session", "aaaaaaaa-1111"]));
-    assert_eq!(
-        out,
-        concat!(
-            "Session aaaaaaaa-1111: $2.08 over 10 calls (in 250.1k, write 71.2k, read 37.1k, out 1.1k)\n",
-            "1 calls to models the price file does not list\n",
-        )
-    );
-    let json: serde_json::Value = serde_json::from_str(&stdout(sessions(
-        &env,
-        &["cost", "--session", "aaaaaaaa-1111", "--json"],
-    )))
-    .unwrap();
-    assert_eq!(json["calls"], 10);
-    assert_eq!(json["unpriced_calls"], 1);
-    let codex = stdout(sessions(
-        &env,
-        &["cost", "--session", "0199aaaa-0000-7000-8000-000000000001"],
-    ));
-    assert!(codex.contains(" over 3 calls"), "{codex}");
-    // A built-in subagent's rollout names only its parent thread.
-    let parent = stdout(sessions(
-        &env,
-        &["cost", "--session", "0199cccc-0000-7000-8000-00000000cccc"],
-    ));
-    assert!(
-        parent.contains(" over 2 calls (in 15, write 0, read 0, out 2)"),
-        "{parent}"
-    );
-    let (code, _, err) = run(sessions(&env, &["cost", "--session", "no-such-session"]));
-    assert_eq!(code, Some(1));
-    assert!(
-        err.contains("session no-such-session has no transcripts"),
-        "{err}"
-    );
+    let by_session = |root: &str| {
+        let json: serde_json::Value = serde_json::from_str(&stdout(sessions(
+            &env,
+            &["cost", "--by", "session", "--json", "--root", root],
+        )))
+        .unwrap();
+        json["rows"].as_array().unwrap().clone()
+    };
+    // A Claude Code session's subagents are grouped under it.
+    let claude = by_session("projects");
+    let main = claude
+        .iter()
+        .find(|row| row["session"] == "aaaaaaaa")
+        .expect("session row");
+    assert_eq!(main["calls"], 10);
+    // A Codex thread, and a built-in subagent's rollout that names only its parent thread.
+    let codex = by_session("codex");
+    let thread = codex
+        .iter()
+        .find(|row| row["session"] == "00000001")
+        .expect("codex row");
+    assert_eq!(thread["calls"], 3);
+    let cases = by_session("codex-cases");
+    let parent = cases
+        .iter()
+        .find(|row| row["session"] == "0000cccc")
+        .expect("parent row");
+    assert_eq!(parent["calls"], 2);
+    assert_eq!(parent["input_tokens"], 15);
+    assert_eq!(parent["output_tokens"], 2);
 }
 
 #[test]
@@ -384,7 +402,6 @@ fn combined_reports_match_standalone_sections() {
     for root in ["projects", "codex"] {
         let sections = [
             ("cost", "Cost"),
-            ("agents", "Agents"),
             ("tools", "Tools"),
             ("cache-gaps", "Cache gaps"),
             ("errors", "Errors"),
@@ -412,7 +429,7 @@ fn combined_reports_match_standalone_sections() {
                 root,
                 "--project",
                 "repo",
-                "--top",
+                "--limit",
                 "2",
                 "--by",
                 "harness,model",
@@ -420,7 +437,15 @@ fn combined_reports_match_standalone_sections() {
         ));
         let denials = stdout(sessions(
             &env,
-            &["denials", "--root", root, "--project", "repo", "--top", "2"],
+            &[
+                "denials",
+                "--root",
+                root,
+                "--project",
+                "repo",
+                "--limit",
+                "2",
+            ],
         ));
         let cost = stdout(sessions(
             &env,
@@ -430,7 +455,7 @@ fn combined_reports_match_standalone_sections() {
                 root,
                 "--project",
                 "repo",
-                "--top",
+                "--limit",
                 "2",
                 "--by",
                 "harness,model",
@@ -441,23 +466,20 @@ fn combined_reports_match_standalone_sections() {
 }
 
 #[test]
-fn failure_kind_filter_preserves_the_migration_alias() {
+fn errors_and_denials_sections_split_the_failures() {
     let env = Env::new();
     let report = |args: &[&str]| {
         let mut command = sessions(&env, args);
         command.args(["--root", "projects"]);
         stdout(command)
     };
-    assert_eq!(report(&["errors"]), report(&["errors", "--kind", "error"]));
-    assert_eq!(
-        report(&["denials"]),
-        report(&["errors", "--kind", "denial"])
-    );
-    let all = report(&["errors", "--kind", "all"]);
-    assert!(all.contains("auto mode"), "{all}");
-    assert!(all.contains("Exit code"), "{all}");
-    assert_ne!(all, report(&["errors"]));
-    assert_ne!(all, report(&["denials"]));
+    let both = report(&["report", "--sections", "errors,denials"]);
+    let errors = report(&["errors"]);
+    let denials = report(&["denials"]);
+    assert_eq!(both, format!("Errors:\n{errors}\nDenials:\n{denials}"));
+    assert!(denials.contains("auto mode"), "{denials}");
+    assert!(errors.contains("Exit code"), "{errors}");
+    assert_ne!(errors, denials);
 }
 
 #[test]

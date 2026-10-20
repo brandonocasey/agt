@@ -33,7 +33,7 @@ A `v*` tag publishes release archives through the [release workflow](../.github/
 Most commands print JSON on stdout, indented at a terminal and compact when piped.
 Exceptions include session reports, `ps`, `doctor`, `secrets`, and `review list --format prompt`.
 Several offer `--json`; each command's section describes its output.
-Task records and `sessions cost --json` always use indented JSON, including when piped.
+Task records and `sessions report --json` always use indented JSON, including when piped.
 `worktree port --env` prints a shell assignment, and `wait` prints a completion message.
 `cleanup --count` prints a count message when saved candidates remain.
 
@@ -65,7 +65,6 @@ Environment variables agt reads, or sets for programs it runs:
 | `AGT_PRICES` | `sessions` | Price file to use instead of `model-prices.json` | user |
 | `AGT_LS_REMOTE_TIMEOUT` | `worktree`, `cleanup` | Seconds a remote check may take (default 10) | user |
 | `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |
-| `AGT_PS_EVENT`, `AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`, `AGT_PS_STATUS_SECS`, `AGT_PS_REASON` | `ps --exec` | Set by agt for the program it runs | set by agt |
 | `AGT_NOW` | all | Unix seconds replacing the current time | test only |
 | `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
 | `AGT_GH_BIN`, `AGT_GLAB_BIN` | everything that calls a forge | Program to run instead of `gh` or `glab` | test only |
@@ -373,7 +372,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   a document with fields this agt does not know (with a warning). Open issues,
   `tracker.json` and anything holding such data stay.
 - `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
-  tasks stay, and so does the session index, a cache that `agt sessions index` rebuilds.
+  tasks stay, and so does the session index, a cache that `agt sessions search` rebuilds.
 - `locks`: `.<key>.lock` and `.<key>.publish.lock` files whose `<key>.json` is gone,
   except an issue tracker's `.push.publish.lock` while `tracker.json` exists.
 - `backups`: `<namespace>-v<n>-<stamp>` directories that agt made before a schema
@@ -900,8 +899,8 @@ unknown flag or command, a bad `--status`, a `--revision` below 1, no command at
 
 Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/tasks/<id>.json`
 (mode 0600, directory 0700), guarded by a `.<id>.lock` directory and a `revision` that every
-write must name (record `version` 1). Commands that find or search sessions are
-`agt sessions index`, `resolve` and `search`.
+write must name (record `version` 1). The command that finds and searches sessions is
+`agt sessions search`.
 
 ## Branch
 
@@ -1010,32 +1009,28 @@ Failures print `agt: error: ...` and exit 1.
 
 `agt sessions` reports on Claude Code transcripts (`~/.claude*/projects`)
 and Codex rollouts (`~/.codex/sessions`, `~/.codex/archived_sessions`). Reports are text
-tables; `cost --json` prints indented JSON with `rows`, `unpriced` and `fast_calls`.
+tables; `report --json` prints the cost section as indented JSON with `rows`, `unpriced` and `fast_calls`.
 
 ```sh
-agt sessions report [--sections cost,agents,tools,cache-gaps,errors,denials,friction] [--by agent,model] [--gap MIN]
-agt sessions cost [--by agent,model,project,session,file,harness] [--json] [FILE...]
-agt sessions cost --session ID [--json]   # one session's cost so far, subagents included
-agt sessions agents          # per agent type: runs, start and peak context, calls, USD
-agt sessions tools           # tool calls and the share of cost their results carry
-agt sessions cache-gaps [--gap MIN]
-agt sessions errors [--kind error|denial|all]
-agt sessions denials         # compatibility spelling for errors --kind denial
-agt sessions friction [--tsv [--width N]]
-agt sessions index [--session ID] [--file FILE] [--rebuild] [--max-files N] [--byte-limit N]
-agt sessions resolve SESSION [index options]
-agt sessions search --query TEXT [--session ID] [--limit N] [index options]
+agt sessions report [--sections cost,tools,cache-gaps,errors,denials,friction] [--by agent,model] [--gap MIN]
+                    [--json] [--tsv [--width N]] [FILE...]
+agt sessions search [--query TEXT] [--session ID] [--limit N] [--file FILE] [--rebuild]
 ```
 
-`report` prints all seven sections by default, or the selected sections in the given order.
-It discovers transcripts once and parses each transcript once for the selected reports.
-`--by` controls cost grouping; `--gap` controls cache gaps. Existing report commands remain available.
-`errors` defaults to tool errors; `--kind denial` selects permission denials; `--kind all` includes both.
+`report` prints all six sections by default, or the selected sections in the given order. One
+selected section prints without its heading, so `--sections cost --json` is the JSON alone. It
+discovers transcripts once and parses each transcript once for the selected reports.
+`cost` is USD by `--by` group (`agent`, `model`, `project`, `session`, `file`, `harness`; one
+session's cost is `--by session`, per-agent totals `--by agent`); `FILE...` prices those
+transcript or stream-json files instead of the roots. `tools` counts tool calls and the share of
+cost their results carry. `--gap` sets the idle minutes of the cache-gaps section. `errors` lists
+tool errors and `denials` permission denials. `friction` lists interrupts, corrections, short
+replies and repeated prompts; `--tsv` prints every user message instead, text cut to `--width`
+(300). `--json` applies to the cost section and `--tsv` to the friction section.
 
-Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `--scratch`
-(scratch and probe projects are skipped otherwise), `--root DIR` (repeatable), `--top N` (25) and
-`--harness all|claude|codex`. `cost --session ID` takes the full session id and prints that one
-session's cost so far from its transcript and its subagents' (it ignores the other options).
+`report` takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `--scratch`
+(scratch and probe projects are skipped otherwise), `--root DIR` (repeatable), `--limit N` (25 rows per table) and
+`--harness all|claude|codex`.
 A transcript last changed before the start date is not read. A root named with `--root` can hold either harness; a file whose
 first line is a Codex `session_meta` is read as Codex. Prices come from
 `$XDG_CONFIG_HOME/agt/model-prices.json` (else the older `~/.config/agents/model-prices.json`), or
@@ -1065,19 +1060,24 @@ result whose `exit_code` is not 0 is an error, read as Claude Code's `Exit code 
 `friction` as `claude -p` ones are. In `cache-gaps` a Codex cache miss shows as uncached input,
 priced at the input rate. A session is labelled by the last 8 characters of its thread id (UUIDv7
 ids start with a timestamp); a subagent rollout is grouped under its role and its parent's
-session. Default Claude Code roots are every `~/.claude*/projects`, links followed.
+session. Without `--root`, reports and `search` read the same directories: Codex's `sessions` and
+`archived_sessions`, and each Claude Code profile's `projects`, `archive` and `archives` (links
+followed). Reports therefore also count transcripts kept in the `archive` directories, whose
+harness is read off each file's first line; `search` additionally reads the prompt history files.
 
-`index`, `resolve` and `search` find sessions and what was typed in them, with a private index
+`search` finds sessions and what was typed in them, with a private index
 of the human turns in Codex and Claude transcripts, prompt history files and
-`--file` in `agents/tasks/session-index/index.json` (version 4). The index is updated
-incrementally; `--rebuild`, a rewritten file or another index version scans again. `index`
-prints the coverage as JSON; `resolve` prints the session's sources and turn count; `search`
-prints up to `--limit` (1 to 100, 20) user turns that contain the query, case-insensitively,
-newest first, with the turns around each, and the coverage as one JSON line on stderr. Turns a
-fork replays from its parent are marked `inherited` and left out of a search without
-`--session`. `--max-files` and `--byte-limit` (or the environment variables
-`AGENT_TASK_MAX_FILES` and `AGENT_TASK_BYTE_LIMIT`) bound a run; `--session` and `resolve` still
-find an exact session beyond `--max-files`.
+`--file` in `agents/tasks/session-index/index.json` (version 4). Every run first updates the
+index incrementally; `--rebuild`, a rewritten file or another index version scans again. Without
+`--query` and `--session` it prints the coverage as JSON (`updatedAt`, the counts of files,
+turns and unreadable sources). With `--session ID` and no `--query` it prints the session's
+sources and turn count and fails when the session is not found. With `--query` it prints up to
+`--limit` (1 to 100, 20) user turns that contain the text, case-insensitively, newest first, with
+the turns around each, and the coverage as one JSON line on stderr. `--session` limits the
+search to that session, whose transcripts are found wherever they are, and turns a fork replays
+from its parent (marked `inherited`) are left out of a search without it.
+There is no limit on files or bytes: a run reads every transcript, and the coverage has no
+scan or byte limit fields.
 
 ## Ps
 
@@ -1102,20 +1102,13 @@ share the directory, or the platform cannot read the process's directory, `sessi
 rollout has no later `task_complete` or `turn_aborted`, else `idle`; `status_secs` counts from
 that event's timestamp (only the file's last 256 KiB is read).
 
-`agt ps --watch [--blocked-after SECS] [--interval SECS] [--notify] [--exec PROGRAM [-- ARGS...]]`
-polls every `--interval` seconds (default 5) until interrupted and prints one JSON line per event
-for Claude Code sessions: `blocked` (the session has been `waiting` for `--blocked-after` seconds,
-default 60; once per waiting stretch, with `waiting_for`), `cleared` (a blocked session left
-`waiting`, with `reason` `answered`, or a new waiting stretch replaced the blocked one, with `reason` `new_prompt`) and `ended` (its process is gone). Each line holds the row's fields plus `event` and
-`at`. `--notify` posts a desktop notification per `blocked` event through native APIs:
-the desktop notification service over D-Bus on Linux, and Notification Center on macOS.
-Notification failures warn on stderr and polling continues. `--exec` runs
-the program, without a shell, once per event with the event JSON on stdin and `AGT_PS_EVENT`,
-`AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`,
-`AGT_PS_STATUS_SECS` and (for `cleared`) `AGT_PS_REASON` set. The program's stdout goes to agt's stderr, so stdout stays one JSON line
-per event. It runs synchronously: polling waits until it exits. A program that exits non-zero only
-warns on stderr. A session whose process still runs but is missing from one poll keeps its state
-and is not reported `ended`.
+`agt ps --watch [--interval SECS]` polls every `--interval` seconds (default 5) until
+interrupted and prints one JSON line per event for Claude Code sessions: `blocked` (the session
+has been `waiting` for 60 seconds; once per waiting stretch, with `waiting_for`), `cleared` (a
+blocked session left `waiting`, with `reason` `answered`, or a new waiting stretch replaced the
+blocked one, with `reason` `new_prompt`) and `ended` (its process is gone). Each line holds the
+row's fields plus `event` and `at`. A session whose process still runs but is missing from one
+poll keeps its state and is not reported `ended`.
 
 ## Worktrees
 

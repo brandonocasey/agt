@@ -1,0 +1,7 @@
+Total $2.12 since 2026-02-15
+agent     calls      in  write   read  out   USD     %  write%  read%  out%
+--------  -----  ------  -----  -----  ---  ----  ----  ------  -----  ----
+main          9  250.1k  57.9k  21.1k  594  2.03  95.8      22      3     1
+explorer      4      12  20.1k  16.0k  570  0.09   4.2      85      5    10
+Unpriced models (add them to the price file): claude-mystery-1: 1
+Fast-mode calls: 1

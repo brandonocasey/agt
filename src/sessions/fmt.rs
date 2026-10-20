@@ -42,19 +42,6 @@ pub fn tok(n: f64) -> String {
     format!("{}", n.trunc() as i64)
 }
 
-pub fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(f64::total_cmp);
-    let n = values.len();
-    if n == 0 {
-        return 0.0;
-    }
-    if n % 2 == 1 {
-        values[n / 2]
-    } else {
-        (values[n / 2 - 1] + values[n / 2]) / 2.0
-    }
-}
-
 static NUMERIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[-$\d.,%kMG/]+$").expect("valid pattern"));
 
@@ -117,7 +104,6 @@ mod tests {
         assert_eq!(tok(999.0), "999");
         assert_eq!(tok(2_500_000.0), "2.5M");
         assert_eq!(round(0.12345, 4), 0.1235);
-        assert_eq!(median(vec![3.0, 1.0, 2.0, 10.0]), 2.5);
     }
 
     #[test]

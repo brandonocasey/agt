@@ -113,13 +113,8 @@ pub struct Scanned {
     pub bytes: u64,
 }
 
-/// Scans `path` from where `previous` stopped, reading at most `budget` bytes.
-pub fn scan_file(
-    path: &str,
-    stat: &Stat,
-    previous: Option<&FileState>,
-    budget: u64,
-) -> Result<Scanned> {
+/// Scans `path` from where `previous` stopped to the end of the file.
+pub fn scan_file(path: &str, stat: &Stat, previous: Option<&FileState>) -> Result<Scanned> {
     let file = File::open(path).map_err(ctx(format!("open {path}")))?;
     let prefix = file_prefix(&file, stat.size)?;
     let append = can_append(&file, stat, previous)?;
@@ -144,10 +139,8 @@ pub fn scan_file(
         None => (ScanState::default(), 0, Vec::new(), false),
     };
     let mut read_bytes: u64 = 0;
-    while start_offset + read_bytes < stat.size && read_bytes < budget {
-        let length = (READ_CHUNK as u64)
-            .min(stat.size - start_offset - read_bytes)
-            .min(budget - read_bytes);
+    while start_offset + read_bytes < stat.size {
+        let length = (READ_CHUNK as u64).min(stat.size - start_offset - read_bytes);
         let chunk = read_at(
             &file,
             start_offset + read_bytes,

@@ -3,6 +3,6 @@ agent  model              calls      in  write   read  out   USD     %  write%  
 -----  -----------------  -----  ------  -----  -----  ---  ----  ----  ------  -----  ----
 main   claude-sonnet-4-6      3  250.0k   4.0k   1.0k   90  1.52  71.6       1      0     0
 main   claude-opus-4-8        5      24  53.9k  20.1k  494  0.51  24.2      83     12     5
-(2 more groups; --top raises the limit)
+(2 more groups; --limit raises the limit)
 Unpriced models (add them to the price file): claude-mystery-1: 1
 Fast-mode calls: 1
