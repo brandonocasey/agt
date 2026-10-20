@@ -216,13 +216,20 @@ fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
         // Git takes a submodule's URL from the shared config when the main checkout has
         // registered it, else from `.gitmodules`; offline only `file` URLs can be cloned, so
         // the others are skipped with a warning and the worktree and its hooks carry on.
-        let listed = inside.git(&[
-            "config",
-            "-f",
-            ".gitmodules",
-            "--get-regexp",
-            r"^submodule\..*\.path$",
-        ])?;
+        // `-z` ends each record with NUL and splits key from value at a newline, so a name or
+        // path with spaces survives. No match exits 1 (an empty `.gitmodules`), which means no
+        // submodules rather than a failure that would stop `finish` and the create hooks.
+        let listed = inside
+            .git_opt(&[
+                "config",
+                "-f",
+                ".gitmodules",
+                "--get-regexp",
+                r"^submodule\..*\.path$",
+            ])
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         for path in listed
             .lines()
             .filter_map(|line| line.split_once(' ').map(|(_, path)| path))
