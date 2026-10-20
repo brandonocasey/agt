@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::super::Store;
 use super::Removal;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::is_current;
+use crate::core::local::{is_current, try_lock};
 
 impl Store {
     /// Lock files (`.<key>.lock`, `.<key>.publish.lock`) under the namespace whose document is
@@ -71,12 +71,8 @@ pub(super) enum StrayLock {
 /// lock file replaced since the open is a different inode, and deleting it would break the
 /// lock its holder believes it has.
 pub(super) fn lock_stray_file(file: fs::File, path: &Path) -> Result<StrayLock> {
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Ok(StrayLock::Busy),
-        Err(fs::TryLockError::Error(error)) => {
-            return fail(format!("lock {}: {error}", path.display()));
-        }
+    if !try_lock(&file, path)? {
+        return Ok(StrayLock::Busy);
     }
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return Ok(StrayLock::Kept);

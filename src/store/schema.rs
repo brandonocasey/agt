@@ -3,10 +3,13 @@
 
 use std::path::Path;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::json::{lost_field, persist_json, read_json};
+use super::json::{lost_field, persist_json};
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::read_json;
 use crate::store::model::{Target, VERSION};
 
 const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);
@@ -54,9 +57,7 @@ pub(super) fn read_target_intact(
         return Ok(None);
     }
     let (target, document) = parse_target(path, document, schema)?;
-    let written =
-        serde_json::to_value(&target).map_err(ctx(format!("encode {}", path.display())))?;
-    Ok(Some(match lost_field(&document, &written, "") {
+    Ok(Some(match lost_field_of(path, &document, &target)? {
         Some(field) => Err(field),
         None => Ok(target),
     }))
@@ -69,27 +70,55 @@ pub(super) fn read_target_for_write(path: &Path, schema: Schema) -> Result<Optio
         return Ok(None);
     };
     let (target, document) = parse_target(path, document, schema)?;
-    let written =
-        serde_json::to_value(&target).map_err(ctx(format!("encode {}", path.display())))?;
-    if let Some(field) = lost_field(&document, &written, "") {
-        return fail(format!(
+    refuse_lost_field(path, &document, &target)?;
+    Ok(Some(target))
+}
+
+/// The first field of `document` that `value` would not write back.
+pub(super) fn lost_field_of<T: Serialize>(
+    path: &Path,
+    document: &Value,
+    value: &T,
+) -> Result<Option<String>> {
+    let written = serde_json::to_value(value).map_err(ctx(format!("encode {}", path.display())))?;
+    Ok(lost_field(document, &written, ""))
+}
+
+/// Fails when writing `value` back would drop a field of `document` that this build lacks.
+pub(super) fn refuse_lost_field<T: Serialize>(
+    path: &Path,
+    document: &Value,
+    value: &T,
+) -> Result<()> {
+    match lost_field_of(path, document, value)? {
+        Some(field) => fail(format!(
             "{} has field {field} that this agt does not know; it was probably written by a newer agt, so upgrade agt before changing it",
             path.display()
-        ));
+        )),
+        None => Ok(()),
     }
-    Ok(Some(target))
 }
 
 /// Parses a stored target, migrating older schema versions first. Returns the migrated
 /// document alongside the target.
 pub(super) fn parse_target(
     path: &Path,
-    mut document: Value,
+    document: Value,
     schema: Schema,
 ) -> Result<(Target, Value)> {
     if !is_target_document(&document) {
         return fail(format!("{} is not a target document", path.display()));
     }
+    parse_versioned(path, document, schema)
+}
+
+/// Parses a stored document of any namespace: its `version` must be one this build knows, and
+/// older ones are migrated first. Returns the migrated document alongside the parsed value.
+pub(super) fn parse_versioned<T: DeserializeOwned>(
+    path: &Path,
+    mut document: Value,
+    schema: Schema,
+) -> Result<(T, Value)> {
     let version = document.get("version").and_then(Value::as_u64);
     let version = match version.map(u32::try_from) {
         Some(Ok(version)) => version,
@@ -107,9 +136,9 @@ pub(super) fn parse_target(
         return fail(format!("{} has unsupported version 0", path.display()));
     }
     migrate_with(&mut document, version, schema.migrations);
-    let target: Target = serde_json::from_value(document.clone())
+    let value = serde_json::from_value(document.clone())
         .map_err(ctx(format!("parse {}", path.display())))?;
-    Ok((target, document))
+    Ok((value, document))
 }
 
 /// One step per schema version: `MIGRATIONS[n - 1]` rewrites a version `n` document into

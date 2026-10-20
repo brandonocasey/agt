@@ -27,34 +27,6 @@ pub fn private_dir(path: &Path) -> Result<()> {
         .map_err(ctx(format!("chmod {}", path.display())))
 }
 
-/// A lock held as a directory. Dropping it releases the lock.
-pub struct Lock(PathBuf);
-
-impl Lock {
-    /// Takes the lock, retrying for `wait` when it is held and then failing with `busy`.
-    pub fn acquire(path: PathBuf, wait: Option<Duration>, busy: &str) -> Result<Self> {
-        let deadline = wait.map(|wait| Instant::now() + wait);
-        loop {
-            match DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => return Ok(Self(path)),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
-                        return fail(busy);
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(error) => return Err(Error(format!("lock {}: {error}", path.display()))),
-            }
-        }
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
-    }
-}
-
 /// Replaces `path` with `data` through a private temporary file in the same directory, so a
 /// reader sees the old or the new document and never a partial one. `check` runs just before
 /// the rename. `durable` also syncs the data and the directory, so the write survives a crash.
@@ -115,15 +87,41 @@ pub fn sync_dir(dir: &Path) -> Result<()> {
         .map_err(ctx(format!("sync {}", dir.display())))
 }
 
-/// The JSON document at `path`, `None` when the file does not exist.
+/// The JSON document at `path`, `None` when the file does not exist. It must be a regular
+/// file. Writers replace files by rename, so a file
+/// swapped between the check and the open is read again; only a path that keeps changing fails.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(ctx(format!("parse {}", path.display()))),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => fail(format!("read {}: {error}", path.display())),
+    const ATTEMPTS: usize = 100;
+    for _ in 0..ATTEMPTS {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return fail(format!("stat {}: {error}", path.display())),
+        };
+        if !meta.file_type().is_file() {
+            return fail(format!(
+                "{} must be a regular file, not a symbolic link",
+                path.display()
+            ));
+        }
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            // Replaced by a rename of a file that is gone again, or removed.
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return fail(format!("open {}: {error}", path.display())),
+        };
+        let opened = file
+            .metadata()
+            .map_err(ctx(format!("stat {}", path.display())))?;
+        if opened.ino() != meta.ino() || opened.dev() != meta.dev() {
+            continue;
+        }
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)
+            .map_err(ctx(format!("read {}", path.display())))?;
+        return serde_json::from_str(&raw).map_err(ctx(format!("parse {}", path.display())));
     }
+    fail(format!("{} changed while opening; retry", path.display()))
 }
 
 /// Writes `value` as indented JSON with a final newline, privately and atomically; see
@@ -197,20 +195,43 @@ pub fn lock_file(path: &Path) -> Result<File> {
     }
 }
 
+/// Tries the exclusive lock on the open `file` without waiting; `false` when another process
+/// holds it. `path` names the file in the error.
+pub fn try_lock(file: &File, path: &Path) -> Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(error)) => fail(format!("lock {}: {error}", path.display())),
+    }
+}
+
 /// Like [`lock_file`], but gives up with `None` when another process holds the lock.
 pub fn try_lock_file(path: &Path) -> Result<Option<File>> {
+    lock_file_within(path, None)
+}
+
+/// Like [`try_lock_file`], but polls for `wait` while another process holds the lock, and
+/// fails with `busy` when it still does. The lock is released when the file is dropped, also
+/// when the process dies.
+pub fn lock_file_or_busy(path: &Path, wait: Option<Duration>, busy: &str) -> Result<File> {
+    lock_file_within(path, wait)?.ok_or_else(|| Error(busy.to_owned()))
+}
+
+/// [`try_lock_file`] polling for `wait` (`None`: one try) while another process holds the lock.
+pub fn lock_file_within(path: &Path, wait: Option<Duration>) -> Result<Option<File>> {
+    let deadline = wait.map(|wait| Instant::now() + wait);
     loop {
         let file = open_lock_file(path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Error(error)) => {
-                return fail(format!("lock {}: {error}", path.display()));
+        if try_lock(&file, path)? {
+            if is_current(&file, path)? {
+                return Ok(Some(file));
             }
+            continue;
         }
-        if is_current(&file, path)? {
-            return Ok(Some(file));
+        if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+            return Ok(None);
         }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -283,15 +304,6 @@ pub fn agt_config_file(name: &str) -> Result<PathBuf> {
     Ok(config_home()?.join("agt").join(name))
 }
 
-/// `current`, unless only the file `older` from an earlier name of agt exists.
-pub fn current_or_older(current: PathBuf, older: PathBuf) -> PathBuf {
-    if !current.exists() && older.exists() {
-        older
-    } else {
-        current
-    }
-}
-
 /// `$XDG_CACHE_HOME`, or `~/.cache` when it is unset or relative.
 pub fn cache_home() -> Result<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")
@@ -323,6 +335,37 @@ mod tests {
     use std::collections::BTreeMap;
 
     type Map = BTreeMap<String, u16>;
+
+    #[test]
+    fn a_held_lock_is_polled_for_then_reported_busy_and_follows_its_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".x.lock");
+        let held = try_lock_file(&path).unwrap().unwrap();
+        assert!(try_lock_file(&path).unwrap().is_none());
+        let started = Instant::now();
+        let error = lock_file_or_busy(&path, Some(Duration::from_millis(100)), "busy now");
+        assert_eq!(error.unwrap_err().0, "busy now");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        drop(held);
+        let again = lock_file_within(&path, Some(Duration::from_millis(100))).unwrap();
+        assert!(again.is_some());
+    }
+
+    #[test]
+    fn read_json_refuses_a_symbolic_link_and_reads_through_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let error = read_json::<Map>(&link).unwrap_err();
+        assert!(error.0.contains("must be a regular file"), "{}", error.0);
+        assert!(
+            read_json::<Map>(&dir.path().join("none.json"))
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn update_json_writes_a_private_file_only_when_changed() {

@@ -5,10 +5,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::json::{persist_json, read_json};
+use super::json::persist_json;
 use super::{Store, create_dir};
 use crate::core::clock;
 use crate::core::error::Result;
+use crate::core::local::read_json;
 use crate::store::model::Forge;
 
 pub(super) const ACCOUNT_FILE: &str = ".account.json";

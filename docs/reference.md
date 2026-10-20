@@ -22,9 +22,7 @@ review coverage checks; older versions count every merge commit as unreviewed.
 Repositories with SHA-1 or SHA-256 object IDs both work.
 
 Up to 0.4.0, the binary was `agent-review`; its commands lacked the `review` prefix.
-Its stores remain readable. Posted comment markers retain the `agent-review` name,
-and `$XDG_CONFIG_HOME/agent-review/hosts.json` is still read when `$XDG_CONFIG_HOME/agt/hosts.json`
-does not exist.
+Its stores remain readable. Posted comment markers retain the `agent-review` name.
 
 A `v*` tag publishes release archives through the [release workflow](../.github/workflows/release.yml).
 
@@ -52,8 +50,8 @@ Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
 | --- | --- | --- |
 | `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
 | `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
-| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}`; the older `$XDG_CONFIG_HOME/agent-review/hosts.json` is read only when this one is missing | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
-| `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model; the older `~/.config/agents/model-prices.json` is read only when this one is missing | [Sessions](#sessions) |
+| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}` | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
+| `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model | [Sessions](#sessions) |
 
 Unknown keys and invalid values in the TOML files are errors that name the file and the key.
 
@@ -376,7 +374,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   unfinished `.<namespace>-v<n>-<stamp>.partial` copies (`partial_backups`). Other
   names in the same backups directory belong to other tools and are never touched.
   Repository schema backups use `agents/backups/repositories/<clone-id>/`; newest-backup
-  protection applies separately per clone and namespace. Legacy-import backups follow the same per-clone retention rules.
+  protection applies separately per clone and namespace.
 
 The `files` kind covers cache files, which go by age (its categories are `output` and `scratch`). Each top-level entry goes whole, and only once nothing in it changed
 for the whole period, so a task that is still writing keeps all of its files:
@@ -487,8 +485,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 
 ## Sync
 
-- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agt/hosts.json` (else the older
-  `$XDG_CONFIG_HOME/agent-review/hosts.json`), a JSON object of host to
+- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agt/hosts.json`, a JSON object of host to
   `{"service": "github"}` or `{"service": "gitlab"}`, such as
   `{"git.example.com": {"service": "gitlab"}}`, with host names compared without regard to
   case and entries for other hosts ignored; the
@@ -703,13 +700,9 @@ non-bare main checkout, issue and review commands fail clearly.
 Git's common directory holds a private `agt-repository-id` shared by linked worktrees.
 It keeps migration and backup ownership stable when the checkout moves.
 
-First use imports matching legacy records from `$XDG_STATE_HOME/agents/reviews/`
-and `agents/issues/` (default state root `~/.local/state`). Originals remain intact.
-Imports install a saved snapshot. Writes through older versions after that snapshot
-stay in the legacy store. This includes writes overlapping import.
-Imports are locked, backed up globally and marked complete per clone. Existing
-conflicting records stop import instead of being overwritten. Dry-runs inspect
-existing data without importing it. Tasks, session indexes, ports and backups
+Records an older agt kept under `$XDG_STATE_HOME/agents/reviews/` and `agents/issues/`
+are no longer imported; `agt cleanup` still prunes them by age.
+Tasks, session indexes, ports and backups
 remain global. Add `/.agt/` to your global Git ignore; agt does not edit that file.
 
 Each target is one JSON file, mode 0600, in a 0700
@@ -899,7 +892,7 @@ unknown flag or command, a bad `--status`, a `--revision` below 1, no command at
 2 and clap's message; other errors exit with 1.
 
 Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/tasks/<id>.json`
-(mode 0600, directory 0700), guarded by a `.<id>.lock` directory and a `revision` that every
+(mode 0600, directory 0700), guarded by a `.<id>.lock` file (an advisory lock that goes when the process dies) and a `revision` that every
 write must name (record `version` 1). The command that finds and searches sessions is
 `agt sessions search`.
 
@@ -1031,7 +1024,7 @@ replies and repeated prompts; `--tsv` prints every user message instead, text cu
 `--harness all|claude|codex`.
 A transcript last changed before the start date is not read. A root named with `--root` can hold either harness; a file whose
 first line is a Codex `session_meta` is read as Codex. Prices come from
-`$XDG_CONFIG_HOME/agt/model-prices.json` (else the older `~/.config/agents/model-prices.json`), or
+`$XDG_CONFIG_HOME/agt/model-prices.json`, or
 the file `AGT_PRICES` names; models it does not list are reported as unpriced.
 
 The prices file is a JSON object with a `models` object that maps a model name to its rates in
@@ -1174,7 +1167,7 @@ and prints JSON. The main checkout is the first entry of `git worktree list`; wh
 (`reused: true`); another existing branch gets a worktree without moving. A branch that exists only as `origin/<branch>` (no local branch, no `--base`) gets a local branch tracking it, checked out in the worktree (`tracking` names the upstream). When neither a local branch nor `origin/<branch>` exists, `create` first asks `origin` (`git ls-remote --exit-code`, whose exit code 2 means no such branch, so git's message language does not matter) and then fetches that one branch (`git fetch origin +refs/heads/<branch>:refs/remotes/origin/<branch>`), so a branch pushed after the last fetch is found; if `origin` has no such branch the new branch starts as below, and any other fetch failure (offline, authentication) is an error naming the branch that suggests `--base`, instead of a silent new branch. A new branch starts at
 `--base`, or at the newest default base: for each remote, its live default
 (`git ls-remote --symref <remote> HEAD`) is fetched and its commit recorded at once, and the local
-default branch (`origin/HEAD`'s, else `main`, else `master`) joins them. The candidate that
+default branch (`origin/HEAD`'s, else `main`, `master` or `init.defaultBranch`) joins them. The candidate that
 contains all the others wins; when they diverge, origin's fetched default is used and
 `base.diverged` is true. `base.candidates` lists every candidate with its commit. Choosing
 moves no remote-tracking branch, and a remote that cannot be queried or fetched is an
@@ -1294,8 +1287,7 @@ since_days = 90             # first sync only; later syncs use the watermark
 # push = false              # explicitly prohibit writes for this tracker
 ```
 
-The existing `sync.auto` key remains an alias for `auto_pull`.
-Specifying both names in one file is an error. `push = true` permits writes;
+`push = true` permits writes;
 it never enables automatic publication. Omitted push permissions permit explicit
 commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching
 tracker or supported `origin`. Unrelated global trackers do not participate automatically.

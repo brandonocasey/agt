@@ -86,9 +86,7 @@ fn a_0_4_0_store_reads_and_updates_unchanged() {
 
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("test/fixtures/store-0.4.0/github.com/Owner/Repo");
-    let dir = env
-        .path("state")
-        .join("agents/reviews/github.com/Owner/Repo");
+    let dir = env.state();
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join(format!("{KEY}.json"));
     fs::copy(source.join(format!("{KEY}.json")), &file).unwrap();
@@ -98,10 +96,7 @@ fn a_0_4_0_store_reads_and_updates_unchanged() {
     assert!(text.contains("fix this"), "{text}");
 
     env.run(&["--target", KEY, "reply", "h2", "--body", "agreed"]);
-    let original: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert!(!original.to_string().contains("agreed"));
-    let migrated = env.state().join(format!("{KEY}.json"));
-    let document: serde_json::Value = serde_json::from_slice(&fs::read(migrated).unwrap()).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(document["version"], 1);
     assert_eq!(document["revision"], 5);
     assert!(document.to_string().contains("agreed"));

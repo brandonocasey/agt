@@ -246,7 +246,6 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
     ]);
     assert!(error.contains("next-step exceeds"), "{error}");
     assert!(!task.tasks().join("large-create.json").exists());
-    assert!(!task.tasks().join(".large-create.lock").exists());
     task.run(&["create", "large-check", "--objective", "Work"]);
     for field in ["code-revision", "inputs", "environment"] {
         let flag = format!("--check-{field}");
@@ -266,25 +265,27 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
         let unchanged = task.run(&["show", "large-check"]);
         assert_eq!(unchanged["revision"], 1);
         assert_eq!(unchanged["checks"], json!([]));
-        assert!(!task.tasks().join(".large-check.lock").exists());
     }
 }
 
 #[test]
-fn a_held_task_lock_fails_fast_and_is_not_left_behind() {
+fn a_held_task_lock_fails_fast_and_dies_with_its_holder() {
     let task = Task::new();
     task.run(&["create", "busy", "--objective", "Work"]);
-    let lock = task.tasks().join(".busy.lock");
-    fs::create_dir(&lock).unwrap();
+    let held = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(task.tasks().join(".busy.lock"))
+        .unwrap();
+    held.lock().unwrap();
     let error = task.fail(&["update", "busy", "--revision", "1", "--next-step", "x"]);
     assert!(error.contains("is being updated; retry"), "{error}");
-    assert!(lock.exists(), "a lock the tool did not take stays");
-    fs::remove_dir(&lock).unwrap();
+    drop(held);
     assert_eq!(
         task.run(&["update", "busy", "--revision", "1", "--next-step", "x"])["revision"],
         2
     );
-    assert!(!lock.exists());
 }
 
 #[test]

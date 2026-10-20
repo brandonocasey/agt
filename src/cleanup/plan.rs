@@ -306,8 +306,8 @@ impl Plan {
         Ok(())
     }
 
-    /// Lock files in `store` whose document is gone. Task locks are directories that exist only
-    /// while held, so they are not looked at. Callers MUST plan the store's local repositories
+    /// Lock files in `store` whose document is gone. A task's lock file goes with its
+    /// record, so task locks are not looked at. Callers MUST plan the store's local repositories
     /// first: a listed local repository deletes its own stray locks.
     fn stray_locks(&mut self, store: &Store, namespace: Namespace) {
         let found = store.stray_locks();

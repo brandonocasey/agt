@@ -7,9 +7,9 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use super::json::read_json;
 use super::{Store, create_dir};
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::read_json;
 use crate::core::local::{lock_file, sync_dir};
 
 impl Store {

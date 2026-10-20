@@ -160,7 +160,10 @@ fn offline_keeps_issue_reads_local(fake: Fake) {
     let variable = read(&env, STALE, &["show", "1"], &[("AGT_OFFLINE", "1")]);
     assert_quiet_success(&variable);
     assert_eq!(title(&variable), "Login fails");
-    env.write_config(&format!("{}\n[sync]\nauto = false\n", fake.config(false)));
+    env.write_config(&format!(
+        "{}\n[sync]\nauto_pull = false\n",
+        fake.config(false)
+    ));
     let config = read(&env, STALE, &["show", "1"], &[]);
     assert_quiet_success(&config);
     assert_eq!(title(&config), "Login fails");
@@ -307,7 +310,8 @@ fn a_bad_config_does_not_break_a_local_read() {
     let env = Env::new();
     for (text, key) in [
         ("[sync]\nbogus = 1\n", "bogus"),
-        ("[sync]\nauto = \"yes\"\n", ""),
+        ("[sync]\nauto = true\n", "auto"),
+        ("[sync]\nauto_pull = \"yes\"\n", ""),
         ("[sync]\nmax_age_secs = \"soon\"\n", ""),
     ] {
         env.write_config(text);

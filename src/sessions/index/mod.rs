@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_atomic};
+use crate::core::local::{error_code, lock_file_or_busy, private_dir, tasks_dir, write_atomic};
 use crate::core::output::Output;
 use crate::core::text::bounded;
 use crate::core::transcripts::Turn;
@@ -226,8 +226,8 @@ fn deduplicate(turns: Vec<Turn>) -> Vec<Merged> {
 
 fn index_sessions(options: &SearchArgs, session: Option<&str>) -> Result<Indexed> {
     let directory = ensure_index_root()?;
-    let _lock = Lock::acquire(
-        directory.join(".lock"),
+    let _lock = lock_file_or_busy(
+        &directory.join(".lock"),
         Some(LOCK_WAIT),
         "session index is being updated; retry",
     )?;

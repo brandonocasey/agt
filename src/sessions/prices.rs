@@ -1,5 +1,4 @@
-//! Per-model USD rates from `<config>/agt/model-prices.json`, else `~/.config/agents/model-prices.json`
-//! (override: `AGT_PRICES`). The file is described in `docs/reference.md`.
+//! Per-model USD rates from `<config>/agt/model-prices.json` (override: `AGT_PRICES`). The file is described in `docs/reference.md`.
 
 use std::path::PathBuf;
 
@@ -51,16 +50,12 @@ impl Parts {
     }
 }
 
-/// The file `AGT_PRICES` names; else the one in agt's config directory, or the older
-/// `~/.config/agents/model-prices.json` when only that exists.
+/// The file `AGT_PRICES` names; else the one in agt's config directory.
 fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("AGT_PRICES").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    Ok(local::current_or_older(
-        local::agt_config_file("model-prices.json")?,
-        local::home()?.join(".config/agents/model-prices.json"),
-    ))
+    local::agt_config_file("model-prices.json")
 }
 
 fn rate(rates: &Value, key: &str) -> f64 {

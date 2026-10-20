@@ -455,8 +455,8 @@ impl Repo {
         self.ref_commit(&format!("refs/heads/{name}"))
     }
 
-    /// Returns the full ref of the default branch: `--default-branch`, then `origin/HEAD`, then a
-    /// local `main`, `master` or `init.defaultBranch`.
+    /// Returns the full ref of the default branch: `--default-branch`, then `origin/HEAD`, then
+    /// [`Self::default_branch_ref`].
     pub fn default_branch(&self, explicit: Option<&str>) -> Result<String> {
         self.find_default_branch(explicit)?.map_or_else(
             || fail("cannot find the default branch; pass --default-branch <ref>"),
@@ -480,11 +480,39 @@ impl Repo {
         {
             return Ok(Some(remote));
         }
-        let configured = self.git_opt(&["config", "init.defaultBranch"])?;
-        for name in ["main", "master"].into_iter().chain(configured.as_deref()) {
-            let local = format!("refs/heads/{name}");
-            if self.ref_commit(&local)?.is_some() {
-                return Ok(Some(local));
+        Ok(self.default_branch_ref()?.map(|(_, reference)| reference))
+    }
+
+    /// The names the default branch may have, best first: the branch `origin/HEAD` names,
+    /// `main`, `master`, then `init.defaultBranch`.
+    pub fn default_branch_names(&self) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        if let Some(remote) = self.git_opt(&[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])? {
+            names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
+        }
+        names.extend(["main".to_owned(), "master".to_owned()]);
+        names.extend(self.git_opt(&["config", "init.defaultBranch"])?);
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|name| seen.insert(name.clone()));
+        Ok(names)
+    }
+
+    /// The default branch's name and ref: the first of [`Self::default_branch_names`] that
+    /// exists, as a local branch when it does and as `origin/<name>` otherwise.
+    pub fn default_branch_ref(&self) -> Result<Option<(String, String)>> {
+        for name in self.default_branch_names()? {
+            for reference in [
+                format!("refs/heads/{name}"),
+                format!("refs/remotes/origin/{name}"),
+            ] {
+                if self.ref_commit(&reference)?.is_some() {
+                    return Ok(Some((name, reference)));
+                }
             }
         }
         Ok(None)
@@ -1055,6 +1083,30 @@ mod tests {
         assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
         sandbox.git(&root, &["checkout", "-q", "--detach"]);
         assert_eq!(repo.current_branch().unwrap(), None);
+    }
+
+    #[test]
+    fn the_default_branch_honours_init_default_branch_everywhere() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        let repo = Repo::at(&root);
+        sandbox.git(&root, &["init", "-q", "-b", "trunk"]);
+        sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        assert_eq!(repo.default_branch_ref().unwrap(), None);
+        assert_eq!(repo.find_default_branch(None).unwrap(), None);
+        sandbox.git(&root, &["config", "init.defaultBranch", "trunk"]);
+        assert_eq!(
+            repo.default_branch_ref().unwrap(),
+            Some(("trunk".to_owned(), "refs/heads/trunk".to_owned()))
+        );
+        assert_eq!(
+            repo.find_default_branch(None).unwrap().as_deref(),
+            Some("refs/heads/trunk")
+        );
+        assert_eq!(
+            repo.default_branch_names().unwrap(),
+            ["main", "master", "trunk"]
+        );
     }
 
     #[test]
