@@ -1,4 +1,4 @@
-//! `agt issue` reading: sync, the local reads, find, link and note. Each scenario runs against
+//! `agt issue` reading: sync, the local reads, list lookups, link and private notes. Each scenario runs against
 //! GitHub and GitLab.
 
 use serde_json::{Value, json};
@@ -173,9 +173,9 @@ fn reads_need_no_host(fake: Fake) {
     for args in [
         vec!["list"],
         vec!["show", "1"],
-        vec!["search", "login"],
+        vec!["list", "--text", "login"],
         vec!["status"],
-        vec!["find", "--pr", "5"],
+        vec!["list", "--pr", "5"],
     ] {
         env.issue_offline(&args);
     }
@@ -248,8 +248,8 @@ fn status_counts_per_tracker(fake: Fake) {
 
 fn search_matches_title_body_comments_and_notes(fake: Fake) {
     let env = synced(fake, &two_issues());
-    env.issue(&["note", "2", "remember the rollout"]);
-    let by = |text: &str| env.issue(&["search", text]);
+    env.issue(&["comment", "2", "remember the rollout", "--private"]);
+    let by = |text: &str| env.issue(&["list", "--text", text]);
     let found = by("LOGIN");
     assert_eq!(found["count"], 1);
     assert_eq!(found["issues"][0]["matched"], json!(["title", "body"]));
@@ -261,32 +261,32 @@ fn search_matches_title_body_comments_and_notes(fake: Fake) {
 fn find_by_pr_branch_and_title(fake: Fake) {
     let env = synced(fake, &two_issues());
     let key = format!("{}#1", fake.repo());
-    let found = env.issue(&["find", "--pr", "5"]);
+    let found = env.issue(&["list", "--pr", "5"]);
     assert_eq!(keys(&found), std::slice::from_ref(&key));
     assert_eq!(found["issues"][0]["via"], json!(["link"]));
-    assert!(keys(&env.issue(&["find", "--pr", "6"])).is_empty());
+    assert!(keys(&env.issue(&["list", "--pr", "6"])).is_empty());
     let url = match fake.name() {
         "github" => "https://github.com/o/r/pull/5",
         _ => "https://gitlab.com/g/p/-/merge_requests/5",
     };
     assert_eq!(
-        keys(&env.issue(&["find", "--pr", url])),
+        keys(&env.issue(&["list", "--pr", url])),
         std::slice::from_ref(&key)
     );
-    assert!(keys(&env.issue(&["find", "--pr", &url.replace(fake.repo(), "x/y")])).is_empty());
+    assert!(keys(&env.issue(&["list", "--pr", &url.replace(fake.repo(), "x/y")])).is_empty());
 
-    let by_pr_branch = env.issue(&["find", "--branch", "fix/1-login"]);
+    let by_pr_branch = env.issue(&["list", "--branch", "fix/1-login"]);
     assert_eq!(
         by_pr_branch["issues"][0]["via"],
         json!(["pr-branch", "branch-name"])
     );
-    let by_name = env.issue(&["find", "--branch", "feature/2-cleanup"]);
+    let by_name = env.issue(&["list", "--branch", "feature/2-cleanup"]);
     assert_eq!(keys(&by_name), [format!("{}#2", fake.repo())]);
     assert_eq!(by_name["issues"][0]["via"], json!(["branch-name"]));
-    assert!(keys(&env.issue(&["find", "--branch", "main"])).is_empty());
+    assert!(keys(&env.issue(&["list", "--branch", "main"])).is_empty());
 
     let titled = env.issue(&[
-        "find",
+        "list",
         "--pr",
         "77",
         "--title",
@@ -294,7 +294,7 @@ fn find_by_pr_branch_and_title(fake: Fake) {
     ]);
     assert_eq!(titled["count"], 2);
     assert_eq!(titled["issues"][0]["via"], json!(["title"]));
-    let other_repo = env.issue(&["find", "--pr", "77", "--title", "Fix other/repo#2"]);
+    let other_repo = env.issue(&["list", "--pr", "77", "--title", "Fix other/repo#2"]);
     assert_eq!(other_repo["count"], 0);
 }
 
@@ -302,19 +302,13 @@ fn link_and_note_stay_local(fake: Fake) {
     let env = synced(fake, &two_issues());
     let calls = env.forge_calls().len();
     env.issue(&["link", "2", "--pr", "9"]);
-    env.issue(&["link", "2", "--issue", "o/other#3"]);
-    env.issue(&["link", "2", "--review", "gh-42"]);
-    env.issue(&["link", "2", "--task", "task-1"]);
     env.issue(&["link", "2", "--branch", "fix/2-old"]);
     env.issue(&["link", "2", "--pr", "9"]);
-    let note = env.issue(&["note", "2", "private"]);
+    let note = env.issue(&["comment", "2", "private", "--private"]);
     assert_eq!(note["pending"], false, "a note and links are never sent");
     let doc = env.issue_doc(fake.tracker(), "2");
     assert_eq!(doc["links"]["prs"].as_array().unwrap().len(), 1);
     assert_eq!(doc["links"]["prs"][0]["source"], "local");
-    assert_eq!(doc["links"]["issues"], json!(["o/other#3"]));
-    assert_eq!(doc["links"]["reviews"], json!(["gh-42"]));
-    assert_eq!(doc["links"]["tasks"], json!(["task-1"]));
     assert_eq!(doc["links"]["branches"], json!(["fix/2-old"]));
     assert_eq!(doc["notes"][0]["text"], "private");
     assert_eq!(
@@ -322,7 +316,7 @@ fn link_and_note_stay_local(fake: Fake) {
         calls,
         "link and note never call a host"
     );
-    let found = env.issue(&["find", "--branch", "fix/2-old"]);
+    let found = env.issue(&["list", "--branch", "fix/2-old"]);
     assert_eq!(
         found["issues"][0]["via"],
         json!(["linked-branch", "branch-name"])

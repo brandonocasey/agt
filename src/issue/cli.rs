@@ -22,26 +22,19 @@ pub enum Command {
         /// `owner/repo#12`, `#12`, `12` or `local-xxxx`.
         key: String,
     },
-    /// Find issues whose title, body, comments or notes contain the text.
-    Search { text: String },
     /// Per tracker: counts, queued changes, conflicts and errors. Never writes.
     Status,
-    /// Find the issues for a PR/MR or a branch from the local data.
-    Find(FindArgs),
-    /// Link an issue to a PR/MR, issue, review target, task or branch, locally; `--pr --comment`
-    /// also queues a comment naming the PR/MR.
+    /// Link an issue to a PR/MR or a branch, locally; `--pr --comment` also queues a comment
+    /// naming the PR/MR.
     Link(LinkArgs),
-    /// Keep a private note on an issue; never sent.
-    Note {
-        key: String,
-        /// The note; `-` reads stdin.
-        text: String,
-    },
-    /// Queue a comment.
+    /// Queue a comment, or with `--private` keep a note that is never sent.
     Comment {
         key: String,
         /// The comment; `-` reads stdin.
         text: String,
+        /// Keep it as a local note on the issue instead of queueing it.
+        #[arg(long)]
+        private: bool,
     },
     /// Queue a new issue.
     Create(CreateArgs),
@@ -60,8 +53,9 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct ListArgs {
-    #[arg(long, value_enum, default_value = "open")]
-    pub state: StateFilter,
+    /// Default `open`, or `all` with `--text`, `--pr`, `--branch` or `--title`.
+    #[arg(long, value_enum)]
+    pub state: Option<StateFilter>,
     #[arg(long)]
     pub label: Option<String>,
     #[arg(long)]
@@ -71,6 +65,19 @@ pub struct ListArgs {
     /// Only issues with queued changes.
     #[arg(long)]
     pub pending: bool,
+    /// Only issues whose title, body, comments or notes contain the text; adds `matched`.
+    #[arg(long)]
+    pub text: Option<String>,
+    /// Only issues linked to this PR/MR number or URL; adds `via`. With `--branch` or
+    /// `--title`, an issue that matches any of the three is kept.
+    #[arg(long)]
+    pub pr: Option<String>,
+    /// Only issues tied to this branch name; adds `via`.
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// The PR/MR title: only issues its references such as `#12` name; adds `via`.
+    #[arg(long)]
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -102,32 +109,10 @@ impl Reason {
 }
 
 #[derive(Args)]
-pub struct FindArgs {
-    /// A PR/MR number or URL.
-    #[arg(long, required_unless_present = "branch")]
-    pub pr: Option<String>,
-    /// A branch name.
-    #[arg(long, required_unless_present = "pr")]
-    pub branch: Option<String>,
-    /// The PR/MR title: references such as `#12` in it name issues.
-    #[arg(long)]
-    pub title: Option<String>,
-}
-
-#[derive(Args)]
 pub struct LinkArgs {
     pub key: String,
     #[arg(long, group = "target")]
     pub pr: Option<String>,
-    /// Another issue.
-    #[arg(long, group = "target")]
-    pub issue: Option<String>,
-    /// A review target key.
-    #[arg(long, group = "target")]
-    pub review: Option<String>,
-    /// An `agt task` id.
-    #[arg(long, group = "target")]
-    pub task: Option<String>,
     #[arg(long, group = "target")]
     pub branch: Option<String>,
     /// With `--pr`: also queue the comment `Linked: <url>`, once per PR/MR.
@@ -142,10 +127,17 @@ pub struct CreateArgs {
     /// The body; `-` reads stdin.
     #[arg(long, default_value = "")]
     pub body: String,
-    #[arg(long = "label")]
-    pub labels: Vec<String>,
-    #[arg(long = "assignee")]
-    pub assignees: Vec<String>,
+    #[command(flatten)]
+    pub lists: Lists,
+}
+
+/// The label and assignee additions `create` and `edit` share.
+#[derive(Args)]
+pub struct Lists {
+    #[arg(long = "add-label", alias = "label", value_name = "LABEL")]
+    pub add_labels: Vec<String>,
+    #[arg(long = "add-assignee", alias = "assignee", value_name = "LOGIN")]
+    pub add_assignees: Vec<String>,
 }
 
 #[derive(Args)]
@@ -161,13 +153,11 @@ pub struct EditArgs {
     /// Why it closed (GitHub only); needs `--state closed`.
     #[arg(long, value_enum, requires = "state")]
     pub reason: Option<Reason>,
-    #[arg(long = "add-label", value_name = "LABEL")]
-    pub add_labels: Vec<String>,
+    #[command(flatten)]
+    pub lists: Lists,
     #[arg(long = "remove-label", value_name = "LABEL")]
     pub remove_labels: Vec<String>,
     /// Removals apply first, so one call can swap a single assignee.
-    #[arg(long = "add-assignee", value_name = "LOGIN")]
-    pub add_assignees: Vec<String>,
     #[arg(long = "remove-assignee", value_name = "LOGIN")]
     pub remove_assignees: Vec<String>,
 }

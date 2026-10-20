@@ -119,7 +119,6 @@ fn creates_checks_updates_and_lists_a_private_task() {
     let task = Task::new();
     let created = task.run(&[
         "create",
-        "--id",
         "demo",
         "--objective",
         "Finish work",
@@ -141,15 +140,15 @@ fn creates_checks_updates_and_lists_a_private_task() {
     assert_eq!(mode(&task.tasks()), 0o700);
     assert_eq!(mode(&task.tasks().join("demo.json")), 0o600);
     let checked = task.run(&[
-        "check",
+        "update",
         "demo",
         "--revision",
         "1",
-        "--name",
+        "--check-name",
         "unit",
-        "--result",
+        "--check-result",
         "pass",
-        "--inputs",
+        "--check-inputs",
         "fixture",
     ]);
     assert_eq!(checked["revision"], 2);
@@ -184,14 +183,14 @@ fn creates_checks_updates_and_lists_a_private_task() {
 #[test]
 fn rejects_traversal_and_stale_revisions() {
     let task = Task::new();
-    task.run(&["create", "--id", "demo", "--objective", "Finish work"]);
+    task.run(&["create", "demo", "--objective", "Finish work"]);
     let stale = task.fail(&["update", "demo", "--revision", "2", "--next-step", "No"]);
     assert!(stale.contains("stale revision"), "{stale}");
     assert_eq!(
         task.run(&["update", "demo", "--revision", "1", "--next-step", "Yes"])["revision"],
         2
     );
-    let duplicate = task.fail(&["create", "--id", "demo", "--objective", "Again"]);
+    let duplicate = task.fail(&["create", "demo", "--objective", "Again"]);
     assert!(duplicate.contains("already exists"), "{duplicate}");
     let after = task.run(&[
         "update",
@@ -213,7 +212,7 @@ fn help_lists_the_task_commands_and_a_bare_run_is_a_usage_error() {
         let output = task.raw(&[flag]);
         assert!(output.status.success());
         let help = String::from_utf8_lossy(&output.stdout);
-        assert!(help.contains("create") && help.contains("check"), "{help}");
+        assert!(help.contains("create") && help.contains("update"), "{help}");
         assert!(
             !help.contains("resolve") && !help.contains("index"),
             "{help}"
@@ -239,7 +238,6 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
     let oversized = "x".repeat(16_385);
     let error = task.fail(&[
         "create",
-        "--id",
         "large-create",
         "--objective",
         "Work",
@@ -249,22 +247,22 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
     assert!(error.contains("next-step exceeds"), "{error}");
     assert!(!task.tasks().join("large-create.json").exists());
     assert!(!task.tasks().join(".large-create.lock").exists());
-    task.run(&["create", "--id", "large-check", "--objective", "Work"]);
+    task.run(&["create", "large-check", "--objective", "Work"]);
     for field in ["code-revision", "inputs", "environment"] {
-        let flag = format!("--{field}");
+        let flag = format!("--check-{field}");
         let error = task.fail(&[
-            "check",
+            "update",
             "large-check",
             "--revision",
             "1",
-            "--name",
+            "--check-name",
             "check",
-            "--result",
+            "--check-result",
             "pass",
             &flag,
             &oversized,
         ]);
-        assert!(error.contains(&format!("{field} exceeds")), "{error}");
+        assert!(error.contains(&format!("check-{field} exceeds")), "{error}");
         let unchanged = task.run(&["show", "large-check"]);
         assert_eq!(unchanged["revision"], 1);
         assert_eq!(unchanged["checks"], json!([]));
@@ -275,7 +273,7 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
 #[test]
 fn a_held_task_lock_fails_fast_and_is_not_left_behind() {
     let task = Task::new();
-    task.run(&["create", "--id", "busy", "--objective", "Work"]);
+    task.run(&["create", "busy", "--objective", "Work"]);
     let lock = task.tasks().join(".busy.lock");
     fs::create_dir(&lock).unwrap();
     let error = task.fail(&["update", "busy", "--revision", "1", "--next-step", "x"]);
@@ -300,23 +298,36 @@ fn input_errors_fail_with_a_reason() {
         assert!(error.contains(reason), "{args:?}: {error}");
     };
     usage(&["frobnicate"], "unrecognized subcommand 'frobnicate'");
-    usage(&["create", "--id"], "a value is required for '--id <ID>'");
+    usage(&["create"], "<ID>");
     usage(
-        &["create", "--id", "a", "--objective"],
+        &["create", "a", "--objective"],
         "a value is required for '--objective <OBJECTIVE>'",
     );
-    usage(&["create", "--id", "a"], "--objective <OBJECTIVE>");
+    usage(&["create", "a"], "--objective <OBJECTIVE>");
+    usage(
+        &["create", "--id", "a", "--objective", "x"],
+        "unexpected argument '--id'",
+    );
+    usage(&["check", "a"], "unrecognized subcommand 'check'");
+    usage(
+        &["update", "a", "--revision", "1", "--check-name", "unit"],
+        "--check-result <CHECK_RESULT>",
+    );
+    usage(
+        &["update", "a", "--revision", "1", "--check-inputs", "x"],
+        "--check-name <CHECK_NAME>",
+    );
     usage(&["update", "a", "--revision", "0"], "--revision <REVISION>");
     usage(
         &["update", "a", "--revision", "1", "--status", "weird"],
         "invalid value 'weird' for '--status <STATUS>'",
     );
     assert!(
-        task.fail(&["create", "--id", "Bad", "--objective", "x"])
+        task.fail(&["create", "Bad", "--objective", "x"])
             .contains("id must match")
     );
     assert!(
-        task.fail(&["create", "--id", "a", "--objective", ""])
+        task.fail(&["create", "a", "--objective", ""])
             .contains("objective must not be empty")
     );
     assert!(
@@ -334,16 +345,16 @@ fn input_errors_fail_with_a_reason() {
     );
     assert!(
         task.fail(&[
-            "check",
+            "update",
             "a",
             "--revision",
             "1",
-            "--name",
+            "--check-name",
             "unit",
-            "--result",
+            "--check-result",
             ""
         ])
-        .contains("result must not be empty")
+        .contains("check-result must not be empty")
     );
     // The index commands live under `agt sessions`.
     usage(&["search"], "unrecognized subcommand 'search'");

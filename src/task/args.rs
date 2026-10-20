@@ -14,8 +14,6 @@ pub enum Command {
     Show(Target),
     /// Update one task record.
     Update(Update),
-    /// Add a completed check to a task record.
-    Check(Check),
 }
 
 /// Which task a command works on.
@@ -23,28 +21,22 @@ pub enum Command {
 pub struct Target {
     /// The task id, `[a-z0-9][a-z0-9._-]{0,63}`.
     #[arg(value_name = "ID")]
-    positional: Option<String>,
-    /// The task id; takes precedence over the positional one.
-    #[arg(long, value_name = "ID")]
-    id: Option<String>,
+    id: String,
 }
 
 impl Target {
     pub fn id(&self) -> Result<String> {
-        match self.id.as_ref().or(self.positional.as_ref()) {
-            Some(id) if is_id(id) => Ok(id.clone()),
-            _ => fail("id must match [a-z0-9][a-z0-9._-]{0,63}"),
+        if is_id(&self.id) {
+            Ok(self.id.clone())
+        } else {
+            fail("id must match [a-z0-9][a-z0-9._-]{0,63}")
         }
     }
 }
 
+/// The fields `create` sets and `update` changes.
 #[derive(Args)]
-pub struct Create {
-    #[command(flatten)]
-    pub target: Target,
-    /// What the task is for.
-    #[arg(long)]
-    pub objective: String,
+pub struct Fields {
     #[arg(long)]
     pub parent_pr: Option<String>,
     #[arg(long)]
@@ -54,11 +46,22 @@ pub struct Create {
     /// Where the user's authorization for the work came from.
     #[arg(long)]
     pub authorization: Option<String>,
-    /// What the authorization covers [default with --authorization: unspecified].
+    /// What the authorization covers [default on create with --authorization: unspecified].
     #[arg(long)]
     pub scope: Option<String>,
     #[arg(long)]
     pub next_step: Option<String>,
+}
+
+#[derive(Args)]
+pub struct Create {
+    #[command(flatten)]
+    pub target: Target,
+    /// What the task is for.
+    #[arg(long)]
+    pub objective: String,
+    #[command(flatten)]
+    pub fields: Fields,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,44 +102,25 @@ pub struct Update {
     pub revision: i64,
     #[arg(long)]
     pub objective: Option<String>,
-    #[arg(long)]
-    pub parent_pr: Option<String>,
-    #[arg(long)]
-    pub target_branch: Option<String>,
-    #[arg(long)]
-    pub task_boundary: Option<String>,
+    #[command(flatten)]
+    pub fields: Fields,
     /// Add a correction the user made.
     #[arg(long)]
     pub correction: Option<String>,
-    #[arg(long)]
-    pub next_step: Option<String>,
     #[arg(long, value_enum)]
     pub status: Option<Status>,
-    #[arg(long)]
-    pub authorization: Option<String>,
-    #[arg(long)]
-    pub scope: Option<String>,
-}
-
-#[derive(Args)]
-pub struct Check {
-    #[command(flatten)]
-    pub target: Target,
-    /// The revision the record is at now; the update fails if it has moved on.
-    #[arg(long, value_parser = value_parser!(i64).range(1..))]
-    pub revision: i64,
-    /// What was checked.
-    #[arg(long)]
-    pub name: String,
+    /// Add a completed check; what was checked. Needs `--check-result`.
+    #[arg(long, requires = "check_result")]
+    pub check_name: Option<String>,
     /// What the check found.
-    #[arg(long)]
-    pub result: String,
-    /// The code revision checked [default: the task's recorded HEAD].
-    #[arg(long)]
-    pub code_revision: Option<String>,
-    #[arg(long)]
-    pub inputs: Option<String>,
+    #[arg(long, requires = "check_name")]
+    pub check_result: Option<String>,
+    /// The code revision checked [default: the task's HEAD, as recorded by this update].
+    #[arg(long, requires = "check_name")]
+    pub check_code_revision: Option<String>,
+    #[arg(long, requires = "check_name")]
+    pub check_inputs: Option<String>,
     /// Where the check ran [default: the platform and host name].
-    #[arg(long)]
-    pub environment: Option<String>,
+    #[arg(long, requires = "check_name")]
+    pub check_environment: Option<String>,
 }

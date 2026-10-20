@@ -18,6 +18,5 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::List => records::list(),
         Command::Show(target) => records::show(&target),
         Command::Update(args) => records::update(&args),
-        Command::Check(args) => records::check(&args),
     }
 }

@@ -140,9 +140,9 @@ fn every_issue_read_syncs_when_stale(fake: Fake) {
     for args in [
         vec!["list"],
         vec!["show", "1"],
-        vec!["search", "login"],
+        vec!["list", "--text", "login"],
         vec!["status"],
-        vec!["find", "--branch", "feat"],
+        vec!["list", "--branch", "feat"],
     ] {
         let env = changed_on_the_host(fake);
         let before = env.forge_calls().len();

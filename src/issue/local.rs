@@ -1,9 +1,9 @@
-//! The commands that change only the local copy: `link`, `note` and every write that waits for
+//! The commands that change only the local copy: `link`, private notes and every write that waits for
 //! `push`. Nothing here talks to a host.
 
 use serde_json::Value;
 
-use super::cli::{CreateArgs, EditArgs, LinkArgs, Reason, State};
+use super::cli::{CreateArgs, EditArgs, LinkArgs, Lists, Reason, State};
 use super::trackers::{self, Tracker};
 use super::view::summary;
 use crate::core::clock;
@@ -69,26 +69,28 @@ fn queue_comment(tracker: &Tracker, issue: &mut Issue, text: String) {
     ));
 }
 
-pub fn comment(store: &Store, filter: Option<&str>, key: &str, text: &str) -> Result<Value> {
-    let text = read_text(text, "comment", false)?;
+/// Queues `text` as a comment, or with `private` keeps it as a note that is never sent.
+pub fn comment(
+    store: &Store,
+    filter: Option<&str>,
+    key: &str,
+    text: &str,
+    private: bool,
+) -> Result<Value> {
+    let text = read_text(text, if private { "note" } else { "comment" }, false)?;
     let now = clock::now()?;
     change(store, filter, key, |tracker, issue| {
-        issue.updated_at.clone_from(&now);
-        queue_comment(tracker, issue, text);
-        Ok(())
-    })
-}
-
-pub fn note(store: &Store, filter: Option<&str>, key: &str, text: &str) -> Result<Value> {
-    let text = read_text(text, "note", false)?;
-    let now = clock::now()?;
-    change(store, filter, key, |_, issue| {
-        let last = last_number(issue.notes.iter().map(|note| &note.id), "n");
-        issue.notes.push(Note {
-            id: format!("n{}", last + 1),
-            text,
-            created_at: now,
-        });
+        if private {
+            let last = last_number(issue.notes.iter().map(|note| &note.id), "n");
+            issue.notes.push(Note {
+                id: format!("n{}", last + 1),
+                text,
+                created_at: now,
+            });
+        } else {
+            issue.updated_at.clone_from(&now);
+            queue_comment(tracker, issue, text);
+        }
         Ok(())
     })
 }
@@ -134,6 +136,7 @@ fn assign(tracker: &Tracker, issue: &mut Issue, add: &[String], remove: &[String
     if add.is_empty() {
         return Ok(());
     }
+    let had_any = !assignees.is_empty();
     assignees.extend(add.iter().cloned());
     assignees.sort();
     assignees.dedup();
@@ -142,20 +145,36 @@ fn assign(tracker: &Tracker, issue: &mut Issue, add: &[String], remove: &[String
         .forge
         .map(|forge| service::kind(forge).issue_caps);
     if caps.is_some_and(|caps| !caps.multi_assignee) && assignees.len() > 1 {
-        return fail(
-            "this service takes one assignee on an issue; remove the current one with --remove-assignee",
-        );
+        return fail(if had_any {
+            "this service takes one assignee on an issue; remove the current one with --remove-assignee"
+        } else {
+            "this service takes one assignee on an issue"
+        });
     }
     Ok(())
+}
+
+/// The label and assignee changes `create` and `edit` share; `create` starts from none.
+fn apply_lists(
+    tracker: &Tracker,
+    issue: &mut Issue,
+    add: &Lists,
+    remove_labels: &[String],
+    remove_assignees: &[String],
+) -> Result<()> {
+    let labels = &mut issue.fields.labels;
+    labels.retain(|label| !remove_labels.contains(label));
+    labels.extend(add.add_labels.iter().cloned());
+    assign(tracker, issue, &add.add_assignees, remove_assignees)
 }
 
 pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Value> {
     if args.title.is_none()
         && args.body.is_none()
         && args.state.is_none()
-        && args.add_labels.is_empty()
+        && args.lists.add_labels.is_empty()
         && args.remove_labels.is_empty()
-        && args.add_assignees.is_empty()
+        && args.lists.add_assignees.is_empty()
         && args.remove_assignees.is_empty()
     {
         return fail(
@@ -182,10 +201,13 @@ pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Valu
         if let Some(state) = args.state {
             set_state(tracker, issue, state, args.reason)?;
         }
-        let labels = &mut issue.fields.labels;
-        labels.retain(|label| !args.remove_labels.contains(label));
-        labels.extend(args.add_labels.iter().cloned());
-        assign(tracker, issue, &args.add_assignees, &args.remove_assignees)
+        apply_lists(
+            tracker,
+            issue,
+            &args.lists,
+            &args.remove_labels,
+            &args.remove_assignees,
+        )
     })
 }
 
@@ -255,20 +277,8 @@ pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Valu
         return fail("--comment needs --pr");
     }
     change(store, filter, &args.key, |tracker, issue| {
-        let links: &mut Links = &mut issue.links;
-        let push = |list: &mut Vec<String>, value: &str| {
-            if !list.iter().any(|known| known == value) {
-                list.push(value.to_owned());
-            }
-        };
-        match (
-            &args.pr,
-            &args.issue,
-            &args.review,
-            &args.task,
-            &args.branch,
-        ) {
-            (Some(pr), ..) => {
+        match (&args.pr, &args.branch) {
+            (Some(pr), _) => {
                 let link = pr_link(tracker, pr, LinkSource::Local)?;
                 let body = format!("Linked: {}", link.url.as_deref().unwrap_or_default());
                 add_pr(issue, link);
@@ -278,11 +288,13 @@ pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Valu
                     queue_comment(tracker, issue, body);
                 }
             }
-            (_, Some(other), ..) => push(&mut links.issues, other),
-            (_, _, Some(review), ..) => push(&mut links.reviews, review),
-            (_, _, _, Some(task), _) => push(&mut links.tasks, task),
-            (_, _, _, _, Some(branch)) => push(&mut links.branches, branch),
-            _ => return fail("link needs one of --pr, --issue, --review, --task, --branch"),
+            (_, Some(branch)) => {
+                let branches = &mut issue.links.branches;
+                if !branches.contains(branch) {
+                    branches.push(branch.clone());
+                }
+            }
+            _ => return fail("link needs one of --pr, --branch"),
         }
         Ok(())
     })
@@ -307,25 +319,17 @@ pub fn create(
     };
     let title = read_text(&args.title, "title", false)?;
     let body = read_text(&args.body, "body", true)?;
-    let caps = tracker
-        .doc
-        .forge
-        .map(|forge| service::kind(forge).issue_caps);
-    if caps.is_some_and(|caps| !caps.multi_assignee) && args.assignees.len() > 1 {
-        return fail("this service takes one assignee on an issue");
-    }
     let now = clock::now()?;
     let key = random::token("local-", 6);
-    let mut fields = Fields {
+    let fields = Fields {
         title: title.trim().to_owned(),
         body,
         state: Category::Open,
         reason: None,
-        labels: args.labels.clone(),
-        assignees: args.assignees.clone(),
+        labels: Vec::new(),
+        assignees: Vec::new(),
     };
-    fields.normalize();
-    let issue = Issue {
+    let mut issue = Issue {
         version: VERSION,
         key: key.clone(),
         tracker: tracker.doc.key.clone(),
@@ -347,6 +351,8 @@ pub fn create(
         errors: Vec::new(),
         create: Some(Delivery::new(PostState::Pending)),
     };
+    apply_lists(&tracker, &mut issue, &args.lists, &[], &[])?;
+    issue.fields.normalize();
     let created = store.update_doc(&tracker.dir, &key, || issue.clone(), |_| Ok(issue.clone()))?;
     Ok(summary(&created))
 }

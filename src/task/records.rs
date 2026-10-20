@@ -1,4 +1,4 @@
-//! `create`, `list`, `show`, `update` and `check`: one pretty-printed JSON file per task in
+//! `create`, `list`, `show` and `update` (which also records a check): one pretty-printed JSON file per task in
 //! `agents/tasks`.
 
 use std::fs::{self, OpenOptions};
@@ -13,7 +13,7 @@ use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{Lock, hostname, write_json};
 use crate::core::output::Output;
 use crate::git::Repo;
-use crate::task::args::{Check, Create, Target, Update};
+use crate::task::args::{Create, Target, Update};
 use crate::task::files;
 use crate::task::text::limited;
 
@@ -105,18 +105,18 @@ pub fn create(args: &Create) -> Result<Output> {
             return fail(format!("task {id} already exists"));
         }
         let now = clock::now_iso_millis()?;
-        let parent_pr = optional(args.parent_pr.as_ref(), "parent-pr")?;
-        let target_branch = optional(args.target_branch.as_ref(), "target-branch")?;
-        let task_boundary = optional(args.task_boundary.as_ref(), "task-boundary")?;
+        let parent_pr = optional(args.fields.parent_pr.as_ref(), "parent-pr")?;
+        let target_branch = optional(args.fields.target_branch.as_ref(), "target-branch")?;
+        let task_boundary = optional(args.fields.task_boundary.as_ref(), "task-boundary")?;
         let context = context();
-        let authorization = match &args.authorization {
+        let authorization = match &args.fields.authorization {
             Some(provenance) => json!({
                 "provenance": limited(Some(provenance), "authorization")?,
-                "scope": limited(Some(args.scope.as_deref().unwrap_or("unspecified")), "scope")?,
+                "scope": limited(Some(args.fields.scope.as_deref().unwrap_or("unspecified")), "scope")?,
             }),
             None => Value::Null,
         };
-        let next_step = optional(args.next_step.as_ref(), "next-step")?;
+        let next_step = optional(args.fields.next_step.as_ref(), "next-step")?;
         write_task(&json!({
             "version": 1,
             "id": id,
@@ -169,10 +169,10 @@ pub fn update(args: &Update) -> Result<Output> {
         let revision = check_revision(&task, args.revision)?;
         for (option, value, field) in [
             ("objective", &args.objective, "objective"),
-            ("parent-pr", &args.parent_pr, "parentPr"),
-            ("target-branch", &args.target_branch, "targetBranch"),
-            ("task-boundary", &args.task_boundary, "taskBoundary"),
-            ("next-step", &args.next_step, "nextStep"),
+            ("parent-pr", &args.fields.parent_pr, "parentPr"),
+            ("target-branch", &args.fields.target_branch, "targetBranch"),
+            ("task-boundary", &args.fields.task_boundary, "taskBoundary"),
+            ("next-step", &args.fields.next_step, "nextStep"),
         ] {
             if let Some(value) = value {
                 set(&mut task, field, json!(limited(Some(value), option)?));
@@ -191,14 +191,18 @@ pub fn update(args: &Update) -> Result<Output> {
         if let Some(status) = args.status {
             set(&mut task, "status", json!(status.as_str()));
         }
-        if args.authorization.is_some() || args.scope.is_some() {
+        if args.fields.authorization.is_some() || args.fields.scope.is_some() {
             let stored = |field: &str| {
                 task.pointer(&format!("/authorization/{field}"))
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             };
-            let provenance = args.authorization.clone().or_else(|| stored("provenance"));
-            let scope = args.scope.clone().or_else(|| stored("scope"));
+            let provenance = args
+                .fields
+                .authorization
+                .clone()
+                .or_else(|| stored("provenance"));
+            let scope = args.fields.scope.clone().or_else(|| stored("scope"));
             let authorization = json!({
                 "provenance": limited(provenance.as_deref(), "authorization")?,
                 "scope": limited(scope.as_deref(), "scope")?,
@@ -206,7 +210,11 @@ pub fn update(args: &Update) -> Result<Output> {
             set(&mut task, "authorization", authorization);
         }
         set(&mut task, "context", context());
-        bump(&mut task, revision, &clock::now_iso_millis()?);
+        let at = clock::now_iso_millis()?;
+        if let Some(name) = &args.check_name {
+            add_check(&mut task, args, name, &at)?;
+        }
+        bump(&mut task, revision, &at);
         write_task(&task)
     })?;
     show_task(&id)
@@ -225,42 +233,35 @@ fn platform() -> String {
     format!("{os} {arch} {}", hostname())
 }
 
-pub fn check(args: &Check) -> Result<Output> {
-    let id = args.target.id()?;
-    with_lock(&id, || {
-        let mut task = read_task(&id)?;
-        let revision = check_revision(&task, args.revision)?;
-        let name = limited(Some(&args.name), "name")?;
-        let result = limited(Some(&args.result), "result")?;
-        let code_revision = match &args.code_revision {
-            Some(value) => json!(limited(Some(value), "code-revision")?),
-            None => task
-                .pointer("/context/head")
-                .cloned()
-                .unwrap_or(Value::Null),
-        };
-        let inputs = optional(args.inputs.as_ref(), "inputs")?;
-        let environment = match &args.environment {
-            Some(value) => limited(Some(value), "environment")?,
-            None => platform(),
-        };
-        let at = clock::now_iso_millis()?;
-        let item = json!({
-            "name": name,
-            "result": result,
-            "revision": code_revision,
-            "inputs": inputs,
-            "environment": environment,
-            "at": at,
-        });
-        match task.get_mut("checks").and_then(Value::as_array_mut) {
-            Some(list) => list.push(item),
-            None => set(&mut task, "checks", json!([item])),
-        }
-        bump(&mut task, revision, &at);
-        write_task(&task)
-    })?;
-    show_task(&id)
+/// Appends the check `update --check-name` names, recorded at `at`.
+fn add_check(task: &mut Value, args: &Update, name: &str, at: &str) -> Result<()> {
+    let name = limited(Some(name), "check-name")?;
+    let result = limited(args.check_result.as_deref(), "check-result")?;
+    let code_revision = match &args.check_code_revision {
+        Some(value) => json!(limited(Some(value), "check-code-revision")?),
+        None => task
+            .pointer("/context/head")
+            .cloned()
+            .unwrap_or(Value::Null),
+    };
+    let inputs = optional(args.check_inputs.as_ref(), "check-inputs")?;
+    let environment = match &args.check_environment {
+        Some(value) => limited(Some(value), "check-environment")?,
+        None => platform(),
+    };
+    let item = json!({
+        "name": name,
+        "result": result,
+        "revision": code_revision,
+        "inputs": inputs,
+        "environment": environment,
+        "at": at,
+    });
+    match task.get_mut("checks").and_then(Value::as_array_mut) {
+        Some(list) => list.push(item),
+        None => set(task, "checks", json!([item])),
+    }
+    Ok(())
 }
 
 fn show_task(id: &str) -> Result<Output> {

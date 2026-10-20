@@ -30,11 +30,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let filter = cli.tracker.as_deref();
     if matches!(
         cli.command,
-        Command::List(_)
-            | Command::Show { .. }
-            | Command::Search { .. }
-            | Command::Status
-            | Command::Find(_)
+        Command::List(_) | Command::Show { .. } | Command::Status
     ) {
         auto::sync_stale(&store, &repo, filter, cli.offline)?;
     }
@@ -49,12 +45,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
         Command::List(args) => view::list(&store, filter, args)?,
         Command::Show { key } => view::show(&store, filter, key)?,
-        Command::Search { text } => view::search(&store, filter, text)?,
         Command::Status => view::status(&store, filter)?,
-        Command::Find(args) => view::find(&store, filter, args)?,
         Command::Link(args) => local::link(&store, filter, args)?,
-        Command::Note { key, text } => local::note(&store, filter, key, text)?,
-        Command::Comment { key, text } => local::comment(&store, filter, key, text)?,
+        Command::Comment { key, text, private } => {
+            local::comment(&store, filter, key, text, *private)?
+        }
         Command::Create(args) => {
             let config = if filter.is_some() && filter != Some("local") {
                 Config::load_for_repo(&repo)?
@@ -83,7 +78,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     };
     if matches!(
         &cli.command,
-        Command::Create(_) | Command::Edit(_) | Command::Comment { .. }
+        Command::Create(_) | Command::Edit(_) | Command::Comment { private: false, .. }
     ) || matches!(&cli.command, Command::Link(args) if args.comment)
     {
         auto::push_changed(&store, &repo, filter, cli.offline, &mut value);

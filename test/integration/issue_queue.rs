@@ -296,7 +296,7 @@ fn a_local_issue_needs_no_configuration_or_origin_and_keeps_private_content() {
     let key = made["key"].as_str().unwrap();
     assert_eq!(made["tracker"], "local");
     assert_eq!(env.issue_doc("local", "tracker")["forge"], Value::Null);
-    env.issue(&["note", key, "Private note"]);
+    env.issue(&["comment", key, "Private note", "--private"]);
     env.issue(&["link", key, "--branch", "feat/local"]);
     env.issue(&["link", key, "--pr", "https://github.com/o/r/pull/7"]);
     let stored = env.issue_doc("local", key);

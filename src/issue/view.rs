@@ -1,8 +1,8 @@
-//! The reading commands: `list`, `show`, `search`, `status` and `find`. They never touch a host.
+//! The reading commands: `list` (with its text and PR/branch lookups), `show` and `status`. They never touch a host.
 
 use serde_json::{Value, json};
 
-use super::cli::{FindArgs, ListArgs, StateFilter};
+use super::cli::{ListArgs, StateFilter};
 use super::merge::{has_pending, pending_changes, unsent_comments};
 use super::refs;
 use super::trackers::{self, Tracker};
@@ -47,12 +47,116 @@ pub fn summary(issue: &Issue) -> Value {
     })
 }
 
+/// What `--text` matched in `issue`, in title, body, comments, notes order.
+fn text_places(issue: &Issue, needle: &str) -> Vec<&'static str> {
+    let has = |haystack: &str| haystack.to_lowercase().contains(needle);
+    let mut places = Vec::new();
+    if has(&issue.fields.title) {
+        places.push("title");
+    }
+    if has(&issue.fields.body) {
+        places.push("body");
+    }
+    if issue.comments.iter().any(|comment| has(&comment.body)) {
+        places.push("comments");
+    }
+    if issue.notes.iter().any(|note| has(&note.text)) {
+        places.push("notes");
+    }
+    places
+}
+
+/// The `--pr`, `--branch` and `--title` lookups: how an issue relates to the PR/MR or branch,
+/// empty when it does not (or when none was asked for).
+struct Lookup {
+    pr: Option<forge::PrRef>,
+    branch: Option<String>,
+    named: Vec<(Option<String>, u64)>,
+    by_branch: Vec<u64>,
+}
+
+impl Lookup {
+    fn new(args: &ListArgs) -> Result<Self> {
+        Ok(Self {
+            pr: args.pr.as_deref().map(forge::parse_pr).transpose()?,
+            branch: args.branch.clone(),
+            named: args
+                .title
+                .as_deref()
+                .map(refs::references)
+                .unwrap_or_default(),
+            by_branch: args
+                .branch
+                .as_deref()
+                .map(refs::branch_numbers)
+                .unwrap_or_default(),
+        })
+    }
+
+    fn asked(&self, args: &ListArgs) -> bool {
+        args.pr.is_some() || args.branch.is_some() || args.title.is_some()
+    }
+
+    fn via(&self, repo: &str, issue: &Issue) -> Vec<&'static str> {
+        let mut via = Vec::new();
+        if let Some(pr) = &self.pr {
+            let wanted = pr.location.as_ref().map_or(repo, |(_, repo)| repo.as_str());
+            if issue
+                .links
+                .prs
+                .iter()
+                .any(|link| link.number == pr.number && link.repo.eq_ignore_ascii_case(wanted))
+            {
+                via.push("link");
+            }
+        }
+        if let Some(branch) = &self.branch {
+            if issue
+                .links
+                .prs
+                .iter()
+                .any(|link| link.branch.as_ref() == Some(branch))
+            {
+                via.push("pr-branch");
+            }
+            if issue.links.branches.contains(branch) {
+                via.push("linked-branch");
+            }
+            if issue
+                .number
+                .is_some_and(|number| self.by_branch.contains(&number))
+            {
+                via.push("branch-name");
+            }
+        }
+        let titled = self.named.iter().any(|(named_repo, number)| {
+            issue.number == Some(*number)
+                && named_repo
+                    .as_ref()
+                    .is_none_or(|named| named.eq_ignore_ascii_case(repo))
+        });
+        if titled {
+            via.push("title");
+        }
+        via
+    }
+}
+
 pub fn list(store: &Store, filter: Option<&str>, args: &ListArgs) -> Result<Value> {
+    let lookup = Lookup::new(args)?;
+    let asked = lookup.asked(args);
+    let needle = args.text.as_deref().map(str::to_lowercase);
+    // A text or PR/branch lookup searches closed issues too unless `--state` says otherwise.
+    let state = args.state.unwrap_or(if asked || needle.is_some() {
+        StateFilter::All
+    } else {
+        StateFilter::Open
+    });
     let mut issues = Vec::new();
-    for (_, found) in all(store, filter)? {
+    for (tracker, found) in all(store, filter)? {
         for issue in found {
             let fields = &issue.fields;
-            let keep = match args.state {
+            let keep = match state {
                 StateFilter::All => true,
                 StateFilter::Open => fields.state == Category::Open,
                 StateFilter::Closed => fields.state == Category::Closed,
@@ -69,9 +173,25 @@ pub fn list(store: &Store, filter: Option<&str>, args: &ListArgs) -> Result<Valu
                     .as_ref()
                     .is_none_or(|login| issue.author.as_ref() == Some(login))
                 && (!args.pending || has_pending(&issue));
-            if keep {
-                issues.push(summary(&issue));
+            if !keep {
+                continue;
             }
+            let mut view = summary(&issue);
+            if let Some(needle) = &needle {
+                let places = text_places(&issue, needle);
+                if places.is_empty() {
+                    continue;
+                }
+                view["matched"] = json!(places);
+            }
+            if asked {
+                let via = lookup.via(&tracker.doc.repo, &issue);
+                if via.is_empty() {
+                    continue;
+                }
+                view["via"] = json!(via);
+            }
+            issues.push(view);
         }
     }
     Ok(json!({ "count": issues.len(), "issues": issues }))
@@ -126,35 +246,6 @@ pub fn show(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
     Ok(view)
 }
 
-pub fn search(store: &Store, filter: Option<&str>, text: &str) -> Result<Value> {
-    let needle = text.to_lowercase();
-    let has = |haystack: &str| haystack.to_lowercase().contains(&needle);
-    let mut found = Vec::new();
-    for (_, issues) in all(store, filter)? {
-        for issue in issues {
-            let mut places = Vec::new();
-            if has(&issue.fields.title) {
-                places.push("title");
-            }
-            if has(&issue.fields.body) {
-                places.push("body");
-            }
-            if issue.comments.iter().any(|comment| has(&comment.body)) {
-                places.push("comments");
-            }
-            if issue.notes.iter().any(|note| has(&note.text)) {
-                places.push("notes");
-            }
-            if !places.is_empty() {
-                let mut view = summary(&issue);
-                view["matched"] = json!(places);
-                found.push(view);
-            }
-        }
-    }
-    Ok(json!({ "count": found.len(), "issues": found }))
-}
-
 pub fn status(store: &Store, filter: Option<&str>) -> Result<Value> {
     let mut reports = Vec::new();
     for (tracker, issues) in all(store, filter)? {
@@ -203,70 +294,4 @@ pub fn status(store: &Store, filter: Option<&str>) -> Result<Value> {
         }));
     }
     Ok(json!({ "trackers": reports }))
-}
-
-pub fn find(store: &Store, filter: Option<&str>, args: &FindArgs) -> Result<Value> {
-    let pr = args.pr.as_deref().map(forge::parse_pr).transpose()?;
-    let named = args
-        .title
-        .as_deref()
-        .map(refs::references)
-        .unwrap_or_default();
-    let by_branch = args
-        .branch
-        .as_deref()
-        .map(refs::branch_numbers)
-        .unwrap_or_default();
-    let mut found = Vec::new();
-    for (tracker, issues) in all(store, filter)? {
-        let repo = tracker.doc.repo.as_str();
-        for issue in issues {
-            let mut via = Vec::new();
-            if let Some(pr) = &pr {
-                let wanted = pr.location.as_ref().map_or(repo, |(_, repo)| repo.as_str());
-                if issue
-                    .links
-                    .prs
-                    .iter()
-                    .any(|link| link.number == pr.number && link.repo.eq_ignore_ascii_case(wanted))
-                {
-                    via.push("link");
-                }
-            }
-            if let Some(branch) = &args.branch {
-                if issue
-                    .links
-                    .prs
-                    .iter()
-                    .any(|link| link.branch.as_ref() == Some(branch))
-                {
-                    via.push("pr-branch");
-                }
-                if issue.links.branches.contains(branch) {
-                    via.push("linked-branch");
-                }
-                if issue
-                    .number
-                    .is_some_and(|number| by_branch.contains(&number))
-                {
-                    via.push("branch-name");
-                }
-            }
-            let titled = named.iter().any(|(named_repo, number)| {
-                issue.number == Some(*number)
-                    && named_repo
-                        .as_ref()
-                        .is_none_or(|named| named.eq_ignore_ascii_case(repo))
-            });
-            if titled {
-                via.push("title");
-            }
-            if !via.is_empty() {
-                let mut view = summary(&issue);
-                view["via"] = json!(via);
-                found.push(view);
-            }
-        }
-    }
-    Ok(json!({ "count": found.len(), "issues": found }))
 }
