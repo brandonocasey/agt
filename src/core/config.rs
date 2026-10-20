@@ -28,7 +28,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct SyncConfig {
     /// `false` keeps every read local.
-    #[serde(default, alias = "auto")]
+    #[serde(default)]
     pub auto_pull: bool,
     #[serde(default)]
     pub auto_push: bool,
@@ -179,18 +179,13 @@ fn read_value(path: &Path) -> Result<toml::Value> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return fail(format!("read {}: {error}", path.display())),
     };
-    let mut value: toml::Value = toml::from_str(&text)
+    let value: toml::Value = toml::from_str(&text)
         .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
     let config: Config = value
         .clone()
         .try_into()
         .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
     config.validate(path)?;
-    if let Some(sync) = value.get_mut("sync").and_then(toml::Value::as_table_mut)
-        && let Some(auto) = sync.remove("auto")
-    {
-        sync.insert("auto_pull".into(), auto);
-    }
     Ok(value)
 }
 
@@ -248,11 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_legacy_alias_is_explicit_and_duplicate_aliases_fail() {
+    fn sync_auto_is_an_unknown_key() {
         let (_, config) = load("[sync]\nauto = true\n");
-        assert!(config.unwrap().sync.auto_pull);
-        let (_, config) = load("[sync]\nauto = true\nauto_pull = false\n");
-        assert!(config.unwrap_err().0.contains("duplicate field"));
+        assert!(config.unwrap_err().0.contains("unknown field"));
     }
 
     #[test]
@@ -260,7 +253,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("global.toml");
         let local = dir.path().join("local.toml");
-        std::fs::write(&global, "[sync]\nauto = true\nauto_push = true\nmax_age_secs = 17\n[worktree]\nroots = [\"a\", \"b\"]\n[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\n").unwrap();
+        std::fs::write(&global, "[sync]\nauto_pull = true\nauto_push = true\nmax_age_secs = 17\n[worktree]\nroots = [\"a\", \"b\"]\n[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\n").unwrap();
         std::fs::write(
             &local,
             "[sync]\nauto_pull = false\n[worktree]\nroots = [\"c\"]\n[issues]\ntracker = []\n",

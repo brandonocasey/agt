@@ -1304,8 +1304,7 @@ since_days = 90             # first sync only; later syncs use the watermark
 # push = false              # explicitly prohibit writes for this tracker
 ```
 
-The existing `sync.auto` key remains an alias for `auto_pull`.
-Specifying both names in one file is an error. `push = true` permits writes;
+`push = true` permits writes;
 it never enables automatic publication. Omitted push permissions permit explicit
 commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching
 tracker or supported `origin`. Unrelated global trackers do not participate automatically.
