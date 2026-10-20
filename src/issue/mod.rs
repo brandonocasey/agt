@@ -30,9 +30,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let filter = cli.tracker.as_deref();
     if matches!(
         cli.command,
-        Command::List(_)
-            | Command::Show { .. }
-            | Command::Status
+        Command::List(_) | Command::Show { .. } | Command::Status
     ) {
         auto::sync_stale(&store, &repo, filter, cli.offline)?;
     }
