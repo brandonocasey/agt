@@ -51,13 +51,8 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     if !strays.is_empty() {
         return fail(nested::reason(&strays));
     }
-    let git_dir = PathBuf::from(Repo::at(worktree).git(&["rev-parse", "--absolute-git-dir"])?);
-    let main_modules = PathBuf::from(Repo::at(main).git(&[
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-common-dir",
-    ])?)
-    .join("modules");
+    let git_dir = Repo::at(worktree).git_dir()?;
+    let main_modules = PathBuf::from(Repo::at(main).common_dir()?).join("modules");
     let worktree_modules = git_dir.join("modules");
     let mut seen = HashSet::new();
     let mut roots = vec![worktree.to_path_buf()];
@@ -65,7 +60,7 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     unfilled_submodules(&roots)?;
     for sub in found {
         let name = format!("submodule {}", sub.rel);
-        let gitdir = PathBuf::from(Repo::at(&sub.dir).git(&["rev-parse", "--absolute-git-dir"])?);
+        let gitdir = Repo::at(&sub.dir).git_dir()?;
         seen.insert(fs::canonicalize(&gitdir).unwrap_or_else(|_| gitdir.clone()));
         if let Some(recorded) = recorded_commit(&sub)?
             && Repo::at(&sub.dir).head().ok().as_deref() != Some(recorded.as_str())
@@ -101,15 +96,11 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
 /// no longer has, and files in a submodule directory that is not initialized.
 fn worktree_state(worktree: &Path) -> Result<()> {
     let repo = Repo::at(worktree);
-    let git_dir = PathBuf::from(repo.git(&["rev-parse", "--absolute-git-dir"])?);
-    for marker in UNFINISHED {
-        if git_dir.join(marker).exists() {
-            return fail(format!(
-                "{} has a {} in progress; finish or abort it first",
-                worktree.display(),
-                marker.trim_end_matches("_HEAD").to_lowercase()
-            ));
-        }
+    if let Some(operation) = unfinished(&repo.git_dir()?) {
+        return fail(format!(
+            "{} has a {operation} in progress; finish or abort it first",
+            worktree.display()
+        ));
     }
     let own = repo.git(&[
         "for-each-ref",
@@ -123,30 +114,24 @@ fn worktree_state(worktree: &Path) -> Result<()> {
             worktree.display()
         ));
     }
-    let status = repo.checked(
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--no-renames",
-            "--untracked-files=no",
-        ],
-        None,
-        &[],
-    )?;
-    for entry in status
-        .split(|byte| *byte == 0)
-        .filter(|entry| entry.len() > 3)
-    {
-        let (staged, unstaged) = (entry[0], entry[1]);
+    for entry in repo.status(false, &[])? {
+        let (staged, unstaged) = (entry.staged, entry.unstaged);
         if staged != b' ' && staged != b'?' && unstaged != b' ' && unstaged != b'?' {
             return fail(format!(
                 "{} has both staged and unstaged changes: the backup keeps only the working file, so stage or commit them together first",
-                String::from_utf8_lossy(&entry[3..])
+                entry.path
             ));
         }
     }
     Ok(())
+}
+
+/// The unfinished operation (rebase, merge, ...) the git directory records, if any.
+fn unfinished(git_dir: &Path) -> Option<String> {
+    UNFINISHED
+        .iter()
+        .find(|marker| git_dir.join(marker).exists())
+        .map(|marker| marker.trim_end_matches("_HEAD").to_lowercase())
 }
 
 /// A gitlink directory that is not initialized holds files: git lists none of them and the
@@ -242,9 +227,7 @@ fn workdir_of(clone: &Path) -> Option<PathBuf> {
     let workdir = fs::canonicalize(clone.join(configured)).ok()?;
     // The path may hold other files by now (a vendored directory in place of the submodule,
     // say): then git there finds the superproject, and the clone has no files to check.
-    let found = Repo::at(&workdir)
-        .git(&["rev-parse", "--absolute-git-dir"])
-        .ok()?;
+    let found = Repo::at(&workdir).git_dir().ok()?;
     let same = fs::canonicalize(&found).ok()? == fs::canonicalize(clone).ok()?;
     same.then_some(workdir)
 }
@@ -257,9 +240,14 @@ fn plumbing(gitdir: &Path, args: &[&str]) -> Result<String> {
 
 fn plumbing_bytes(gitdir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let dir = gitdir.to_string_lossy();
-    let mut all = vec!["--git-dir", &dir, "--work-tree", &dir];
+    Repo::at(gitdir).checked(&at_gitdir(&dir, args), None, &[])
+}
+
+/// `args` run against the repository whose git directory is `dir`, with `dir` as its work tree.
+fn at_gitdir<'a>(dir: &'a str, args: &[&'a str]) -> Vec<&'a str> {
+    let mut all = vec!["--git-dir", dir, "--work-tree", dir];
     all.extend_from_slice(args);
-    Repo::at(gitdir).checked(&all, None, &[])
+    all
 }
 
 /// A ref of a repository, with the commit it leads to (none for a tag of a blob or tree).
@@ -318,14 +306,7 @@ fn beyond_remotes(gitdir: &Path, roots: &[&str], remotes: &[String]) -> Result<V
     }
     let dir = gitdir.to_string_lossy();
     let output = Repo::at(gitdir).checked(
-        &[
-            "--git-dir",
-            &dir,
-            "--work-tree",
-            &dir,
-            "rev-list",
-            "--stdin",
-        ],
+        &at_gitdir(&dir, &["rev-list", "--stdin"]),
         Some(input.into_bytes()),
         &[],
     )?;
@@ -378,15 +359,7 @@ fn advertised_tags(gitdir: &Path) -> Result<Vec<(String, String)>> {
         .ok_or_else(|| crate::core::error::Error("it has no remote".to_owned()))?;
     let dir = gitdir.to_string_lossy();
     let output = Repo::at(gitdir).git_within(
-        &[
-            "--git-dir",
-            &dir,
-            "--work-tree",
-            &dir,
-            "ls-remote",
-            "--tags",
-            remote,
-        ],
+        &at_gitdir(&dir, &["ls-remote", "--tags", remote]),
         remote_timeout(),
     )?;
     Ok(String::from_utf8_lossy(&output)
@@ -512,13 +485,10 @@ fn holds_nothing_unique(
     elsewhere: &[PathBuf],
     online: bool,
 ) -> Result<()> {
-    for marker in UNFINISHED {
-        if gitdir.join(marker).exists() {
-            return fail(format!(
-                "{name} has a {} in progress; finish or abort it first",
-                marker.trim_end_matches("_HEAD").to_lowercase()
-            ));
-        }
+    if let Some(operation) = unfinished(gitdir) {
+        return fail(format!(
+            "{name} has a {operation} in progress; finish or abort it first"
+        ));
     }
     commits_held(name, gitdir, elsewhere, online)?;
     let worktrees = plumbing_bytes(gitdir, &["worktree", "list", "--porcelain", "-z"])?;
@@ -531,31 +501,14 @@ fn holds_nothing_unique(
         return Ok(());
     };
     let work = Repo::at(workdir);
-    let dirty = work.checked(
-        &[
-            "-c",
-            "status.showUntrackedFiles=all",
-            "status",
-            "--porcelain",
-            "-z",
-            "--no-renames",
-            "--untracked-files=all",
-            // A submodule of this one gets its own pass, which filters its junk; here only
-            // its commit counts.
-            "--ignore-submodules=dirty",
-        ],
-        None,
-        &[],
-    )?;
+    // A submodule of this one gets its own pass, which filters its junk; here only its commit
+    // counts.
+    let dirty = work.status(true, &["--ignore-submodules=dirty"])?;
     // An untracked file the operating system recreates (a Finder `.DS_Store`) is no work, as
     // at the top level; every other entry, tracked or not, counts.
-    let real = dirty
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .any(|entry| {
-            let path = String::from_utf8_lossy(entry.get(3..).unwrap_or_default());
-            !(entry.starts_with(b"?? ") && is_os_junk(path.rsplit('/').next().unwrap_or("")))
-        });
+    let real = dirty.iter().any(|entry| {
+        !(entry.untracked() && is_os_junk(entry.path.rsplit('/').next().unwrap_or("")))
+    });
     if real {
         return fail(format!("{name} has uncommitted changes"));
     }

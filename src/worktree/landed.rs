@@ -8,7 +8,7 @@ use super::info;
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::forge::landed::Origin;
-use crate::git::{Repo, Worktree};
+use crate::git::{Repo, Worktree, nul_fields};
 use crate::store::model::ReviewState;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -306,7 +306,7 @@ pub fn recent(path: &Path, now: i64) -> Result<bool> {
             .and_then(|meta| clock::mtime_secs(&meta))
             .is_some_and(since)
     };
-    let git_dir = PathBuf::from(repo.git(&["rev-parse", "--absolute-git-dir"])?);
+    let git_dir = repo.git_dir()?;
     if ["HEAD", "index", "logs/HEAD"]
         .iter()
         .any(|name| touched(&git_dir.join(name)))
@@ -324,8 +324,8 @@ pub fn recent(path: &Path, now: i64) -> Result<bool> {
         None,
         &[],
     )?;
-    Ok(listing
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-        .any(|name| touched(&path.join(String::from_utf8_lossy(name).as_ref()))))
+    Ok(
+        nul_fields(&listing)
+            .any(|name| touched(&path.join(String::from_utf8_lossy(name).as_ref()))),
+    )
 }

@@ -9,7 +9,7 @@ use super::disposable::is_disposable;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
 use crate::git::base::default_names;
-use crate::git::{Repo, Worktree};
+use crate::git::{Repo, Worktree, nul_fields};
 
 /// The main checkout: the first entry of `git worktree list`.
 pub fn main_checkout(repo: &Repo) -> Result<Worktree> {
@@ -21,10 +21,9 @@ pub fn main_checkout(repo: &Repo) -> Result<Worktree> {
 
 /// The root of the work tree that contains `dir`.
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
-    let root = Repo::at(dir)
-        .git(&["rev-parse", "--show-toplevel"])
-        .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))?;
-    Ok(PathBuf::from(root))
+    Repo::at(dir)
+        .toplevel()
+        .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))
 }
 
 /// The default branch's name and its ref: the first of [`default_names`] that exists, as a
@@ -67,7 +66,7 @@ pub fn ignored(root: &Path) -> Result<Ignored> {
         copy: Vec::new(),
         skipped: Vec::new(),
     };
-    for entry in listing.split(|byte| *byte == 0).filter(|e| !e.is_empty()) {
+    for entry in nul_fields(&listing) {
         let entry = String::from_utf8_lossy(entry).into_owned();
         walk(root, &entry, &mut found)?;
     }
@@ -107,26 +106,10 @@ fn walk(root: &Path, rel: &str, found: &mut Ignored) -> Result<()> {
 
 /// What `git status` lists: whether each path is untracked, and the path.
 fn status(root: &Path) -> Result<Vec<(bool, String)>> {
-    let out = Repo::at(root).checked(
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--no-renames",
-        ],
-        None,
-        &[],
-    )?;
-    Ok(out
-        .split(|byte| *byte == 0)
-        .filter(|e| e.len() > 3)
-        .map(|entry| {
-            (
-                entry.starts_with(b"??"),
-                String::from_utf8_lossy(&entry[3..]).into_owned(),
-            )
-        })
+    Ok(Repo::at(root)
+        .status(true, &[])?
+        .into_iter()
+        .map(|entry| (entry.untracked(), entry.path))
         .collect())
 }
 

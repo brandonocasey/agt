@@ -10,7 +10,7 @@ use super::backup::{self, FileMode, REF_PREFIX, Record};
 use super::info;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::git::{Repo, Worktree};
+use crate::git::{Repo, Worktree, nul_fields};
 
 pub struct Taken {
     pub record: Record,
@@ -95,33 +95,27 @@ fn build(
         &message,
     ])?;
     shared.git(&["update-ref", reference, &snapshot])?;
-    let changed = shared
-        .checked(
-            &[
-                "diff-tree",
-                "-r",
-                "--no-renames",
-                "--name-only",
-                "-z",
-                &entry.head,
-                &snapshot,
-            ],
-            None,
-            &[],
-        )?
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-        .count();
+    let changed = shared.checked(
+        &[
+            "diff-tree",
+            "-r",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &entry.head,
+            &snapshot,
+        ],
+        None,
+        &[],
+    )?;
+    let changed = nul_fields(&changed).count();
 
     let ignored = info::ignored(&entry.path)?;
     copy_files(&entry.path, &dir.join("files"), &ignored.copy, 0o700)?;
     save_git_files(&entry.path, &dir.join(SAVED_GIT_DIR))?;
     let paths = shared.checked(&["ls-tree", "-r", "--name-only", "-z", &tree], None, &[])?;
     let mut file_modes = Vec::new();
-    for path in paths
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-    {
+    for path in nul_fields(&paths) {
         let source = entry.path.join(std::ffi::OsStr::from_bytes(path));
         let metadata = match fs::symlink_metadata(&source) {
             Ok(metadata) => metadata,
@@ -166,7 +160,7 @@ pub const SAVED_GIT_FILES: [&str; 2] = ["info/sparse-checkout", "config.worktree
 /// Copies the per-worktree git files that exist from the git directory of the worktree at
 /// `worktree` into `to`.
 fn save_git_files(worktree: &Path, to: &Path) -> Result<()> {
-    let git_dir = PathBuf::from(Repo::at(worktree).git(&["rev-parse", "--absolute-git-dir"])?);
+    let git_dir = Repo::at(worktree).git_dir()?;
     for name in SAVED_GIT_FILES {
         let source = git_dir.join(name);
         if !source.is_file() {

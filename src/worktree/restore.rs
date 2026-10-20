@@ -131,10 +131,9 @@ fn reapply_sparse(
         return false;
     }
     let repo = Repo::at(target);
-    let Ok(git_dir) = repo.git(&["rev-parse", "--absolute-git-dir"]) else {
+    let Ok(git_dir) = repo.git_dir() else {
         return false;
     };
-    let git_dir = PathBuf::from(git_dir);
     let attempt = || -> Result<bool> {
         // Per-worktree config only counts when the repository reads it.
         repo.git(&["config", "extensions.worktreeConfig", "true"])?;

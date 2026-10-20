@@ -49,8 +49,7 @@ impl Step {
 }
 
 fn status_path(root: &Path) -> Result<PathBuf> {
-    let git_dir = Repo::at(root).git(&["rev-parse", "--absolute-git-dir"])?;
-    Ok(PathBuf::from(git_dir).join(STATUS_FILE))
+    Ok(Repo::at(root).git_dir()?.join(STATUS_FILE))
 }
 
 /// The report `{"pid", "status", "log", "already_running": true}` of a background setup that

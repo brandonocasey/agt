@@ -81,10 +81,7 @@ fn write_task(task: &Value) -> Result<()> {
 
 fn context() -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let repo = Repo::at(&cwd)
-        .git_opt(&["rev-parse", "--show-toplevel"])
-        .ok()
-        .flatten();
+    let repo = Repo::at(&cwd).toplevel().ok();
     let head = repo.as_deref().and_then(|repo| Repo::at(repo).head().ok());
     json!({
         "host": hostname(),

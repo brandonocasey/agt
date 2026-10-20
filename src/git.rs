@@ -34,6 +34,19 @@ pub struct LogEntry {
     pub subject: String,
 }
 
+/// One entry of `git status --porcelain`: the index and work tree columns, and the path.
+pub struct StatusEntry {
+    pub staged: u8,
+    pub unstaged: u8,
+    pub path: String,
+}
+
+impl StatusEntry {
+    pub fn untracked(&self) -> bool {
+        self.staged == b'?'
+    }
+}
+
 /// One entry of `git worktree list`.
 pub struct Worktree {
     pub path: PathBuf,
@@ -67,6 +80,44 @@ impl Repo {
         &self.root
     }
 
+    /// The absolute git directory of this work tree (a linked worktree's own, not the common one).
+    pub fn git_dir(&self) -> Result<PathBuf> {
+        self.git(&["rev-parse", "--absolute-git-dir"])
+            .map(PathBuf::from)
+    }
+
+    /// The root of the work tree that contains this directory.
+    pub fn toplevel(&self) -> Result<PathBuf> {
+        self.git(&["rev-parse", "--show-toplevel"])
+            .map(PathBuf::from)
+    }
+
+    /// What `git status` lists, without renames. `untracked` also lists untracked files; `extra`
+    /// adds `status` options.
+    pub fn status(&self, untracked: bool, extra: &[&str]) -> Result<Vec<StatusEntry>> {
+        let mut args = vec![
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            if untracked {
+                "--untracked-files=all"
+            } else {
+                "--untracked-files=no"
+            },
+        ];
+        args.extend(extra);
+        let listing = self.checked(&args, None, &[])?;
+        Ok(nul_fields(&listing)
+            .filter(|entry| entry.len() > 3)
+            .map(|entry| StatusEntry {
+                staged: entry[0],
+                unstaged: entry[1],
+                path: String::from_utf8_lossy(&entry[3..]).into_owned(),
+            })
+            .collect())
+    }
+
     pub fn discover() -> Result<Self> {
         let top = Self::at(".")
             .git_opt(&["rev-parse", "--show-toplevel"])?
@@ -95,7 +146,8 @@ impl Repo {
         Ok(self)
     }
 
-    fn exec(&self, args: &[&str], input: Option<Vec<u8>>, env: &[(&str, &Path)]) -> Result<Output> {
+    /// `git args` in the work tree, with the options every call shares.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new("git");
         command
             .current_dir(&self.root)
@@ -103,8 +155,13 @@ impl Repo {
             // worktree that is only being read.
             .args(["--no-optional-locks", "-c", "core.quotepath=false"])
             .args(args)
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .envs(env.iter().copied());
+            .envs(self.env.iter().map(|(key, value)| (key, value)));
+        command
+    }
+
+    fn exec(&self, args: &[&str], input: Option<Vec<u8>>, env: &[(&str, &Path)]) -> Result<Output> {
+        let mut command = self.command(args);
+        command.envs(env.iter().copied());
         let captured = process::output(&mut command, input.as_deref(), None)
             .map_err(ctx(format!("run git {}", args.join(" "))))?;
         captured
@@ -133,11 +190,8 @@ impl Repo {
     /// timeout, and git in its own process group so that a timeout or a signal to agt kills ssh with it.
     pub fn git_within(&self, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
         let ssh = self.batch_ssh_command(args);
-        let mut command = Command::new("git");
+        let mut command = self.command(args);
         command
-            .current_dir(&self.root)
-            .args(["--no-optional-locks"])
-            .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "false")
             .env("SSH_ASKPASS", "false")
@@ -223,16 +277,14 @@ impl Repo {
             .ok_or_else(|| Error("repository has no commits".into()))
     }
 
+    /// The object `spec` names, `None` when it does not exist.
+    fn verify(&self, spec: &str) -> Result<Option<String>> {
+        self.git_opt(&["rev-parse", "--verify", "--quiet", "--end-of-options", spec])
+    }
+
     pub fn commit(&self, rev: &str) -> Result<String> {
-        let spec = format!("{rev}^{{commit}}");
-        self.git_opt(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ])?
-        .ok_or_else(|| Error(format!("unknown commit: {rev}")))
+        self.verify(&format!("{rev}^{{commit}}"))?
+            .ok_or_else(|| Error(format!("unknown commit: {rev}")))
     }
 
     /// The first line of the message of `commit`.
@@ -243,14 +295,7 @@ impl Repo {
     }
 
     pub fn parent(&self, commit: &str) -> Result<Option<String>> {
-        let spec = format!("{commit}^1");
-        self.git_opt(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ])
+        self.verify(&format!("{commit}^1"))
     }
 
     pub fn tree_of(&self, commit: &str) -> Result<String> {
@@ -293,8 +338,7 @@ impl Repo {
 
     /// The commit `reference` (a full ref name) leads to, or `None` when it does not exist.
     pub fn ref_commit(&self, reference: &str) -> Result<Option<String>> {
-        let spec = format!("{reference}^{{commit}}");
-        self.git_opt(&["rev-parse", "--verify", "--quiet", &spec])
+        self.verify(&format!("{reference}^{{commit}}"))
     }
 
     /// Returns the full ref of the default branch: `--default-branch`, then `origin/HEAD`, then a
@@ -359,7 +403,7 @@ impl Repo {
 
     /// Commits in `to` that `from` lacks (`git rev-list --count from..to`).
     pub fn distance(&self, from: &str, to: &str) -> Result<u64> {
-        let range = format!("{from}..{to}");
+        let range = range(Some(from), to);
         let count = self.git(&["rev-list", "--count", "--end-of-options", &range])?;
         count
             .parse()
@@ -428,7 +472,7 @@ impl Repo {
             self.checked(&["add", "-A"], None, &env)?;
             let tree = text(self.checked(&["write-tree"], None, &env)?)?;
             let lost = self.checked(&["diff-files", "--name-only", "-z"], None, &env)?;
-            if let Some(name) = lost.split(|byte| *byte == 0).find(|name| !name.is_empty()) {
+            if let Some(name) = nul_fields(&lost).next() {
                 return fail(format!(
                     "{} is outside the sparse-checkout patterns and this git ({}) cannot back it up; widen the patterns with `git sparse-checkout add` or upgrade to git 2.35",
                     String::from_utf8_lossy(name),
@@ -450,9 +494,7 @@ impl Repo {
         }
         let env = [("GIT_INDEX_FILE", temp_index.as_path())];
         let changed = self.checked(&["diff", "--name-only", "-z", "--no-renames"], None, &env)?;
-        Ok(changed
-            .split(|byte| *byte == 0)
-            .filter(|name| !name.is_empty())
+        Ok(nul_fields(&changed)
             .map(|name| String::from_utf8_lossy(name).into_owned())
             .filter(|name| flagged.contains(name))
             .collect())
@@ -465,7 +507,7 @@ impl Repo {
         let listing = self.checked(&["ls-files", "-v", "-z"], None, &env)?;
         let mut flagged = Vec::new();
         let mut input = Vec::new();
-        for entry in listing.split(|byte| *byte == 0).filter(|e| e.len() > 2) {
+        for entry in nul_fields(&listing).filter(|e| e.len() > 2) {
             let (tag, path) = (entry[0], &entry[2..]);
             if tag != b'S' && !tag.is_ascii_lowercase() {
                 continue;
@@ -492,19 +534,7 @@ impl Repo {
 
     /// Non-merge commits in `from..to` (or all of `to` when `from` is `None`), oldest first.
     pub fn commits(&self, from: Option<&str>, to: &str) -> Result<Vec<CommitInfo>> {
-        let range = match from {
-            Some(from) => format!("{from}..{to}"),
-            None => to.to_owned(),
-        };
-        let listing = self.git(&[
-            "log",
-            "--reverse",
-            "--no-merges",
-            "--format=%H%x00%T%x00%s",
-            "--end-of-options",
-            &range,
-            "--",
-        ])?;
+        let range = range(from, to);
         let mut args = vec![
             "-c",
             "log.showRoot=true",
@@ -525,41 +555,29 @@ impl Repo {
             .into_iter()
             .map(|(patch_id, sha)| (sha, patch_id))
             .collect();
-        listing
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                let mut parts = line.splitn(3, '\0');
-                let (Some(sha), Some(tree), Some(subject)) =
-                    (parts.next(), parts.next(), parts.next())
-                else {
-                    return fail(format!("unexpected git log line: {line}"));
-                };
-                Ok(CommitInfo {
-                    sha: sha.to_owned(),
-                    tree: tree.to_owned(),
-                    subject: subject.to_owned(),
-                    patch_id: ids.get(sha).cloned(),
-                })
+        Ok(self
+            .log(from, to)?
+            .into_iter()
+            .filter(|entry| entry.parents.len() <= 1)
+            .map(|entry| CommitInfo {
+                patch_id: ids.get(&entry.sha).cloned(),
+                sha: entry.sha,
+                tree: entry.tree,
+                subject: entry.subject,
             })
-            .collect()
+            .collect())
     }
 
     pub fn commit_patch_id(&self, commit: &str) -> Result<Option<String>> {
         let mut args = vec!["diff-tree", "-p", "--root", "--no-renames"];
         args.extend(DIFF_FLAGS);
         args.extend(["--end-of-options", commit, "--"]);
-        let patch = self.checked(&args, None, &[])?;
-        Ok(self.patch_ids(patch)?.into_iter().next().map(|(id, _)| id))
+        self.first_patch_id(&args)
     }
 
-    /// Patch-id of the whole change from `from` (empty tree when `None`) to a commit or tree.
     /// Every commit in `from..to`, merges included, oldest first.
     pub fn log(&self, from: Option<&str>, to: &str) -> Result<Vec<LogEntry>> {
-        let range = match from {
-            Some(from) => format!("{from}..{to}"),
-            None => to.to_owned(),
-        };
+        let range = range(from, to);
         let listing = self.git(&[
             "log",
             "--reverse",
@@ -588,24 +606,22 @@ impl Repo {
             .collect()
     }
 
-    /// The tree of git's automatic merge of `ours` and `theirs`, conflict markers included;
-    /// `None` when git cannot tell (`merge-tree --write-tree` needs git 2.38). It writes
-    /// objects, so it only runs on a read-only repository.
-    pub fn merge_tree(&self, ours: &str, theirs: &str) -> Result<Option<String>> {
+    /// `git merge-tree --write-tree <extra> ours theirs`. It writes objects, so it only runs on
+    /// a read-only repository.
+    fn merge_tree_run(&self, ours: &str, theirs: &str, extra: &[&str]) -> Result<Output> {
         if self._scratch.is_none() {
             return fail("merge-tree needs a read-only repository");
         }
-        let output = self.exec(
-            &[
-                "merge-tree",
-                "--write-tree",
-                "--end-of-options",
-                ours,
-                theirs,
-            ],
-            None,
-            &[],
-        )?;
+        let mut args = vec!["merge-tree", "--write-tree"];
+        args.extend(extra);
+        args.extend(["--end-of-options", ours, theirs]);
+        self.exec(&args, None, &[])
+    }
+
+    /// The tree of git's automatic merge of `ours` and `theirs`, conflict markers included;
+    /// `None` when git cannot tell (`merge-tree --write-tree` needs git 2.38).
+    pub fn merge_tree(&self, ours: &str, theirs: &str) -> Result<Option<String>> {
+        let output = self.merge_tree_run(ours, theirs, &[])?;
         // Exit 1 means conflicts; the first line is still the merged tree.
         if !matches!(output.status.code(), Some(0 | 1)) {
             return Ok(None);
@@ -615,21 +631,8 @@ impl Repo {
     }
 
     /// The paths git cannot merge when it merges `theirs` into `ours`; empty for a clean merge.
-    /// It writes objects, so it only runs on a read-only repository.
     pub fn merge_conflicts(&self, ours: &str, theirs: &str) -> Result<Vec<String>> {
-        if self._scratch.is_none() {
-            return fail("merge-tree needs a read-only repository");
-        }
-        let args = [
-            "merge-tree",
-            "--write-tree",
-            "--name-only",
-            "--no-messages",
-            "--end-of-options",
-            ours,
-            theirs,
-        ];
-        let output = self.exec(&args, None, &[])?;
+        let output = self.merge_tree_run(ours, theirs, &["--name-only", "--no-messages"])?;
         match output.status.code() {
             Some(0) => Ok(Vec::new()),
             // Exit 1 means conflicts: the merged tree, then one line per conflicted path.
@@ -650,6 +653,7 @@ impl Repo {
         }
     }
 
+    /// Patch-id of the whole change from `from` (empty tree when `None`) to a commit or tree.
     pub fn range_patch_id(&self, from: Option<&str>, to: &str) -> Result<Option<String>> {
         let from = match from {
             Some(from) => from.to_owned(),
@@ -662,7 +666,11 @@ impl Repo {
         let mut args = vec!["diff", "--no-renames"];
         args.extend(DIFF_FLAGS);
         args.extend(["--end-of-options", &from, to, "--"]);
-        let patch = self.checked(&args, None, &[])?;
+        self.first_patch_id(&args)
+    }
+
+    fn first_patch_id(&self, args: &[&str]) -> Result<Option<String>> {
+        let patch = self.checked(args, None, &[])?;
         Ok(self.patch_ids(patch)?.into_iter().next().map(|(id, _)| id))
     }
 
@@ -680,15 +688,15 @@ impl Repo {
 
     /// `git diff -U3 -M`, the context forges show around review comments.
     pub fn diff_context(&self, from: &str, to: &str) -> Result<String> {
-        let mut args = vec!["diff", "-U3", "-M"];
-        args.extend(DIFF_FLAGS);
-        args.extend(["--end-of-options", from, to, "--"]);
-        let diff = self.checked(&args, None, &[])?;
-        Ok(String::from_utf8_lossy(&diff).into_owned())
+        self.diff("-U3", from, to)
     }
 
     pub fn diff_u0(&self, from: &str, to: &str) -> Result<String> {
-        let mut args = vec!["diff", "-U0", "-M"];
+        self.diff("-U0", from, to)
+    }
+
+    fn diff(&self, context: &str, from: &str, to: &str) -> Result<String> {
+        let mut args = vec!["diff", context, "-M"];
         args.extend(DIFF_FLAGS);
         args.extend(["--end-of-options", from, to, "--"]);
         let diff = self.checked(&args, None, &[])?;
@@ -780,6 +788,21 @@ impl Repo {
             Some(value.as_bytes().to_vec()),
             &[],
         )?)
+    }
+}
+
+/// The non-empty fields of NUL-separated git output.
+pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
+    listing
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+}
+
+/// The revision range `from..to`, or all of `to` when `from` is `None`.
+fn range(from: Option<&str>, to: &str) -> String {
+    match from {
+        Some(from) => format!("{from}..{to}"),
+        None => to.to_owned(),
     }
 }
 
