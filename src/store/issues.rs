@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::config::Scope;
+use crate::core::config::{self, Scope};
 use crate::core::local::lock_file;
 use crate::store::model::{Comment, Forge};
 
@@ -184,6 +184,51 @@ pub struct TrackerDoc {
     pub watermark: Option<String>,
     pub login: Option<String>,
     pub synced_at: Option<String>,
+}
+
+impl TrackerDoc {
+    /// The document of a configured tracker, as first created.
+    pub fn new(key: String, tracker: &config::Tracker) -> Self {
+        let mut doc = Self {
+            version: VERSION,
+            key,
+            forge: Some(tracker.forge),
+            host: tracker.host.clone(),
+            repo: tracker.repo.clone(),
+            scope: tracker.scope,
+            since_days: tracker.since_days,
+            push: false,
+            watermark: None,
+            login: None,
+            synced_at: None,
+        };
+        doc.refresh(tracker);
+        doc
+    }
+
+    /// The document of the tracker for issues that exist only on this machine.
+    pub fn local() -> Self {
+        Self {
+            version: VERSION,
+            key: "local".into(),
+            forge: None,
+            host: String::new(),
+            repo: "local".into(),
+            scope: Scope::All,
+            since_days: 90,
+            push: false,
+            watermark: None,
+            login: None,
+            synced_at: None,
+        }
+    }
+
+    /// Takes the settings of `tracker` that may change between syncs.
+    pub fn refresh(&mut self, tracker: &config::Tracker) {
+        self.scope = tracker.scope;
+        self.since_days = tracker.since_days;
+        self.push = tracker.push != Some(false);
+    }
 }
 
 impl super::Store {

@@ -367,21 +367,28 @@ pub struct Kind {
 
 pub const SERVICES: &[Kind] = &[crate::forge::github::KIND, crate::forge::gitlab::KIND];
 
-/// The forge of `host`, never guessed. In order: `named`, a forge the user named for the host,
-/// hosts every service knows by name, `cached`, a forge this repository last used the host
-/// with, then each service's own configuration and logins, which are the slowest to ask.
-pub fn detect(host: &str, named: Option<Forge>, cached: Option<Forge>) -> Option<Forge> {
-    let by = |check: fn(&Kind) -> fn(&str) -> bool| {
-        SERVICES
-            .iter()
-            .find(|kind| check(kind)(host))
-            .map(|kind| kind.forge)
-    };
+fn by(host: &str, check: fn(&Kind) -> fn(&str) -> bool) -> Option<Forge> {
+    SERVICES
+        .iter()
+        .find(|kind| check(kind)(host))
+        .map(|kind| kind.forge)
+}
+
+/// The forge of `host` from what is known without asking a CLI whether it is logged in. In
+/// order: `named`, a forge the user named for the host, hosts every service knows by name,
+/// `cached`, a forge this repository last used the host with, then each service's own
+/// configuration.
+pub fn detect_known(host: &str, named: Option<Forge>, cached: Option<Forge>) -> Option<Forge> {
     named
-        .or_else(|| by(|kind| kind.well_known))
+        .or_else(|| by(host, |kind| kind.well_known))
         .or(cached)
-        .or_else(|| by(|kind| kind.configured))
-        .or_else(|| by(|kind| kind.probe))
+        .or_else(|| by(host, |kind| kind.configured))
+}
+
+/// The forge of `host`, never guessed: [`detect_known`], then each service's login, which is the
+/// slowest to ask.
+pub fn detect(host: &str, named: Option<Forge>, cached: Option<Forge>) -> Option<Forge> {
+    detect_known(host, named, cached).or_else(|| by(host, |kind| kind.probe))
 }
 
 pub fn kind(forge: Forge) -> &'static Kind {
@@ -402,6 +409,8 @@ mod tests {
         assert!(forge(detect("github.com", Some(Forge::Gitlab), None)) == Forge::Gitlab);
         assert!(forge(detect("github.com", None, Some(Forge::Gitlab))) == Forge::Github);
         assert!(forge(detect("gitlab.com", None, None)) == Forge::Gitlab);
+        assert!(forge(detect_known("gitlab.com", None, None)) == Forge::Gitlab);
+        assert!(detect_known("git.example.invalid", None, None).is_none());
         // A cached host needs no probe of any CLI.
         assert!(forge(detect("git.example.invalid", None, Some(Forge::Gitlab))) == Forge::Gitlab);
         assert!(

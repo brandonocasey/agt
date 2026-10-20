@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use crate::core::config::{self, Config};
 use crate::core::error::{Error, Result, fail};
+use crate::forge::service;
 use crate::store::Store;
-use crate::store::issues::{Issue, TRACKER_FILE, TrackerDoc, VERSION};
+use crate::store::issues::{Issue, TRACKER_FILE, TrackerDoc};
 use crate::store::model::Forge;
 
 /// A tracker's directory and document.
@@ -16,7 +17,7 @@ pub struct Tracker {
 
 /// `gh-<host>-<owner>-<repo>`, lowercase with slashes as dashes.
 pub fn tracker_key(forge: Forge, host: &str, repo: &str) -> String {
-    let prefix = crate::forge::service::kind(forge).key_prefix;
+    let prefix = service::kind(forge).key_prefix;
     format!("{prefix}-{host}-{repo}")
         .to_ascii_lowercase()
         .replace('/', "-")
@@ -69,41 +70,15 @@ pub fn ensure_mode(store: &Store, tracker: &config::Tracker, preview: bool) -> R
     if preview {
         let doc = store
             .load_doc(&dir, TRACKER_FILE)?
-            .unwrap_or_else(|| TrackerDoc {
-                version: VERSION,
-                key: key.clone(),
-                forge: Some(forge),
-                host: tracker.host.clone(),
-                repo: tracker.repo.clone(),
-                scope: tracker.scope,
-                since_days: tracker.since_days,
-                push: tracker.push != Some(false),
-                watermark: None,
-                login: None,
-                synced_at: None,
-            });
+            .unwrap_or_else(|| TrackerDoc::new(key, tracker));
         return Ok(Tracker { dir, doc });
     }
     let doc = store.update_doc(
         &dir,
         TRACKER_FILE,
-        || TrackerDoc {
-            version: VERSION,
-            key: key.clone(),
-            forge: Some(forge),
-            host: tracker.host.clone(),
-            repo: tracker.repo.clone(),
-            scope: tracker.scope,
-            since_days: tracker.since_days,
-            push: tracker.push != Some(false),
-            watermark: None,
-            login: None,
-            synced_at: None,
-        },
+        || TrackerDoc::new(key.clone(), tracker),
         |doc| {
-            doc.scope = tracker.scope;
-            doc.since_days = tracker.since_days;
-            doc.push = tracker.push != Some(false);
+            doc.refresh(tracker);
             Ok(doc.clone())
         },
     )?;
@@ -184,19 +159,7 @@ pub fn local(store: &Store) -> Result<Tracker> {
     let doc = store.update_doc(
         &dir,
         TRACKER_FILE,
-        || TrackerDoc {
-            version: VERSION,
-            key: "local".into(),
-            forge: None,
-            host: String::new(),
-            repo: "local".into(),
-            scope: config::Scope::All,
-            since_days: 90,
-            push: false,
-            watermark: None,
-            login: None,
-            synced_at: None,
-        },
+        TrackerDoc::local,
         |doc| Ok(doc.clone()),
     )?;
     Ok(Tracker { dir, doc })
@@ -228,10 +191,8 @@ pub fn destinations(
             config::path()?.display()
         ));
     };
-    let forge = match host.as_str() {
-        "github.com" => Forge::Github,
-        "gitlab.com" => Forge::Gitlab,
-        _ => return fail("origin has no known issue service; configure a tracker"),
+    let Some(forge) = service::detect_known(&host, None, None) else {
+        return fail("origin has no known issue service; configure a tracker");
     };
     config.issues.tracker.push(config::Tracker {
         forge,
