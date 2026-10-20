@@ -23,26 +23,43 @@ use crate::store::model::{
 pub struct PrRef {
     pub number: u64,
     pub location: Option<(String, String)>,
+    /// The service whose URL it is; `None` for a bare number.
+    pub forge: Option<Forge>,
+    /// The URL names a pipeline, not a PR/MR; only when pipeline URLs are accepted.
+    pub pipeline: bool,
 }
 
 pub fn parse_pr(arg: &str) -> Result<PrRef> {
+    parse_ref(arg, false)
+}
+
+/// Like [`parse_pr`]; `pipelines` also accepts a pipeline URL.
+pub fn parse_ref(arg: &str, pipelines: bool) -> Result<PrRef> {
     if let Ok(number) = arg.trim_start_matches(['#', '!']).parse() {
         return Ok(PrRef {
             number,
             location: None,
+            forge: None,
+            pipeline: false,
         });
     }
     let invalid = || Error(format!("--pr must be a number or a PR/MR URL: {arg}"));
     let (_, rest) = arg.split_once("://").ok_or_else(invalid)?;
     let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
-    let (repo, number) = SERVICES
+    let (kind, marker, pipeline) = SERVICES
         .iter()
-        .filter(|kind| path.contains(kind.url_marker))
+        .flat_map(|kind| {
+            let pipeline = kind.pipeline_marker.filter(|_| pipelines);
+            [(kind, kind.url_marker, false)]
+                .into_iter()
+                .chain(pipeline.map(|marker| (kind, marker, true)))
+        })
+        .filter(|(_, marker, _)| path.contains(marker))
         // The longest marker is the most specific, so a project named `pull` on GitLab is not
         // mistaken for a GitHub PR path.
-        .max_by_key(|kind| kind.url_marker.len())
-        .and_then(|kind| path.split_once(kind.url_marker))
+        .max_by_key(|(_, marker, _)| marker.len())
         .ok_or_else(invalid)?;
+    let (repo, number) = path.split_once(marker).ok_or_else(invalid)?;
     let number = number
         .split(['/', '#', '?'])
         .next()
@@ -52,6 +69,8 @@ pub fn parse_pr(arg: &str) -> Result<PrRef> {
     Ok(PrRef {
         number,
         location: Some((host.to_ascii_lowercase(), repo.trim_matches('/').to_owned())),
+        forge: Some(kind.forge),
+        pipeline,
     })
 }
 

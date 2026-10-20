@@ -207,7 +207,9 @@ struct Remote {
 }
 
 fn number(text: &str, remote: &Remote) -> Result<u64> {
-    let PrRef { number, location } = parse_pr(text)?;
+    let PrRef {
+        number, location, ..
+    } = parse_pr(text)?;
     if let Some((host, repo)) = location
         && (host != remote.origin.host || repo != remote.origin.repo)
     {

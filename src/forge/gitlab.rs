@@ -23,6 +23,7 @@ pub const KIND: Kind = Kind {
     key_prefix: "gl",
     tool: "glab",
     url_marker: "/-/merge_requests/",
+    pipeline_marker: Some("/-/pipelines/"),
     commit_marker: "/-/commit/",
     well_known: |host| host == "gitlab.com",
     configured: |host| {

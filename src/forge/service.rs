@@ -350,6 +350,8 @@ pub struct Kind {
     pub tool: &'static str,
     /// Path segment of a PR/MR URL between the repository and the number.
     pub url_marker: &'static str,
+    /// Path segment of a pipeline URL between the repository and the number, if it has pipelines.
+    pub pipeline_marker: Option<&'static str>,
     /// Path segment of a commit URL between the repository and the sha.
     pub commit_marker: &'static str,
     /// Hosts known without asking anything.

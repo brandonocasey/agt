@@ -50,6 +50,7 @@ pub const KIND: Kind = Kind {
     key_prefix: "gh",
     tool: "gh",
     url_marker: "/pull/",
+    pipeline_marker: None,
     commit_marker: "/commit/",
     well_known: |host| host == DEFAULT_HOST,
     configured: |_| false,

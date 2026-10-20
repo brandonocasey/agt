@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::core::error::Result;
 use crate::core::transcripts::json::text;
-use crate::forge::gitlab::{self, Gitlab};
 use crate::forge::gitlab::ci::base_of_id;
+use crate::forge::gitlab::{self, Gitlab};
 use crate::forge::transport::CliTransport;
 
 pub const RUNNING: [&str; 7] = [

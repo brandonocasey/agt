@@ -5,17 +5,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::core::error::{Error, Result, fail};
-use crate::forge::{github, gitlab};
+use crate::forge::landed::Origin;
+use crate::forge::{self, PrRef, github, gitlab, service};
 use crate::git::Repo;
 use crate::store::model::Forge;
 
-static GITLAB_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^https?://([^/]+)/(.+?)/-/(merge_requests|pipelines)/(\d+)")
-        .expect("valid pattern")
-});
-static GITHUB_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^https?://([^/]+)/([^/]+/[^/]+)/pull/(\d+)").expect("valid pattern")
-});
 static GITHUB_REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([^/\s#!@]+/[^/\s#!@]+)#(\d+)$").expect("valid pattern"));
 static GITLAB_REF: LazyLock<Regex> =
@@ -78,23 +72,19 @@ pub fn parse_as(arg: &str, bare_pipeline: bool) -> Result<Target> {
             awaiting: false,
         })
     };
-    if let Some(found) = GITLAB_URL.captures(value) {
-        let pipeline = &found[3] == "pipelines";
+    if let Ok(PrRef {
+        number,
+        location: Some((host, repo)),
+        forge: Some(platform),
+        pipeline,
+    }) = forge::parse_ref(value, true)
+    {
         return target(
-            Forge::Gitlab,
-            Some(&found[1]),
-            Some(&found[2]),
+            platform,
+            Some(&host),
+            Some(&repo),
             pipeline,
-            &found[4],
-        );
-    }
-    if let Some(found) = GITHUB_URL.captures(value) {
-        return target(
-            Forge::Github,
-            Some(&found[1]),
-            Some(&found[2]),
-            false,
-            &found[3],
+            &number.to_string(),
         );
     }
     if let Some(found) = GITHUB_REF.captures(value) {
@@ -125,10 +115,22 @@ fn gitlab_host() -> Result<String> {
         .ok_or_else(|| Error("no GitLab host: set GITLAB_HOST or configure glab's host".into()))
 }
 
-fn origin() -> Result<(String, String)> {
-    Repo::discover()?.origin_location()?.ok_or_else(|| {
-        Error("the current repository has no origin remote to name the target".into())
-    })
+/// The host and repository of `origin`, which must be on the forge the target names.
+fn origin(platform: Forge) -> Result<(String, String)> {
+    let Some(origin) = Origin::of(&Repo::discover()?)? else {
+        return fail(
+            "origin is not a GitHub or GitLab host that gh or glab is logged in to (no origin remote, an unknown forge, or gh/glab not authenticated for it)",
+        );
+    };
+    if origin.forge != platform {
+        return fail(format!(
+            "origin {} is {}, but the target is a {} reference",
+            origin.host,
+            service::kind(origin.forge).name,
+            service::kind(platform).name
+        ));
+    }
+    Ok((origin.host, origin.repo))
 }
 
 pub fn resolve(target: Target) -> Result<Resolved> {
@@ -141,7 +143,7 @@ pub fn resolve(target: Target) -> Result<Resolved> {
             };
             (host, repo)
         }
-        (_, None) => origin()?,
+        (_, None) => origin(target.platform)?,
     };
     let number = target.number;
     let key = match (target.platform, target.pipeline) {

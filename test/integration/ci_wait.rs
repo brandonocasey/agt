@@ -643,6 +643,22 @@ fn bad_arguments_exit_2() {
     }
 }
 
+#[test]
+fn a_local_reference_for_the_other_forge_than_origin_is_a_usage_error() {
+    for (origin, target, forge) in [
+        ("https://github.com/o/r.git", "!5", "GitHub"),
+        ("https://gitlab.com/g/p.git", "#5", "GitLab"),
+    ] {
+        let scenario = Scenario::new(&[]);
+        scenario.env.git(&["remote", "add", "origin", origin]);
+        let output = scenario.command(&[target], &[]).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{target}");
+        assert!(output.stdout.is_empty(), "{target}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&format!("is {forge}, but")), "{stderr}");
+    }
+}
+
 fn mr_path(suffix: &str) -> String {
     format!("{GITLAB_PROJECT}/{suffix}")
 }

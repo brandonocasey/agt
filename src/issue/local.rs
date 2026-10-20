@@ -196,13 +196,8 @@ fn pr_link(tracker: &Tracker, arg: &str, source: LinkSource) -> Result<PrLink> {
     let forge = match doc.forge {
         Some(forge) => forge,
         None => {
-            let Some((host, repo)) = pr.location else {
+            let (Some((host, repo)), Some(forge)) = (pr.location, pr.forge) else {
                 return fail("a local tracker needs a full PR/MR URL");
-            };
-            let forge = if arg.contains("/-/merge_requests/") {
-                crate::store::model::Forge::Gitlab
-            } else {
-                crate::store::model::Forge::Github
             };
             let kind = service::kind(forge);
             return Ok(PrLink {
