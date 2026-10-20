@@ -28,6 +28,14 @@ pub fn configured<'a>(
     config: &'a Config,
     filter: Option<&str>,
 ) -> Result<Vec<&'a config::Tracker>> {
+    for (index, tracker) in config.issues.tracker.iter().enumerate() {
+        let key = tracker_key(tracker.forge, &tracker.host, &tracker.repo);
+        for other in &config.issues.tracker[..index] {
+            if key == tracker_key(other.forge, &other.host, &other.repo) {
+                check_identity(&TrackerDoc::new(key.clone(), other), tracker)?;
+            }
+        }
+    }
     let found: Vec<&config::Tracker> = config
         .issues
         .tracker
@@ -71,6 +79,7 @@ pub fn ensure_mode(store: &Store, tracker: &config::Tracker, preview: bool) -> R
         let doc = store
             .load_doc(&dir, TRACKER_FILE)?
             .unwrap_or_else(|| TrackerDoc::new(key, tracker));
+        check_identity(&doc, tracker)?;
         return Ok(Tracker { dir, doc });
     }
     let doc = store.update_doc(
@@ -78,11 +87,25 @@ pub fn ensure_mode(store: &Store, tracker: &config::Tracker, preview: bool) -> R
         TRACKER_FILE,
         || TrackerDoc::new(key.clone(), tracker),
         |doc| {
+            check_identity(doc, tracker)?;
             doc.refresh(tracker);
             Ok(doc.clone())
         },
     )?;
     Ok(Tracker { dir, doc })
+}
+
+pub(super) fn check_identity(doc: &TrackerDoc, tracker: &config::Tracker) -> Result<()> {
+    if doc.forge == Some(tracker.forge)
+        && doc.host.eq_ignore_ascii_case(&tracker.host)
+        && doc.repo.eq_ignore_ascii_case(&tracker.repo)
+    {
+        return Ok(());
+    }
+    fail(format!(
+        "tracker identity collision for {}: stored {:?} {}/{} differs from configured {:?} {}/{}",
+        doc.key, doc.forge, doc.host, doc.repo, tracker.forge, tracker.host, tracker.repo
+    ))
 }
 
 /// The stored trackers `filter` names, or all of them.

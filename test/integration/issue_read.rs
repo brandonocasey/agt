@@ -450,3 +450,67 @@ fn a_newer_issue_document_is_refused_with_an_upgrade_hint() {
     let error = env.issue_fail(&["list"]);
     assert!(error.contains("upgrade agt"), "{error}");
 }
+
+#[test]
+fn tracker_identity_collisions_preserve_documents_and_avoid_forge_calls() {
+    for args in [vec!["sync"], vec!["push"], vec!["push", "--dry-run"]] {
+        let env = Env::new();
+        let config = Github.config(true).replace("o/r", "a-b/c");
+        env.write_config(&config);
+        env.issue(&["create", "--tracker", "a-b/c", "--title", "Keep me"]);
+        let before = env.issue_files();
+        env.write_config(
+            &config
+                .replace("a-b/c", "a/b-c")
+                .replace("push = true", "push = false"),
+        );
+        let error = env.issue_fail(&args);
+        assert!(
+            error.contains("tracker identity collision"),
+            "{args:?}: {error}"
+        );
+        assert!(
+            error.contains("a-b/c") && error.contains("a/b-c"),
+            "{error}"
+        );
+        assert!(error.contains("gh-github.com-a-b-c"), "{error}");
+        assert_eq!(env.issue_files(), before, "{args:?}");
+        assert!(env.forge_calls().is_empty(), "{args:?}");
+    }
+}
+
+#[test]
+fn configured_tracker_collisions_fail_before_creating_documents() {
+    let env = Env::new();
+    let config = Github.config(true).replace("o/r", "a-b/c");
+    env.write_config(&format!("{}\n{}", config, config.replace("a-b/c", "a/b-c")));
+    let error = env.issue_fail(&["sync"]);
+    assert!(error.contains("tracker identity collision"), "{error}");
+    assert!(env.issue_files().is_empty());
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn tracker_identity_accepts_case_changes_and_rejects_corrupt_empty_hosts() {
+    let env = Env::new();
+    env.write_config(&Github.config(false));
+    env.issue(&["create", "--tracker", "o/r", "--title", "Keep me"]);
+    env.write_config(
+        &Github
+            .config(false)
+            .replace("github.com", "GITHUB.COM")
+            .replace("o/r", "O/R"),
+    );
+    env.issue(&["push", "--dry-run"]);
+    env.issue(&["push"]);
+    let path = env.issue_state().join("gh-github.com-o-r/tracker.json");
+    let mut doc = env.issue_doc("gh-github.com-o-r", "tracker");
+    doc["host"] = json!("");
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    let before = env.issue_files();
+    for args in [vec!["sync"], vec!["push", "--dry-run"]] {
+        assert!(env.issue_fail(&args).contains("tracker identity collision"));
+        assert_eq!(env.issue_files(), before);
+    }
+    assert!(env.forge_calls().is_empty());
+}

@@ -1317,6 +1317,9 @@ issue references accept `owner/repo#12`, `#12`, `12` or `local-xxxxxx`.
 Reads (`list`, `show`, `search`, `status`, `find`) stay local unless
 `sync.auto_pull = true`. Enabled pulls refresh applicable trackers when unsynced
 or at least `max_age_secs` old. Failures back off for that interval and print
+Different destinations sharing a tracker key cause an identity collision error.
+The collided tracker remains unchanged, and no request reaches its forge.
+Host and repository comparisons ignore ASCII case; existing tracker keys stay unchanged.
 `agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
 
 With `sync.auto_push = true`, mutations with a remote representation send only

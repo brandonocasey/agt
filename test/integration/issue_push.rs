@@ -974,3 +974,44 @@ fn waiting_issue_mutation_does_not_recreate_the_source(attach: bool) {
     let moved: Value = serde_json::from_slice(&std::fs::read(destination).unwrap()).unwrap();
     assert_eq!(moved["fields"]["title"], "Move me");
 }
+
+#[test]
+fn automatic_push_rejects_colliding_policy_and_attachment_destinations() {
+    for local in [false, true] {
+        let fake: Fake = &crate::support::issue::Github;
+        let env = Env::new();
+        let config = fake.config(false).replace("o/r", "a-b/c");
+        env.write_config(&config);
+        let made = env.issue(&["create", "--tracker", "a-b/c", "--title", "Stored"]);
+        let stored_key = made["key"].as_str().unwrap();
+        let made_local = env.issue(&["create", "--title", "Local"]);
+        let key = if local {
+            made_local["key"].as_str().unwrap()
+        } else {
+            stored_key
+        };
+        let before = env.issue_doc("gh-github.com-a-b-c", "tracker");
+        env.write_config(&format!(
+            "{}\n[sync]\nauto_push = true\n",
+            config
+                .replace("a-b/c", "a/b-c")
+                .replace("push = false", "push = true")
+        ));
+        env.git(&["remote", "add", "origin", "https://github.com/a/b-c.git"]);
+        let output = env.issue_exec(&["edit", key, "--title", "Saved locally"], "", &[]);
+        assert!(output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("tracker identity collision"), "{error}");
+        assert_eq!(env.issue_doc("gh-github.com-a-b-c", "tracker"), before);
+        assert!(env.forge_calls().is_empty());
+        let tracker = if local {
+            "local"
+        } else {
+            "gh-github.com-a-b-c"
+        };
+        assert_eq!(
+            env.issue_doc(tracker, key)["fields"]["title"],
+            "Saved locally"
+        );
+    }
+}

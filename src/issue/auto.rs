@@ -166,11 +166,14 @@ pub fn push_changed(
             trackers::destinations(&mut config, repo, filter, true)?;
             attach(store, destination(&config, filter)?, &source, &issue)?
         } else {
-            let target = config.issues.tracker.iter().find(|target| {
-                trackers::tracker_key(target.forge, &target.host, &target.repo) == source.doc.key
-            });
-            if target.is_some_and(|target| target.push == Some(false)) {
-                return crate::core::error::fail("tracker has push = false");
+            for target in &config.issues.tracker {
+                if trackers::tracker_key(target.forge, &target.host, &target.repo) == source.doc.key
+                {
+                    trackers::check_identity(&source.doc, target)?;
+                    if target.push == Some(false) {
+                        return crate::core::error::fail("tracker has push = false");
+                    }
+                }
             }
             source
         };
