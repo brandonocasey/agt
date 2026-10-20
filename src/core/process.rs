@@ -148,43 +148,13 @@ mod tests {
     use std::fs;
 
     use super::*;
-
-    fn command(root: &std::path::Path, program: &str) -> Command {
-        let mut command = Command::new(program);
-        command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", root.join("home"))
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env("XDG_CONFIG_HOME", root.join("config"))
-            .env("XDG_CACHE_HOME", root.join("cache"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("AGT_GH_BIN", root.join("no-forge"))
-            .env("AGT_GLAB_BIN", root.join("no-forge"))
-            .current_dir(root.join("repo"));
-        command
-    }
-
-    fn environment() -> tempfile::TempDir {
-        let root = tempfile::tempdir().unwrap();
-        for dir in ["home", "state", "config", "cache", "repo"] {
-            fs::create_dir(root.path().join(dir)).unwrap();
-        }
-        assert!(
-            command(root.path(), "git")
-                .args(["init", "-q"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        root
-    }
+    use crate::core::testing::Sandbox;
 
     #[test]
     fn input_and_output_larger_than_pipes_do_not_deadlock() {
-        let root = environment();
+        let root = Sandbox::with_repo();
         let input = vec![b'i'; 256 * 1024];
-        let mut command = command(root.path(), "sh");
+        let mut command = root.command("sh");
         command.args([
             "-c",
             "dd if=/dev/zero bs=65536 count=4 2>/dev/null; cat; printf error >&2",
@@ -199,8 +169,8 @@ mod tests {
 
     #[test]
     fn a_child_exiting_before_reading_input_keeps_its_exit_status() {
-        let root = environment();
-        let mut command = command(root.path(), "sh");
+        let root = Sandbox::with_repo();
+        let mut command = root.command("sh");
         command.args(["-c", "printf refused >&2; exit 7"]);
         let captured = output(&mut command, Some(&vec![b'x'; 256 * 1024]), None).unwrap();
         captured.input.unwrap();
@@ -210,8 +180,8 @@ mod tests {
 
     #[test]
     fn deadlines_cover_inherited_pipes_and_expired_commands_never_start() {
-        let root = environment();
-        let mut expired = command(root.path(), "sh");
+        let root = Sandbox::with_repo();
+        let mut expired = root.command("sh");
         expired.args(["-c", "touch should-not-exist"]);
         let error = output(&mut expired, None, Some(Instant::now()))
             .err()
@@ -219,7 +189,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert!(!root.path().join("repo/should-not-exist").exists());
 
-        let mut held = command(root.path(), "sh");
+        let mut held = root.command("sh");
         held.args(["-c", "sleep 60 & printf '%s' \"$!\" > child.pid"]);
         let started = Instant::now();
         let error = output(&mut held, None, Some(started + Duration::from_millis(400)))

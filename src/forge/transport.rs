@@ -469,6 +469,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::core::testing::Sandbox;
     use crate::forge::service::Method;
 
     fn rest(method: Method, path: &str, body: Option<Value>) -> Request {
@@ -477,7 +478,7 @@ mod tests {
 
     #[test]
     fn consecutive_forge_calls_share_the_remaining_deadline() {
-        let root = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new();
         let tool = Cli {
             program: "sh".into(),
             name: "test forge",
@@ -488,7 +489,7 @@ mod tests {
                 "XDG_CACHE_HOME",
             ]
             .into_iter()
-            .map(|key| (key, root.path().display().to_string()))
+            .map(|key| (key, sandbox.path().display().to_string()))
             .collect(),
         };
         set_deadline(Duration::from_millis(1500));

@@ -263,10 +263,12 @@ pub fn copy_files(from: &Path, to: &Path, rels: &[String], dir_mode: u32) -> Res
 #[cfg(test)]
 mod tests {
     use super::ref_safe;
+    use crate::core::testing::Sandbox;
 
     /// What `git check-ref-format` says of the backup ref for `name`.
     fn valid(name: &str) -> bool {
-        std::process::Command::new("git")
+        Sandbox::new()
+            .command("git")
             .args([
                 "check-ref-format",
                 &format!("refs/agt/backups/20260101-0000-worktree-{name}"),

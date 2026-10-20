@@ -871,26 +871,17 @@ fn remote_key(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{Repo, branch_name, parse_worktrees, remote_key};
-
-    fn git(root: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    use crate::core::testing::Sandbox;
 
     #[test]
     fn origin_location_falls_back_to_the_written_url_when_the_expanded_one_names_no_host() {
-        let root = tempfile::tempdir().unwrap();
-        let repo = Repo::at(root.path());
-        git(root.path(), &["init", "-q"]);
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        let repo = Repo::at(&root);
+        sandbox.git(&root, &["init", "-q"]);
         assert_eq!(repo.origin_location().unwrap(), None);
-        git(
-            root.path(),
+        sandbox.git(
+            &root,
             &[
                 "remote",
                 "add",
@@ -900,8 +891,8 @@ mod tests {
         );
         let expected = Some(("github.com".to_owned(), "owner/repo".to_owned()));
         assert_eq!(repo.origin_location().unwrap(), expected);
-        git(
-            root.path(),
+        sandbox.git(
+            &root,
             &[
                 "config",
                 "url./srv/mirror/.insteadOf",
