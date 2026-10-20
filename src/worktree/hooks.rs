@@ -109,10 +109,15 @@ pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
         ("AGT_BRANCH", branch),
     ];
     // Read only when something runs, so a damaged ports file cannot block a hookless remove.
-    if !commands.is_empty()
-        && let Some(number) = port::recorded(root)?
-    {
-        env.push(("PORT", number.to_string()));
+    // A create hook records the worktree's port so that it sees PORT on the first run.
+    if !commands.is_empty() {
+        let number = match kind {
+            Kind::Create => Some(port::assign(root)?.1),
+            Kind::Remove => port::recorded(root)?,
+        };
+        if let Some(number) = number {
+            env.push(("PORT", number.to_string()));
+        }
     }
     let mut steps = Vec::new();
     for (index, command) in commands.iter().enumerate() {

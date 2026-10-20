@@ -1,4 +1,4 @@
-//! Background setup for a new worktree: a detached `agt worktree prepare --setup ...` child
+//! Background setup for a new worktree: a detached hidden `agt worktree setup --steps ...` child
 //! runs the dependency install and the create hooks while `create` returns, and records its
 //! progress in `agt-setup.json` in the worktree's own git directory, so the file goes away with
 //! the worktree. `prepare --wait` reads it.
@@ -7,15 +7,17 @@ use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
 
-use super::info::toplevel;
+use super::info::{dir_or_cwd, toplevel};
 use super::{emit, hooks, prepare, steps};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{read_json, write_json};
 use crate::core::output::{Output, TIMED_OUT};
+use crate::core::process::{self, Polled};
 use crate::core::{agents, clock};
 use crate::git::Repo;
 
@@ -24,22 +26,28 @@ const STATUS_FILE: &str = "agt-setup.json";
 /// How long a status without a child pid counts as starting.
 const STARTING_GRACE: Duration = Duration::from_secs(30);
 
+/// The hidden entry point of the background child: `agt worktree setup --steps prepare,hooks [PATH]`.
+#[derive(Args)]
+pub struct Cli {
+    /// The worktree; default: the current one.
+    path: Option<PathBuf>,
+    /// The steps to run, in the order `prepare`, `hooks`.
+    #[arg(long, required = true, value_delimiter = ',', value_enum)]
+    steps: Vec<Step>,
+}
+
+pub fn run(cli: Cli) -> Result<Output> {
+    child(&dir_or_cwd(cli.path)?, &cli.steps)
+}
+
 /// A step the background child runs.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(super) enum Step {
     Prepare,
     Hooks,
 }
 
 impl Step {
-    pub(super) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "prepare" => Some(Self::Prepare),
-            "hooks" => Some(Self::Hooks),
-            _ => None,
-        }
-    }
-
     fn name(self) -> &'static str {
         match self {
             Self::Prepare => "prepare",
@@ -105,7 +113,7 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
     )?;
     let list = steps.iter().map(|step| step.name()).collect::<Vec<_>>();
     let spawned = Command::new(std::env::current_exe().map_err(ctx("find the agt binary"))?)
-        .args(["worktree", "prepare", "--setup", &list.join(",")])
+        .args(["worktree", "setup", "--steps", &list.join(",")])
         .arg(root)
         .current_dir(root)
         .stdin(Stdio::null())
@@ -123,7 +131,7 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
 }
 
 /// The background child: runs `steps`, recording `running` then `done` in the status file.
-pub(super) fn child(dir: &Path, steps: &[Step]) -> Result<Output> {
+fn child(dir: &Path, steps: &[Step]) -> Result<Output> {
     let root = toplevel(dir)?;
     let file = status_path(&root)?;
     let log = read_json::<Value>(&file)?
@@ -148,7 +156,9 @@ pub(super) fn child(dir: &Path, steps: &[Step]) -> Result<Output> {
     emit(done, ok)
 }
 
-fn execute(root: &Path, steps: &[Step], done: &mut Value) -> Result<bool> {
+/// Runs `steps` in the worktree `root` in order, adding each report to `done` under the step's name;
+/// the flag says every step succeeded.
+pub(super) fn execute(root: &Path, steps: &[Step], done: &mut Value) -> Result<bool> {
     let mut ok = true;
     if steps.contains(&Step::Prepare) {
         let (report, passed) = prepare::prepare(root, false)?;
@@ -178,34 +188,32 @@ fn live(pid: u64, file: &Path) -> bool {
 }
 
 /// Waits for the background setup of the worktree containing `dir` and prints its report.
-pub(super) fn wait(dir: &Path, max: u64) -> Result<Output> {
+pub(super) fn wait(dir: &Path, timeout: u64) -> Result<Output> {
     let root = toplevel(dir)?;
     let file = status_path(&root)?;
-    let start = Instant::now();
-    loop {
+    let polled = process::poll_until(Duration::from_secs(timeout), Duration::from_secs(1), |_| {
         let Some(status) = read_json::<Value>(&file)? else {
             return fail(format!("no background setup for {}", root.display()));
         };
         if status["state"] == "done" {
-            return emit(status.clone(), status["ok"] == true);
+            return emit(status.clone(), status["ok"] == true).map(Some);
         }
         let pid = status["pid"].as_u64().unwrap_or(0);
-        if !live(pid, &file) {
-            let log = status["log"].as_str().unwrap_or("(none)");
-            return Err(Error(if pid == 0 {
-                format!("the background setup never started; see its log {log}")
-            } else {
-                format!(
-                    "the background setup (pid {pid}) is gone without finishing; see its log {log}"
-                )
-            }));
+        if live(pid, &file) {
+            return Ok(None);
         }
-        if start.elapsed().as_secs() >= max {
-            return Ok(Output::Text(format!(
-                "agt worktree prepare --wait: setup still running after {max}s; wait again\n"
-            ))
-            .exiting(TIMED_OUT));
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
+        let log = status["log"].as_str().unwrap_or("(none)");
+        Err(Error(if pid == 0 {
+            format!("the background setup never started; see its log {log}")
+        } else {
+            format!("the background setup (pid {pid}) is gone without finishing; see its log {log}")
+        }))
+    })?;
+    Ok(match polled {
+        Polled::Done(output) => output,
+        Polled::TimedOut => Output::Text(format!(
+            "agt worktree prepare --wait: setup still running after {timeout}s; wait again\n"
+        ))
+        .exiting(TIMED_OUT),
+    })
 }

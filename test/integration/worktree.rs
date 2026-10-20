@@ -482,7 +482,7 @@ fn list_reports_counts_ahead_and_merged_for_this_repo_and_all_roots() {
     assert_eq!(done["merged"], true);
     assert_eq!(done["ahead"], 0);
 
-    // `--all` scans the configured roots, not the current repository.
+    // `--all-repos` scans the configured roots, not the current repository.
     let other = f.env.path("home/code/proj");
     fs::create_dir_all(&other).unwrap();
     wgit(&f.env, &other, &["init", "-q", "-b", "trunk"]);
@@ -496,7 +496,7 @@ fn list_reports_counts_ahead_and_merged_for_this_repo_and_all_roots() {
         &["worktree", "add", "-q", "-b", "o", &tree.to_string_lossy()],
     );
     f.env.write_config("[worktree]\nroots = [\"~/code/*\"]\n");
-    let all = f.json(&["list", "--all"]);
+    let all = f.json(&["list", "--all-repos"]);
     let rows = all["worktrees"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{all}");
     assert_eq!(rows[0]["branch"], "o");
@@ -508,7 +508,7 @@ fn list_reports_counts_ahead_and_merged_for_this_repo_and_all_roots() {
 }
 
 #[test]
-fn backups_list_show_and_rm() {
+fn backups_list_filter_by_id_and_rm() {
     let f = Fixture::new();
     f.dirty();
     let removed = f.remove();
@@ -517,7 +517,9 @@ fn backups_list_show_and_rm() {
 
     let listed = f.json(&["backups"]);
     assert_eq!(listed["backups"][0]["id"], id);
-    let shown = f.json(&["backups", "show", id]);
+    let filtered = f.json(&["backups", id]);
+    assert_eq!(filtered["backups"].as_array().unwrap().len(), 1);
+    let shown = &filtered["backups"][0];
     assert_eq!(shown["dir"], dir);
     assert_eq!(
         shown["worktree"],
@@ -535,7 +537,7 @@ fn backups_list_show_and_rm() {
     assert!(!Path::new(dir).exists());
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt"]), "");
     assert_eq!(f.json(&["backups"])["backups"], json!([]));
-    f.refuses(&f.env.repo, &["backups", "show", id], "no worktree backup");
+    f.refuses(&f.env.repo, &["backups", id], "no worktree backup");
 }
 
 #[test]
@@ -697,7 +699,7 @@ fn list_all_warns_about_an_unreadable_repository_and_lists_the_rest() {
         ],
     );
     f.env.write_config("[worktree]\nroots = [\"~/code/*\"]\n");
-    let all = f.json(&["list", "--all"]);
+    let all = f.json(&["list", "--all-repos"]);
     let rows = all["worktrees"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{all}");
     let warnings = all["warnings"].as_array().unwrap();
@@ -1138,7 +1140,7 @@ fn backup_ids_are_unique_across_repositories() {
     assert_ne!(first["id"], second["id"], "{first} {second}");
     for removed in [&first, &second] {
         let id = removed["id"].as_str().unwrap();
-        assert_eq!(f.json(&["backups", "show", id])["id"], id);
+        assert_eq!(f.json(&["backups", id])["backups"][0]["id"], id);
     }
 }
 

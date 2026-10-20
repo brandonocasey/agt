@@ -54,7 +54,7 @@ fn default_max_age_secs() -> u64 {
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Worktree {
-    /// Globs of repository directories `agt worktree list --all` scans; `~` is the home
+    /// Globs of repository directories `agt worktree list --all-repos` scans; `~` is the home
     /// directory. `None` means the default layout.
     pub roots: Option<Vec<String>>,
     #[serde(default)]

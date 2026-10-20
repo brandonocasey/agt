@@ -506,24 +506,19 @@ fn submodules_are_initialized_in_the_new_worktree() {
 }
 
 #[test]
-fn prepare_and_port_run_after_create_on_request() {
+fn prepare_runs_after_create_on_request() {
     let (env, _) = repo_with_commit();
     let tools = fake_tools(&env);
     fs::write(env.repo.join("Cargo.lock"), "").unwrap();
     git(&env, &env.repo, &["add", "-A"]);
     git(&env, &env.repo, &["commit", "-q", "-m", "lock"]);
-    let value = prepared(
-        &env,
-        &tools,
-        &env.repo,
-        &["create", "both", "--prepare", "--port"],
-    );
+    let value = prepared(&env, &tools, &env.repo, &["create", "both", "--prepare"]);
     assert_eq!(value["prepare"]["ok"], true);
     assert_eq!(
         value["prepare"]["steps"][0]["command"],
         "cargo fetch --locked"
     );
-    assert!(value["port"]["port"].as_u64().is_some());
+    assert!(value.get("port").is_none());
 }
 
 /// A directory of fake package managers: each appends `<name> <args>` to `$FAKE_LOG`, prints a

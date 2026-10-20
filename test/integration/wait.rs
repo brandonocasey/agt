@@ -1,4 +1,4 @@
-//! `agt wait`: exit 0 when the check passes, 3 when `--max` passes first, 2 on bad usage.
+//! `agt wait`: exit 0 when the check passes, 3 when `--timeout` passes first, 2 on bad usage.
 
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,16 @@ fn the_check_runs_until_it_passes() {
     let started = Instant::now();
     let (code, out) = wait(
         &env,
-        &["--every", "1", "--max", "10", "--", "sh", "-c", &script],
+        &[
+            "--interval",
+            "1",
+            "--timeout",
+            "10",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ],
     );
     assert_eq!(code, Some(0));
     assert!(out.starts_with("agt wait: done after "), "{out}");
@@ -46,13 +55,20 @@ fn the_check_runs_until_it_passes() {
 fn a_failing_check_times_out_with_exit_3() {
     let env = Env::new();
     assert_eq!(
-        wait(&env, &["--max", "1", "--every", "1", "--", "false"]),
+        wait(&env, &["--timeout", "1", "--interval", "1", "--", "false"]),
         (
             Some(3),
             "agt wait: still running after 1s; check the job and re-arm\n".into()
         )
     );
-    let missing = ["--max", "1", "--every", "1", "--", "/nonexistent/check"];
+    let missing = [
+        "--timeout",
+        "1",
+        "--interval",
+        "1",
+        "--",
+        "/nonexistent/check",
+    ];
     assert_eq!(wait(&env, &missing).0, Some(3));
 }
 
@@ -61,8 +77,8 @@ fn bad_usage_exits_2() {
     let env = Env::new();
     for args in [
         &["true"][..],
-        &["--max", "0", "--", "true"],
-        &["--every", "x", "--", "true"],
+        &["--timeout", "0", "--", "true"],
+        &["--interval", "x", "--", "true"],
         &[],
     ] {
         assert_eq!(wait(&env, args).0, Some(2), "{args:?}");
@@ -73,7 +89,7 @@ fn bad_usage_exits_2() {
 fn a_sleep_interval_never_extends_the_deadline() {
     let env = Env::new();
     let started = Instant::now();
-    let (code, _) = wait(&env, &["--max", "1", "--every", "4", "--", "false"]);
+    let (code, _) = wait(&env, &["--timeout", "1", "--interval", "4", "--", "false"]);
     assert_eq!(code, Some(3));
     assert!(started.elapsed() < Duration::from_secs(3));
 }
@@ -82,7 +98,10 @@ fn a_sleep_interval_never_extends_the_deadline() {
 fn an_overdue_check_cannot_report_late_success() {
     let env = Env::new();
     let started = Instant::now();
-    let (code, _) = wait(&env, &["--max", "1", "--", "sh", "-c", "sleep 3; exit 0"]);
+    let (code, _) = wait(
+        &env,
+        &["--timeout", "1", "--", "sh", "-c", "sleep 3; exit 0"],
+    );
     assert_eq!(code, Some(3));
     assert!(started.elapsed() < Duration::from_secs(3));
 }
@@ -92,7 +111,18 @@ fn an_overdue_check_loses_its_descendants() {
     let env = Env::new();
     let pid = env.path("child.pid");
     let script = format!("sleep 3 & echo $! > '{}'; wait", pid.display());
-    let (code, _) = wait(&env, &["--max", "1", "--", "sh", "-c", &script]);
+    let (code, _) = wait(&env, &["--timeout", "1", "--", "sh", "-c", &script]);
     assert_eq!(code, Some(3));
     crate::support::process::assert_gone(&pid);
+}
+
+#[test]
+fn the_old_max_and_every_names_still_work() {
+    let env = Env::new();
+    let (code, _) = wait(&env, &["--max", "1", "--every", "1", "--", "false"]);
+    assert_eq!(code, Some(3));
+    assert_eq!(
+        wait(&env, &["--max", "5", "--every", "1", "--", "true"]).0,
+        Some(0)
+    );
 }

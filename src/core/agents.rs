@@ -503,24 +503,6 @@ pub fn session_tree() -> Vec<i32> {
     found
 }
 
-/// The pids of the calling session: this process, its ancestors and `CLAUDE_PID` when set.
-pub fn own_pids() -> Vec<i32> {
-    let mut pids = lineage();
-    pids.extend(own_claude_pid());
-    pids
-}
-
-/// The first live Claude Code session, other than the calling one, whose `cwd` is `root` or
-/// inside it.
-pub fn live_in(root: &Path) -> Option<Live> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
-    let own = own_pids();
-    live()
-        .into_iter()
-        .filter(|session| !own.contains(&session.pid))
-        .find(|session| inside(&session.cwd, &root))
-}
-
 /// Whether `path`, links resolved, is `root` or inside it; `root` is already canonical.
 pub fn inside(path: &Path, root: &Path) -> bool {
     path.canonicalize()

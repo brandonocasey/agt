@@ -1,4 +1,4 @@
-//! The directories `agt worktree list --all` scans for repositories.
+//! The directories `agt worktree list --all-repos` scans for repositories.
 
 use std::fs;
 use std::path::PathBuf;

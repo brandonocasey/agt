@@ -1121,19 +1121,18 @@ gives each a dev-server port, lists them, removes one after backing it up, sweep
 Output is JSON.
 
 ```sh
-agt worktree create BRANCH [--base C] [--path P] [--prepare] [--port] [--no-hooks] [--background]
+agt worktree create BRANCH [--base C] [--path P] [--prepare] [--no-hooks] [--background]
 agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lockfiles
 agt worktree prepare --hooks [PATH]  # rerun only the create hooks, no installs (after a failed one)
-agt worktree prepare --wait [PATH] [--max SECS]  # wait for the background setup `create --background` started
+agt worktree prepare --wait [PATH] [--timeout SECS]  # wait for the background setup `create --background` started
 agt worktree port [PATH] [--env]            # a stable dev-server port
-agt worktree list [--all]                   # this repository's linked worktrees, or every repository under the roots
+agt worktree list [--all-repos]            # this repository's linked worktrees, or every repository under the roots
 agt worktree remove PATH [--yes] [--no-hooks]  # without --yes: print the plan, change nothing
 agt cleanup --only worktrees [--all-repos] [--yes] [--offline] [--dirty] [--recent] [--worktree NAME-OR-PATH]...  # remove landed worktrees, delete landed branches
 agt worktree trust [PATH] [--remove]        # trust (or forget) the repository's [worktree.hooks]
 agt worktree trust --list                   # trusted files and whether each still matches
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
-agt worktree backups                        # list backups
-agt worktree backups show ID
+agt worktree backups [ID]                   # list backups, or only the one with this id
 agt worktree backups rm ID [--yes]          # delete the backup's ref and directory
 ```
 
@@ -1145,15 +1144,15 @@ create = ["npm run build"]   # after `create` makes a new worktree (not a reused
 remove = ["docker compose down"]  # before `remove --yes` or `cleanup --yes` backs the worktree up
 ```
 
-Each entry runs as `sh -c <entry>` in the worktree root, one after another, stopping at the first failure; stdin is empty and the output goes to a log under `$XDG_CACHE_HOME/agents/output/`. The environment has `AGT_HOOK` (`create` or `remove`), `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` (empty when detached) and, only when a port is already recorded for the worktree (`create --port` records one first), `PORT`. `create` reports them under `hooks` (`create`: the steps with `command`, `exit`, `ok`, `duration_ms`, `log`; `ok`) and exits 1 when one fails; `--no-hooks` skips them. A failing `remove` hook is an error: nothing is backed up or removed. The removal checks run again after the `remove` hooks, so work a hook leaves behind (a nested repository, say) still blocks the removal. The `remove` plan (no `--yes`) lists the commands under `hooks`; `remove --no-hooks` skips them and `agt cleanup --only worktrees` always runs them.
+Each entry runs as `sh -c <entry>` in the worktree root, one after another, stopping at the first failure; stdin is empty and the output goes to a log under `$XDG_CACHE_HOME/agents/output/`. The environment has `AGT_HOOK` (`create` or `remove`), `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` (empty when detached) and `PORT`: a `create` hook records the worktree's port first (as `agt worktree port` does), a `remove` hook gets the port only when one is already recorded. `create` reports them under `hooks` (`create`: the steps with `command`, `exit`, `ok`, `duration_ms`, `log`; `ok`) and exits 1 when one fails; `--no-hooks` skips them. A failing `remove` hook is an error: nothing is backed up or removed. The removal checks run again after the `remove` hooks, so work a hook leaves behind (a nested repository, say) still blocks the removal. The `remove` plan (no `--yes`) lists the commands under `hooks`; `remove --no-hooks` skips them and `agt cleanup --only worktrees` always runs them.
 
 Repository hooks are gated like `mise trust`: the global hooks always run, but `[worktree.hooks]` in a repository's `.config/agt.toml` run only while that file is trusted. `agt worktree trust [PATH]` (PATH is any checkout, default the current directory) records the main checkout's file with the SHA-256 of its exact bytes in `$XDG_STATE_HOME/agents/worktrees/trust.json` and prints `file`, `sha256`, and the `create` and `remove` commands it trusts; it fails when the file is missing or has no `[worktree.hooks]`. Trust is keyed on the canonical main checkout joined with the literal `.config/agt.toml`; when `.config` or `.config/agt.toml` is a symlink its hooks are untrusted (reported with a `reason`) and `trust` refuses. Any edit untrusts the file. `--remove` forgets it; `--list` prints every trusted file with its hash and `current` (`true`, `false` or `missing`). Trust covers only hooks; other repository keys apply untrusted. An untrusted file's hooks are skipped (the global hooks alone apply, per key) without failing, and the result reports `hooks.untrusted` with `file`, the skipped `create` and `remove` commands, and `next` (a note to ask the user to review the commands, with the quoted trust command), or `reason` when the file cannot be trusted: on `create` (also the background child's report), on `remove` (the plan's `hooks` is `{"remove": [commands], "untrusted": {...}}`, `untrusted` only when present) and on `agt cleanup --only worktrees` plan rows (`hooks.error` when the config or trust file cannot be read; the plan continues).
 
-`agt worktree prepare --hooks [PATH]` runs only the create hooks (no install steps) in the foreground (a failed or timed-out create hook cannot be rerun by `create`, which reuses the worktree); the report is `{path, hooks, ok}`, and it exits 1 when a step failed. `PORT` is set only from a recorded port; an inherited `PORT` is removed from every step. The hook config is validated before `create` makes the worktree. A second `create --background` while a setup is running starts no child and reports the running one with `background.already_running: true`. While it runs, `prepare`, `prepare --hooks` and `create --prepare` in that worktree fail and point to `prepare --wait`, so no install or hook runs twice at once.
+`agt worktree prepare --hooks [PATH]` runs only the create hooks (no install steps) in the foreground (a failed or timed-out create hook cannot be rerun by `create`, which reuses the worktree); the report is `{path, hooks, ok}`, and it exits 1 when a step failed. An inherited `PORT` is removed from every step; a `remove` hook sees `PORT` only from a recorded port. The hook config is validated before `create` makes the worktree. A second `create --background` while a setup is running starts no child and reports the running one with `background.already_running: true`. While it runs, `prepare`, `prepare --hooks` and `create --prepare` in that worktree fail and point to `prepare --wait`, so no install or hook runs twice at once.
 
-`create --background` returns at once: the port is still recorded first, but `--prepare` and the create hooks run in a detached process, and the output has `background` with its `pid`, the `status` file and the `log` (`background.started: false` when there is nothing to run). The status file `agt-setup.json` is in the worktree's own git directory, so it goes with the worktree. `agt worktree prepare --wait [PATH] [--max SECS]` (default 270) waits until the setup is done, prints the stored report and exits 1 when it failed, or exits 3 when `--max` passes first. It is an error when the worktree has no background setup or the setup process died without finishing. `--wait` cannot be combined with `--clone-deps`.
+`create --background` returns at once: `--prepare` and the create hooks run in a detached process, and the output has `background` with its `pid`, the `status` file and the `log` (`background.started: false` when there is nothing to run). The status file `agt-setup.json` is in the worktree's own git directory, so it goes with the worktree. `agt worktree prepare --wait [PATH] [--timeout SECS]` (default 270; `--max` is an accepted alias) waits until the setup is done, prints the stored report and exits 1 when it failed, or exits 3 when `--timeout` passes first. It is an error when the worktree has no background setup or the setup process died without finishing. `--wait` cannot be combined with `--clone-deps`.
 
-`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it) (a worktree on a branch with no commit yet has `unborn: true` and `null` for those three), and `agents`: the live Claude Code sessions whose working directory is inside it, each with `pid`, `name`, `status` and `session` (the sessions `agt ps` lists). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml` (a repository it cannot read becomes an entry of `warnings` and the rest are still listed, as `agt cleanup --only worktrees --all-repos` does); globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
+`list` prints per worktree its `path`, `branch` (or `detached`), `head`, `locked`, counts of `modified` tracked, `untracked` and `ignored` (not disposable) files, `ahead` and `behind` the default branch, and `merged` (HEAD is an ancestor of it) (a worktree on a branch with no commit yet has `unborn: true` and `null` for those three), and `agents`: the live Claude Code sessions whose working directory is inside it, each with `pid`, `name`, `status` and `session` (the sessions `agt ps` lists). The default branch is the one `refs/remotes/origin/HEAD` names, else `main`, else `master`. `--all-repos` scans the roots in `$XDG_CONFIG_HOME/agt/config.toml` (a repository it cannot read becomes an entry of `warnings` and the rest are still listed, as `agt cleanup --only worktrees --all-repos` does); globs and `~` are allowed, and the default is the layout `agt cleanup` assumes:
 
 ```toml
 [worktree]
@@ -1174,7 +1173,7 @@ A backup lives in `$XDG_STATE_HOME/agents/backups/<repo>/<YYYYMMDD-HHMM>-worktre
 
 `restore` recreates the worktree at its original path (or `--path`) and refuses an existing path. It checks out the original branch when it exists and is not checked out elsewhere and detaches at the snapshot's parent when it is checked out elsewhere or its tip moved off the snapshot's parent (the warning names the tip it has now, so newer commits never show up as reverted changes), and recreates the branch at the snapshot's parent when it is gone. The working tree then matches the snapshot, with modified, deleted and untracked files left unstaged (a deletion outside a sparse checkout's patterns comes back staged, since git cannot hold it unstaged there), and the copied ignored files return. At the original path `claude --continue` finds the old session.
 
-`agt worktree create <branch> [--base COMMIT-ISH] [--path P] [--prepare] [--port]` puts a branch in
+`agt worktree create <branch> [--base COMMIT-ISH] [--path P] [--prepare]` puts a branch in
 a worktree at `<main checkout>/.worktrees/<branch>` (slashes make subdirectories) or at `--path`,
 and prints JSON. The main checkout is the first entry of `git worktree list`; when it is bare,
 `--path` is required. A branch that a worktree already has checked out returns that worktree
@@ -1249,10 +1248,10 @@ fail the scan with exit status 2 and identify the path.
 
 ## Wait
 
-`agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every
-`--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. Agents run it in the background so they wake within the prompt cache's five
+`agt wait [--timeout S] [--interval S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every
+`--interval` (5) seconds until it succeeds, for at most `--timeout` (270) seconds (`--every` and `--max` are accepted aliases). Agents run it in the background so they wake within the prompt cache's five
 minutes to look at a long job. Exit status: 0 the check passed (`agt wait: done after Ns`), 3
-`--max` passed first, 2 usage.
+`--timeout` passed first, 2 usage.
 The deadline includes checks and pauses between checks. An overdue check and its children
 are terminated; a check finishing after the deadline cannot report success.
 

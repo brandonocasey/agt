@@ -61,21 +61,25 @@ fn create_hooks_run_in_the_worktree_with_the_hook_environment() {
     let tree = env.repo.join(".worktrees/feat/x");
     let seen = fs::read_to_string(tree.join("env.txt")).unwrap();
     let real = |path: &Path| fs::canonicalize(path).unwrap().display().to_string();
-    let expected = format!("create|feat/x|{}|{}|none", real(&tree), real(&env.repo));
+    let port = json(&agt(&env, &tree, &["port"]))["port"].to_string();
+    let expected = format!("create|feat/x|{}|{}|{port}", real(&tree), real(&env.repo));
     assert_eq!(seen.trim(), expected);
     assert!(tree.join("second").exists());
 }
 
 #[test]
-fn a_recorded_port_reaches_the_hook_as_port() {
+fn a_create_hook_gets_the_worktrees_port_as_port() {
     let env = repo();
     repo_config(
         &env,
         "[worktree.hooks]\ncreate = [\"echo $PORT > port.txt\"]\n",
     );
-    let value = json(&agt(&env, &env.repo, &["create", "p", "--port"]));
-    let seen = fs::read_to_string(env.repo.join(".worktrees/p/port.txt")).unwrap();
-    assert_eq!(seen.trim(), value["port"]["port"].to_string());
+    let created = json(&agt(&env, &env.repo, &["create", "p"]));
+    assert!(created.get("port").is_none());
+    let tree = env.repo.join(".worktrees/p");
+    let seen = fs::read_to_string(tree.join("port.txt")).unwrap();
+    let recorded = json(&agt(&env, &tree, &["port"]));
+    assert_eq!(seen.trim(), recorded["port"].to_string());
 }
 
 #[test]
@@ -231,20 +235,30 @@ fn wait_gives_up_after_max_with_exit_3() {
     repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 5\"]\n");
     json(&agt(&env, &env.repo, &["create", "slow", "--background"]));
     let tree = env.repo.join(".worktrees/slow");
-    let output = agt(&env, &tree, &["prepare", "--wait", "--max", "1"]);
+    let output = agt(&env, &tree, &["prepare", "--wait", "--timeout", "1"]);
     assert_eq!(output.status.code(), Some(3));
 }
 
 #[test]
-fn an_inherited_port_is_not_passed_when_none_is_recorded() {
+fn an_inherited_port_is_not_passed_to_a_remove_hook_when_none_is_recorded() {
     let env = repo();
+    let marker = env.path("marker");
     repo_config(
         &env,
-        "[worktree.hooks]\ncreate = [\"echo ${PORT:-none} > port.txt\"]\n",
+        &format!(
+            "[worktree.hooks]\nremove = [\"echo ${{PORT:-none}} > {}\"]\n",
+            marker.display()
+        ),
     );
     json(&agt(&env, &env.repo, &["create", "np"]));
-    let seen = fs::read_to_string(env.repo.join(".worktrees/np/port.txt")).unwrap();
-    assert_eq!(seen.trim(), "none");
+    let tree = env.repo.join(".worktrees/np");
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read_to_string(&marker).unwrap().trim(), "none");
 }
 
 #[test]
@@ -383,7 +397,7 @@ fn a_status_stuck_at_starting_does_not_block_a_new_setup() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    let waited = agt(&env, &tree, &["prepare", "--wait", "--max", "5"]);
+    let waited = agt(&env, &tree, &["prepare", "--wait", "--timeout", "5"]);
     assert_eq!(waited.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&waited.stderr).contains("never started"));
     let again = json(&agt(
@@ -392,7 +406,7 @@ fn a_status_stuck_at_starting_does_not_block_a_new_setup() {
         &["create", "stuck", "--background", "--prepare"],
     ));
     assert!(again["background"]["already_running"].is_null());
-    let done = agt(&env, &tree, &["prepare", "--wait", "--max", "60"]);
+    let done = agt(&env, &tree, &["prepare", "--wait", "--timeout", "60"]);
     assert!(done.status.success());
 }
 
