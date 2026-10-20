@@ -893,7 +893,12 @@ for uncommitted work. The output lists the new ids under `added` and
 
 ## Tasks
 
-`agt task` takes `create`, `list`, `show`, `update` and `check`; `agt task --help` lists them.
+`agt task` takes `create`, `list`, `show` and `update`; `agt task --help` lists them. The id is
+the one positional argument: `agt task create <id> --objective ...`, `agt task update <id> --revision N ...`.
+`update` also records a completed check with `--check-name` and `--check-result` (both required
+together), optionally `--check-code-revision` (default: the task's HEAD as this update records it),
+`--check-inputs` and `--check-environment` (default: the platform and host name); the update and
+the check are one revision bump.
 Arguments are parsed like every other `agt` command, so a usage error (a missing value, an
 unknown flag or command, a bad `--status`, a `--revision` below 1, no command at all) exits with
 2 and clap's message; other errors exit with 1.
