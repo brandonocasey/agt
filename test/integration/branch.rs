@@ -151,6 +151,22 @@ fn pushed_counts_a_rename_once_and_an_edit_git_status_hides() {
 }
 
 #[test]
+fn pushed_counts_a_staged_path_once_when_its_worktree_edit_is_hidden() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        for name in ["config.txt", "quoted \" -> \n.txt"] {
+            let site = Site::new();
+            site.pulls(&[]);
+            site.env.write(name, "staged\n");
+            site.env.git(&["add", "--", name]);
+            site.env.git(&["update-index", flag, "--", name]);
+            site.env.write(name, "hidden\n");
+            let (report, _) = site.report(&["pushed"]);
+            assert_eq!(report["uncommitted"], 1, "{flag}: {name:?}");
+        }
+    }
+}
+
+#[test]
 fn pushed_skips_a_worktree_whose_directory_is_gone() {
     let site = Site::new();
     site.pulls(&[]);

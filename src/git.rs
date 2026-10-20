@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
@@ -137,8 +137,19 @@ impl Repo {
     /// How many changes the work tree has: the paths `git status` lists, a rename counting
     /// once, and the edits it hides.
     pub fn uncommitted_count(&self) -> Result<usize> {
-        let listed = self.git(&["status", "--porcelain"])?;
-        Ok(listed.lines().count() + self.hidden_edits()?.len())
+        let listed = self.checked(&["status", "--porcelain=v1", "-z"], None, &[])?;
+        let mut entries = nul_fields(&listed);
+        let mut paths: HashSet<_> = self.hidden_edits()?.into_iter().collect();
+        while let Some(entry) = entries.next() {
+            if entry.len() <= 3 {
+                continue;
+            }
+            paths.insert(String::from_utf8_lossy(&entry[3..]).into_owned());
+            if matches!(entry[0], b'R' | b'C') || matches!(entry[1], b'R' | b'C') {
+                entries.next();
+            }
+        }
+        Ok(paths.len())
     }
 
     /// The submodules the index records, limited to `pathspec` when it is not empty.
