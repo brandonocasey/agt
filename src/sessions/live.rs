@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Args;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::fmt::{grouped, round, table, tok};
@@ -67,6 +68,43 @@ pub struct Cli {
     max_polls: Option<u64>,
 }
 
+/// One running agent.
+#[derive(Clone, Serialize)]
+struct Row {
+    harness: &'static str,
+    pid: i32,
+    name: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    status_secs: Option<i64>,
+    waiting_for: Option<String>,
+    cwd: Option<PathBuf>,
+    session: Option<String>,
+    note: Option<String>,
+    /// Present when cost and place were asked for.
+    #[serde(flatten)]
+    spend: Option<Spend>,
+    #[serde(flatten)]
+    place: Option<Place>,
+}
+
+/// What a session's transcripts say it cost; all `null` when they cannot be priced.
+#[derive(Clone, Default, Serialize)]
+struct Spend {
+    model: Option<String>,
+    context_tokens: Option<i64>,
+    usd: Option<f64>,
+    unpriced_calls: Option<i64>,
+}
+
+/// Where a session works: its repository's main checkout, the branch, and the linked worktree.
+#[derive(Clone, Default, Serialize)]
+struct Place {
+    repository: Option<PathBuf>,
+    branch: Option<String>,
+    worktree: Option<PathBuf>,
+}
+
 pub fn run(cli: Cli) -> Result<Output> {
     if cli.watch {
         watch(&cli)?;
@@ -90,16 +128,14 @@ pub fn run(cli: Cli) -> Result<Output> {
             now,
             &home,
         );
-        spend(&mut row, &home, &mut warned);
-        if let Some(cwd) = &proc.cwd {
-            place(&mut row, cwd);
-        }
+        row.spend = Some(spend(row.session.as_deref(), &home, &mut warned));
+        row.place = proc.cwd.as_deref().map(place);
         rows.push(row);
     }
     rows.sort_by_key(|row| {
         (
-            row["status"] != "busy",
-            std::cmp::Reverse(row["status_secs"].as_i64()),
+            row.status.as_deref() != Some("busy"),
+            std::cmp::Reverse(row.status_secs),
         )
     });
     if cli.json {
@@ -109,46 +145,47 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 /// One row per live Claude Code session; with the `home` directory, cost and place are added.
-fn claude_rows(now: i64, detail: Option<&Path>, warned: &mut bool) -> Vec<Value> {
+fn claude_rows(now: i64, detail: Option<&Path>, warned: &mut bool) -> Vec<Row> {
     let mut rows = Vec::new();
     for live in agents::live() {
         let record = &live.record;
         let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
         let since = record.get("statusUpdatedAt").and_then(Value::as_i64);
-        let mut row = json!({
-            "harness": Harness::Claude.id(),
-            "pid": live.pid,
-            "name": text("name"),
-            "kind": text("kind"),
-            "status": text("status"),
-            "status_secs": since.map(|millis| (now - millis / 1000).max(0)),
-            "waiting_for": text("waitingFor"),
-            "cwd": live.cwd,
-            "session": text("sessionId"),
-            "note": null,
+        let session = text("sessionId");
+        rows.push(Row {
+            harness: Harness::Claude.id(),
+            pid: live.pid,
+            name: text("name"),
+            kind: text("kind"),
+            status: text("status"),
+            status_secs: since.map(|millis| (now - millis / 1000).max(0)),
+            waiting_for: text("waitingFor"),
+            cwd: Some(live.cwd.clone()),
+            spend: detail.map(|home| spend(session.as_deref(), home, warned)),
+            place: detail.map(|_| place(&live.cwd)),
+            session,
+            note: None,
         });
-        if let Some(home) = detail {
-            spend(&mut row, home, warned);
-            place(&mut row, &live.cwd);
-        }
-        rows.push(row);
     }
     rows
 }
 
-fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64, home: &Path) -> Value {
-    let mut row = json!({
-        "harness": Harness::Codex.id(),
-        "pid": proc.proc.pid,
-        "name": null,
-        "kind": null,
-        "status": null,
-        "status_secs": null,
-        "waiting_for": null,
-        "cwd": proc.cwd,
-        "session": null,
-    });
-    let note = match &proc.cwd {
+fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64, home: &Path) -> Row {
+    let mut row = Row {
+        harness: Harness::Codex.id(),
+        pid: proc.proc.pid,
+        name: None,
+        kind: None,
+        status: None,
+        status_secs: None,
+        waiting_for: None,
+        cwd: proc.cwd.clone(),
+        session: None,
+        note: None,
+        spend: None,
+        place: None,
+    };
+    row.note = match &proc.cwd {
         None => Some("the process's working directory cannot be read on this platform".to_owned()),
         Some(_) if same_cwd.is_some_and(|count| *count > 1) => {
             Some("several codex processes share this directory".to_owned())
@@ -161,10 +198,10 @@ fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64, home: &Path) 
                 Some(session) => {
                     if let Some(file) = session_files(home, &session).first() {
                         let (status, since) = codex_status(&file.path);
-                        row["status"] = json!(status);
-                        row["status_secs"] = json!(since.map(|at| (now - at).max(0)));
+                        row.status = Some(status.to_owned());
+                        row.status_secs = since.map(|at| (now - at).max(0));
                     }
-                    row["session"] = json!(session);
+                    row.session = Some(session);
                     None
                 }
                 None => Some(
@@ -173,7 +210,6 @@ fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64, home: &Path) 
             }
         }
     };
-    row["note"] = json!(note);
     row
 }
 
@@ -214,31 +250,31 @@ fn codex_status(path: &Path) -> (&'static str, Option<i64>) {
 
 /// What `--watch` remembers of one Claude Code session between polls.
 struct Seen {
-    row: Value,
+    row: Row,
     blocked: bool,
     /// Unix seconds the current status began, when the record says.
     since: Option<i64>,
 }
 
 fn watch(cli: &Cli) -> Result<()> {
-    let mut seen: HashMap<i64, Seen> = HashMap::new();
+    let mut seen: HashMap<i32, Seen> = HashMap::new();
     let mut polls = 0;
     loop {
         let now = clock::now_secs()?;
         let mut rows = claude_rows(now, None, &mut false);
         let mut events = Vec::new();
         // A session missing from one poll while its process runs keeps its previous state.
-        let gone = |pid: &i64| !agents::exists(i32::try_from(*pid).unwrap_or_default());
+        let gone = |pid: &i32| !agents::exists(*pid);
         for (pid, old) in &seen {
-            if !rows.iter().any(|row| row["pid"] == *pid) && gone(pid) {
-                events.push(event("ended", &old.row, now));
+            if !rows.iter().any(|row| row.pid == *pid) && gone(pid) {
+                events.push(Event::of("ended", &old.row, now, None));
             }
         }
-        seen.retain(|pid, _| rows.iter().any(|row| row["pid"] == *pid) || !gone(pid));
+        seen.retain(|pid, _| rows.iter().any(|row| row.pid == *pid) || !gone(pid));
         for row in rows.drain(..) {
-            let pid = row["pid"].as_i64().unwrap_or_default();
-            let waiting = row["status"] == "waiting";
-            let since = row["status_secs"].as_i64().map(|secs| now - secs);
+            let pid = row.pid;
+            let waiting = row.status.as_deref() == Some("waiting");
+            let since = row.status_secs.map(|secs| now - secs);
             let mut blocked = seen.get(&pid).is_some_and(|old| old.blocked);
             // A new waiting stretch behind a blocked one ends the old stretch and starts afresh.
             if blocked
@@ -248,25 +284,21 @@ fn watch(cli: &Cli) -> Result<()> {
                 && since.is_some()
                 && old.since != since
             {
-                let mut cleared = event("cleared", &old.row, now);
-                cleared["reason"] = json!("new_prompt");
-                events.push(cleared);
+                events.push(Event::of("cleared", &old.row, now, Some("new_prompt")));
                 blocked = false;
             }
             let now_blocked = if waiting {
                 blocked
-                    || row["status_secs"]
-                        .as_i64()
+                    || row
+                        .status_secs
                         .is_some_and(|secs| secs >= cli.blocked_after)
             } else {
                 false
             };
             if now_blocked && !blocked {
-                events.push(event("blocked", &row, now));
+                events.push(Event::of("blocked", &row, now, None));
             } else if blocked && !waiting {
-                let mut cleared = event("cleared", &row, now);
-                cleared["reason"] = json!("answered");
-                events.push(cleared);
+                events.push(Event::of("cleared", &row, now, Some("answered")));
             }
             seen.insert(
                 pid,
@@ -288,22 +320,37 @@ fn watch(cli: &Cli) -> Result<()> {
     }
 }
 
-fn event(kind: &str, row: &Value, now: i64) -> Value {
-    let mut event = row.clone();
-    event["event"] = json!(kind);
-    event["at"] = json!(clock::format(now));
-    event
+/// A row and what happened to it, as a `--watch` line.
+#[derive(Serialize)]
+struct Event {
+    #[serde(flatten)]
+    row: Row,
+    event: &'static str,
+    at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
-fn emit(cli: &Cli, event: &Value) -> Result<()> {
-    let line = event.to_string();
+impl Event {
+    fn of(event: &'static str, row: &Row, now: i64, reason: Option<&'static str>) -> Self {
+        Self {
+            row: row.clone(),
+            event,
+            at: clock::format(now),
+            reason,
+        }
+    }
+}
+
+fn emit(cli: &Cli, event: &Event) -> Result<()> {
+    let line = serde_json::to_string(event).map_err(ctx("encode event"))?;
     let mut out = std::io::stdout().lock();
     writeln!(out, "{line}")
         .and_then(|()| out.flush())
         .map_err(ctx("write stdout"))?;
     drop(out);
-    if cli.notify && event["event"] == "blocked" {
-        notify(event);
+    if cli.notify && event.event == "blocked" {
+        notify(&event.row);
     }
     if let Some(program) = &cli.exec
         && let Err(error) = exec(program, &cli.exec_args, event, &line)
@@ -314,23 +361,30 @@ fn emit(cli: &Cli, event: &Value) -> Result<()> {
 }
 
 /// Runs `program` with the event on stdin and in `AGT_PS_*` variables, and waits for it.
-fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()> {
-    let text = |key: &str| match &event[key] {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
+fn exec(program: &str, args: &[String], event: &Event, line: &str) -> Result<()> {
+    let row = &event.row;
     let mut command = Command::new(program);
     command
         .args(args)
-        .env("AGT_PS_EVENT", text("event"))
-        .env("AGT_PS_PID", text("pid"))
-        .env("AGT_PS_SESSION", text("session"))
-        .env("AGT_PS_NAME", text("name"))
-        .env("AGT_PS_CWD", text("cwd"))
-        .env("AGT_PS_WAITING_FOR", text("waiting_for"))
-        .env("AGT_PS_STATUS_SECS", text("status_secs"))
-        .env("AGT_PS_REASON", text("reason"))
+        .env("AGT_PS_EVENT", event.event)
+        .env("AGT_PS_PID", row.pid.to_string())
+        .env("AGT_PS_SESSION", row.session.as_deref().unwrap_or_default())
+        .env("AGT_PS_NAME", row.name.as_deref().unwrap_or_default())
+        .env(
+            "AGT_PS_CWD",
+            row.cwd.as_deref().map(Path::as_os_str).unwrap_or_default(),
+        )
+        .env(
+            "AGT_PS_WAITING_FOR",
+            row.waiting_for.as_deref().unwrap_or_default(),
+        )
+        .env(
+            "AGT_PS_STATUS_SECS",
+            row.status_secs
+                .map(|secs| secs.to_string())
+                .unwrap_or_default(),
+        )
+        .env("AGT_PS_REASON", event.reason.unwrap_or_default())
         // The event stream on stdout stays one JSON line per event.
         .stdout(std::io::stderr());
     let status = process::status(&mut command, Some(format!("{line}\n").as_bytes()))
@@ -342,13 +396,14 @@ fn exec(program: &str, args: &[String], event: &Value, line: &str) -> Result<()>
     }
 }
 
-fn notify(event: &Value) {
-    let who = event["name"]
-        .as_str()
-        .or_else(|| event["cwd"].as_str())
+fn notify(row: &Row) {
+    let who = row
+        .name
+        .as_deref()
+        .or_else(|| row.cwd.as_deref().and_then(Path::to_str))
         .unwrap_or("a session");
     let title = format!("agt: {who} is blocked");
-    let body = event["waiting_for"].as_str().unwrap_or("waiting for input");
+    let body = row.waiting_for.as_deref().unwrap_or("waiting for input");
     #[cfg(target_os = "linux")]
     let result = notify_rust::Notification::new()
         .summary(&title)
@@ -367,47 +422,43 @@ fn notify(event: &Value) {
     }
 }
 
-/// Adds model, context tokens and cost from the session's transcripts. When they or the price
+/// The model, context tokens and cost from the session's transcripts. When they or the price
 /// file cannot be read the cost stays `null` and the first such failure is warned about.
-fn spend(row: &mut Value, home: &Path, warned: &mut bool) {
-    if let Err(error) = try_spend(row, home)
-        && !*warned
-    {
-        eprintln!("warning: cost left unpriced: {error}");
-        *warned = true;
-    }
+fn spend(session: Option<&str>, home: &Path, warned: &mut bool) -> Spend {
+    try_spend(session, home).unwrap_or_else(|error| {
+        if !*warned {
+            eprintln!("warning: cost left unpriced: {error}");
+            *warned = true;
+        }
+        Spend::default()
+    })
 }
 
-fn try_spend(row: &mut Value, home: &Path) -> Result<()> {
-    row["model"] = Value::Null;
-    row["context_tokens"] = Value::Null;
-    row["usd"] = Value::Null;
-    row["unpriced_calls"] = Value::Null;
-    let Some(session) = row["session"].as_str().map(str::to_owned) else {
-        return Ok(());
+fn try_spend(session: Option<&str>, home: &Path) -> Result<Spend> {
+    let mut spend = Spend::default();
+    let Some(session) = session else {
+        return Ok(spend);
     };
-    if session_files(home, &session).is_empty() {
-        return Ok(());
+    if session_files(home, session).is_empty() {
+        return Ok(spend);
     }
-    let cost = session_cost(&session)?;
+    let cost = session_cost(session)?;
     if let Some((model, context)) = cost.last {
-        row["model"] = json!(model);
-        row["context_tokens"] = json!(context);
+        spend.model = Some(model);
+        spend.context_tokens = Some(context);
     }
-    row["unpriced_calls"] = json!(cost.unpriced_calls);
+    spend.unpriced_calls = Some(cost.unpriced_calls);
     if cost.unpriced_calls < cost.calls {
-        row["usd"] = json!(round(cost.usd, 4));
+        spend.usd = Some(round(cost.usd, 4));
     }
-    Ok(())
+    Ok(spend)
 }
 
-/// Adds the repository's main checkout, the branch, and the linked worktree when `cwd` is in one.
-fn place(row: &mut Value, cwd: &Path) {
-    row["repository"] = Value::Null;
-    row["branch"] = Value::Null;
-    row["worktree"] = Value::Null;
+/// The repository's main checkout, the branch, and the linked worktree when `cwd` is in one.
+fn place(cwd: &Path) -> Place {
+    let mut place = Place::default();
     if !cwd.is_dir() {
-        return;
+        return place;
     }
     let repo = Repo::at(cwd);
     let Some(paths) = repo
@@ -420,22 +471,23 @@ fn place(row: &mut Value, cwd: &Path) {
         .ok()
         .flatten()
     else {
-        return;
+        return place;
     };
     let mut lines = paths.lines();
     let (Some(top), Some(common)) = (lines.next(), lines.next()) else {
-        return;
+        return place;
     };
     let common = Path::new(common);
     let main = match common.file_name() {
         Some(name) if name == ".git" => common.parent().unwrap_or(common),
         _ => Path::new(top),
     };
-    row["repository"] = json!(main);
+    place.repository = Some(main.to_owned());
     if main != Path::new(top) {
-        row["worktree"] = json!(top);
+        place.worktree = Some(PathBuf::from(top));
     }
-    row["branch"] = json!(repo.current_branch().ok().flatten());
+    place.branch = repo.current_branch().ok().flatten();
+    place
 }
 
 /// A duration as its largest whole unit: `45s`, `12m`, `3h`, `2d`.
@@ -458,38 +510,42 @@ fn tilde(place: &str, home: &Path) -> String {
     }
 }
 
-fn render(rows: &[Value], home: &Path) -> String {
+fn render(rows: &[Row], home: &Path) -> String {
     if rows.is_empty() {
         return "No agents are running.\n".into();
     }
-    let cell = |row: &Value, key: &str| row[key].as_str().unwrap_or("-").to_owned();
+    let cell = |value: Option<&str>| value.unwrap_or("-").to_owned();
     let table_rows: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
-            let place = row["worktree"]
-                .as_str()
-                .or_else(|| row["cwd"].as_str())
+            let spend = row.spend.clone().unwrap_or_default();
+            let place = row
+                .place
+                .as_ref()
+                .and_then(|place| place.worktree.as_deref())
+                .or(row.cwd.as_deref())
+                .and_then(Path::to_str)
                 .unwrap_or("-");
-            let usd = match (row["usd"].as_f64(), row["unpriced_calls"].as_i64()) {
+            let usd = match (spend.usd, spend.unpriced_calls) {
                 (Some(usd), Some(0)) => grouped(usd, 2),
                 (Some(usd), _) => format!("{}+", grouped(usd, 2)),
                 (None, Some(_)) => "unpriced".into(),
                 (None, None) => "-".into(),
             };
             vec![
-                cell(row, "harness"),
-                row["pid"].to_string(),
-                cell(row, "name"),
-                cell(row, "status"),
-                row["status_secs"].as_i64().map_or("-".into(), age),
-                cell(row, "branch"),
+                row.harness.to_owned(),
+                row.pid.to_string(),
+                cell(row.name.as_deref()),
+                cell(row.status.as_deref()),
+                row.status_secs.map_or("-".into(), age),
+                cell(row.place.as_ref().and_then(|place| place.branch.as_deref())),
                 tilde(place, home),
-                cell(row, "model"),
-                row["context_tokens"]
-                    .as_i64()
+                cell(spend.model.as_deref()),
+                spend
+                    .context_tokens
                     .map_or("-".into(), |tokens| tok(tokens as f64)),
                 usd,
-                head(&cell(row, "session"), SHORT_ID).to_owned(),
+                head(&cell(row.session.as_deref()), SHORT_ID).to_owned(),
             ]
         })
         .collect();
@@ -503,11 +559,11 @@ fn render(rows: &[Value], home: &Path) -> String {
         &table_rows,
     );
     for row in rows {
-        if let Some(note) = row["note"].as_str() {
-            out.push_str(&format!("pid {}: {note}\n", row["pid"]));
+        if let Some(note) = &row.note {
+            out.push_str(&format!("pid {}: {note}\n", row.pid));
         }
-        if let Some(waiting) = row["waiting_for"].as_str() {
-            out.push_str(&format!("pid {} waits for: {waiting}\n", row["pid"]));
+        if let Some(waiting) = &row.waiting_for {
+            out.push_str(&format!("pid {} waits for: {waiting}\n", row.pid));
         }
     }
     out
@@ -526,5 +582,43 @@ mod tests {
         assert_eq!(tilde("/srv/x", home), "/srv/x");
         assert_eq!(tilde("-", home), "-");
         assert_eq!(tilde("/x", Path::new("/")), "/x");
+    }
+
+    fn row() -> Row {
+        Row {
+            harness: Harness::Claude.id(),
+            pid: 7,
+            name: None,
+            kind: None,
+            status: Some("waiting".into()),
+            status_secs: Some(3),
+            waiting_for: None,
+            cwd: Some(PathBuf::from("/w")),
+            session: Some("abc".into()),
+            note: None,
+            spend: None,
+            place: None,
+        }
+    }
+
+    #[test]
+    fn rows_and_events_keep_their_json_field_order() {
+        let mut full = row();
+        full.spend = Some(Spend::default());
+        full.place = Some(Place::default());
+        let keys =
+            |value: &Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
+        assert_eq!(
+            keys(&json!(full)).join(","),
+            "harness,pid,name,kind,status,status_secs,waiting_for,cwd,session,note,\
+             model,context_tokens,usd,unpriced_calls,repository,branch,worktree"
+        );
+        let cleared = Event::of("cleared", &row(), 0, Some("answered"));
+        assert_eq!(
+            keys(&json!(cleared)).join(","),
+            "harness,pid,name,kind,status,status_secs,waiting_for,cwd,session,note,event,at,reason"
+        );
+        let blocked = Event::of("blocked", &row(), 0, None);
+        assert!(json!(blocked).get("reason").is_none());
     }
 }
