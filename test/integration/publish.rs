@@ -98,23 +98,13 @@ fn github_crash_after_write_does_not_duplicate() {
 fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
     // A run whose one pass finds nothing.
     let quiet_run = |env: &Env| {
-        let run = env.run(&["run", "start"])["run"]
+        let run = env.run_stdin(
+            &["pass", "start", "--kind", "full", "--reviewers", "-"],
+            PUBLISH.reviewers,
+        )["run"]
             .as_str()
             .unwrap()
             .to_owned();
-        env.run_stdin(
-            &[
-                "pass",
-                "start",
-                "--run",
-                &run,
-                "--kind",
-                "full",
-                "--reviewers",
-                "-",
-            ],
-            PUBLISH.reviewers,
-        );
         env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
         env.run(&["run", "end", "--run", &run]);
         run
@@ -123,7 +113,7 @@ fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     for finding in [setup.finding(1), setup.finding(2)] {
-        env.run(&["resolve", &finding, "--triage", "stale"]);
+        env.run(&["resolve", &finding, "--stale"]);
     }
     svc.link(&setup);
     svc.accept(env, Call::PostNote, 604);
@@ -209,7 +199,7 @@ fn a_failed_summary_edit_is_sent_again() {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     for finding in [setup.finding(1), setup.finding(2)] {
-        env.run(&["resolve", &finding, "--triage", "stale"]);
+        env.run(&["resolve", &finding, "--stale"]);
     }
     svc.link(&setup);
     svc.accept(env, Call::PostNote, 604);
@@ -410,7 +400,7 @@ fn closed_unrelated_pr_is_not_attached_or_pruned() {
     env.write("a.txt", &numbered(10, &[(3, "three")]));
     env.commit_all("change");
     let base = env.git(&["rev-parse", "main"]);
-    let branch_key = env.run(&["run", "start"])["target"]
+    let branch_key = env.run(&["pass", "start", "--kind", "full"])["target"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -472,15 +462,12 @@ fn github_approve_review_claimed_by_sync_is_not_sent_again() {
     let svc = Github::new();
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
     env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
-    let id = env.run(&["approve", "--formal"])["thread"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     let mut remote = Remote::by("alice");
     svc.sync(&setup, &remote);
     env.run(&["sync", "--pr", "42"]);
+    let id = env.approve("42", &["--formal", "--not-own"]);
     env.run(&["run", "end", "--run", &setup.run]);
     // The review lands on GitHub, but its response is lost.
     svc.lose(env, Call::Approve);
@@ -500,18 +487,15 @@ fn own_github_upgrade_to_formal_is_reported() {
     let svc = Github::new();
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
     env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
-    let id = env.run(&["approve"])["thread"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     svc.link(&setup);
+    let id = env.approve("42", &[]);
     let comments = svc.call(Call::PostNote);
     env.respond_nth(&strs(&comments), 1, r#"{"id":610,"html_url":"u"}"#);
     env.respond_nth(&strs(&comments), 2, r#"{"id":611,"html_url":"u"}"#);
     env.run(&["publish", "--pr", "42"]);
-    env.run(&["approve", "--formal"]);
+    env.approve("42", &["--formal"]);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert!(
         dry["skipped"].to_string().contains(&format!("{id}/formal")),
@@ -530,7 +514,7 @@ fn gitlab_a_failed_summary_edit_keeps_the_summary_trusted() {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     for finding in [setup.finding(1), setup.finding(2)] {
-        env.run(&["resolve", &finding, "--triage", "stale"]);
+        env.run(&["resolve", &finding, "--stale"]);
     }
     svc.link(&setup);
     svc.accept(env, Call::PostNote, 6002);
@@ -575,7 +559,7 @@ fn gitlab_a_record_from_before_the_summary_stays_trusted() {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     for finding in [setup.finding(1), setup.finding(2)] {
-        env.run(&["resolve", &finding, "--triage", "stale"]);
+        env.run(&["resolve", &finding, "--stale"]);
     }
     svc.link(&setup);
     // The record an earlier build posted as note 6001.
@@ -703,7 +687,7 @@ fn gitlab_ranges_post_with_line_codes() {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let started = env.run_stdin(
-        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
         crate::support::scenario::PUBLISH.reviewers,
     );
     let run = started["run"].as_str().unwrap();
@@ -740,19 +724,18 @@ fn gitlab_ranges_post_with_line_codes() {
 fn approved(svc: &Gitlab, kill_f2: bool, formal: bool) -> (Setup, String) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
     if kill_f2 {
         env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
     }
-    let approval = if formal {
-        env.run(&["approve", "--formal"])
-    } else {
-        env.run(&["approve"])
-    };
-    let id = approval["thread"]["id"].as_str().unwrap().to_owned();
     svc.sync(&setup, &Remote::new());
     env.run(&["sync", "--pr", "3"]);
     env.run(&["run", "end", "--run", &setup.run]);
+    let id = if formal {
+        env.approve("3", &["--formal"])
+    } else {
+        env.approve("3", &[])
+    };
     (setup, id)
 }
 
@@ -809,7 +792,7 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
         "a refusal is not retried by itself"
     );
     // `approve --formal` again retries the host's approval alone, without a second note.
-    env.run(&["approve", "--formal"]);
+    env.approve("3", &["--formal"]);
     env.run(&["publish", "--pr", "3"]);
     assert_eq!(svc.count(env, Call::Approve), 2);
     assert_eq!(svc.count(env, Call::PostNote), 2);
@@ -927,7 +910,7 @@ fn a_pending_formal_approval_waits_for_only_to_name_it() {
     svc.accept_nth(env, Call::PostNote, 1, 5030);
     svc.accept_nth(env, Call::PostNote, 2, 5031);
     env.run(&["publish", "--pr", "3"]);
-    env.run(&["approve", "--formal"]);
+    env.approve("3", &["--formal"]);
     let other = env.run(&["comment", "--body", "Unrelated note."])["thread"]["id"]
         .as_str()
         .unwrap()

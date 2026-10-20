@@ -69,6 +69,7 @@ matrix!(
     approving_twice_posts_once_and_reopened_findings_hold_it,
     rejected_findings_resolve_with_a_reason_and_count_in_the_record,
     a_remote_unresolve_clears_the_fixed_outcome,
+    status_and_list_can_sync_first,
 );
 
 /// The kinds of the writes of a publish that posts one in-diff comment, then `rest`.
@@ -147,6 +148,7 @@ fn publish_posts_every_payload_once(svc: Svc) {
             "thread",
             "reply",
             "reply",
+            "reply",
             "resolve",
             "unresolve",
             "summary",
@@ -195,7 +197,7 @@ fn not_own_publish_posts_only_replies_and_resolves_on_others_threads(svc: Svc) {
     env.run(&["comment", "--body", "My own note.", "--author", "me"]);
     let alice = svc.local_thread(301);
     env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
-    env.run(&["resolve", &alice, "--resolution", "answered"]);
+    env.run(&["resolve", &alice, "--answered"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let dry = dry_run(env, svc, &["--not-own"]);
     assert_eq!(kinds(&dry, "writes"), ["reply", "resolve"], "{dry}");
@@ -418,7 +420,7 @@ fn stale_unposted_findings_are_not_posted(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let f2 = setup.finding(2);
-    env.run(&["resolve", &f2, "--triage", "stale"]);
+    env.run(&["resolve", &f2, "--stale"]);
     svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
     assert_eq!(writes_for(&dry, &format!("{f2}/c1")), Vec::<String>::new());
@@ -508,12 +510,8 @@ fn record_counts_reviews_like_status(svc: Svc) {
     env.commit_all("C0");
     let base = env.git(&["rev-parse", "main"]);
     env.write("a.txt", &numbered(10, &[(3, "three"), (6, "six")]));
-    let run = env.run(&["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    crate::support::scenario::add_pass(&env, &run, &crate::support::scenario::PUBLISH);
-    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    let run =
+        crate::support::scenario::start_review(&env, &crate::support::scenario::PUBLISH, false);
     let head = env.commit_all("commit exactly the reviewed tree");
     let setup = Setup {
         env,
@@ -614,12 +612,7 @@ fn runs_ended_before_the_pr_are_never_published(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let (f1, f2) = (setup.finding(1), setup.finding(2));
-    env.run(&[
-        "resolve",
-        &f1,
-        "--resolution",
-        &format!("fixed {}", setup.head),
-    ]);
+    env.run(&["resolve", &f1, "--fixed", &setup.head]);
     env.run(&["run", "end", "--run", &setup.run]);
     let later = unix_now() + 3600;
     svc.sync(&setup, &Remote::new());
@@ -674,7 +667,7 @@ fn not_own_findings_posts_findings_and_my_threads_but_no_record(svc: Svc) {
     env.run(&["comment", "--body", "My own note.", "--author", "me"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let only = format!("{},h1", setup.finding(1));
-    let dry = dry_run(env, svc, &["--not-own", "--findings", "--only", &only]);
+    let dry = dry_run(env, svc, &["--not-own", "--only", &only]);
     assert_eq!(
         kinds(&dry, "writes"),
         inline_then(svc, &["thread"]),
@@ -695,27 +688,18 @@ fn only_limits_publish_to_named_threads(svc: Svc) {
     svc.sync(&setup, &Remote::by("alice"));
     sync(env, svc);
     env.run(&["run", "end", "--run", &setup.run]);
-    let second = env.run(&["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    crate::support::scenario::add_pass(env, &second, &crate::support::scenario::PUBLISH);
-    env.run(&["pass", "end", "--run", &second, "--pass", "c1p0"]);
+    let second =
+        crate::support::scenario::start_review(env, &crate::support::scenario::PUBLISH, false);
     let wanted = format!("{second}.c1p0.r1.f1");
 
-    let error = env.fail(
-        &[
-            "publish",
-            "--pr",
-            svc.number(),
-            "--not-own",
-            "--findings",
-            "--dry-run",
-        ],
-        None,
+    let held = dry_run(env, svc, &["--not-own"]);
+    assert!(
+        held["skipped"]
+            .to_string()
+            .contains("name ours with --only"),
+        "{held}"
     );
-    assert!(error.contains("--only"), "{error}");
-    let dry = dry_run(env, svc, &["--not-own", "--findings", "--only", &wanted]);
+    let dry = dry_run(env, svc, &["--not-own", "--only", &wanted]);
     let items: Vec<String> = dry["writes"]
         .as_array()
         .unwrap()
@@ -736,7 +720,7 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let started = env.run_stdin(
-        &["run", "start", "--kind", "full", "--reviewers", "-"],
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
         crate::support::scenario::PUBLISH.reviewers,
     );
     let run = started["run"].as_str().unwrap();
@@ -783,30 +767,53 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
     );
 }
 
+fn status_and_list_can_sync_first(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.sync(&setup, &Remote::by("alice"));
+    assert_eq!(env.run(&["status"])["review"], Value::Null);
+    let status = env.run(&["status", "--sync", "--pr", svc.number()]);
+    assert_eq!(status["review"]["author"], "alice", "{status}");
+    let state = snapshot(&env.state());
+    env.run(&["status"]);
+    assert_eq!(
+        snapshot(&env.state()),
+        state,
+        "a plain status writes nothing"
+    );
+
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.sync(&setup, &Remote::by("alice"));
+    env.run(&["list", "--sync", "--pr", svc.number()]);
+    assert_eq!(env.run(&["status"])["review"]["author"], "alice");
+    let offline = env.fail(&["--offline", "status", "--sync"], None);
+    assert!(offline.contains("offline"), "{offline}");
+}
+
 fn approvals_post_a_comment_unless_formal(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let f1 = setup.finding(1);
-    let error = env.fail(&["approve"], None);
+    svc.link(&setup);
+    let error = env.fail(
+        &["publish", "--pr", svc.number(), "--approve", "--dry-run"],
+        None,
+    );
     assert!(
         error.contains(&format!("open findings block approval: {f1}")),
         "{error}"
     );
-    env.run(&["resolve", &f1, "--triage", "stale"]);
-    let approved = env.run(&["approve"]);
-    let id = approved["thread"]["id"].as_str().unwrap().to_owned();
+    env.run(&["resolve", &f1, "--stale"]);
+    let id = env.approve(svc.number(), &[]);
     let open = env.run(&["status"])["open_threads"].to_string();
     assert!(
         !open.contains(&format!("\"{id}\"")),
         "an approval is never open: {open}"
     );
     // A formal approval of the same head upgrades the comment approval: one comment.
-    let formal = env.run(&["approve", "--formal"])["thread"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let formal = env.approve(svc.number(), &["--formal"]);
     assert_eq!(formal, id);
-    svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
     let comment = dry["writes"]
         .as_array()
@@ -857,13 +864,10 @@ fn approval_writes(dry: &Value) -> usize {
 fn formal_approval_on_someone_elses_pr(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
-    let id = env.run(&["approve", "--formal"])["thread"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
     svc.sync(&setup, &Remote::by("alice"));
     sync(env, svc);
+    let id = env.approve(svc.number(), &["--formal", "--not-own"]);
     let dry = dry_run(env, svc, &["--not-own", "--only", &id]);
     let writes = dry["writes"].as_array().unwrap();
     if svc.expect().approves_by_review() {
@@ -880,11 +884,9 @@ fn formal_approval_on_someone_elses_pr(svc: Svc) {
 fn approval_of_an_old_head_is_not_posted(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    env.run(&["resolve", &setup.finding(1), "--triage", "stale"]);
-    let id = env.run(&["approve"])["thread"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
+    svc.link(&setup);
+    let id = env.approve(svc.number(), &[]);
     svc.sync(&setup, &Remote::new().head(env.git(&["rev-parse", "main"])));
     sync(env, svc);
     let dry = dry_run(env, svc, &[]);
@@ -906,13 +908,13 @@ fn approving_twice_posts_once_and_reopened_findings_hold_it(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let f1 = setup.finding(1);
-    env.run(&["resolve", &f1, "--triage", "stale"]);
-    let first = env.run(&["approve"])["thread"]["id"].clone();
-    assert_eq!(env.run(&["approve"])["thread"]["id"], first);
+    env.run(&["resolve", &f1, "--stale"]);
     svc.link(&setup);
+    let first = env.approve(svc.number(), &[]);
+    assert_eq!(env.approve(svc.number(), &[]), first);
     let dry = dry_run(env, svc, &[]);
     assert_eq!(approval_writes(&dry), 1, "{dry}");
-    env.run(&["resolve", &f1, "--reopen"]);
+    env.run(&["resolve", &f1, "--not-fixed", "reopened"]);
     let dry = dry_run(env, svc, &[]);
     assert_eq!(approval_writes(&dry), 0, "{dry}");
     assert!(
@@ -928,7 +930,7 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record(svc: Svc) {
     let env = &setup.env;
     let f1 = setup.finding(1);
     assert!(
-        env.fail(&["resolve", &f1, "--resolution", "rejected:"], None)
+        env.fail(&["resolve", &f1, "--rejected", ""], None)
             .contains("rejected reason must not be empty")
     );
     let thread = &env.run(&["resolve", &f1, "--rejected", "Intended behavior."])["thread"];

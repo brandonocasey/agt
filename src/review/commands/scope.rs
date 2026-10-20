@@ -130,7 +130,13 @@ impl Ctx {
                     }
                 };
                 match found {
-                    Some(head) => (Some(self.branch_base(&branch, &head)?.0), head),
+                    Some(head) => (
+                        Some(
+                            self.branch_base(&branch, &head, target.default_branch.as_deref())?
+                                .0,
+                        ),
+                        head,
+                    ),
                     None => {
                         headless = true;
                         (target.base.clone(), String::new())
@@ -153,6 +159,11 @@ impl Ctx {
             base,
             head,
             head_known: !headless,
+            default_branch: self
+                .selection
+                .default_branch
+                .clone()
+                .or_else(|| target.default_branch.clone()),
             existing: Some(target),
         })
     }
@@ -192,6 +203,7 @@ impl Ctx {
             base,
             head,
             head_known: true,
+            default_branch: None,
             existing,
         })
     }
@@ -203,13 +215,7 @@ impl Ctx {
             Error("HEAD is detached; pass --range <rev> or --target <key>".into())
         })?;
         let head = self.repo.head()?;
-        let (base, key_base) = self.branch_base(&branch, &head)?;
         let birth = self.repo.branch_birth(&branch)?;
-        let mut key = format!("branch-{}-{key_base}", self.branch_key(&branch)?);
-        if let Some((time, sha)) = birth.as_ref().and_then(|birth| birth.split_once(' ')) {
-            let short = sha.get(..12).unwrap_or(sha);
-            let _ = write!(key, "-{time}-{short}");
-        }
         let mut candidates: Vec<Target> = self
             .store
             .targets(&self.dir)?
@@ -224,6 +230,18 @@ impl Ctx {
                 .iter()
                 .position(|target| target.branch_birth.as_ref() == Some(birth))
         });
+        // The default branch a target of this branch was started with applies to later commands.
+        let default_branch = self
+            .selection
+            .default_branch
+            .clone()
+            .or_else(|| same_birth.and_then(|index| candidates[index].default_branch.clone()));
+        let (base, key_base) = self.branch_base(&branch, &head, default_branch.as_deref())?;
+        let mut key = format!("branch-{}-{key_base}", self.branch_key(&branch)?);
+        if let Some((time, sha)) = birth.as_ref().and_then(|birth| birth.split_once(' ')) {
+            let short = sha.get(..12).unwrap_or(sha);
+            let _ = write!(key, "-{time}-{short}");
+        }
         let existing = match same_birth {
             Some(index) => Some(candidates.swap_remove(index)),
             None => match candidates.iter().position(|target| target.key == key) {
@@ -239,6 +257,7 @@ impl Ctx {
             base: Some(base),
             head,
             head_known: true,
+            default_branch,
             existing,
         })
     }
@@ -330,18 +349,21 @@ impl Ctx {
         else {
             return Ok(false);
         };
-        let default = self
-            .repo
-            .default_branch(self.selection.default_branch.as_deref())?;
+        let default = self.repo.default_branch(scope.default_branch.as_deref())?;
         Ok(default == format!("refs/heads/{branch}"))
     }
 
     /// Returns the review base and the commit that names the target. On the default branch
     /// itself the merge-base is the head, so the root commit names the target instead.
-    pub(super) fn branch_base(&self, branch: &str, head: &str) -> Result<(String, String)> {
+    pub(super) fn branch_base(
+        &self,
+        branch: &str,
+        head: &str,
+        stored: Option<&str>,
+    ) -> Result<(String, String)> {
         let default = self
             .repo
-            .default_branch(self.selection.default_branch.as_deref())?;
+            .default_branch(self.selection.default_branch.as_deref().or(stored))?;
         if default == format!("refs/heads/{branch}") {
             return Ok((head.to_owned(), self.repo.root_commit(head)?));
         }
@@ -406,6 +428,7 @@ impl Ctx {
             branch_birth: scope.birth.clone(),
             base: scope.base.clone(),
             head: (scope.kind != TargetKind::Branch).then(|| scope.head.clone()),
+            default_branch: scope.default_branch.clone(),
             created_at: now.to_owned(),
             updated_at: now.to_owned(),
             review: None,
@@ -426,7 +449,12 @@ impl Ctx {
             &scope.key,
             &now,
             || self.new_target(scope, &now),
-            |target| change(target, &now),
+            |target| {
+                if target.default_branch.is_none() {
+                    target.default_branch.clone_from(&scope.default_branch);
+                }
+                change(target, &now)
+            },
         )
     }
 

@@ -14,6 +14,9 @@ pub struct Target {
     pub branch_birth: Option<String>,
     pub base: Option<String>,
     pub head: Option<String>,
+    /// The `--default-branch` the target was started with, so later commands need not repeat it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub review: Option<Review>,

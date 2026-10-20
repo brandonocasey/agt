@@ -145,8 +145,6 @@ pub(super) struct Batch {
 pub(super) struct Planner<'a> {
     ctx: &'a Ctx,
     attempt: &'a str,
-    /// `--findings`: on someone else's PR/MR, also post our findings and local threads.
-    findings: bool,
     /// `--only`: the thread ids to post; empty means all.
     only: &'a [String],
     run: Option<&'a str>,
@@ -180,7 +178,6 @@ impl<'a> Planner<'a> {
         Ok(Self {
             ctx,
             attempt,
-            findings: options.findings,
             only: &options.only,
             run: options.run.as_deref(),
             repo: &ctx.repo,

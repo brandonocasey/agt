@@ -250,7 +250,12 @@ fn review_writes_do_not_sync() {
     let setup = unsynced_pr();
     let env = &setup.env;
     let at = NOW;
-    review_json(&review_now(env, at, &["run", "start"], &[]));
+    review_json(&review_now(
+        env,
+        at,
+        &["pass", "start", "--kind", "full"],
+        &[],
+    ));
     assert!(env.forge_calls().is_empty());
 }
 
@@ -511,8 +516,8 @@ fn automatic_publish_attaches_and_sends_only_the_completed_run() {
         "comment",
         "--body",
         "CURRENT COMMENT",
-        "--run",
-        &run,
+        "--reviewer",
+        &format!("{run}.c1p0.fix"),
         "--model",
         "m1",
         "--effort",
@@ -609,7 +614,7 @@ fn auto_publish_remote_reply(published_finding: bool) {
         env.run(&["sync"]);
         ("gh-t301".to_owned(), "PRRT_old")
     };
-    let current = env.run(&["run", "start"])["run"]
+    let current = env.run(&["pass", "start", "--kind", "full"])["run"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -620,10 +625,12 @@ fn auto_publish_remote_reply(published_finding: bool) {
         ("CURRENT REMOTE REPLY", Some(current.as_str()), false),
     ] {
         let mut args = vec!["reply", &thread, "--body", body];
+        let who;
         if let Some(run) = run {
+            who = format!("{run}.c1p0.fix");
             args.extend([
-                "--run",
-                run,
+                "--reviewer",
+                &who,
                 "--model",
                 "m1",
                 "--effort",
@@ -640,6 +647,7 @@ fn auto_publish_remote_reply(published_finding: bool) {
     service.accept(env, Call::Reply(remote_thread), 801);
     service.accept(env, Call::PostNote, 601);
     auto_push(env);
+    env.run(&["pass", "end", "--run", &current, "--pass", "c1p0"]);
     let output = env.exec(&["run", "end", "--run", &current], None, &[]);
     review_json(&output);
     assert!(

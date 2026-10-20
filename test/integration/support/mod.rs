@@ -427,17 +427,42 @@ impl Env {
 
     /// Starts a run with one reviewer, runs one full pass and returns the run id.
     pub fn review(&self, kind: &str) -> String {
-        let run = self.run(&["run", "start"])["run"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        self.reviewed_pass(&run, kind);
+        let started = self.run_stdin(
+            &["pass", "start", "--kind", kind, "--reviewers", "-"],
+            REVIEWERS,
+        );
+        let run = started["run"].as_str().unwrap().to_owned();
+        let id = started["pass"]["id"].as_str().unwrap().to_owned();
+        self.run(&["pass", "end", "--run", &run, "--pass", &id]);
         self.run(&["run", "end", "--run", &run]);
         run
     }
 
+    /// Records the approval of the head through a dry-run `publish --approve` on PR `pr` (the
+    /// fake forge already knows it) and returns its thread id.
+    pub fn approve(&self, pr: &str, extra: &[&str]) -> String {
+        let mut args = vec!["publish", "--pr", pr, "--approve", "--dry-run"];
+        args.extend(extra);
+        self.run(&args);
+        self.approval()
+    }
+
+    /// The id of the approval thread `publish --approve` recorded last.
+    pub fn approval(&self) -> String {
+        let list = self.run(&["list"]);
+        list["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|thread| thread["approval"].is_object())
+            .unwrap_or_else(|| panic!("no approval thread: {list}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     pub fn reviewed_pass(&self, run: &str, kind: &str) -> String {
-        let reviewers = r#"[{"model":"claude-opus-5-5","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296"}]"#;
         let pass = self.run_stdin(
             &[
                 "pass",
@@ -449,7 +474,7 @@ impl Env {
                 "--reviewers",
                 "-",
             ],
-            reviewers,
+            REVIEWERS,
         );
         let id = pass["pass"]["id"].as_str().unwrap().to_owned();
         self.run(&["pass", "end", "--run", run, "--pass", &id]);
@@ -465,6 +490,8 @@ impl Env {
         env
     }
 }
+
+const REVIEWERS: &str = r#"[{"model":"claude-opus-5-5","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296"}]"#;
 
 pub fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|arg| (*arg).to_owned()).collect()

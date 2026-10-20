@@ -21,7 +21,6 @@ use plan::skips::Skipped;
 pub(super) struct Options {
     pub dry_run: bool,
     pub not_own: bool,
-    pub findings: bool,
     pub only: Vec<String>,
     pub run: Option<String>,
 }
@@ -30,9 +29,6 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
     let Options {
         dry_run, not_own, ..
     } = *options;
-    if options.findings && options.only.is_empty() {
-        return fail("--findings posts on someone else's PR/MR only what --only <id,...> names");
-    }
     let connection = sync::connect(ctx, pr)?;
     let _publish_lock = if dry_run {
         None

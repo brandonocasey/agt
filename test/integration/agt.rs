@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::support::Env;
 
-const COMMANDS: [&str; 12] = [
-    "run", "pass", "finding", "comment", "reply", "resolve", "approve", "list", "show", "status",
-    "sync", "publish",
+const COMMANDS: [&str; 11] = [
+    "run", "pass", "finding", "comment", "reply", "resolve", "list", "show", "status", "sync",
+    "publish",
 ];
 
 fn agt(args: &[&str]) -> std::process::Output {

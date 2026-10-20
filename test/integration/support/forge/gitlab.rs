@@ -347,7 +347,7 @@ impl FakeService for Gitlab {
         let threads = self.call(Call::PostThread);
         env.respond_nth(&strs(&threads), 1, r#"{"id":"d-f2","notes":[{"id":5002}]}"#);
         env.respond_nth(&strs(&threads), 2, r#"{"id":"d-h1","notes":[{"id":5003}]}"#);
-        for (discussion, id) in [("d-f1", 5011), ("d-g", 5012)] {
+        for (discussion, id) in [("d-f1", 5011), ("d-g", 5012), ("d-o", 5013)] {
             self.accept(env, Call::Reply(discussion), id);
         }
         for (discussion, resolved) in [("d-f1", true), ("d-o", false)] {

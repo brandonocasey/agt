@@ -42,6 +42,29 @@ pub(super) struct Connection {
 }
 
 impl Connection {
+    /// Authenticates against `host` and names the PR/MR `number` of `repo`.
+    fn open(forge: Forge, host: &str, repo: &str, number: u64) -> Result<Self> {
+        let (service, login) = authenticate(forge, host)?;
+        Ok(Self::with(service, login, host, repo, number))
+    }
+
+    fn with(
+        service: Box<dyn ReviewService>,
+        login: String,
+        host: &str,
+        repo: &str,
+        number: u64,
+    ) -> Self {
+        Self {
+            key: pr_key(service.forge(), number),
+            service,
+            host: host.to_owned(),
+            login,
+            repo: repo.to_owned(),
+            number,
+        }
+    }
+
     pub fn forge(&self) -> Forge {
         self.service.forge()
     }
@@ -63,15 +86,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
             .and_then(|target| target.review)
     {
         // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`.
-        let (service, login) = authenticate(review.forge, &review.host)?;
-        return Ok(Connection {
-            key: pr_key(review.forge, review.number),
-            service,
-            host: review.host,
-            login,
-            repo: review.repo,
-            number: review.number,
-        });
+        return connection_of(&review);
     }
     let pr_ref = pr.map(forge::parse_pr).transpose()?;
     let origin = ctx.repo.origin_location()?;
@@ -98,14 +113,7 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
             })?
         }
     };
-    Ok(Connection {
-        key: pr_key(forge, number),
-        service,
-        host,
-        login,
-        repo,
-        number,
-    })
+    Ok(Connection::with(service, login, &host, &repo, number))
 }
 
 /// The store key of the PR/MR `review` is.
@@ -115,15 +123,7 @@ pub(super) fn key_of(review: &Review) -> String {
 
 /// The connection to the PR/MR a target was synced with.
 pub(super) fn connection_of(review: &Review) -> Result<Connection> {
-    let (service, login) = authenticate(review.forge, &review.host)?;
-    Ok(Connection {
-        key: pr_key(review.forge, review.number),
-        service,
-        host: review.host.clone(),
-        login,
-        repo: review.repo.clone(),
-        number: review.number,
-    })
+    Connection::open(review.forge, &review.host, &review.repo, review.number)
 }
 
 /// The forge and repository of `origin`, or `None` when there is no origin or its host is not a
@@ -146,14 +146,7 @@ pub(super) fn find_for_branch(
     let Some((repo, number)) = service.find_review(repo, branch)? else {
         return Ok(None);
     };
-    Ok(Some(Connection {
-        key: pr_key(forge, number),
-        service,
-        host: host.to_owned(),
-        login,
-        repo,
-        number,
-    }))
+    Ok(Some(Connection::with(service, login, host, &repo, number)))
 }
 
 /// The forge of `host` by [`service::detect`], with the hosts file and the forge this repository
@@ -336,6 +329,7 @@ pub(super) fn sync_planned(ctx: &Ctx, connection: &Connection, plan: Plan) -> Re
         base: plan.scope.base.clone(),
         head: plan.scope.head.clone(),
         head_known: true,
+        default_branch: plan.scope.default_branch.clone(),
         existing: None,
     };
     let (summary, recorded, total, review) = ctx.store.update_renamed(
@@ -429,6 +423,9 @@ fn sync_scope(
             base: fetched.pr.base_sha.clone(),
             head: fetched.pr.head_sha.clone(),
             head_known: true,
+            default_branch: existing
+                .as_ref()
+                .and_then(|target| target.default_branch.clone()),
             existing,
         },
         false,

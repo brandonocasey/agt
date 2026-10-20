@@ -399,7 +399,7 @@ fn gitlab_self_hosted_sync() {
     let env = &setup.env;
     let old = env.git(&["rev-parse", "HEAD~1"]);
     let f1 = format!("{}.c1p0.r1.f1", setup.run);
-    env.run(&["resolve", &f1, "--resolution", "answered"]);
+    env.run(&["resolve", &f1, "--answered"]);
     gitlab::sync_fixtures(&setup, &old);
 
     let synced = env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);

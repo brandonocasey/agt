@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::core::error::{Result, fail};
-use crate::review::cli::ApproveArgs;
+use crate::review::cli::ApprovalArgs;
 use crate::store::model::{Approval, Target, Thread, ThreadType};
 
 use super::Ctx;
@@ -9,10 +9,10 @@ use super::findings::{NewThread, author, local_thread};
 use super::input::read_body;
 
 /// Records an approval of the head as a general thread for `publish`.
-pub(super) fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
+pub(super) fn approve(ctx: &Ctx, args: &ApprovalArgs) -> Result<Value> {
     let scope = ctx.scope()?;
     if !scope.head_known {
-        return fail("approve needs a head: check out the branch or pass --target");
+        return fail("--approve needs a head: check out the branch or pass --target");
     }
     let head = scope.head.clone();
     let blocking: Vec<&str> = scope.existing.iter().flat_map(blocking_threads).collect();

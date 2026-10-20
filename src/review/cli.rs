@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 
 use crate::store::model::{PassKind, Severity, Side, ThreadType, Triage};
 
@@ -23,7 +23,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Start or end a review run.
+    /// End a review run (a run starts with `pass start --kind full`).
     Run {
         #[command(subcommand)]
         action: RunAction,
@@ -33,7 +33,7 @@ pub enum Command {
         #[command(subcommand)]
         action: PassAction,
     },
-    /// Record reviewer findings.
+    /// Move a reviewer finding to the killed list.
     Finding {
         #[command(subcommand)]
         action: FindingAction,
@@ -44,14 +44,11 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Resolve, triage or reopen a thread.
     Resolve(ResolveArgs),
-    /// Approve the head: `publish` posts an approval comment, or with `--formal` the host's
-    /// approval. Refused while a bug, requirement or question is open.
-    Approve(ApproveArgs),
     /// List threads and killed findings.
     List(ListArgs),
     /// Show a thread, killed finding, run (`rv-xxxx`) or pass (`rv-xxxx.c1p0`).
     Show { id: String },
-    /// Report what is reviewed at a head. Never writes.
+    /// Report what is reviewed at a head. Never writes, unless `--sync` imports the PR/MR first.
     Status {
         /// Commit to evaluate instead of the current head and work tree.
         #[arg(long)]
@@ -59,6 +56,8 @@ pub enum Command {
         /// Also print every commit, run and imported record.
         #[arg(long)]
         full: bool,
+        #[command(flatten)]
+        sync: SyncFirst,
     },
     /// Import the PR/MR of this branch (or `--pr`) from GitHub or GitLab. Read-only on the forge.
     Sync {
@@ -68,41 +67,37 @@ pub enum Command {
     },
     /// Post local findings, replies, resolves and final records to an own PR/MR.
     Publish {
-        /// Print every payload without posting or writing anything.
+        /// Print every payload without posting anything. With `--approve` the approval is still
+        /// recorded locally.
         #[arg(long)]
         dry_run: bool,
-        /// Allow a PR/MR authored by someone else.
+        /// Allow a PR/MR authored by someone else; `--only` then names the threads to post.
         #[arg(long)]
         not_own: bool,
-        /// With `--not-own`, also post our findings and local threads (never final records).
-        #[arg(long, requires = "not_own")]
-        findings: bool,
         /// Post only these thread ids (comma-separated) and their replies and resolves.
         #[arg(long, value_delimiter = ',')]
         only: Vec<String>,
         /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
         #[arg(long)]
         pr: Option<String>,
+        #[command(flatten)]
+        approval: ApprovalArgs,
     },
+}
+
+/// Import the PR/MR before a read, so the report is not stale.
+#[derive(Args)]
+pub struct SyncFirst {
+    /// Import the PR/MR of this branch (or `--pr`) first, as `sync` does.
+    #[arg(long)]
+    pub sync: bool,
+    /// With `--sync`, the PR/MR number or URL [default: the PR/MR whose head is the branch].
+    #[arg(long, requires = "sync", value_name = "PR")]
+    pub pr: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum RunAction {
-    /// Start a run and print its id; with `--kind`, also start its first pass.
-    Start {
-        /// Kind of the first pass to start with the run.
-        #[arg(long, value_enum)]
-        kind: Option<PassKind>,
-        /// Start of the first pass's reviewed delta (see `pass start --base`).
-        #[arg(long, requires = "kind")]
-        base: Option<String>,
-        /// JSON array of the first pass's reviewers, from a file or `-` for stdin.
-        #[arg(long, value_name = "FILE", requires = "kind")]
-        reviewers: Option<PathBuf>,
-        /// Reviewed head of a range or commit target (see `pass start --head`).
-        #[arg(long, requires = "kind")]
-        head: Option<String>,
-    },
     /// End a run, record patch-ids for committed work and prune old targets.
     End {
         #[arg(long)]
@@ -126,10 +121,11 @@ pub enum RunAction {
 
 #[derive(Subcommand)]
 pub enum PassAction {
-    /// Start a pass and record what it reviews.
+    /// Start a pass and record what it reviews. A full pass without `--run` starts the run too.
     Start {
+        /// Run to add the pass to [default for `--kind full`: a new run].
         #[arg(long)]
-        run: String,
+        run: Option<String>,
         #[arg(long, value_enum)]
         kind: PassKind,
         /// Start of the reviewed delta [default: merge-base for full, previous pass head otherwise].
@@ -152,8 +148,9 @@ pub enum PassAction {
         /// Freeze the pass's findings (blind review lock).
         #[arg(long)]
         lock: bool,
-        /// Add these findings first: JSON from a file or `-` for stdin, as `finding add`
-        /// reads it; each finding names its `reviewer` or takes `--reviewer`.
+        /// Add these findings first: JSON from a file or `-` for stdin, an array or
+        /// `{"findings": [...], "usage": [...]}`; each finding names its `reviewer` or takes
+        /// `--reviewer`.
         #[arg(long, value_name = "FILE")]
         findings: Option<PathBuf>,
         /// Reviewer of findings that name none.
@@ -164,15 +161,6 @@ pub enum PassAction {
 
 #[derive(Subcommand)]
 pub enum FindingAction {
-    /// Add verified and killed findings from JSON on stdin.
-    Add {
-        #[arg(long)]
-        run: String,
-        #[arg(long)]
-        pass: String,
-        #[arg(long)]
-        reviewer: String,
-    },
     /// Move a surviving finding to its pass's killed list (allowed on a locked pass).
     Kill {
         id: String,
@@ -196,19 +184,27 @@ pub struct AuthorArgs {
     pub harness: Option<String>,
     #[arg(long)]
     pub harness_version: Option<String>,
-    /// Run the agent author belongs to.
-    #[arg(long)]
-    pub run: Option<String>,
-    /// Pass the agent author belongs to.
-    #[arg(long)]
-    pub pass: Option<String>,
-    /// Reviewer id; fills model, effort, harness and session from the stored pass.
-    #[arg(long)]
+    /// Stored reviewer as `<run>.<pass>.<reviewer>`, such as `rv-7k2m.c1p0.r1`; fills model,
+    /// effort, harness and session from the stored pass.
+    #[arg(long, value_name = "ID")]
     pub reviewer: Option<String>,
     /// The harness's id for the agent author, such as the main session's id; posted comments
     /// name its first 8 characters.
     #[arg(long)]
     pub session: Option<String>,
+}
+
+impl AuthorArgs {
+    /// Whether any author flag is given.
+    pub fn is_set(&self) -> bool {
+        self.author.is_some()
+            || self.model.is_some()
+            || self.effort.is_some()
+            || self.harness.is_some()
+            || self.harness_version.is_some()
+            || self.reviewer.is_some()
+            || self.session.is_some()
+    }
 }
 
 #[derive(Args)]
@@ -252,31 +248,33 @@ pub struct ReplyArgs {
 }
 
 #[derive(Args)]
+#[command(group = ArgGroup::new("outcome")
+    .args(["fixed", "not_fixed", "rejected", "stale", "answered", "triage"]))]
 pub struct ResolveArgs {
     /// Threads to change, all in one write.
     #[arg(required = true)]
     pub ids: Vec<String>,
-    /// `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, `stale` or `answered`.
-    #[arg(long, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
-    pub resolution: Option<String>,
-    /// `fixed` and `stale` resolve; `valid` and `question` only record the triage.
-    #[arg(long, value_enum, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
-    pub triage: Option<Triage>,
-    /// Mark the thread unresolved again.
-    #[arg(long, conflicts_with_all = ["fixed", "not_fixed", "rejected"])]
-    pub reopen: bool,
     /// Fixed in this commit: triage `fixed`, resolution `fixed <sha>`, and a reply
     /// "✅ Fixed in <sha> <subject>." linking the commit unless `--reply` gives other text.
-    #[arg(long, value_name = "SHA", conflicts_with = "not_fixed")]
+    #[arg(long, value_name = "SHA")]
     pub fixed: Option<String>,
     /// A fix check found it not fixed: reopen with `not fixed: <reason>` and a reply
     /// "❌ Not fixed: <reason>." unless `--reply` gives other text.
-    #[arg(long, value_name = "REASON", conflicts_with = "rejected")]
+    #[arg(long, value_name = "REASON")]
     pub not_fixed: Option<String>,
     /// Not to be fixed (wrong, or not worth it): resolve with `rejected: <reason>` and a
     /// reply "🚫 Rejected: <reason>." unless `--reply` gives other text.
-    #[arg(long, value_name = "REASON", conflicts_with = "fixed")]
+    #[arg(long, value_name = "REASON")]
     pub rejected: Option<String>,
+    /// The code the thread names is gone: triage `stale` and resolve.
+    #[arg(long)]
+    pub stale: bool,
+    /// Resolve as answered.
+    #[arg(long)]
+    pub answered: bool,
+    /// Only record the triage: `valid` or `question` (a question holds the thread).
+    #[arg(long, value_enum)]
+    pub triage: Option<Verdict>,
     /// Also add this reply to each thread, or `-` for stdin.
     #[arg(long)]
     pub reply: Option<String>,
@@ -284,15 +282,35 @@ pub struct ResolveArgs {
     pub author: AuthorArgs,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Verdict {
+    Valid,
+    Question,
+}
+
+impl From<Verdict> for Triage {
+    fn from(verdict: Verdict) -> Self {
+        match verdict {
+            Verdict::Valid => Self::Valid,
+            Verdict::Question => Self::Question,
+        }
+    }
+}
+
+/// `publish --approve`: record an approval of the head, then publish it with the rest.
 #[derive(Args)]
-pub struct ApproveArgs {
-    /// Also submit the host's approval (GitHub APPROVE review, GitLab approve), not only a
-    /// comment.
+pub struct ApprovalArgs {
+    /// Approve the head first: record a general approval comment (reused for the same head),
+    /// then publish. Refused while a bug, requirement or question is open.
     #[arg(long)]
+    pub approve: bool,
+    /// With `--approve`, also submit the host's approval (GitHub APPROVE review, GitLab approve).
+    #[arg(long, requires = "approve")]
     pub formal: bool,
-    /// Comment text, or `-` for stdin [default: "Approved at <sha>."].
-    #[arg(long)]
+    /// With `--approve`, the comment text or `-` for stdin [default: "Approved at <sha>."].
+    #[arg(long, requires = "approve")]
     pub body: Option<String>,
+    /// With `--approve`: who approves.
     #[command(flatten)]
     pub author: AuthorArgs,
 }
@@ -315,6 +333,8 @@ pub struct ListArgs {
     pub head: Option<String>,
     #[arg(long, value_enum, default_value = "json")]
     pub format: Format,
+    #[command(flatten)]
+    pub sync: SyncFirst,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
