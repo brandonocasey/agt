@@ -279,7 +279,7 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<Vec<Vec<u8>>> {
             continue;
         }
         if parts.get(4).is_some_and(|status| *status == "D") {
-            let file = worktree.join(String::from_utf8_lossy(path).as_ref());
+            let file = worktree.join(std::ffi::OsStr::from_bytes(path));
             fs::remove_file(&file).map_err(ctx(format!("remove {}", file.display())))?;
             deleted.push(path.to_vec());
             continue;

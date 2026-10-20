@@ -2283,3 +2283,42 @@ fn a_build_directory_in_an_uninitialized_submodule_directory_blocks_removal() {
     }
     assert!(second.join("mod/build/notes.md").exists());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_hidden_edits_survive_backup_and_restore() {
+    use std::os::unix::ffi::OsStrExt;
+    for flag in ["--skip-worktree", "--assume-unchanged"] {
+        let f = Fixture::new();
+        let name = std::ffi::OsStr::from_bytes(b"hidden-\xff.txt");
+        fs::write(f.wt.join(name), "original").unwrap();
+        wgit(&f.env, &f.wt, &["add", "-A"]);
+        wgit(&f.env, &f.wt, &["commit", "-qm", "raw filename"]);
+        assert!(
+            f.env
+                .command("git", &f.wt)
+                .args(["update-index", flag])
+                .arg(name)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(f.wt.join(name), "hidden edit").unwrap();
+        remove_and_restore(&f);
+        assert_eq!(fs::read(f.wt.join(name)).unwrap(), b"hidden edit");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_deletions_survive_backup_and_restore() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = Fixture::new();
+    let name = std::ffi::OsStr::from_bytes(b"deleted-\xff.txt");
+    fs::write(f.wt.join(name), "original").unwrap();
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-qm", "raw filename"]);
+    fs::remove_file(f.wt.join(name)).unwrap();
+    remove_and_restore(&f);
+    assert!(!f.wt.join(name).exists());
+}

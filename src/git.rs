@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
@@ -215,8 +216,18 @@ impl Repo {
     }
 
     fn exec(&self, args: &[&str], input: Option<Vec<u8>>, env: &[(&str, &Path)]) -> Result<Output> {
+        self.exec_paths(args, &[], input, env)
+    }
+
+    fn exec_paths(
+        &self,
+        args: &[&str],
+        paths: &[PathBuf],
+        input: Option<Vec<u8>>,
+        env: &[(&str, &Path)],
+    ) -> Result<Output> {
         let mut command = self.command(args);
-        command.envs(env.iter().copied());
+        command.args(paths).envs(env.iter().copied());
         let captured = process::output(&mut command, input.as_deref(), None)
             .map_err(ctx(format!("run git {}", args.join(" "))))?;
         captured
@@ -231,7 +242,17 @@ impl Repo {
         input: Option<Vec<u8>>,
         env: &[(&str, &Path)],
     ) -> Result<Vec<u8>> {
-        let output = self.exec(args, input, env)?;
+        self.checked_paths(args, &[], input, env)
+    }
+
+    pub fn checked_paths(
+        &self,
+        args: &[&str],
+        paths: &[PathBuf],
+        input: Option<Vec<u8>>,
+        env: &[(&str, &Path)],
+    ) -> Result<Vec<u8>> {
+        let output = self.exec_paths(args, paths, input, env)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return fail(format!("git {} failed: {}", args.join(" "), stderr.trim()));
@@ -606,7 +627,7 @@ impl Repo {
                 continue;
             }
             let name = String::from_utf8_lossy(path).into_owned();
-            if fs::symlink_metadata(self.root.join(&name)).is_ok() {
+            if fs::symlink_metadata(self.root.join(OsStr::from_bytes(path))).is_ok() {
                 input.extend_from_slice(path);
                 input.push(0);
                 flagged.push(name);

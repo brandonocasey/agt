@@ -1247,6 +1247,8 @@ may be a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
 containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error (reported as `agt: error: <message>`), including a `PATH` that does not exist (with `--staged`, one that is not on disk, in the index or in the staged diff).
 
 ## Wait
+Files that disappear after listing are skipped. Other filesystem inspection or read errors
+fail the scan with exit status 2 and identify the path.
 
 `agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every
 `--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. Agents run it in the background so they wake within the prompt cache's five

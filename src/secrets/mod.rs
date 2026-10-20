@@ -4,7 +4,10 @@
 mod rules;
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 
 use clap::Args;
 use serde_json::json;
@@ -61,19 +64,29 @@ fn report(args: &Cli, rows: &Findings) -> Result<Output> {
 fn scan(args: &Cli) -> Result<Findings> {
     let repo = Repo::discover()?;
     let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
-    let paths: Vec<String> = args
-        .paths
-        .iter()
-        .map(|path| cwd.join(path).to_string_lossy().into_owned())
-        .collect();
+    let paths: Vec<PathBuf> = args.paths.iter().map(|path| cwd.join(path)).collect();
     // A missing path would match nothing and report clean, which a scanner MUST NOT do. A
     // staged scan also accepts a path in the index or in the staged diff, such as a staged
     // file since deleted from disk or a staged deletion that hooks pass along.
     for (path, full) in args.paths.iter().zip(&paths) {
-        let found = Path::new(full).symlink_metadata().is_ok()
+        let found = full.symlink_metadata().is_ok()
             || (args.staged
-                && (repo.succeeds(&["ls-files", "--error-unmatch", "--", full])?
-                    || !repo.succeeds(&["diff", "--cached", "--quiet", "--", full])?));
+                && (!repo
+                    .checked_paths(
+                        &["ls-files", "-z", "--"],
+                        std::slice::from_ref(full),
+                        None,
+                        &[],
+                    )?
+                    .is_empty()
+                    || !repo
+                        .checked_paths(
+                            &["diff", "--cached", "--name-only", "-z", "--"],
+                            std::slice::from_ref(full),
+                            None,
+                            &[],
+                        )?
+                        .is_empty()));
         if !found {
             return fail(format!("no such path: {}", path.display()));
         }
@@ -93,8 +106,7 @@ fn scan(args: &Cli) -> Result<Findings> {
         vec!["ls-files", "-co", "--exclude-standard", "-z"]
     };
     git.push("--");
-    git.extend(paths.iter().map(String::as_str));
-    let listing = repo.checked(&git, None, &[])?;
+    let listing = repo.checked_paths(&git, &paths, None, &[])?;
     let mut fields = listing
         .split(|&byte| byte == 0)
         .filter(|field| !field.is_empty());
@@ -112,35 +124,35 @@ fn scan(args: &Cli) -> Result<Findings> {
             if mode == "160000" || mode == "120000" {
                 continue;
             }
-            (
-                String::from_utf8_lossy(name).into_owned(),
-                Some(id.to_owned()),
-            )
+            (name, Some(id.to_owned()))
         } else {
-            (String::from_utf8_lossy(field).into_owned(), None)
+            (field, None)
         };
-        let Some(content) = read(&repo, &name, object.as_deref())? else {
+        let Some(content) = read(&repo, name, object.as_deref())? else {
             continue;
         };
-        scan_text(&name, &content, &mut rows);
+        scan_text(&String::from_utf8_lossy(name), &content, &mut rows);
     }
     Ok(rows)
 }
 
 /// The file's bytes (the staged blob `object`, else the working-tree file), or `None` for a
 /// file that is gone, binary or not a regular file (symlinks are never followed).
-fn read(repo: &Repo, name: &str, object: Option<&str>) -> Result<Option<Vec<u8>>> {
+fn read(repo: &Repo, name: &[u8], object: Option<&str>) -> Result<Option<Vec<u8>>> {
     let content = if let Some(id) = object {
         repo.checked(&["cat-file", "blob", id], None, &[])?
     } else {
-        let path: &Path = &repo.root().join(name);
-        match std::fs::symlink_metadata(path) {
+        let path = repo.root().join(OsStr::from_bytes(name));
+        match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() => {}
-            _ => return Ok(None),
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ctx(format!("inspect {}", path.display()))(error)),
         }
-        match std::fs::read(path) {
+        match std::fs::read(&path) {
             Ok(content) => content,
-            Err(_) => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ctx(format!("read {}", path.display()))(error)),
         }
     };
     Ok((!content.iter().take(8000).any(|&byte| byte == 0)).then_some(content))

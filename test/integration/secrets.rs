@@ -164,3 +164,70 @@ fn a_symlink_replaced_by_a_file_is_scanned_when_staged() {
         "config.json:1 github-token\n"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_paths_are_scanned_in_discovery_and_explicit_arguments() {
+    use std::os::unix::ffi::OsStrExt;
+    let env = Env::new();
+    let name = std::ffi::OsStr::from_bytes(b"token-\xff.txt");
+    fs::write(env.repo.join(name), secret()).unwrap();
+    env.git(&["add", "."]);
+    for staged in [false, true] {
+        for explicit in [false, true] {
+            let mut cmd = env.bin(&env.repo);
+            cmd.arg("secrets");
+            if staged {
+                cmd.arg("--staged");
+            }
+            if explicit {
+                cmd.arg(name);
+            }
+            let output = cmd.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "staged={staged} explicit={explicit}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("github-token"));
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret()));
+        }
+    }
+    fs::remove_file(env.repo.join(name)).unwrap();
+    let output = env
+        .bin(&env.repo)
+        .args(["secrets", "--staged"])
+        .arg(name)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn filesystem_lookup_errors_fail_the_secret_scan() {
+    let env = Env::new();
+    fs::create_dir(env.repo.join("blocked")).unwrap();
+    fs::write(env.repo.join("blocked/file"), "clean").unwrap();
+    env.git(&["add", "."]);
+    fs::remove_file(env.repo.join("blocked/file")).unwrap();
+    fs::remove_dir(env.repo.join("blocked")).unwrap();
+    std::os::unix::fs::symlink("blocked", env.repo.join("blocked")).unwrap();
+    let output = scan(&env, &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("blocked/file"));
+}
+
+#[test]
+fn missing_tracked_files_are_skipped() {
+    let env = Env::new();
+    fs::write(env.repo.join("gone"), secret()).unwrap();
+    env.git(&["add", "."]);
+    fs::remove_file(env.repo.join("gone")).unwrap();
+    assert_eq!(scan(&env, &[]).status.code(), Some(0));
+}
