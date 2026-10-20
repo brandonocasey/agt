@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::core::error::Result;
 use crate::core::shell::quote;
 use crate::git::base::Candidate;
-use crate::git::{Repo, local_branch_name};
+use crate::git::{GITLINK, Repo, local_branch_name};
 
 /// The report on the local default branch and, when it may still be behind, the warning; `None`
 /// when there is no local default branch or no remote to bring it up to.
@@ -108,7 +108,7 @@ fn update(
     let gitlink = raw.lines().any(|line| {
         line.split_whitespace()
             .take(2)
-            .any(|mode| mode.trim_start_matches(':') == "160000")
+            .any(|mode| mode.trim_start_matches(':') == GITLINK)
     });
     if gitlink {
         return Ok(Some(format!(

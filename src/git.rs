@@ -47,6 +47,15 @@ impl StatusEntry {
     }
 }
 
+/// The mode git records for a submodule's commit in a tree or the index.
+pub const GITLINK: &str = "160000";
+
+/// A submodule recorded in the index: the commit it is at, and its path.
+pub struct Gitlink {
+    pub commit: String,
+    pub path: String,
+}
+
 /// One entry of `git worktree list`.
 pub struct Worktree {
     pub path: PathBuf,
@@ -55,6 +64,13 @@ pub struct Worktree {
     pub locked: bool,
     pub bare: bool,
     pub prunable: bool,
+}
+
+impl Worktree {
+    /// Whether its branch has no commit yet, so `head` is all zeros.
+    pub fn unborn(&self) -> bool {
+        self.head.chars().all(|c| c == '0')
+    }
 }
 
 pub struct Repo {
@@ -114,6 +130,34 @@ impl Repo {
                 staged: entry[0],
                 unstaged: entry[1],
                 path: String::from_utf8_lossy(&entry[3..]).into_owned(),
+            })
+            .collect())
+    }
+
+    /// How many changes the work tree has: the paths `git status` lists, a rename counting
+    /// once, and the edits it hides.
+    pub fn uncommitted_count(&self) -> Result<usize> {
+        let listed = self.git(&["status", "--porcelain"])?;
+        Ok(listed.lines().count() + self.hidden_edits()?.len())
+    }
+
+    /// The submodules the index records, limited to `pathspec` when it is not empty.
+    pub fn gitlinks(&self, pathspec: &[&str]) -> Result<Vec<Gitlink>> {
+        let mut args = vec!["ls-files", "--stage", "-z"];
+        if !pathspec.is_empty() {
+            args.push("--");
+            args.extend(pathspec);
+        }
+        let listing = self.checked(&args, None, &[])?;
+        Ok(nul_fields(&listing)
+            .filter_map(|entry| {
+                let entry = String::from_utf8_lossy(entry);
+                let (meta, path) = entry.split_once('\t')?;
+                let mut fields = meta.split(' ');
+                (fields.next() == Some(GITLINK)).then(|| Gitlink {
+                    commit: fields.next().unwrap_or_default().to_owned(),
+                    path: path.to_owned(),
+                })
             })
             .collect())
     }
@@ -268,6 +312,39 @@ impl Repo {
         ))
     }
 
+    /// Whether `remote` has `reference` (a full ref name). The error is git's own text when it
+    /// could not ask.
+    pub fn remote_has(&self, remote: &str, reference: &str) -> Result<bool> {
+        // `ls-remote --exit-code` exits 2 when the ref is absent and otherwise non-zero only on
+        // failure, whatever the language of git's messages.
+        match self.probe(&[
+            "ls-remote",
+            "--exit-code",
+            "--end-of-options",
+            remote,
+            reference,
+        ])? {
+            (Some(0), _) => Ok(true),
+            (Some(2), _) => Ok(false),
+            (_, error) => Err(Error(error)),
+        }
+    }
+
+    /// Fetches `refspec` from `remote` and returns the commit it points at. An empty refmap
+    /// keeps the fetch from moving remote-tracking branches; FETCH_HEAD is read at once so a
+    /// later fetch cannot change it.
+    pub fn fetch_commit(&self, remote: &str, refspec: &str) -> Result<String> {
+        self.git(&[
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            "--refmap=",
+            remote,
+            refspec,
+        ])?;
+        self.git(&["rev-parse", "FETCH_HEAD"])
+    }
+
     pub fn succeeds(&self, args: &[&str]) -> Result<bool> {
         Ok(self.exec(args, None, &[])?.status.success())
     }
@@ -339,6 +416,11 @@ impl Repo {
     /// The commit `reference` (a full ref name) leads to, or `None` when it does not exist.
     pub fn ref_commit(&self, reference: &str) -> Result<Option<String>> {
         self.verify(&format!("{reference}^{{commit}}"))
+    }
+
+    /// The commit local branch `name` is at, or `None` when there is no such branch.
+    pub fn branch_tip(&self, name: &str) -> Result<Option<String>> {
+        self.ref_commit(&format!("refs/heads/{name}"))
     }
 
     /// Returns the full ref of the default branch: `--default-branch`, then `origin/HEAD`, then a

@@ -357,7 +357,7 @@ fn state_and_config(repo: Option<&Repo>) -> Vec<Row> {
     if let Some(repo) = repo
         && let Ok(main) = repo.main_checkout_root()
     {
-        let local = main.join(".config/agt.toml");
+        let local = config::repo_file(&main);
         if local.is_file() {
             rows.push(config_row(
                 "repo config",

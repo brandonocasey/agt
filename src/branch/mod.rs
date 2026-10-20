@@ -162,8 +162,7 @@ fn branch_of(repo: &Repo, branch: Option<String>) -> Result<String> {
 
 /// The commit of local branch `branch`.
 fn tip(repo: &Repo, branch: &str) -> Result<String> {
-    let spec = format!("refs/heads/{branch}^{{commit}}");
-    match repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec])? {
+    match repo.branch_tip(branch)? {
         Some(commit) => Ok(commit),
         None => fail(format!("no local branch {branch}")),
     }

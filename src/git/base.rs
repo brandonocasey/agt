@@ -40,20 +40,13 @@ pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
             .lines()
             .find_map(|line| line.strip_prefix("ref: refs/heads/")?.split('\t').next())
             .ok_or_else(|| Error(format!("remote {remote}: no default branch advertised")))?;
-        // An empty refmap keeps the fetch from also moving remote-tracking branches.
-        repo.git(&[
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            "--refmap=",
-            remote,
-            &format!("refs/heads/{branch}"),
-        ])
-        .map_err(named)?;
+        let commit = repo
+            .fetch_commit(remote, &format!("refs/heads/{branch}"))
+            .map_err(named)?;
         found.push(Candidate {
             remote: Some(remote.to_owned()),
             branch: branch.to_owned(),
-            commit: repo.git(&["rev-parse", "FETCH_HEAD"]).map_err(named)?,
+            commit,
         });
     }
     for name in default_names(repo)? {

@@ -11,13 +11,18 @@ use serde::de::DeserializeOwned;
 
 use crate::core::error::{Error, Result, ctx, fail};
 
-/// Creates `path` and its parents with mode 0700 and makes `path` itself 0700.
-pub fn private_dir(path: &Path) -> Result<()> {
+/// Creates `path` and the parents it lacks with `mode`; a directory that exists keeps its own.
+pub fn create_dirs(path: &Path, mode: u32) -> Result<()> {
     DirBuilder::new()
         .recursive(true)
-        .mode(0o700)
+        .mode(mode)
         .create(path)
-        .map_err(ctx(format!("create {}", path.display())))?;
+        .map_err(ctx(format!("create {}", path.display())))
+}
+
+/// Creates `path` and its parents with mode 0700 and makes `path` itself 0700.
+pub fn private_dir(path: &Path) -> Result<()> {
+    create_dirs(path, 0o700)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(ctx(format!("chmod {}", path.display())))
 }
@@ -95,7 +100,8 @@ fn stage(
     } else {
         temp.persist(path)
     };
-    persisted.map_err(|error| Error(format!("replace {}: {}", path.display(), error.error)))?;
+    let verb = if noclobber { "create" } else { "replace" };
+    persisted.map_err(|error| Error(format!("{verb} {}: {}", path.display(), error.error)))?;
     if durable {
         sync_dir(dir)?;
     }
@@ -348,6 +354,16 @@ mod tests {
         assert!(write_atomic(&path, b"new", true, || fail("no")).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"old");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn write_new_names_the_failure_a_create_and_write_atomic_a_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity");
+        write_new(&path, b"one").unwrap();
+        let error = write_new(&path, b"two").unwrap_err();
+        assert!(error.0.starts_with("create "), "{}", error.0);
+        assert_eq!(fs::read(&path).unwrap(), b"one");
     }
 
     #[test]

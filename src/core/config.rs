@@ -111,6 +111,11 @@ fn default_since_days() -> u32 {
     90
 }
 
+/// A main checkout's repository config file, which overrides the global one.
+pub fn repo_file(main: &Path) -> PathBuf {
+    main.join(".config").join("agt.toml")
+}
+
 impl Config {
     /// The configuration from the default path, or defaults when the file is missing.
     pub fn load() -> Result<Self> {
@@ -119,7 +124,7 @@ impl Config {
 
     pub fn load_for_repo(repo: &crate::git::Repo) -> Result<Self> {
         let global = path()?;
-        let local = repo.main_checkout_root()?.join(".config/agt.toml");
+        let local = repo_file(&repo.main_checkout_root()?);
         Self::load_paths(&global, &local)
     }
 

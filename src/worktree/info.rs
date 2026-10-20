@@ -152,7 +152,7 @@ pub fn describe(
     let ignored = ignored(&entry.path)?.copy.len();
     let (mut ahead, mut behind, mut merged) = (Value::Null, Value::Null, Value::Null);
     // A branch with no commit yet has no HEAD to compare.
-    let unborn = entry.head.chars().all(|c| c == '0');
+    let unborn = entry.unborn();
     if let Some((_, reference)) = default.filter(|_| !unborn) {
         let counts = repo.git(&[
             "rev-list",
@@ -201,6 +201,14 @@ pub fn agents_in(live: &[Live], path: &Path) -> Value {
         })
         .collect();
     json!(found)
+}
+
+/// The `path` argument of a worktree command, else the current directory.
+pub fn dir_or_cwd(path: Option<PathBuf>) -> Result<PathBuf> {
+    match path {
+        Some(path) => Ok(path),
+        None => std::env::current_dir().map_err(ctx("read the current directory")),
+    }
 }
 
 pub fn real(path: &Path) -> Result<PathBuf> {

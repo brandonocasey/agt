@@ -56,22 +56,13 @@ pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
 /// The pinned commit of `refs/heads/<branch>` on `remote`; `None` when the remote lacks it.
 fn fetch(repo: &Repo, remote: &str, branch: &str) -> Result<Option<String>> {
     let heads = format!("refs/heads/{branch}");
-    // `ls-remote --exit-code` exits 2 when the ref is absent, whatever the language of git.
-    match repo.probe(&[
-        "ls-remote",
-        "--exit-code",
-        "--end-of-options",
-        remote,
-        &heads,
-    ])? {
-        (Some(0), _) => {}
-        (Some(2), _) => return Ok(None),
-        (_, error) => return fail(format!("cannot read {remote}: {error}")),
+    let present = repo
+        .remote_has(remote, &heads)
+        .or_else(|error| fail(format!("cannot read {remote}: {error}")))?;
+    if !present {
+        return Ok(None);
     }
-    // An empty refmap keeps the fetch from moving remote-tracking branches; FETCH_HEAD is read
-    // at once so a later fetch cannot change it.
-    repo.git(&["fetch", "--no-tags", "--quiet", "--refmap=", remote, &heads])?;
-    Ok(Some(repo.git(&["rev-parse", "FETCH_HEAD"])?))
+    Ok(Some(repo.fetch_commit(remote, &heads)?))
 }
 
 /// Changed paths in the worktree that has `branch` checked out, else `None`.
@@ -82,8 +73,7 @@ fn uncommitted(repo: &Repo, branch: &str) -> Result<Option<usize>> {
             && !worktree.prunable
             && worktree.path.is_dir()
         {
-            let status = Repo::at(&worktree.path).git(&["status", "--porcelain"])?;
-            return Ok(Some(status.lines().count()));
+            return Ok(Some(Repo::at(&worktree.path).uncommitted_count()?));
         }
     }
     Ok(None)

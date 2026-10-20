@@ -322,18 +322,9 @@ impl Scene {
             return Ok(());
         }
         let reference = origin.head_ref(number);
-        repo.git(&[
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            "--refmap=",
-            "origin",
-            &reference,
-        ])
-        .map_err(|error| error.to_string())?;
         let fetched = repo
-            .git(&["rev-parse", "FETCH_HEAD"])
-            .map_err(|e| e.to_string())?;
+            .fetch_commit("origin", &reference)
+            .map_err(|error| error.to_string())?;
         if fetched == sha {
             Ok(())
         } else {
@@ -343,7 +334,7 @@ impl Scene {
 }
 
 /// How long a worktree must sit untouched before cleanup removes it.
-const QUIET_SECS: i64 = 3 * 86_400;
+const QUIET_SECS: i64 = 3 * clock::SECS_PER_DAY;
 
 /// Whether anything in the worktree changed in the last 3 days before `now`: its HEAD commit,
 /// its git dir's HEAD, index or HEAD log, or a tracked or untracked non-ignored file.

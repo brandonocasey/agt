@@ -132,6 +132,25 @@ fn pushed_equal_without_a_pull_request_exits_zero() {
 }
 
 #[test]
+fn pushed_counts_a_rename_once_and_an_edit_git_status_hides() {
+    let site = Site::new();
+    site.pulls(&[]);
+    site.env.write("old.txt", "one\ntwo\nthree\n");
+    site.env.write("hidden.txt", "h\n");
+    site.env.git(&["add", "-A"]);
+    site.env.git(&["commit", "-q", "-m", "files"]);
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    site.env.git(&["mv", "old.txt", "new.txt"]);
+    let (report, _) = site.report(&["pushed"]);
+    assert_eq!(report["uncommitted"], 1);
+    site.env
+        .git(&["update-index", "--skip-worktree", "hidden.txt"]);
+    site.env.write("hidden.txt", "changed\n");
+    let (report, _) = site.report(&["pushed"]);
+    assert_eq!(report["uncommitted"], 2);
+}
+
+#[test]
 fn pushed_skips_a_worktree_whose_directory_is_gone() {
     let site = Site::new();
     site.pulls(&[]);

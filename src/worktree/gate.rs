@@ -139,16 +139,8 @@ fn unfinished(git_dir: &Path) -> Option<String> {
 /// submodules of submodules count and a `.gitmodules` entry over ordinary files does not.
 fn unfilled_submodules(roots: &[PathBuf]) -> Result<()> {
     for root in roots {
-        let listing = Repo::at(root).checked(&["ls-files", "--stage", "-z"], None, &[])?;
-        for entry in listing.split(|byte| *byte == 0) {
-            let entry = String::from_utf8_lossy(entry);
-            let Some((meta, path)) = entry.split_once('\t') else {
-                continue;
-            };
-            if !meta.starts_with("160000 ") {
-                continue;
-            }
-            let dir = root.join(path);
+        for link in Repo::at(root).gitlinks(&[])? {
+            let dir = root.join(&link.path);
             if dir.join(".git").exists() {
                 continue;
             }
@@ -191,11 +183,8 @@ fn recorded_commit(sub: &nested::Found) -> Result<Option<String>> {
         .strip_prefix(&sub.parent)
         .map(|inside| inside.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let listing = Repo::at(&sub.parent).git(&["ls-files", "--stage", "--", &inside])?;
-    Ok(listing.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        (fields.next() == Some("160000")).then(|| fields.next().map(str::to_owned))?
-    }))
+    let links = Repo::at(&sub.parent).gitlinks(&[&inside])?;
+    Ok(links.into_iter().next().map(|link| link.commit))
 }
 
 /// Every clone below `modules`, at any depth: a directory with a `HEAD` and `objects`, and the

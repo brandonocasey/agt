@@ -362,13 +362,7 @@ fn delete_branch(repo: &Repo, subject: &Subject, yes: bool, report: &mut Report)
         report.delete.push(row);
         return Ok(());
     }
-    let now = repo.git_opt(&[
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        &format!("refs/heads/{branch}"),
-    ])?;
-    if now.as_deref() != Some(subject.tip) {
+    if repo.branch_tip(branch)?.as_deref() != Some(subject.tip) {
         report
             .kept
             .push(kept(subject, None, "the branch moved since it was judged"));

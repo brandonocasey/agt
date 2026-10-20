@@ -10,7 +10,7 @@ use serde_json::json;
 use super::{backup, info, snapshot};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
-use crate::git::Repo;
+use crate::git::{GITLINK, Repo};
 
 #[derive(Args)]
 pub struct Cli {
@@ -57,8 +57,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             repo.git(&["worktree", "add", "--detach", &target_text, &record.head])?;
         }
         Some(branch) => {
-            let reference = format!("refs/heads/{branch}");
-            let tip = repo.git_opt(&["rev-parse", "--verify", "--quiet", &reference])?;
+            let tip = repo.branch_tip(branch)?;
             let elsewhere = repo
                 .worktrees()?
                 .iter()
@@ -276,7 +275,7 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<Vec<Vec<u8>>> {
         let header = String::from_utf8_lossy(header);
         let parts: Vec<&str> = header.trim_start_matches(':').split(' ').collect();
         // Submodule commits cannot be checked out as files; the worktree records HEAD's.
-        if parts.iter().take(2).any(|mode| *mode == "160000") {
+        if parts.iter().take(2).any(|mode| *mode == GITLINK) {
             continue;
         }
         if parts.get(4).is_some_and(|status| *status == "D") {

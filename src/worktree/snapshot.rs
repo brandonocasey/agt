@@ -1,15 +1,16 @@
 //! Backing a worktree up: a commit of its whole working tree pinned by a ref, and a copy of
 //! its ignored files that are not disposable.
 
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use super::backup::{self, FileMode, REF_PREFIX, Record};
 use super::info;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::create_dirs;
 use crate::git::{Repo, Worktree, nul_fields};
 
 pub struct Taken {
@@ -21,6 +22,17 @@ pub struct Taken {
 
 /// Snapshots `entry`, whose repository's main checkout is `main`. Nothing in the worktree
 /// changes; its index is not touched.
+/// Fails when `entry` has no commit, which a backup needs to restore on.
+pub(super) fn require_commit(entry: &Worktree) -> Result<()> {
+    if entry.unborn() {
+        return fail(format!(
+            "{} is on a branch with no commit yet; commit something first, a backup needs a commit to restore on",
+            entry.path.display()
+        ));
+    }
+    Ok(())
+}
+
 pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
     let created = clock::now_secs()?;
     let stamp = clock::format(created);
@@ -32,12 +44,7 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
         &stamp[11..13],
         &stamp[14..16]
     );
-    if entry.head.chars().all(|c| c == '0') {
-        return fail(format!(
-            "{} is on a branch with no commit yet; commit something first, a backup needs a commit to restore on",
-            entry.path.display()
-        ));
-    }
+    require_commit(entry)?;
     let name = ref_safe(&entry.path.file_name().unwrap_or_default().to_string_lossy());
     let repo_name = main.file_name().unwrap_or_default().to_string_lossy();
     let shared = Repo::at(main);
@@ -56,11 +63,11 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
             !dir.exists()
                 && !backup::id_taken(id)
                 && shared
-                    .git_opt(&["rev-parse", "--verify", "--quiet", &reference])
+                    .ref_commit(&reference)
                     .is_ok_and(|found| found.is_none())
         })
         .unwrap_or_default();
-    make_dir(&dir.join("files"), 0o700)?;
+    create_dirs(&dir.join("files"), 0o700)?;
     let reference = format!("{REF_PREFIX}{id}");
     let made = build(main, entry, &shared, &dir, id, &reference, created);
     if made.is_err() {
@@ -168,7 +175,7 @@ fn save_git_files(worktree: &Path, to: &Path) -> Result<()> {
         }
         let target = to.join(name);
         if let Some(parent) = target.parent() {
-            make_dir(parent, 0o700)?;
+            create_dirs(parent, 0o700)?;
         }
         fs::copy(&source, &target).map_err(ctx(format!(
             "copy {} to {}",
@@ -220,21 +227,13 @@ fn ref_safe(name: &str) -> String {
     }
 }
 
-fn make_dir(dir: &Path, mode: u32) -> Result<()> {
-    DirBuilder::new()
-        .recursive(true)
-        .mode(mode)
-        .create(dir)
-        .map_err(ctx(format!("create {}", dir.display())))
-}
-
 /// Copies each relative path from `from` to `to`, keeping file modes and symlinks. Missing
 /// parent directories are made with `dir_mode`.
 pub fn copy_files(from: &Path, to: &Path, rels: &[String], dir_mode: u32) -> Result<()> {
     for rel in rels {
         let (source, target) = (from.join(rel), to.join(rel));
         if let Some(parent) = target.parent() {
-            make_dir(parent, dir_mode)?;
+            create_dirs(parent, dir_mode)?;
         }
         let kind = fs::symlink_metadata(&source)
             .map_err(ctx(format!("stat {}", source.display())))?

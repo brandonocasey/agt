@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::info::toplevel;
-use super::{emit, hooks, prepare};
-use crate::core::clock;
+use super::{emit, hooks, prepare, steps};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{read_json, write_json};
 use crate::core::output::{Output, TIMED_OUT};
+use crate::core::{agents, clock};
 use crate::git::Repo;
 
 const STATUS_FILE: &str = "agt-setup.json";
@@ -93,7 +93,7 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
     let status = status_path(root)?;
     let nanos = clock::unix_nanos();
     let log =
-        prepare::output_dir()?.join(format!("worktree-setup-{}-{nanos}.log", std::process::id()));
+        steps::output_dir()?.join(format!("worktree-setup-{}-{nanos}.log", std::process::id()));
     let sink = File::create(&log).map_err(ctx(format!("create {}", log.display())))?;
     let again = sink.try_clone().map_err(ctx("duplicate the log handle"))?;
     // The child cannot write its own start before this returns, and a late write here could
@@ -168,22 +168,13 @@ fn execute(root: &Path, steps: &[Step], done: &mut Value) -> Result<bool> {
 /// that died first or a parent killed before the spawn.
 fn live(pid: u64, file: &Path) -> bool {
     if pid != 0 {
-        return alive(pid);
+        return i32::try_from(pid).is_ok_and(agents::exists);
     }
     fs::metadata(file)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|age| age < STARTING_GRACE)
-}
-
-fn alive(pid: u64) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 only checks that the process exists.
-    let found = unsafe { libc::kill(pid, 0) } == 0;
-    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Waits for the background setup of the worktree containing `dir` and prints its report.
@@ -210,8 +201,10 @@ pub(super) fn wait(dir: &Path, max: u64) -> Result<Output> {
             }));
         }
         if start.elapsed().as_secs() >= max {
-            println!("agt worktree prepare --wait: setup still running after {max}s; wait again");
-            return Ok(Output::Exit(TIMED_OUT));
+            return Ok(Output::Text(format!(
+                "agt worktree prepare --wait: setup still running after {max}s; wait again\n"
+            ))
+            .exiting(TIMED_OUT));
         }
         std::thread::sleep(Duration::from_secs(1));
     }

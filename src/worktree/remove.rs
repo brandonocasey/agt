@@ -33,12 +33,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         .or_else(|_| fail(format!("{} is not a linked worktree", path.display())))?;
     let main = info::real(&listing[0].path)?;
     let entry = refuse(&listing, &path, &main)?;
-    if entry.head.chars().all(|c| c == '0') {
-        return fail(format!(
-            "{} is on a branch with no commit yet; commit something first, a backup needs a commit to restore on",
-            path.display()
-        ));
-    }
+    snapshot::require_commit(entry)?;
     let mut cwds = Cwds::default();
     if let Some(why) = cwds.busy(&path) {
         return fail(format!("{} is in use: {why}", path.display()));

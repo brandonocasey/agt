@@ -10,10 +10,10 @@ use crate::core::hash::sha256_hex;
 use clap::Args;
 use serde_json::json;
 
-use super::info::{main_checkout, toplevel};
+use super::info::{dir_or_cwd, main_checkout, toplevel};
 use super::port;
-use crate::core::config::Config;
-use crate::core::error::{Result, ctx, fail};
+use crate::core::config::{Config, repo_file};
+use crate::core::error::{Result, fail};
 use crate::core::local::{read_json, update_json};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -36,12 +36,9 @@ pub fn run(cli: Cli) -> Result<Output> {
     if cli.list {
         return list();
     }
-    let dir = match cli.path {
-        Some(path) => path,
-        None => std::env::current_dir().map_err(ctx("read the current directory"))?,
-    };
+    let dir = dir_or_cwd(cli.path)?;
     let main = main_checkout(&Repo::at(&toplevel(&dir)?))?.path;
-    let file = config_file(&main);
+    let file = repo_file(&main);
     if cli.remove {
         let key = key(&main);
         let removed = update(|trusted| trusted.remove(&key).is_some())?;
@@ -90,21 +87,16 @@ fn list() -> Result<Output> {
     Ok(Output::Json(json!({"trusted": files})))
 }
 
-/// A main checkout's repository config file.
-pub(super) fn config_file(main: &Path) -> PathBuf {
-    main.join(".config").join("agt.toml")
-}
-
 /// The trust key of a repository: its canonical main checkout joined with the literal
 /// `.config/agt.toml`, so a symlinked config cannot borrow another repository's trust.
 fn key(main: &Path) -> String {
     let root = main.canonicalize().unwrap_or_else(|_| main.to_path_buf());
-    config_file(&root).to_string_lossy().into_owned()
+    repo_file(&root).to_string_lossy().into_owned()
 }
 
 /// Why the repository config cannot be trusted: `.config` or `.config/agt.toml` is a symlink.
 pub(super) fn symlink_reason(main: &Path) -> Option<String> {
-    let file = config_file(main);
+    let file = repo_file(main);
     [file.parent()?, file.as_path()]
         .into_iter()
         .find(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()))

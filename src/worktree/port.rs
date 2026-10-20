@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Args;
 use serde_json::{Value, json};
 
+use super::info::dir_or_cwd;
 use crate::core::error::{Error, Result, ctx};
 use crate::core::local::{self, read_json, update_json};
 use crate::core::output::Output;
@@ -32,10 +33,7 @@ const PORTS_FILE: &str = "ports.json";
 type Ports = BTreeMap<String, u16>;
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let dir = match cli.path {
-        Some(path) => path,
-        None => std::env::current_dir().map_err(ctx("read the current directory"))?,
-    };
+    let dir = dir_or_cwd(cli.path)?;
     let (path, port) = assign(&super::info::toplevel(&dir)?)?;
     if cli.env {
         return Ok(Output::Text(format!("PORT={port}\n")));

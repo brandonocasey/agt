@@ -23,6 +23,7 @@ mod restore;
 pub(crate) mod roots;
 mod setup;
 mod snapshot;
+mod steps;
 mod trust;
 
 use clap::{Args, Subcommand};

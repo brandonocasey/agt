@@ -163,17 +163,14 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
     if !repo.origin_url()?.is_some() {
         return Ok(false);
     }
-    // `ls-remote --exit-code` exits 2 when the ref is absent and otherwise non-zero only on
-    // failure, whatever the language of git's messages.
     let heads = format!("refs/heads/{branch}");
-    match repo.probe(&["ls-remote", "--exit-code", "origin", &heads])? {
-        (Some(0), _) => {}
-        (Some(2), _) => return Ok(false),
-        (_, error) => {
-            return fail(format!(
-                "cannot tell whether {branch} exists on origin: {error}; pass --base to start a new branch anyway"
-            ));
-        }
+    let present = repo.remote_has("origin", &heads).or_else(|error| {
+        fail(format!(
+            "cannot tell whether {branch} exists on origin: {error}; pass --base to start a new branch anyway"
+        ))
+    })?;
+    if !present {
+        return Ok(false);
     }
     let spec = format!("+{heads}:{tracking}");
     repo.git(&["fetch", "--quiet", "--no-tags", "origin", &spec])?;

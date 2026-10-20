@@ -2,22 +2,18 @@
 //! command's output under `$XDG_CACHE_HOME/agents/output/`. Dependency directories are never
 //! symlinked from another checkout; `--clone-deps` copies them copy-on-write instead.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
 
 use clap::Args;
 use serde_json::{Value, json};
 
 use super::emit;
-use super::info::{main_checkout, toplevel};
+use super::info::{dir_or_cwd, main_checkout, toplevel};
 use super::setup::{self, Step};
-use crate::core::clock;
+use super::steps::run_step;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local;
 use crate::core::output::Output;
-use crate::core::process;
 use crate::git::Repo;
 
 const MISE_FILES: [&str; 3] = ["mise.toml", ".mise.toml", ".tool-versions"];
@@ -51,10 +47,7 @@ pub struct Cli {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let dir = match cli.path {
-        Some(path) => path,
-        None => std::env::current_dir().map_err(ctx("read the current directory"))?,
-    };
+    let dir = dir_or_cwd(cli.path)?;
     if cli.wait {
         return setup::wait(&dir, cli.max);
     }
@@ -105,7 +98,7 @@ pub(super) fn prepare(dir: &Path, clone_deps: bool) -> Result<(Value, bool)> {
     );
     let mut clone_available = false;
     for (index, (command, lockfile)) in commands.iter().enumerate() {
-        let mut step = run_step(&root, command, index, &[])?;
+        let mut step = run_step(&root, command, "prepare", index, &[])?;
         let failed = step["ok"] != true;
         // A clone copies `node_modules` only, so it is offered for a failed node install whose
         // lockfile the main checkout shares and whose `node_modules` it has.
@@ -209,51 +202,6 @@ fn identical(main: &Path, root: &Path, file: &str) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
-}
-
-/// `$XDG_CACHE_HOME/agents/output`, creating it.
-pub(super) fn output_dir() -> Result<PathBuf> {
-    let dir = local::agents_cache()?.join("output");
-    fs::create_dir_all(&dir).map_err(ctx(format!("create {}", dir.display())))?;
-    Ok(dir)
-}
-
-/// Runs `command` in `root` with `env` added, logging its output; the report says how it went.
-pub(super) fn run_step(
-    root: &Path,
-    command: &[String],
-    index: usize,
-    env: &[(&str, String)],
-) -> Result<Value> {
-    let nanos = clock::unix_nanos();
-    let name = format!(
-        "worktree-prepare-{}-{nanos}-{index}.log",
-        std::process::id()
-    );
-    let log = output_dir()?.join(name);
-    let sink = File::create(&log).map_err(ctx(format!("create {}", log.display())))?;
-    let again = sink.try_clone().map_err(ctx("duplicate the log handle"))?;
-    let started = Instant::now();
-    let mut run = Command::new(&command[0]);
-    run.args(&command[1..])
-        .current_dir(root)
-        // An inherited PORT must not leak into a step; the caller's `env` may set it.
-        .env_remove("PORT")
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .stdout(sink)
-        .stderr(again);
-    let status = process::status(&mut run, None);
-    let mut step = json!({
-        "command": command.join(" "),
-        "exit": status.as_ref().ok().and_then(|status| status.code()),
-        "ok": status.as_ref().is_ok_and(|status| status.success()),
-        "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "log": log,
-    });
-    if let Err(error) = status {
-        step["error"] = json!(format!("run {}: {error}", command[0]));
-    }
-    Ok(step)
 }
 
 /// Copies every `node_modules` of `main` that `root` lacks, relative path preserved, and returns

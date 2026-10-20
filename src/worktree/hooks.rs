@@ -6,8 +6,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::info::main_checkout;
-use super::{port, prepare, trust};
-use crate::core::config::Config;
+use super::{port, steps, trust};
+use crate::core::config::{Config, repo_file};
 use crate::core::error::Result;
 use crate::core::shell::quote;
 use crate::git::Repo;
@@ -62,7 +62,7 @@ pub(super) fn resolve(main: &Path) -> Result<Resolved> {
         });
     }
     let merged = Config::load_for_repo(&repo)?.worktree.hooks;
-    let file = trust::config_file(main);
+    let file = repo_file(main);
     let bytes = std::fs::read(&file).unwrap_or_default();
     let symlink = trust::symlink_reason(main);
     if !trust::has_hooks(&bytes) || (symlink.is_none() && trust::is_trusted(main, &bytes)?) {
@@ -117,7 +117,7 @@ pub(super) fn run(root: &Path, kind: Kind) -> Result<(Value, bool)> {
     let mut steps = Vec::new();
     for (index, command) in commands.iter().enumerate() {
         let argv = ["sh".to_owned(), "-c".to_owned(), command.clone()];
-        let mut step = prepare::run_step(root, &argv, index, &env)?;
+        let mut step = steps::run_step(root, &argv, "hook", index, &env)?;
         step["command"] = json!(command);
         let failed = step["ok"] != true;
         steps.push(step);
