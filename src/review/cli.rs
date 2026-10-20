@@ -386,6 +386,13 @@ pub enum QaCommand {
         /// Print every payload without posting anything.
         #[arg(long)]
         dry_run: bool,
+        /// Allow a PR/MR authored by someone else; `--only` then names the threads to post. The
+        /// summary, with its QA section, is never posted there.
+        #[arg(long)]
+        not_own: bool,
+        /// Post only these thread ids (comma-separated) and their replies and resolves.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
         /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
         #[arg(long)]
         pr: Option<String>,

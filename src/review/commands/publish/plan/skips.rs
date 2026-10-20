@@ -250,6 +250,12 @@ impl Planner<'_> {
                     .comments
                     .first()
                     .is_some_and(|comment| comment_in_run(comment, run))
+                // A QA run's findings belong to it whoever wrote them.
+                || thread.check.as_deref().is_some_and(|check| {
+                    check
+                        .strip_prefix(run)
+                        .is_some_and(|rest| rest.starts_with('.'))
+                })
         })
     }
 

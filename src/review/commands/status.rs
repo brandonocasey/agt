@@ -462,7 +462,7 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         "outdated_threads": threads.outdated,
         "held_questions": threads.held,
         "runs": run_views(target),
-        "qa": super::qa::qa_state(target, &head, Some(&head_tree)),
+        "qa": super::qa::qa_state(target, &head, Some(&ctx.reviewed_state(&scope)?.1)),
     }))
 }
 
