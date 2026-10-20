@@ -1317,6 +1317,43 @@ fn manual_report_skips_a_worktree_holding_an_ignored_nested_repository() {
 }
 
 #[test]
+fn manual_report_skips_a_worktree_with_a_process_running_in_it_as_the_sweep_does() {
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+    git(&["worktree", "add", "-q", ".worktrees/done", "-b", "done"]);
+    let done = repo.join(".worktrees/done");
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+
+    // The sweep keeps a worktree where another process runs, so the list must not offer it.
+    let mut child = prune.env.command("sleep", &done).arg("30").spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut listed = 1;
+    while listed != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let report = prune.run_at(later(), &["--only", "manual"]);
+        listed = report["manual"]["worktrees"].as_array().unwrap().len();
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(listed, 0);
+}
+
+#[test]
 fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_directory() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");

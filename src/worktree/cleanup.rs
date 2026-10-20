@@ -7,11 +7,10 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use serde_json::{Value, json};
 
-use super::idle::Cwds;
-use super::landed::{Finding, Scene, Verdict, recent};
-use super::remove::{refuse, removal};
-use super::{gate, info, roots};
-use crate::core::clock;
+use super::idle::{Allow, Cwds, blocker};
+use super::landed::{Finding, Scene, Verdict};
+use super::remove::removal;
+use super::{info, roots};
 use crate::core::error::Result;
 use crate::forge::auto::Offline;
 use crate::forge::landed::Origin;
@@ -194,19 +193,7 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
             }
             continue;
         }
-        let verdict = if scene.contains(repo, &entry.head)? {
-            Finding {
-                verdict: Verdict::Merged,
-                evidence: format!("detached HEAD is an ancestor of {}", scene.name),
-                details: Value::Null,
-            }
-        } else {
-            Finding {
-                verdict: Verdict::Unmerged,
-                evidence: format!("detached HEAD is not an ancestor of {}", scene.name),
-                details: Value::Null,
-            }
-        };
+        let verdict = scene.detached(repo, &entry.head)?;
         let subject = Subject {
             branch: None,
             tip: &entry.head,
@@ -291,11 +278,16 @@ fn remove_worktree(
     report: &mut Report,
 ) -> Result<bool> {
     let path = &entry.path;
-    if let Some((verdict, reason)) = blocker(scene, entry, main, cli, cwds)? {
-        let verdict = verdict.unwrap_or(subject.finding.verdict.as_str());
+    let allow = Allow {
+        offline: cli.offline.is_set(),
+        recent: cli.recent,
+        dirty: cli.dirty,
+    };
+    if let Some(blocker) = blocker(scene, entry, main, allow, cwds)? {
+        let verdict = blocker.verdict.unwrap_or(subject.finding.verdict.as_str());
         report
             .kept
-            .push(kept_as(verdict, subject, Some(path), &reason));
+            .push(kept_as(verdict, subject, Some(path), &blocker.reason));
         return Ok(false);
     }
     let real = info::real(path)?;
@@ -348,53 +340,6 @@ fn remove_worktree(
             Ok(false)
         }
     }
-}
-
-/// Why the worktree must stay, if it must.
-fn blocker(
-    scene: &Scene,
-    entry: &Worktree,
-    main: &Path,
-    cli: &Options,
-    cwds: &mut Cwds,
-) -> Result<Option<(Option<&'static str>, String)>> {
-    if !entry.path.exists() {
-        return Ok(Some((
-            None,
-            "the directory is missing; run git worktree prune".into(),
-        )));
-    }
-    let real = info::real(&entry.path)?;
-    if let Err(error) = refuse(&scene.entries, &real, main) {
-        return Ok(Some((None, error.to_string())));
-    }
-    let gated = if cli.offline.is_set() {
-        gate::check_offline(&real, main)
-    } else {
-        gate::check(&real, main)
-    };
-    if let Err(error) = gated {
-        return Ok(Some((None, error.to_string())));
-    }
-    if let Some(reason) = cwds.busy(&real) {
-        return Ok(Some((None, reason)));
-    }
-    if !cli.recent && recent(&real, clock::now_secs()?)? {
-        return Ok(Some((
-            Some("recent"),
-            "something in it changed in the last 3 days; pass --recent to remove it anyway".into(),
-        )));
-    }
-    let unsaved = info::unsaved(&real)?;
-    if unsaved > 0 && !cli.dirty {
-        return Ok(Some((
-            None,
-            format!(
-                "dirty: {unsaved} modified or untracked files; pass --dirty to remove it after a snapshot backup"
-            ),
-        )));
-    }
-    Ok(None)
 }
 
 fn delete_branch(repo: &Repo, subject: &Subject, yes: bool, report: &mut Report) -> Result<()> {

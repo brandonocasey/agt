@@ -1,15 +1,14 @@
 //! What `agt cleanup` lists for worktrees and branches: work that is already in the default
 //! branch by local ancestry alone. Nothing here touches the network or runs `lsof`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use super::gate;
+use super::idle::{Allow, Cwds, blocker};
 use super::info;
-use super::landed::{Scene, recent};
+use super::landed::Scene;
 use super::roots;
 use crate::core::error::Result;
-use crate::core::{agents, clock};
-use crate::git::{Repo, Worktree};
+use crate::git::Repo;
 
 /// A merged worktree or branch that `agt cleanup --only worktrees` would remove.
 pub struct Found {
@@ -21,54 +20,47 @@ pub struct Found {
 /// The candidates of every repository under the configured roots, in repository order.
 pub fn candidates() -> Result<Vec<Found>> {
     let mut found = Vec::new();
+    let mut cwds = Cwds::default();
     for root in roots::repositories()? {
         // A repository git cannot read is none of cleanup's business.
-        if let Ok(mut here) = of(&Repo::at(&root)) {
+        if let Ok(mut here) = of(&Repo::at(&root), &mut cwds) {
             found.append(&mut here);
         }
     }
     Ok(found)
 }
 
-fn of(repo: &Repo) -> Result<Vec<Found>> {
+fn of(repo: &Repo, cwds: &mut Cwds) -> Result<Vec<Found>> {
     let Some(scene) = Scene::read(repo)? else {
         return Ok(Vec::new());
     };
     let main = info::real(&scene.main().path)?;
+    // What the sweep may remove, offline: the same check, with no force flag.
+    let allow = Allow {
+        offline: true,
+        recent: false,
+        dirty: false,
+    };
     let mut found = Vec::new();
-    for entry in scene.entries.iter().skip(1) {
-        let merged = match &entry.branch {
-            Some(branch) => !scene.protected(branch),
-            None => true,
-        } && scene.contains(repo, &entry.head)?;
-        if merged && idle(&scene, entry, &main)? {
-            found.push(Found {
-                repo: main.clone(),
-                worktree: Some(entry.path.clone()),
-                branch: None,
-            });
+    for local in scene.local_findings(repo)? {
+        if !local.finding.verdict.landed() {
+            continue;
         }
-    }
-    for (branch, tip) in scene.branches(repo)? {
-        if scene.worktree_of(&branch).is_none() && scene.contains(repo, &tip)? {
-            found.push(Found {
+        match local.worktree {
+            Some(entry) if blocker(&scene, entry, &main, allow, cwds)?.is_none() => {
+                found.push(Found {
+                    repo: main.clone(),
+                    worktree: Some(entry.path.clone()),
+                    branch: None,
+                });
+            }
+            Some(_) => {}
+            None => found.push(Found {
                 repo: main.clone(),
                 worktree: None,
-                branch: Some(branch),
-            });
+                branch: local.branch,
+            }),
         }
     }
     Ok(found)
-}
-
-/// Whether the worktree exists, is unlocked, clean, quiet for 3 days and without a live agent session.
-fn idle(scene: &Scene, entry: &Worktree, main: &Path) -> Result<bool> {
-    if entry.locked || !entry.path.exists() || scene.holds_cwd(&entry.path) {
-        return Ok(false);
-    }
-    // The cheap checks first, and the gate without the network: the report must stay offline.
-    Ok(!recent(&entry.path, clock::now_secs()?)?
-        && agents::live_in(&entry.path).is_none()
-        && info::unsaved(&entry.path)? == 0
-        && gate::check_offline(&entry.path, main).is_ok())
 }

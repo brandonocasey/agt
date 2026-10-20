@@ -59,6 +59,14 @@ fn finding(verdict: Verdict, evidence: impl Into<String>) -> Finding {
     }
 }
 
+/// A worktree or branch with the verdict local ancestry gives it.
+pub struct Local<'a> {
+    pub branch: Option<String>,
+    /// The linked worktree; `None` for a branch that has none.
+    pub worktree: Option<&'a Worktree>,
+    pub finding: Finding,
+}
+
 /// A repository's worktrees and default branch, and what must never be touched.
 pub struct Scene {
     pub entries: Vec<Worktree>,
@@ -143,6 +151,52 @@ impl Scene {
     /// Whether a commit is in the default branch.
     pub fn contains(&self, repo: &Repo, commit: &str) -> Result<bool> {
         repo.is_ancestor(commit, &self.reference)
+    }
+
+    /// The verdict for a detached HEAD at `head`, from local ancestry alone.
+    pub fn detached(&self, repo: &Repo, head: &str) -> Result<Finding> {
+        Ok(if self.contains(repo, head)? {
+            finding(
+                Verdict::Merged,
+                format!("detached HEAD is an ancestor of {}", self.name),
+            )
+        } else {
+            finding(
+                Verdict::Unmerged,
+                format!("detached HEAD is not an ancestor of {}", self.name),
+            )
+        })
+    }
+
+    /// What local ancestry alone says about every linked worktree and every branch without
+    /// one, with no forge evidence: the worktrees in listing order, then the branches. A
+    /// protected branch is left out, and so is a branch checked out in a worktree (its
+    /// worktree is the subject).
+    pub fn local_findings<'a>(&'a self, repo: &Repo) -> Result<Vec<Local<'a>>> {
+        let mut found = Vec::new();
+        for entry in self.entries.iter().skip(1) {
+            let finding = match &entry.branch {
+                None => self.detached(repo, &entry.head)?,
+                Some(branch) if self.protected(branch) => continue,
+                Some(branch) => self.judge(repo, None, branch, &entry.head)?,
+            };
+            found.push(Local {
+                branch: entry.branch.clone(),
+                worktree: Some(entry),
+                finding,
+            });
+        }
+        for (branch, tip) in self.branches(repo)? {
+            if self.worktree_of(&branch).is_none() {
+                let finding = self.judge(repo, None, &branch, &tip)?;
+                found.push(Local {
+                    branch: Some(branch),
+                    worktree: None,
+                    finding,
+                });
+            }
+        }
+        Ok(found)
     }
 
     /// The verdict for `branch` at `tip`: local ancestry first, then, with an `origin`, its

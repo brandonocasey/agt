@@ -1,9 +1,83 @@
-//! Whether any process other than agt, its ancestors and the calling session's own processes
-//! has its current directory inside a worktree.
+//! Whether a linked worktree may be removed now: the one check that `agt cleanup`'s candidate
+//! list and the sweep behind `agt cleanup --only worktrees` share. It includes whether any
+//! process other than agt, its ancestors and the calling session's own processes has its
+//! current directory inside the worktree.
 
 use std::path::{Path, PathBuf};
 
-use crate::core::agents;
+use super::landed::{Scene, recent};
+use super::remove::refuse;
+use super::{gate, info};
+use crate::core::error::Result;
+use crate::core::{agents, clock};
+use crate::git::Worktree;
+
+/// What the check lets through, and how far it may reach.
+#[derive(Clone, Copy)]
+pub struct Allow {
+    /// Check the gate without the network.
+    pub offline: bool,
+    /// Pass a worktree where something changed in the last 3 days.
+    pub recent: bool,
+    /// Pass a worktree with uncommitted work, which a snapshot backup keeps.
+    pub dirty: bool,
+}
+
+/// Why a worktree must stay.
+pub struct Blocker {
+    /// The verdict the kept row reports instead of the branch's own.
+    pub verdict: Option<&'static str>,
+    pub reason: String,
+}
+
+fn blocked(reason: impl Into<String>) -> Result<Option<Blocker>> {
+    Ok(Some(Blocker {
+        verdict: None,
+        reason: reason.into(),
+    }))
+}
+
+/// Why the worktree must stay, if it must.
+pub fn blocker(
+    scene: &Scene,
+    entry: &Worktree,
+    main: &Path,
+    allow: Allow,
+    cwds: &mut Cwds,
+) -> Result<Option<Blocker>> {
+    if !entry.path.exists() {
+        return blocked("the directory is missing; run git worktree prune");
+    }
+    let real = info::real(&entry.path)?;
+    if let Err(error) = refuse(&scene.entries, &real, main) {
+        return blocked(error.to_string());
+    }
+    let gated = if allow.offline {
+        gate::check_offline(&real, main)
+    } else {
+        gate::check(&real, main)
+    };
+    if let Err(error) = gated {
+        return blocked(error.to_string());
+    }
+    if let Some(reason) = cwds.busy(&real) {
+        return blocked(reason);
+    }
+    if !allow.recent && recent(&real, clock::now_secs()?)? {
+        return Ok(Some(Blocker {
+            verdict: Some("recent"),
+            reason: "something in it changed in the last 3 days; pass --recent to remove it anyway"
+                .into(),
+        }));
+    }
+    let unsaved = info::unsaved(&real)?;
+    if unsaved > 0 && !allow.dirty {
+        return blocked(format!(
+            "dirty: {unsaved} modified or untracked files; pass --dirty to remove it after a snapshot backup"
+        ));
+    }
+    Ok(None)
+}
 
 /// The current directories of all processes, read once on first use.
 #[derive(Default)]
