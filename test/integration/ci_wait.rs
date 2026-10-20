@@ -6,8 +6,9 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use assert_fs::TempDir;
 use serde_json::{Value, json};
+
+use crate::support::Env;
 
 const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-steps.sh");
 const GITHUB_TARGET: &str = "owner/repo#42@abc123";
@@ -51,14 +52,15 @@ impl Step {
 }
 
 struct Scenario {
-    _temp: TempDir,
+    env: Env,
     dir: std::path::PathBuf,
 }
 
 impl Scenario {
     fn new(steps: &[Step]) -> Self {
-        let temp = TempDir::new().unwrap();
-        let dir = temp.path().canonicalize().unwrap();
+        let env = Env::new();
+        let dir = env.path("steps");
+        fs::create_dir_all(&dir).unwrap();
         for (index, step) in steps.iter().enumerate() {
             let put = |ext: &str, text: &str| {
                 fs::write(dir.join(format!("{index}.{ext}")), text).unwrap()
@@ -75,20 +77,14 @@ impl Scenario {
                 put("delay", &seconds.to_string());
             }
         }
-        Self { _temp: temp, dir }
+        Self { env, dir }
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_agt"));
+        let mut command = self.env.bin(&self.env.repo);
         command
             .args(["ci", "wait"])
             .args(args)
-            .env("HOME", &self.dir)
-            .env("XDG_STATE_HOME", &self.dir)
-            .env("XDG_CONFIG_HOME", &self.dir)
-            .env("XDG_CACHE_HOME", &self.dir)
-            .env_remove("AGT_GH_BIN")
-            .env_remove("AGT_GLAB_BIN")
             .env("AGT_GH_BIN", FAKE)
             .env("AGT_GLAB_BIN", FAKE)
             .env("FAKE_STEPS_DIR", &self.dir)
