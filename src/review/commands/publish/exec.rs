@@ -6,7 +6,8 @@ use crate::core::error::{Error, Result};
 use crate::forge::markers::agent_id;
 use crate::forge::service::Inline;
 use crate::review::commands::Ctx;
-use crate::review::commands::sync::{Connection, landed};
+use crate::review::commands::sync::Connection;
+use crate::review::commands::sync::merge::landed;
 use crate::store::model::{
     Approval, Comment, Delivery, PostState, RecordPost, RemoteComment, Target,
 };
