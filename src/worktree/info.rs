@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 use super::disposable::is_disposable;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
-use crate::git::base::default_names;
 use crate::git::{Repo, Worktree, nul_fields};
 
 /// The main checkout: the first entry of `git worktree list`.
@@ -24,22 +23,6 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     Repo::at(dir)
         .toplevel()
         .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))
-}
-
-/// The default branch's name and its ref: the first of [`default_names`] that exists, as a
-/// local branch when it does and as `origin/<name>` otherwise.
-pub fn default_branch(repo: &Repo) -> Result<Option<(String, String)>> {
-    for name in default_names(repo)? {
-        for reference in [
-            format!("refs/heads/{name}"),
-            format!("refs/remotes/origin/{name}"),
-        ] {
-            if repo.ref_commit(&reference)?.is_some() {
-                return Ok(Some((name, reference)));
-            }
-        }
-    }
-    Ok(None)
 }
 
 /// Ignored files, split into those a backup copies and the disposable paths it skips.

@@ -1,7 +1,7 @@
 use clap::Args;
 use serde_json::{Value, json};
 
-use super::info::{agents_in, default_branch, describe};
+use super::info::{agents_in, describe};
 use super::roots;
 use crate::core::agents;
 use crate::core::error::Result;
@@ -41,7 +41,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 fn rows_of(repo: &Repo, live: &[agents::Live]) -> Result<Vec<Value>> {
     let entries = repo.worktrees()?;
-    let default = default_branch(repo)?;
+    let default = repo.default_branch_ref()?;
     let mut rows = Vec::new();
     for entry in entries.iter().skip(1) {
         let mut row = describe(repo, entry, default.as_ref())?;

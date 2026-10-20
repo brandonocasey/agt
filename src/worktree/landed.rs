@@ -80,7 +80,7 @@ pub struct Scene {
 impl Scene {
     /// `None` when the repository has no default branch.
     pub fn read(repo: &Repo) -> Result<Option<Self>> {
-        let Some((name, reference)) = info::default_branch(repo)? else {
+        let Some((name, reference)) = repo.default_branch_ref()? else {
             return Ok(None);
         };
         let entries = repo.worktrees()?;

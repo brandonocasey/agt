@@ -11,22 +11,6 @@ pub struct Candidate {
     pub commit: String,
 }
 
-/// The names the default branch may have, best first: the branch `origin/HEAD` names, `main`,
-/// `master`.
-pub fn default_names(repo: &Repo) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    if let Some(remote) = repo.git_opt(&[
-        "symbolic-ref",
-        "--quiet",
-        "--short",
-        "refs/remotes/origin/HEAD",
-    ])? {
-        names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
-    }
-    names.extend(["main".to_owned(), "master".to_owned()]);
-    Ok(names)
-}
-
 /// Every remote's live default branch, fetched, then the local default branch. `flag` names the
 /// option the caller offers to name the base itself, for the error when none is found.
 pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
@@ -49,7 +33,7 @@ pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
             commit,
         });
     }
-    for name in default_names(repo)? {
+    for name in repo.default_branch_names()? {
         if let Some(commit) = repo.ref_commit(&format!("refs/heads/{name}"))? {
             found.push(Candidate {
                 remote: None,

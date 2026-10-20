@@ -1177,7 +1177,7 @@ and prints JSON. The main checkout is the first entry of `git worktree list`; wh
 (`reused: true`); another existing branch gets a worktree without moving. A branch that exists only as `origin/<branch>` (no local branch, no `--base`) gets a local branch tracking it, checked out in the worktree (`tracking` names the upstream). When neither a local branch nor `origin/<branch>` exists, `create` first asks `origin` (`git ls-remote --exit-code`, whose exit code 2 means no such branch, so git's message language does not matter) and then fetches that one branch (`git fetch origin +refs/heads/<branch>:refs/remotes/origin/<branch>`), so a branch pushed after the last fetch is found; if `origin` has no such branch the new branch starts as below, and any other fetch failure (offline, authentication) is an error naming the branch that suggests `--base`, instead of a silent new branch. A new branch starts at
 `--base`, or at the newest default base: for each remote, its live default
 (`git ls-remote --symref <remote> HEAD`) is fetched and its commit recorded at once, and the local
-default branch (`origin/HEAD`'s, else `main`, else `master`) joins them. The candidate that
+default branch (`origin/HEAD`'s, else `main`, `master` or `init.defaultBranch`) joins them. The candidate that
 contains all the others wins; when they diverge, origin's fetched default is used and
 `base.diverged` is true. `base.candidates` lists every candidate with its commit. Choosing
 moves no remote-tracking branch, and a remote that cannot be queried or fetched is an
