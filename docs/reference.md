@@ -1247,10 +1247,10 @@ text is never printed, not even in errors. Rules (one table in `src/secrets/rule
 `generic-assignment` (`key`, `token`, `secret` or `password` set to a quoted value of 8 or more characters, or a bare 16+ character token ending the line as in `.env`, `export` and YAML lines; neither
 may be a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
 containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error (reported as `agt: error: <message>`), including a `PATH` that does not exist (with `--staged`, one that is not on disk, in the index or in the staged diff).
-
-## Wait
 Files that disappear after listing are skipped. Other filesystem inspection or read errors
 fail the scan with exit status 2 and identify the path.
+
+## Wait
 
 `agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every
 `--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. Agents run it in the background so they wake within the prompt cache's five
@@ -1317,15 +1317,15 @@ Issues live under `<main-checkout>/.agt/issues/<tracker>/<number-or-local-id>.js
 Remote tracker keys are `gh-<host>-<owner>-<repo>` or `gl-<host>-<group>-<project>`.
 Local issues use the local tracker. `--tracker` accepts a key or `owner/repo`;
 issue references accept `owner/repo#12`, `#12`, `12` or `local-xxxxxx`.
+Different destinations sharing a tracker key cause an identity collision error.
+The collided tracker remains unchanged, and no request reaches its forge.
+Host and repository comparisons ignore ASCII case; existing tracker keys stay unchanged.
 
 ### Auto-sync of issues
 
 Reads (`list`, `show`, `search`, `status`, `find`) stay local unless
 `sync.auto_pull = true`. Enabled pulls refresh applicable trackers when unsynced
 or at least `max_age_secs` old. Failures back off for that interval and print
-Different destinations sharing a tracker key cause an identity collision error.
-The collided tracker remains unchanged, and no request reaches its forge.
-Host and repository comparisons ignore ASCII case; existing tracker keys stay unchanged.
 `agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
 
 With `sync.auto_push = true`, mutations with a remote representation send only
