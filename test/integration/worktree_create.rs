@@ -1109,3 +1109,21 @@ fn offline_create_prepare_reports_the_refusal_as_a_failed_step_and_runs_the_hook
     assert!(fake_calls(&env).is_empty(), "{:?}", fake_calls(&env));
 }
 
+#[test]
+fn offline_background_setup_does_not_install() {
+    let (env, tools) = offline_prepare_repo();
+    let output = offline_create(&env, &tools, &["--prepare", "--background"]);
+    assert!(output.status.success(), "{output:?}");
+    let tree = env.repo.join(".worktrees/off");
+    let waited = env
+        .bin(&tree)
+        .args(["worktree", "prepare", "--wait", "--timeout", "30"])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&waited.stdout).unwrap();
+    assert_eq!(report["state"], "done");
+    assert_eq!(report["prepare"]["ok"], false);
+    assert!(tree.join("hooked").exists());
+    assert!(fake_calls(&env).is_empty(), "{:?}", fake_calls(&env));
+}
+

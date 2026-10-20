@@ -18,6 +18,7 @@ use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{read_json, write_json};
 use crate::core::output::{Output, TIMED_OUT};
 use crate::core::process::{self, Polled};
+use crate::forge::auto::Offline;
 use crate::core::{agents, clock};
 use crate::git::Repo;
 
@@ -112,10 +113,16 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
         false,
     )?;
     let list = steps.iter().map(|step| step.name()).collect::<Vec<_>>();
-    let spawned = Command::new(std::env::current_exe().map_err(ctx("find the agt binary"))?)
+    let mut command = Command::new(std::env::current_exe().map_err(ctx("find the agt binary"))?);
+    command
         .args(["worktree", "setup", "--steps", &list.join(",")])
         .arg(root)
-        .current_dir(root)
+        .current_dir(root);
+    // The root `--offline` flag is not inherited by the child.
+    if Offline::current().is_set() {
+        command.env("AGT_OFFLINE", "1");
+    }
+    let spawned = command
         .stdin(Stdio::null())
         .stdout(sink)
         .stderr(again)
