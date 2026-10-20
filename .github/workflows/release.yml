@@ -16,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Check release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agt") | .version')
+          test "$RELEASE_TAG" = "v$version"
       - run: cargo test --locked
 
   build:
@@ -36,10 +42,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
-          name=agt-${{ github.ref_name }}-${{ matrix.target }}
-          cp dist/target/${{ matrix.target }}/release/agt .
+          name="agt-${RELEASE_TAG}-${TARGET}"
+          cp "dist/target/${TARGET}/release/agt" .
           tar -czf "$name.tar.gz" agt
+      - name: Check packaged executable
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="agt-${RELEASE_TAG}-${TARGET}.tar.gz"
+          test "$(tar -tzf "$archive")" = "agt"
+          check_dir=$(mktemp -d "$RUNNER_TEMP/agt-smoke.XXXXXX")
+          tar -xzf "$archive" -C "$check_dir"
+          export HOME="$check_dir/home"
+          export XDG_CONFIG_HOME="$check_dir/config"
+          export XDG_STATE_HOME="$check_dir/state"
+          export XDG_CACHE_HOME="$check_dir/cache"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
+          test -x "$check_dir/agt"
+          test "$("$check_dir/agt" --version)" = "agt ${RELEASE_TAG#v}"
+          "$check_dir/agt" --help > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

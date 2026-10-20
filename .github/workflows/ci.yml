@@ -9,6 +9,13 @@ permissions:
   contents: read
 
 jobs:
+  minimum-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: cargo check --locked --all-targets
+
   check:
     strategy:
       fail-fast: false
