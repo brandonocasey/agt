@@ -1067,3 +1067,45 @@ fn clone_deps_still_runs_the_other_installs_and_fails_when_one_fails() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["deps_from"], "clone");
 }
+
+/// A repository whose lockfile makes `create --prepare` run `npm ci`, with a create hook that
+/// touches `hooked`, and the fake tools directory.
+fn offline_prepare_repo() -> (Env, PathBuf) {
+    let (env, _) = repo_with_commit();
+    let tools = fake_tools(&env);
+    commit(&env, &env.repo.clone(), "package-lock.json", "{}\n");
+    env.write_repo_config("[worktree.hooks]\ncreate = [\"touch hooked\"]\n");
+    assert!(agt(&env, &env.repo, &["trust"]).status.success());
+    (env, tools)
+}
+
+fn offline_create(env: &Env, tools: &Path, args: &[&str]) -> Output {
+    env.bin(&env.repo)
+        .arg("--offline")
+        .arg("worktree")
+        .args(["create", "off"])
+        .args(args)
+        .env("PATH", path_with(tools))
+        .env("FAKE_LOG", env.path("fake.log"))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn offline_create_prepare_reports_the_refusal_as_a_failed_step_and_runs_the_hooks() {
+    let (env, tools) = offline_prepare_repo();
+    let output = offline_create(&env, &tools, &["--prepare"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["prepare"]["ok"], false);
+    assert!(
+        value["prepare"]["steps"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("offline mode forbids")
+    );
+    assert_eq!(value["hooks"]["ok"], true);
+    assert!(env.repo.join(".worktrees/off/hooked").exists());
+    assert!(fake_calls(&env).is_empty(), "{:?}", fake_calls(&env));
+}
+

@@ -911,7 +911,7 @@ whose answer comes from the remote refuses with `offline mode forbids <what>` (e
 | `branch check` | `--checks pushed` refuses (the remote tip and the PR/MR are the answer, also by default). `--checks landable` weighs the local default branch only and fetches no remote. |
 | `worktree create` | Weighs the local default branch only. A branch with no local branch and no `origin/<branch>` tracking ref refuses unless `--base` is given, since only origin can say whether it exists. Submodules are filled only from clones already on the host (no network transport). |
 | `worktree remove` | Checks as `agt cleanup --only worktrees --offline` does: a tag that no commit elsewhere holds counts as unheld, so removal refuses naming it. |
-| `worktree prepare`, `create --prepare` | Refuse when `mise install` or a lockfile install would run, since those download. `--hooks`, `--wait` and `--clone-deps` without other installs run. |
+| `worktree prepare`, `create --prepare` | Refuse when `mise install` or a lockfile install would run, since those download; `create --prepare` reports the refusal as a failed `prepare` step (exit 1) and still runs the create hooks. `--hooks`, `--wait` and `--clone-deps` without other installs run. |
 | `cleanup --only worktrees` | No `ls-remote` for tags and no forge evidence. |
 | `doctor` | Skips the `gh`/`glab` login checks. |
 | `task`, `sessions`, `ps`, `secrets`, `wait`, `worktree list/port/restore` | Local already. `wait` and the worktree hooks run your commands, which agt does not restrict. |

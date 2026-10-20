@@ -170,11 +170,11 @@ fn worktree_prepare_installs_are_refused() {
         )
         .output()
         .unwrap();
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{error}");
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{report}");
     assert!(
-        error.contains("offline mode forbids agt worktree prepare installs"),
-        "{error}"
+        report.contains("offline mode forbids agt worktree prepare installs"),
+        "{report}"
     );
     assert!(!log.exists(), "npm ran");
 }
