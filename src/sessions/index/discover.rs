@@ -27,12 +27,6 @@ pub struct Coverage {
     pub oversized_lines: u64,
     pub unreadable: Vec<Unreadable>,
     pub removed_files: usize,
-    pub skipped_files: usize,
-    pub scan_limit: Option<u64>,
-    pub scan_limit_reached: bool,
-    pub unscanned_directories: usize,
-    pub byte_limit: Option<u64>,
-    pub byte_limit_reached: bool,
     pub scanned_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_turns: Option<usize>,
@@ -60,9 +54,8 @@ fn lossy(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Lists transcript files, stopping after `maximum` unless `session` asks for an exact match,
-/// which is found even beyond the limit.
-pub fn discover(maximum: u64, session: Option<&str>) -> Result<Discovered> {
+/// Lists every transcript file, with the ones that belong to `session` first.
+pub fn discover(session: Option<&str>) -> Result<Discovered> {
     let home = home()?;
     let roots = all_roots(&home, true);
     let mut files: Vec<String> = history_files(&home)
@@ -78,23 +71,12 @@ pub fn discover(maximum: u64, session: Option<&str>) -> Result<Discovered> {
         oversized_lines: 0,
         unreadable: Vec::new(),
         removed_files: 0,
-        skipped_files: 0,
-        scan_limit: (maximum != u64::MAX).then_some(maximum),
-        scan_limit_reached: false,
-        unscanned_directories: 0,
-        byte_limit: None,
-        byte_limit_reached: false,
         scanned_bytes: 0,
         indexed_turns: None,
         human_turns: None,
         inherited_turns: None,
     };
-    let count = |files: &[String], preferred: &[String]| (files.len() + preferred.len()) as u64;
-    let mut walker = Walker::new(roots);
-    while session.is_some() || count(&files, &preferred) < maximum {
-        let Some(step) = walker.next() else {
-            break;
-        };
+    for step in Walker::new(roots) {
         match step {
             Step::Unreadable(directory, error) => {
                 if error.kind() != ErrorKind::NotFound {
@@ -107,16 +89,10 @@ pub fn discover(maximum: u64, session: Option<&str>) -> Result<Discovered> {
             Step::File(path) if session.is_some_and(|id| belongs_to(&path, id)) => {
                 preferred.push(lossy(&path));
             }
-            Step::File(path) => {
-                if count(&files, &preferred) < maximum {
-                    files.push(lossy(&path));
-                }
-            }
+            Step::File(path) => files.push(lossy(&path)),
         }
     }
     coverage.discovered = files.len() + preferred.len();
-    coverage.scan_limit_reached = maximum != u64::MAX && count(&files, &preferred) >= maximum;
-    coverage.unscanned_directories = walker.unscanned();
     Ok(Discovered {
         files: unique(preferred.into_iter().chain(files)),
         coverage,

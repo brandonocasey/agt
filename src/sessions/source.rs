@@ -243,7 +243,7 @@ mod tests {
             scratch: false,
             roots: Vec::new(),
             files: vec![path.to_string_lossy().into_owned()],
-            top: 25,
+            limit: 25,
             harness: crate::sessions::Which::All,
             home: dir.path().to_owned(),
         };

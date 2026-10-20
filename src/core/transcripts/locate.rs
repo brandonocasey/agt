@@ -99,11 +99,6 @@ impl Walker {
             files: VecDeque::new(),
         }
     }
-
-    /// How many directories have not been read yet.
-    pub fn unscanned(&self) -> usize {
-        self.pending.len()
-    }
 }
 
 impl Iterator for Walker {

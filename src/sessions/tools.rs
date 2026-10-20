@@ -171,7 +171,7 @@ impl Tools {
         );
         let table: Vec<Vec<String>> = rows
             .iter()
-            .take(scope.top)
+            .take(scope.limit)
             .map(|(name, (calls, result, cost))| {
                 vec![
                     name.clone(),
@@ -354,7 +354,7 @@ impl CacheGaps {
             grouped(rewrite_usd, 2)
         );
         out.push_str("\nRewrite tokens by agent and project:\n");
-        let rows: Vec<Vec<String>> = most_common(per, scope.top)
+        let rows: Vec<Vec<String>> = most_common(per, scope.limit)
             .into_iter()
             .map(|((agent, project), tokens)| {
                 vec![
@@ -366,7 +366,7 @@ impl CacheGaps {
             .collect();
         fmt::table(&mut out, &["agent", "project", "rewrite tok"], &rows);
         out.push_str("\nTool running before the expired gap:\n");
-        let rows: Vec<Vec<String>> = most_common(cause, scope.top)
+        let rows: Vec<Vec<String>> = most_common(cause, scope.limit)
             .into_iter()
             .map(|(tool, times)| vec![times.to_string(), tool])
             .collect();

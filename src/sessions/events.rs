@@ -241,7 +241,7 @@ impl Failures {
 
     pub fn render(self, scope: &Scope) -> String {
         let mut out = String::new();
-        grouped(&mut out, self.rows, scope.top);
+        grouped(&mut out, self.rows, scope.limit);
         out
     }
 }
@@ -428,7 +428,7 @@ impl Friction {
             scope.since
         ));
         out.push_str("Interrupts and corrections:\n");
-        grouped(&mut out, rows, scope.top);
+        grouped(&mut out, rows, scope.limit);
         out.push_str("\nShort replies (3 words or fewer), top 20:\n");
         let mut replies: Vec<(String, Seen)> = short.into_iter().collect();
         replies.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
@@ -453,7 +453,7 @@ impl Friction {
         repeated.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
         let table: Vec<Vec<String>> = repeated
             .iter()
-            .take(scope.top)
+            .take(scope.limit)
             .map(|(prompt, seen)| {
                 vec![
                     seen.len().to_string(),
