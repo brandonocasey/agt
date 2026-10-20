@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::core::error::Result;
-use crate::core::local::{Lock, agents_state, private_dir, read_json, write_json};
+use crate::core::local::{agents_state, lock_file_or_busy, private_dir, read_json, write_json};
 
 type Paused = BTreeMap<String, String>;
 
@@ -31,8 +31,8 @@ fn load(files: &Files) -> Result<Paused> {
 /// Reads, changes and writes the document under its lock.
 fn edit<T>(change: impl FnOnce(&mut Paused) -> T) -> Result<T> {
     let files = files()?;
-    let _lock = Lock::acquire(
-        files.lock.clone(),
+    let _lock = lock_file_or_busy(
+        &files.lock,
         Some(Duration::from_secs(5)),
         "another agt pr command is changing the paused auto-merge records",
     )?;

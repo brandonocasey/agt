@@ -160,7 +160,10 @@ fn offline_keeps_issue_reads_local(fake: Fake) {
     let variable = read(&env, STALE, &["show", "1"], &[("AGT_OFFLINE", "1")]);
     assert_quiet_success(&variable);
     assert_eq!(title(&variable), "Login fails");
-    env.write_config(&format!("{}\n[sync]\nauto_pull = false\n", fake.config(false)));
+    env.write_config(&format!(
+        "{}\n[sync]\nauto_pull = false\n",
+        fake.config(false)
+    ));
     let config = read(&env, STALE, &["show", "1"], &[]);
     assert_quiet_success(&config);
     assert_eq!(title(&config), "Login fails");

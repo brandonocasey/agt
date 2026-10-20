@@ -487,9 +487,12 @@ impl Repo {
     /// `main`, `master`, then `init.defaultBranch`.
     pub fn default_branch_names(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
-        if let Some(remote) =
-            self.git_opt(&["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])?
-        {
+        if let Some(remote) = self.git_opt(&[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])? {
             names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
         }
         names.extend(["main".to_owned(), "master".to_owned()]);

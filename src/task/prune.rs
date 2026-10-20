@@ -10,7 +10,7 @@ use super::files;
 use super::records::{is_id, read_task};
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::Lock;
+use crate::core::local::lock_file_within;
 use crate::store::prune::{Removal, past_retention};
 
 /// A finished task record that is old enough to drop.
@@ -70,7 +70,8 @@ pub fn expired(now: i64) -> Result<Vec<Expired>> {
 
 /// Deletes the record under its lock after reading it again; gives up when the lock is held.
 pub fn remove(task: &Expired, now: i64) -> Result<Removal> {
-    let Ok(_lock) = Lock::acquire(files::lock_path(&task.id)?, None, "busy") else {
+    let lock = files::lock_path(&task.id)?;
+    let Some(_lock) = lock_file_within(&lock, None)? else {
         return Ok(Removal::Busy);
     };
     match read_task(&task.id) {
@@ -78,5 +79,7 @@ pub fn remove(task: &Expired, now: i64) -> Result<Removal> {
         _ => return Ok(Removal::Kept),
     }
     fs::remove_file(&task.path).map_err(ctx(format!("remove {}", task.path.display())))?;
+    // Waiters on the old lock inode notice the unlink and retry on a fresh file.
+    fs::remove_file(&lock).map_err(ctx(format!("remove {}", lock.display())))?;
     Ok(Removal::Removed(task.bytes))
 }

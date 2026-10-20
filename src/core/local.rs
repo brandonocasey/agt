@@ -27,34 +27,6 @@ pub fn private_dir(path: &Path) -> Result<()> {
         .map_err(ctx(format!("chmod {}", path.display())))
 }
 
-/// A lock held as a directory. Dropping it releases the lock.
-pub struct Lock(PathBuf);
-
-impl Lock {
-    /// Takes the lock, retrying for `wait` when it is held and then failing with `busy`.
-    pub fn acquire(path: PathBuf, wait: Option<Duration>, busy: &str) -> Result<Self> {
-        let deadline = wait.map(|wait| Instant::now() + wait);
-        loop {
-            match DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => return Ok(Self(path)),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
-                        return fail(busy);
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(error) => return Err(Error(format!("lock {}: {error}", path.display()))),
-            }
-        }
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
-    }
-}
-
 /// Replaces `path` with `data` through a private temporary file in the same directory, so a
 /// reader sees the old or the new document and never a partial one. `check` runs just before
 /// the rename. `durable` also syncs the data and the directory, so the write survives a crash.
@@ -197,20 +169,43 @@ pub fn lock_file(path: &Path) -> Result<File> {
     }
 }
 
+/// Tries the exclusive lock on the open `file` without waiting; `false` when another process
+/// holds it. `path` names the file in the error.
+pub fn try_lock(file: &File, path: &Path) -> Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(error)) => fail(format!("lock {}: {error}", path.display())),
+    }
+}
+
 /// Like [`lock_file`], but gives up with `None` when another process holds the lock.
 pub fn try_lock_file(path: &Path) -> Result<Option<File>> {
+    lock_file_within(path, None)
+}
+
+/// Like [`try_lock_file`], but polls for `wait` while another process holds the lock, and
+/// fails with `busy` when it still does. The lock is released when the file is dropped, also
+/// when the process dies.
+pub fn lock_file_or_busy(path: &Path, wait: Option<Duration>, busy: &str) -> Result<File> {
+    lock_file_within(path, wait)?.ok_or_else(|| Error(busy.to_owned()))
+}
+
+/// [`try_lock_file`] polling for `wait` (`None`: one try) while another process holds the lock.
+pub fn lock_file_within(path: &Path, wait: Option<Duration>) -> Result<Option<File>> {
+    let deadline = wait.map(|wait| Instant::now() + wait);
     loop {
         let file = open_lock_file(path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Error(error)) => {
-                return fail(format!("lock {}: {error}", path.display()));
+        if try_lock(&file, path)? {
+            if is_current(&file, path)? {
+                return Ok(Some(file));
             }
+            continue;
         }
-        if is_current(&file, path)? {
-            return Ok(Some(file));
+        if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+            return Ok(None);
         }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -314,6 +309,21 @@ mod tests {
     use std::collections::BTreeMap;
 
     type Map = BTreeMap<String, u16>;
+
+    #[test]
+    fn a_held_lock_is_polled_for_then_reported_busy_and_follows_its_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".x.lock");
+        let held = try_lock_file(&path).unwrap().unwrap();
+        assert!(try_lock_file(&path).unwrap().is_none());
+        let started = Instant::now();
+        let error = lock_file_or_busy(&path, Some(Duration::from_millis(100)), "busy now");
+        assert_eq!(error.unwrap_err().0, "busy now");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        drop(held);
+        let again = lock_file_within(&path, Some(Duration::from_millis(100))).unwrap();
+        assert!(again.is_some());
+    }
 
     #[test]
     fn update_json_writes_a_private_file_only_when_changed() {

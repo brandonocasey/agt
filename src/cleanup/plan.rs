@@ -304,8 +304,8 @@ impl Plan {
         Ok(())
     }
 
-    /// Lock files of reviews and issues whose document is gone. Task locks are directories that
-    /// exist only while held, so they are not looked at.
+    /// Lock files of reviews and issues whose document is gone. A task's lock file goes with its
+    /// record, so task locks are not looked at.
     pub fn locks(&mut self) -> Result<()> {
         for namespace in [Namespace::Reviews, Namespace::Issues] {
             for store in stores(namespace)? {

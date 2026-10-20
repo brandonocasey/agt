@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
-use crate::core::local::{Lock, hostname, write_json};
+use crate::core::local::{hostname, lock_file_or_busy, write_json};
 use crate::core::output::Output;
 use crate::git::Repo;
 use crate::task::args::{Check, Create, Target, Update};
@@ -65,8 +65,8 @@ pub(super) fn read_task(id: &str) -> Result<Value> {
 
 fn with_lock<T>(id: &str, callback: impl FnOnce() -> Result<T>) -> Result<T> {
     files::ensure_root()?;
-    let _lock = Lock::acquire(
-        files::lock_path(id)?,
+    let _lock = lock_file_or_busy(
+        &files::lock_path(id)?,
         None,
         &format!("task {id} is being updated; retry"),
     )?;
