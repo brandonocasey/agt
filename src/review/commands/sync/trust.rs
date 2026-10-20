@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use crate::forge::CommentData;
-use crate::forge::markers::{agent_attempt, agent_id};
+use crate::forge::markers::{agent_id, is_landed_as};
 use crate::forge::service::{Capabilities, ReviewService};
 use crate::store::model::{Comment, Target};
 
@@ -93,10 +93,8 @@ impl<'a> Trust<'a> {
     /// comment is never claimed.
     pub(super) fn claims(&self, comment: &Comment, incoming: &CommentData) -> bool {
         comment.remote.is_none()
-            && comment.delivery.is_posting()
             && trusted(incoming, self.login)
-            && agent_id(&incoming.body).as_deref() == Some(comment.id.as_str())
-            && comment.delivery.is_attempt(agent_attempt(&incoming.body))
+            && is_landed_as(&comment.delivery, &comment.id, &incoming.body)
             && self.sent_text(comment.delivery.sent.as_deref(), incoming)
     }
 }

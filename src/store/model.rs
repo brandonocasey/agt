@@ -226,6 +226,12 @@ impl Delivery {
         self.began_at = None;
     }
 
+    /// Returns a refused item to the queue: nothing is in flight any more.
+    pub fn refuse(&mut self) {
+        self.post = PostState::Pending;
+        self.attempt = None;
+    }
+
     pub fn is_posting(&self) -> bool {
         self.post == PostState::Posting
     }

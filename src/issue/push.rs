@@ -267,12 +267,10 @@ impl Push<'_> {
             }
             if what == "create" {
                 if let Some(create) = issue.create.as_mut() {
-                    create.post = PostState::Pending;
-                    create.attempt = None;
+                    create.refuse();
                 }
             } else if let Some(comment) = issue.comments.iter_mut().find(|c| c.id == what) {
-                comment.delivery.post = PostState::Pending;
-                comment.delivery.attempt = None;
+                comment.delivery.refuse();
             }
         })?;
         Ok(Step::Stopped)

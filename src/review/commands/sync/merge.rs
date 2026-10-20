@@ -9,35 +9,12 @@ use crate::forge::markers::{self, agent_attempt, agent_id};
 use crate::forge::service::ReviewService;
 use crate::forge::{CommentData, Draft, Fetched, ThreadData};
 use crate::store::model::{
-    Author, Comment, ImportedRecord, PostState, RecordPost, RemoteComment, RemoteKind, Resolution,
+    Author, Comment, ImportedRecord, PostState, RecordPost, RemoteKind, Resolution,
     Run, Target, Thread, ThreadType,
 };
 
-fn remote_comment(comment: &CommentData, login: &str) -> RemoteComment {
-    RemoteComment {
-        id: comment.id.clone(),
-        url: comment.url.clone(),
-        login: comment.login.clone(),
-        is_me: comment.login.as_deref() == Some(login),
-        editor: comment.editor.clone(),
-        review_id: comment.review_id.clone(),
-    }
-}
-
 fn imported_comment(comment: CommentData, login: &str) -> Comment {
-    let author = Author::Human {
-        login: comment.login.clone().unwrap_or_else(|| "ghost".to_owned()),
-        git_name: false,
-    };
-    let remote = remote_comment(&comment, login);
-    Comment::new(
-        Comment::imported_id(&comment.id),
-        author,
-        comment.body,
-        comment.created_at,
-        PostState::Posted,
-        Some(remote),
-    )
+    comment.imported(login, comment.body.clone(), "ghost")
 }
 
 fn imported_id(service: &dyn ReviewService, data: &ThreadData) -> String {
@@ -426,7 +403,7 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
             Some(found) => {
                 used[found] = true;
                 let mut comment = thread.comments[found].clone();
-                comment.remote = Some(remote_comment(&incoming, login));
+                comment.remote = Some(incoming.remote(login));
                 comment.body = incoming.body;
                 comment.delivery.post = PostState::Posted;
                 comment.draft_id = None;
@@ -465,7 +442,7 @@ fn answer(thread: &mut Thread, data: ThreadData, trust: &Trust, now: &str) {
             .iter_mut()
             .find(|existing| trust.claims(existing, &comment))
         {
-            existing.remote = Some(remote_comment(&comment, login));
+            existing.remote = Some(comment.remote(login));
             existing.delivery.post = PostState::Posted;
             existing.draft_id = None;
             continue;

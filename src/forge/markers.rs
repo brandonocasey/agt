@@ -3,6 +3,8 @@
 //! summary holds.
 //! Writers and parsers live together so the format has one definition.
 
+use crate::store::model::Delivery;
+
 const AGENT: &str = "<!-- agent-review id=";
 const FINDING: &str = "<!-- review-finding v1 id=";
 const RECORD: &str = "<!-- review-record v2 ";
@@ -64,6 +66,14 @@ pub fn agent_attempt(body: &str) -> Option<&str> {
     inner
         .split_whitespace()
         .find_map(|pair| pair.strip_prefix("attempt="))
+}
+
+/// Whether `body` is the landed write of the item `local_id` whose delivery is `delivery`: one
+/// being posted, marked with its id and the same attempt.
+pub fn is_landed_as(delivery: &Delivery, local_id: &str, body: &str) -> bool {
+    delivery.is_posting()
+        && agent_id(body).as_deref() == Some(local_id)
+        && delivery.is_attempt(agent_attempt(body))
 }
 
 /// `body` without its `agent-review` marker and the blank space before it, as a person reads it.

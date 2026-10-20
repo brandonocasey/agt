@@ -3,11 +3,11 @@
 
 use crate::forge::CommentData;
 use crate::forge::issue::{Changes, IssueData, IssueFetched};
-use crate::forge::markers::{agent_attempt, agent_id, strip_agent};
+use crate::forge::markers::{is_landed_as, strip_agent};
 use crate::store::issues::{
     Conflict, Fields, Issue, LinkSource, Links, PrLink, RemoteInfo, VERSION,
 };
-use crate::store::model::{Author, Comment, PostState, RemoteComment};
+use crate::store::model::{Comment, PostState};
 
 /// The writable fields of `data`, as the host holds them. A marker `agt` added to the body is
 /// not part of what a person wrote.
@@ -185,37 +185,17 @@ fn merge_comments(
         }
         let claimed = issue.comments.iter().position(|comment| {
             comment.remote.is_none()
-                && comment.delivery.is_posting()
                 && incoming.login.as_deref() == Some(me)
-                && agent_id(&incoming.body).as_deref() == Some(comment.id.as_str())
-                && comment.delivery.is_attempt(agent_attempt(&incoming.body))
+                && is_landed_as(&comment.delivery, &comment.id, &incoming.body)
         });
-        let remote_comment = RemoteComment {
-            id: incoming.id.clone(),
-            url: incoming.url.clone(),
-            login: incoming.login.clone(),
-            is_me: incoming.login.as_deref() == Some(me),
-            editor: incoming.editor.clone(),
-            review_id: None,
-        };
         if let Some(index) = claimed {
             let comment = &mut issue.comments[index];
             comment.delivery.post = PostState::Posted;
-            comment.remote = Some(remote_comment);
+            comment.remote = Some(incoming.remote(me));
             merged.comments_claimed += 1;
             continue;
         }
-        issue.comments.push(Comment::new(
-            Comment::imported_id(&incoming.id),
-            Author::Human {
-                login: incoming.login.clone().unwrap_or_else(|| "unknown".into()),
-                git_name: false,
-            },
-            body,
-            incoming.created_at.clone(),
-            PostState::Posted,
-            Some(remote_comment),
-        ));
+        issue.comments.push(incoming.imported(me, body, "unknown"));
         merged.comments_new += 1;
     }
     for comment in &mut issue.comments {

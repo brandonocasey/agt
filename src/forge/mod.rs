@@ -14,7 +14,9 @@ use serde_json::Value;
 
 use crate::core::error::{Error, Result};
 use crate::forge::service::SERVICES;
-use crate::store::model::{RemoteThread, Review, ReviewState};
+use crate::store::model::{
+    Author, Comment, PostState, RemoteComment, RemoteThread, Review, ReviewState,
+};
 
 /// A `--pr` argument: a number, or a PR/MR URL that also names the host and repository.
 pub struct PrRef {
@@ -131,6 +133,40 @@ pub struct CommentData {
     pub login: Option<String>,
     pub editor: Option<String>,
     pub review_id: Option<String>,
+}
+
+impl CommentData {
+    /// The host's side of the comment; `me` is the login agt posts as.
+    pub fn remote(&self, me: &str) -> RemoteComment {
+        RemoteComment {
+            id: self.id.clone(),
+            url: self.url.clone(),
+            login: self.login.clone(),
+            is_me: self.login.as_deref() == Some(me),
+            editor: self.editor.clone(),
+            review_id: self.review_id.clone(),
+        }
+    }
+
+    /// The comment as a local one with the host's `body`; `missing_login` names an author the
+    /// host no longer knows.
+    pub fn imported(&self, me: &str, body: String, missing_login: &str) -> Comment {
+        let author = Author::Human {
+            login: self
+                .login
+                .clone()
+                .unwrap_or_else(|| missing_login.to_owned()),
+            git_name: false,
+        };
+        Comment::new(
+            Comment::imported_id(&self.id),
+            author,
+            body,
+            self.created_at.clone(),
+            PostState::Posted,
+            Some(self.remote(me)),
+        )
+    }
 }
 
 pub struct ThreadData {

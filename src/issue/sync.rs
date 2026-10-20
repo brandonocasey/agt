@@ -9,7 +9,7 @@ use crate::core::clock;
 use crate::core::config::Config;
 use crate::core::error::{Error, Result};
 use crate::forge::issue::{IssueData, ListQuery};
-use crate::forge::markers::{agent_attempt, agent_id};
+use crate::forge::markers::is_landed_as;
 use crate::forge::service::{self, IssueService, IssueSubject};
 use crate::store::Store;
 use crate::store::issues::{Issue, TRACKER_FILE};
@@ -143,11 +143,10 @@ fn claim_created(
 /// Whether `data` is the issue `local`'s posting create made.
 pub fn is_created_by(local: &Issue, data: &IssueData, login: &str) -> bool {
     data.author.as_deref() == Some(login)
-        && agent_id(&data.body).as_deref() == Some(local.key.as_str())
         && local
             .create
             .as_ref()
-            .is_some_and(|create| create.is_attempt(agent_attempt(&data.body)))
+            .is_some_and(|create| is_landed_as(create, &local.key, &data.body))
 }
 
 /// Gives the local issue `local_key` the identity of `data` and renames it to its number. The
