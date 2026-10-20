@@ -720,7 +720,10 @@ fn gitlab_list_mine_asks_for_created_by_me() {
 fn a_self_hosted_origin_is_found_through_the_hosts_file() {
     let env = setup("git@git.example.invalid:g/p.git");
     let refused = err(&env, &["list"]);
-    assert!(refused.contains("origin is not a GitHub or GitLab host"), "{refused}");
+    assert!(
+        refused.contains("origin is not a GitHub or GitLab host"),
+        "{refused}"
+    );
     let dir = env.path("config/agt");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -831,4 +834,25 @@ fn gitlab_auto_merge_on_that_merges_at_once_succeeds_and_forgets_the_memo() {
     assert_eq!(on["merged"], true);
     assert_eq!(on["pr"]["state"], "merged");
     assert!(!std::fs::read_to_string(&record).unwrap().contains("squash"));
+}
+
+#[test]
+fn offline_refuses_every_pr_command() {
+    let env = github();
+    for offline in [false, true] {
+        let mut command = env.bin(&env.repo);
+        if offline {
+            command.arg("--offline");
+        } else {
+            command.env("AGT_OFFLINE", "1");
+        }
+        let output = command.args(["pr", "list"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("offline mode forbids agt pr"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(env.forge_calls().is_empty());
 }

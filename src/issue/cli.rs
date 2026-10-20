@@ -5,8 +5,6 @@ pub struct Cli {
     /// Only this tracker: its key (`gh-github.com-owner-repo`) or `owner/repo`.
     #[arg(long, global = true, value_name = "KEY")]
     pub tracker: Option<String>,
-    #[command(flatten)]
-    pub offline: crate::forge::auto::Offline,
     #[command(subcommand)]
     pub command: Command,
 }

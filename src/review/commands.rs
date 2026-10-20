@@ -77,7 +77,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
     if matches!(cli.command, Command::Sync { .. } | Command::Publish { .. }) {
-        cli.offline.forbid("review sync and publish")?;
+        crate::forge::auto::Offline::current().forbid("review sync and publish")?;
     }
     let mut ctx = Ctx::new(
         selection,
@@ -93,7 +93,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         cli.command,
         Command::Status { .. } | Command::List(_) | Command::Show { .. }
     ) {
-        auto::sync_stale(&ctx, cli.offline)?;
+        auto::sync_stale(&ctx, crate::forge::auto::Offline::current())?;
     }
     let status_selection = ctx.selection.clone();
     let value = match cli.command {
@@ -165,7 +165,7 @@ pub fn run(cli: Cli) -> Result<Output> {
                 None => Vec::new(),
             };
             let mut ended = run_end(&ctx, &run, reveal, head.as_deref(), usage)?;
-            auto::publish_ended(&mut ctx, &run, cli.offline);
+            auto::publish_ended(&mut ctx, &run, crate::forge::auto::Offline::current());
             // The status the caller would check next, from a read-only repository so
             // merge checks write no objects.
             let mut reader_selection = status_selection;

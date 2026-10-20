@@ -19,6 +19,8 @@ use crate::worktree;
 #[derive(Parser)]
 #[command(name = "agt", version, about)]
 pub struct Cli {
+    #[command(flatten)]
+    offline: crate::forge::auto::Offline,
     #[command(subcommand)]
     command: Command,
 }
@@ -58,6 +60,7 @@ enum Command {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
+    cli.offline.install();
     match cli.command {
         Command::Review(args) => review::commands::run(*args),
         Command::Task(args) => task::cli::run(args),

@@ -15,8 +15,6 @@ pub struct Cli {
     /// Branch the merge-base is taken against [default: origin/HEAD, then main or master].
     #[arg(long, global = true, value_name = "REF")]
     pub default_branch: Option<String>,
-    #[command(flatten)]
-    pub offline: crate::forge::auto::Offline,
     #[command(subcommand)]
     pub command: Command,
 }

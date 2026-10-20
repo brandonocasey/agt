@@ -125,3 +125,22 @@ fn failures_take_the_host_from_an_mr_url() {
         "{calls:?}"
     );
 }
+
+#[test]
+fn offline_refuses_ci_commands() {
+    let env = Env::new();
+    for args in [vec!["ci", "wait", "o/r#1"], vec!["ci", "failures", "g/p!1"]] {
+        let output = env
+            .bin(&env.repo)
+            .arg("--offline")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("offline mode forbids agt ci"),
+            "{args:?}"
+        );
+    }
+    assert!(env.forge_calls().is_empty());
+}

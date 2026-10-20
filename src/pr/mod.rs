@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{self, Output};
+use crate::forge::auto::Offline;
 use crate::forge::landed::Origin;
 use crate::forge::service::{ReviewService, SERVICES, kind};
 use crate::forge::{PrRef, parse_pr};
@@ -338,6 +339,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 fn execute(command: Command) -> Result<Output> {
+    Offline::current().forbid("agt pr")?;
     let repo = Repo::discover()?;
     let remote = Remote::connect(&repo)?;
     let (t, slug) = (remote.service.transport(), remote.origin.repo.as_str());

@@ -41,11 +41,13 @@ impl Origin {
         let Some((host, path)) = repo.origin_location()? else {
             return Ok(None);
         };
-        Ok(service::detect(&host, hosts::named(&host)?, None).map(|forge| Self {
-            forge,
-            host,
-            repo: path,
-        }))
+        Ok(
+            service::detect(&host, hosts::named(&host)?, None).map(|forge| Self {
+                forge,
+                host,
+                repo: path,
+            }),
+        )
     }
 
     /// Like [`Origin::of`], but a repository without a usable `origin` is an error.

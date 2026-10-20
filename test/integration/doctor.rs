@@ -194,3 +194,23 @@ fn a_repo_without_a_default_branch_gets_a_plain_detail() {
         "git remote set-head origin --auto, or create main"
     );
 }
+
+#[test]
+fn offline_skips_the_login_checks() {
+    let env = setup("99.0.0");
+    let output = env
+        .bin(&env.repo)
+        .env("AGT_MISE_BIN", env.path("mise"))
+        .args(["--offline", "doctor", "--json"])
+        .output()
+        .expect("agt runs");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(row(&report, "auth")["detail"], "skipped: offline");
+    assert!(
+        !env.forge_calls()
+            .iter()
+            .any(|call| call.contains("auth status")),
+        "{:?}",
+        env.forge_calls()
+    );
+}

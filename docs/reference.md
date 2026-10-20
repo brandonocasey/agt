@@ -61,7 +61,7 @@ Environment variables agt reads, or sets for programs it runs:
 
 | Variable | Used by | Meaning | Kind |
 | --- | --- | --- | --- |
-| `AGT_OFFLINE` | `review`, `issue`, `cleanup --only worktrees` | Anything but empty, `0` or `false` acts as `--offline` | user |
+| `AGT_OFFLINE` | every command | Anything but empty, `0` or `false` acts as the root `--offline` flag, which `agt pr` and `agt ci` refuse under, `agt doctor` skips its login checks under, and `review`, `issue` and `cleanup --only worktrees` honour as before | user |
 | `AGT_PRICES` | `sessions` | Price file to use instead of `model-prices.json` | user |
 | `AGT_LS_REMOTE_TIMEOUT` | `worktree`, `cleanup` | Seconds a remote check may take (default 10) | user |
 | `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |

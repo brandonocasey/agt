@@ -17,6 +17,7 @@ use clap::{Args, Subcommand};
 
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{FAILED, Output};
+use crate::forge::auto::Offline;
 use crate::store::model::Forge;
 
 use api::Project;
@@ -123,6 +124,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 fn execute(cli: Cli) -> Result<u8> {
+    Offline::current().forbid("agt ci")?;
     let out = Out;
     let code = match cli.command {
         Command::Failures { target, limit } => {
@@ -152,12 +154,7 @@ fn execute(cli: Cli) -> Result<u8> {
     Ok(code)
 }
 
-fn wait_targets(
-    targets: &[String],
-    timeout: f64,
-    interval: f64,
-    max_interval: f64,
-) -> Result<u8> {
+fn wait_targets(targets: &[String], timeout: f64, interval: f64, max_interval: f64) -> Result<u8> {
     if interval > max_interval {
         return fail("--interval cannot exceed --max-interval");
     }
