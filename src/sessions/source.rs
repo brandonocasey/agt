@@ -5,11 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use crate::core::harness::Harness;
 use crate::core::local;
 use crate::core::transcripts::{
-    Kind, Step, Transcript, Walker, claude_projects, codex_roots, is_scratch,
+    Step, Transcript, Walker, claude_projects, codex_roots, is_scratch,
 };
-use crate::sessions::{Harness, Scope};
+use crate::sessions::Scope;
 
 fn modified(path: &Path) -> Option<f64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
@@ -23,11 +24,8 @@ pub fn home() -> PathBuf {
     local::home().unwrap_or_default()
 }
 
-fn wanted(scope: &Scope, kind: Kind) -> bool {
-    matches!(
-        (scope.harness, kind),
-        (Harness::All, _) | (Harness::Claude, Kind::Claude) | (Harness::Codex, Kind::Codex)
-    )
+fn wanted(scope: &Scope, harness: Harness) -> bool {
+    scope.harness.includes(harness)
 }
 
 /// `~` and `~/...` as the home directory.
@@ -47,19 +45,19 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
             .files
             .iter()
             .map(|file| Transcript::of_file(PathBuf::from(file)))
-            .filter(|transcript| wanted(scope, transcript.kind))
+            .filter(|transcript| wanted(scope, transcript.harness))
             .collect();
     }
     let home = home();
     // A root named on the command line can hold either harness; each file says which.
-    let roots: Vec<(PathBuf, Option<Kind>)> = if scope.roots.is_empty() {
+    let roots: Vec<(PathBuf, Option<Harness>)> = if scope.roots.is_empty() {
         claude_projects(&home)
             .into_iter()
-            .map(|root| (root, Some(Kind::Claude)))
+            .map(|root| (root, Some(Harness::Claude)))
             .chain(
                 codex_roots(&home)
                     .into_iter()
-                    .map(|root| (root, Some(Kind::Codex))),
+                    .map(|root| (root, Some(Harness::Codex))),
             )
             .collect()
     } else {
@@ -72,7 +70,7 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
     let mut found = Vec::new();
     let mut skipped = 0;
     for (root, hint) in roots {
-        if hint.is_some_and(|kind| !wanted(scope, kind)) {
+        if hint.is_some_and(|harness| !wanted(scope, harness)) {
             continue;
         }
         for step in Walker::new(vec![root.clone()]) {
@@ -93,7 +91,7 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
                 .project
                 .as_ref()
                 .is_some_and(|text| !transcript.project.contains(text.as_str()));
-            if !wanted(scope, transcript.kind) || outside {
+            if !wanted(scope, transcript.harness) || outside {
                 continue;
             }
             if !scope.scratch && is_scratch(&transcript.project) {
@@ -248,7 +246,7 @@ mod tests {
             roots: Vec::new(),
             files: vec![path.to_string_lossy().into_owned()],
             top: 25,
-            harness: Harness::All,
+            harness: crate::sessions::Which::All,
         };
         let found: Vec<_> = load(
             &scope,

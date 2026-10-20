@@ -87,7 +87,7 @@ impl Cost {
                     "project" => short_project(&transcript.project),
                     "session" => transcript.session.clone(),
                     "file" => transcript.path.to_string_lossy().into_owned(),
-                    _ => transcript.harness().to_owned(),
+                    _ => transcript.harness.id().to_owned(),
                 }
             };
             let group = self

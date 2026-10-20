@@ -15,6 +15,7 @@ use super::spend::session_cost;
 use crate::core::agents::{self, CodexProc};
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx};
+use crate::core::harness::Harness;
 use crate::core::output::Output;
 use crate::core::process;
 use crate::core::transcripts::{codex_sessions, session_files};
@@ -112,7 +113,7 @@ fn claude_rows(now: i64, detail: bool, warned: &mut bool) -> Vec<Value> {
         let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
         let since = record.get("statusUpdatedAt").and_then(Value::as_i64);
         let mut row = json!({
-            "harness": "claude",
+            "harness": Harness::Claude.id(),
             "pid": live.pid,
             "name": text("name"),
             "kind": text("kind"),
@@ -134,7 +135,7 @@ fn claude_rows(now: i64, detail: bool, warned: &mut bool) -> Vec<Value> {
 
 fn codex_row(proc: &CodexProc, same_cwd: Option<&usize>, now: i64) -> Value {
     let mut row = json!({
-        "harness": "codex",
+        "harness": Harness::Codex.id(),
         "pid": proc.proc.pid,
         "name": null,
         "kind": null,

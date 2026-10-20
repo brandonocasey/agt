@@ -536,7 +536,7 @@ pub fn codex_procs() -> Vec<CodexProc> {
     pids()
         .into_iter()
         .filter_map(read)
-        .filter(|proc| proc.comm == "codex")
+        .filter(|proc| proc.comm == harness::Harness::Codex.command())
         .map(|proc| CodexProc {
             cwd: os::cwd(proc.pid),
             proc,

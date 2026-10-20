@@ -16,6 +16,7 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use crate::core::clock;
 use crate::core::error::{Result, fail};
+use crate::core::harness::Harness;
 use crate::core::output::Output;
 
 /// Cost, context, tools, cache gaps, errors and friction from Claude Code and Codex
@@ -57,10 +58,19 @@ enum Command {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Harness {
+pub enum Which {
     All,
     Claude,
     Codex,
+}
+
+impl Which {
+    fn includes(self, harness: Harness) -> bool {
+        matches!(
+            (self, harness),
+            (Self::All, _) | (Self::Claude, Harness::Claude) | (Self::Codex, Harness::Codex)
+        )
+    }
 }
 
 #[derive(Args)]
@@ -85,8 +95,8 @@ struct Common {
     #[arg(long, default_value_t = 25)]
     top: usize,
     /// Which harness's transcripts to read.
-    #[arg(long, value_enum, default_value_t = Harness::All)]
-    harness: Harness,
+    #[arg(long, value_enum, default_value_t = Which::All)]
+    harness: Which,
 }
 
 #[derive(Args)]
@@ -240,7 +250,7 @@ pub struct Scope {
     pub roots: Vec<String>,
     pub files: Vec<String>,
     pub top: usize,
-    pub harness: Harness,
+    pub harness: Which,
 }
 
 fn scope(common: Common, files: Vec<String>) -> Result<Scope> {

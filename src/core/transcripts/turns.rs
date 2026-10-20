@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::codex::Ids;
 use super::json::{get, head, text, truthy};
-use crate::core::harness;
+use crate::core::harness::{self, Harness};
 use crate::core::local::hostname;
 
 const MAX_TEXT: usize = 16_384;
@@ -129,14 +129,6 @@ pub fn injected(text: &str) -> bool {
         .any(|prefix| text.starts_with(prefix))
 }
 
-fn source_kind(file: &str) -> &'static str {
-    if file.contains(harness::CODEX_PATH) {
-        "codex"
-    } else {
-        "claude"
-    }
-}
-
 fn first_truthy(entry: &Value, keys: &[&str]) -> Value {
     keys.iter()
         .map(|key| get(entry, key))
@@ -186,7 +178,7 @@ fn read_entry(entry: &Value, line: &[u8], state: &mut ScanState, file: &str, off
     };
     state.turns.push(Turn {
         source: file.to_owned(),
-        source_type: source_kind(file).to_owned(),
+        source_type: Harness::of_path(file).id().to_owned(),
         host: hostname(),
         session_id: message.session_id.or_else(|| state.session_id.clone()),
         timestamp: first_truthy(entry, &["ts", "timestamp"]),

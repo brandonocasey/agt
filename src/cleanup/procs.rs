@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::core::agents::{self, Proc, exists, pids, read, record_matches, session_dirs};
 use crate::core::clock;
 use crate::core::error::{Error, Result};
+use crate::core::harness::Harness;
 
 pub const MIN_AGE_SECS: i64 = clock::SECS_PER_DAY;
 const GRACE: Duration = Duration::from_secs(10);
@@ -75,7 +76,8 @@ fn session(pid: i32) -> Session {
 /// Harness processes themselves, which carry `CLAUDE_PID` too; versioned Claude installs run
 /// under their version number, such as `2.1.302`.
 fn is_harness(comm: &str) -> bool {
-    matches!(comm, "claude" | "codex" | "node-claude")
+    Harness::ALL.iter().any(|harness| harness.command() == comm)
+        || comm == "node-claude"
         || (comm.split('.').count() == 3
             && comm
                 .split('.')

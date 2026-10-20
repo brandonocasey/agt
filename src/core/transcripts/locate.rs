@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::codex;
 use super::json::{get, head, tail, text};
 use crate::core::clock;
-use crate::core::harness;
+use crate::core::harness::{self, Harness};
 
 /// The longest first line read when looking for a session id.
 const MAX_FIRST_LINE: u64 = 1024 * 1024;
@@ -25,12 +25,6 @@ pub fn is_scratch(project: &str) -> bool {
     SCRATCH.is_match(project)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Claude,
-    Codex,
-}
-
 /// A transcript file and what its location and first line say about it.
 pub struct Transcript {
     pub path: PathBuf,
@@ -39,7 +33,7 @@ pub struct Transcript {
     /// (UUIDv7, whose first characters are a timestamp shared by sessions started together).
     pub session: String,
     pub agent: String,
-    pub kind: Kind,
+    pub harness: Harness,
     /// A `codex exec` run, whose prompts no person typed.
     pub scripted: bool,
 }
@@ -204,21 +198,14 @@ impl Transcript {
         Self::locate(path, &parts, None)
     }
 
-    pub fn harness(&self) -> &'static str {
-        match self.kind {
-            Kind::Claude => "claude",
-            Kind::Codex => "codex",
-        }
-    }
-
     /// Reads off the harness, project, session and agent of `path`. `parts` are its path
     /// components below the root it was found under (for a Claude Code root: the project
     /// directory, then the file, or the session directory and the files inside it). `hint` is
     /// the harness the root belongs to, or `None` for a root that can hold either, where the
     /// file's first line says which.
-    pub fn locate(path: PathBuf, parts: &[String], hint: Option<Kind>) -> Self {
+    pub fn locate(path: PathBuf, parts: &[String], hint: Option<Harness>) -> Self {
         let meta = match hint {
-            Some(Kind::Claude) => None,
+            Some(Harness::Claude) => None,
             _ => codex::meta(&first_record(&path)),
         };
         if let Some(meta) = meta {
@@ -227,17 +214,17 @@ impl Transcript {
                 session: meta.session,
                 agent: meta.agent,
                 scripted: meta.scripted,
-                kind: Kind::Codex,
+                harness: Harness::Codex,
                 path,
             };
         }
-        if hint == Some(Kind::Codex) {
+        if hint == Some(Harness::Codex) {
             return Self {
                 project: String::new(),
                 session: tail(&stem(&path), 8).to_owned(),
                 agent: "main".into(),
                 scripted: false,
-                kind: Kind::Codex,
+                harness: Harness::Codex,
                 path,
             };
         }
@@ -264,7 +251,7 @@ impl Transcript {
             session: head(&session, 8).to_owned(),
             agent,
             scripted: false,
-            kind: Kind::Claude,
+            harness: Harness::Claude,
             path,
         }
     }
@@ -337,7 +324,7 @@ pub fn session_files(home: &Path, session: &str) -> Vec<Transcript> {
                         .flat_map(|rest| rest.components())
                         .map(|part| part.as_os_str().to_string_lossy().into_owned()),
                 );
-                found.push(Transcript::locate(file, &parts, Some(Kind::Claude)));
+                found.push(Transcript::locate(file, &parts, Some(Harness::Claude)));
             }
         }
     }

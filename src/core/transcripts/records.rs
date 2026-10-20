@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use super::codex::Adapter;
 use super::json::{get, key, object, text, truthy};
-use super::locate::{Kind, Transcript};
+use super::locate::Transcript;
+use crate::core::harness::Harness;
 
 /// One API response: its last record's usage and model, and how many tools it called.
 pub struct Call {
@@ -49,9 +50,9 @@ impl Transcript {
                 each(record);
             }
         };
-        match self.kind {
-            Kind::Claude => lines(&self.path, keep),
-            Kind::Codex => {
+        match self.harness {
+            Harness::Claude => lines(&self.path, keep),
+            Harness::Codex => {
                 let mut adapter =
                     Adapter::new(self.path.to_string_lossy().into_owned(), self.scripted);
                 lines(&self.path, |record| adapter.feed(record, &mut keep));

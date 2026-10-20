@@ -55,7 +55,40 @@ pub const HARNESS_PREFIXES: [&str; 5] = [
 ];
 
 /// Path fragment of files under Codex's config directory.
-pub const CODEX_PATH: &str = "/.codex/";
+const CODEX_PATH: &str = "/.codex/";
+
+/// An agent harness agt reads transcripts of and finds running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Harness {
+    Claude,
+    Codex,
+}
+
+impl Harness {
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
+    /// The name reports and `agt ps` give the harness.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// The name of its process.
+    pub const fn command(self) -> &'static str {
+        self.id()
+    }
+
+    /// The harness a transcript file at `path` belongs to, going by its directory.
+    pub fn of_path(path: &str) -> Self {
+        if path.contains(CODEX_PATH) {
+            Self::Codex
+        } else {
+            Self::Claude
+        }
+    }
+}
 
 /// Claude Code profile directories: `.claude` and `.claude-<name>` in `home`, links followed,
 /// and `$CLAUDE_CONFIG_DIR` when set, sorted by path.

@@ -9,8 +9,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::Result;
-use crate::core::harness;
-use crate::core::transcripts::Kind;
+use crate::core::harness::{self, Harness};
 use crate::core::transcripts::json::{count, get, head, key, object, text, truthy};
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, grouped, tok};
@@ -275,7 +274,7 @@ impl CacheGaps {
             seen.insert(id_key);
             // OpenAI bills a cache miss as plain input, with no write, so for Codex the
             // uncached input is what a gap rewrites.
-            let codex = transcript.kind == Kind::Codex;
+            let codex = transcript.harness == Harness::Codex;
             let written = count(usage, "cache_creation_input_tokens")
                 + if codex {
                     count(usage, "input_tokens")
