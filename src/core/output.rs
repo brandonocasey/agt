@@ -4,8 +4,17 @@ use serde_json::Value;
 
 use super::error::{Error, Result, ctx};
 
+/// Exit status of a command that failed on a usage or query error rather than a finding.
+pub const FAILED: u8 = 2;
+
 /// Exit status when a wait passes its time limit before the awaited thing happens.
 pub const TIMED_OUT: u8 = 3;
+
+/// Exit status of a wait that SIGINT ended: 128 plus the signal.
+pub const INTERRUPTED: u8 = 130;
+
+/// Exit status of a wait that SIGTERM ended: 128 plus the signal.
+pub const TERMINATED: u8 = 143;
 
 pub enum Output {
     Json(Value),

@@ -16,7 +16,7 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 
 use crate::core::error::{Error, Result, fail};
-use crate::core::output::Output;
+use crate::core::output::{FAILED, Output};
 use crate::store::model::Forge;
 
 use api::Project;
@@ -124,7 +124,7 @@ fn connect(target: &target::Target, repo: Option<&str>) -> Result<Project> {
 pub fn run(cli: Cli) -> Result<Output> {
     Ok(match execute(cli) {
         Ok(code) => Output::Exit(code),
-        Err(error) => Output::Failure(error, 2),
+        Err(error) => Output::Failure(error, FAILED),
     })
 }
 

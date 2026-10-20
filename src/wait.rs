@@ -38,15 +38,17 @@ pub fn run(cli: Cli) -> Result<Output> {
     let start = Instant::now();
     loop {
         if passes(&cli.check) {
-            println!("agt wait: done after {}s", start.elapsed().as_secs());
-            return Ok(Output::Exit(0));
+            return Ok(Output::Text(format!(
+                "agt wait: done after {}s\n",
+                start.elapsed().as_secs()
+            )));
         }
         if start.elapsed().as_secs() >= cli.max {
-            println!(
-                "agt wait: still running after {}s; check the job and re-arm",
+            return Ok(Output::Text(format!(
+                "agt wait: still running after {}s; check the job and re-arm\n",
                 cli.max
-            );
-            return Ok(Output::Exit(TIMED_OUT));
+            ))
+            .exiting(TIMED_OUT));
         }
         std::thread::sleep(Duration::from_secs(cli.every));
     }

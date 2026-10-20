@@ -14,6 +14,7 @@ use super::classify::{State, blocked, failed_checks, is_query_error, is_waiting,
 use super::poll::snapshot;
 use super::target::Resolved;
 use crate::core::clock;
+use crate::core::output::{FAILED, INTERRUPTED, TERMINATED, TIMED_OUT};
 
 pub struct Options {
     pub targets: Vec<Resolved>,
@@ -21,6 +22,9 @@ pub struct Options {
     pub interval: Duration,
     pub max_interval: Duration,
 }
+
+/// Exit status when a target needs action.
+const BLOCKED: u8 = 1;
 
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 static CANCEL: AtomicBool = AtomicBool::new(false);
@@ -41,9 +45,9 @@ fn install_handlers() {
 
 fn signal_exit() -> u8 {
     if SIGNAL.load(Ordering::SeqCst) == libc::SIGINT {
-        130
+        INTERRUPTED
     } else {
-        143
+        TERMINATED
     }
 }
 
@@ -218,7 +222,7 @@ pub fn run(options: &Options) -> u8 {
             return finish(&tracked, "cancelled", signal_exit());
         }
         if Instant::now() >= deadline {
-            return finish(&tracked, "deadline_exceeded", 3);
+            return finish(&tracked, "deadline_exceeded", TIMED_OUT);
         }
         let mut blocker = false;
         let mut query_error = false;
@@ -242,10 +246,14 @@ pub fn run(options: &Options) -> u8 {
             return finish(&tracked, "cancelled", signal_exit());
         }
         if Instant::now() >= deadline {
-            return finish(&tracked, "deadline_exceeded", 3);
+            return finish(&tracked, "deadline_exceeded", TIMED_OUT);
         }
         if blocker {
-            return finish(&tracked, "action_required", if query_error { 2 } else { 1 });
+            return finish(
+                &tracked,
+                "action_required",
+                if query_error { FAILED } else { BLOCKED },
+            );
         }
         if tracked.iter().all(|entry| entry.done) {
             return finish(&tracked, "checks_complete", 0);

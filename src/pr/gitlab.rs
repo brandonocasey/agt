@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
+use crate::forge::encode;
 use crate::forge::gitlab::{self, project_path};
 use crate::forge::service::{Method, Request};
 use crate::forge::transport::Transport;
-use crate::forge::encode;
 use crate::store::model::ReviewState;
 
 fn base(repo: &str) -> String {
