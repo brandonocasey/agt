@@ -881,11 +881,12 @@ fn an_unreadable_repository_directory_is_a_warning_and_the_pass_goes_on() {
     let report = prune.run(&["--only", "reviews"]);
     let plan = prune.run(&[]);
     drop(sealed);
-    // A reader that ignores permissions (root) sees both; otherwise one is a warning.
+    // A reader that ignores permissions (root) sees both; otherwise the directory is a warning
+    // (the lock scan of the same store may warn about it too).
     let seen = report["plan"]["reviews"].as_array().unwrap().len();
     let warned = report["warnings"].as_array().unwrap().len();
     assert!(
-        (seen == 1 && warned == 1) || (seen == 2 && warned == 0),
+        (seen == 1 && warned >= 1) || (seen == 2 && warned == 0),
         "{report}"
     );
     assert!(old.exists());

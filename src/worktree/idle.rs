@@ -109,7 +109,7 @@ impl Cwds {
         let session = self.session_tree(&inside);
         inside
             .iter()
-            .find(|here| !session.contains(&here.pid))
+            .find(|here| here.session || !session.contains(&here.pid))
             .map(|here| describe(here, true))
     }
 
@@ -181,11 +181,19 @@ fn read() -> Result<Vec<Where>, String> {
             session: false,
         })
         .collect();
-    all.extend(agents::live().into_iter().map(|live| Where {
-        pid: live.pid,
-        cwd: live.cwd.canonicalize().unwrap_or(live.cwd),
-        session: true,
-    }));
+    // A session record blocks unless it is the calling session itself; its descendants may be
+    // other sessions.
+    let claude = agents::own_claude_pid();
+    all.extend(
+        agents::live()
+            .into_iter()
+            .filter(|live| Some(live.pid) != claude)
+            .map(|live| Where {
+                pid: live.pid,
+                cwd: live.cwd.canonicalize().unwrap_or(live.cwd),
+                session: true,
+            }),
+    );
     all.retain(|here| !own.contains(&here.pid));
     Ok(all)
 }

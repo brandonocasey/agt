@@ -344,7 +344,7 @@ fn claude_pid<'a>(vars: impl IntoIterator<Item = &'a [u8]>) -> Option<i32> {
 }
 
 /// The `CLAUDE_PID` of this process's own environment.
-fn own_claude_pid() -> Option<i32> {
+pub fn own_claude_pid() -> Option<i32> {
     std::env::var("CLAUDE_PID")
         .ok()
         .and_then(|value| value.parse().ok())
