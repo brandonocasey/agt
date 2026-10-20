@@ -47,6 +47,12 @@ the dotfiles mise config (`home/dot_config/mise/config.toml` in the chezmoi
 source), so bump that pin, and the minimum version in the review skill's
 `references/store.md` when its rules need the release, in one dotfiles commit.
 
+What these mean for agt: the pin decides which agt version every host runs, so a change on
+`main` reaches hosts only after a release and a pin bump. The review skill's minimum version
+is the oldest agt whose commands, flags and store schema (`VERSION` in `src/store/model.rs`)
+the skill's instructions rely on; raise it in the same release that adds or changes what a
+skill uses, and never to a version that is not yet tagged.
+
 ## Conventions
 
 - Integration tests live in `test/integration/` (one test binary) and fixtures
