@@ -7,7 +7,7 @@ use crate::support::Env;
 /// Exit code and stdout of `agt wait` in the isolated environment.
 fn wait(env: &Env, args: &[&str]) -> (Option<i32>, String) {
     let output = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .bin(&env.repo)
         .arg("wait")
         .args(args)
         .output()

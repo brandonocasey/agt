@@ -27,11 +27,7 @@ fn gitlab() -> Env {
 }
 
 fn pr(env: &Env, args: &[&str]) -> Output {
-    env.command(env!("CARGO_BIN_EXE_agt"), &env.repo)
-        .arg("pr")
-        .args(args)
-        .output()
-        .unwrap()
+    env.bin(&env.repo).arg("pr").args(args).output().unwrap()
 }
 
 fn ok(env: &Env, args: &[&str]) -> Value {

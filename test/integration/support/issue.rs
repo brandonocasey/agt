@@ -21,7 +21,7 @@ impl Env {
     }
 
     pub fn issue_exec(&self, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
-        let mut command: Command = self.command(super::BIN, &self.repo);
+        let mut command: Command = self.bin(&self.repo);
         command
             .arg("issue")
             .args(args)

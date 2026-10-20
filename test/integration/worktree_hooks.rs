@@ -9,10 +9,8 @@ use serde_json::Value;
 
 use crate::support::Env;
 
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
-
 fn agt(env: &Env, dir: &Path, args: &[&str]) -> Output {
-    env.command(BIN, dir)
+    env.bin(dir)
         // An inherited PORT must never reach a hook unless one is recorded.
         .env("PORT", "54321")
         .arg("worktree")

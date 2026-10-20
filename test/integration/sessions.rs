@@ -15,7 +15,7 @@ fn fixtures() -> PathBuf {
 
 /// `agt sessions` in the isolated environment, reading fixtures by relative path.
 fn bare(env: &Env, args: &[&str]) -> Command {
-    let mut command = env.command(env!("CARGO_BIN_EXE_agt"), &fixtures());
+    let mut command = env.bin(&fixtures());
     command
         .env("AGT_PRICES", fixtures().join("prices.json"))
         .env("TZ", "UTC")

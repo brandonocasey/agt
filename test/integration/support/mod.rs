@@ -11,7 +11,7 @@ pub mod forge;
 pub mod issue;
 pub mod scenario;
 
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
+pub const BIN: &str = env!("CARGO_BIN_EXE_agt");
 pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
@@ -90,9 +90,14 @@ impl Env {
 
     /// `agt review` in `dir`, in the isolated environment.
     pub fn agt(&self, dir: &Path) -> Command {
-        let mut command = self.command(BIN, dir);
+        let mut command = self.bin(dir);
         command.arg("review");
         command
+    }
+
+    /// The `agt` binary in `dir`, in the isolated environment.
+    pub fn bin(&self, dir: &Path) -> Command {
+        self.command(BIN, dir)
     }
 
     pub fn command(&self, program: &str, dir: &Path) -> Command {

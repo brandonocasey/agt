@@ -12,10 +12,7 @@ const COMMANDS: [&str; 12] = [
 
 fn agt(args: &[&str]) -> std::process::Output {
     let env = Env::new();
-    env.command(env!("CARGO_BIN_EXE_agt"), &env.repo)
-        .args(args)
-        .output()
-        .unwrap()
+    env.bin(&env.repo).args(args).output().unwrap()
 }
 
 #[test]

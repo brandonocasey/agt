@@ -27,7 +27,7 @@ fn setup(pin: &str) -> Env {
 /// Exit code and the JSON report of `agt doctor --json`.
 fn doctor(env: &Env) -> (Option<i32>, Value) {
     let output = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .bin(&env.repo)
         .env("AGT_MISE_BIN", env.path("mise"))
         .args(["doctor", "--json"])
         .output()
@@ -93,7 +93,7 @@ fn a_broken_repo_config_fails_and_names_the_file() {
 fn the_table_lists_a_fix_under_each_failed_row() {
     let env = setup("0.0.1");
     let output = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .bin(&env.repo)
         .env("AGT_MISE_BIN", env.path("mise"))
         .arg("doctor")
         .output()

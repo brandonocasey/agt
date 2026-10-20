@@ -7,11 +7,9 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
+use crate::support::{BIN, Env};
 
 mod cleanup;
-
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
 
 struct Fixture {
     env: Env,
@@ -54,7 +52,7 @@ impl Fixture {
 
     fn agt(&self, dir: &Path, args: &[&str]) -> Output {
         self.env
-            .command(BIN, dir)
+            .bin(dir)
             .arg("worktree")
             .args(args)
             .output()
@@ -839,7 +837,7 @@ fn the_calling_session_does_not_block_its_own_removal_but_another_does() {
     record_session(&f, caller.0.id(), &f.wt);
     let output = f
         .env
-        .command(BIN, &f.env.repo)
+        .bin(&f.env.repo)
         .env("CLAUDE_PID", caller.0.id().to_string())
         .args(["worktree", "remove", &wt])
         .output()
@@ -934,7 +932,7 @@ fn the_calling_sessions_own_processes_do_not_block_removal_but_others_do() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     let remove = |args: &[&str]| {
         f.env
-            .command(BIN, &f.env.repo)
+            .bin(&f.env.repo)
             .env("CLAUDE_PID", session.0.id().to_string())
             .args(["worktree", "remove"])
             .args(args)
@@ -1138,7 +1136,7 @@ fn backup_ids_are_unique_across_repositories() {
     let run = |dir: &Path, path: &Path| -> Value {
         let output = f
             .env
-            .command(BIN, dir)
+            .bin(dir)
             .env("AGT_NOW", "1790000000")
             .args(["worktree", "remove", &path.to_string_lossy(), "--yes"])
             .output()
@@ -1601,7 +1599,7 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
     );
     let output = f
         .env
-        .command(BIN, &f.env.repo)
+        .bin(&f.env.repo)
         .env("PATH", path)
         .args(["worktree", "remove", &f.wt.to_string_lossy()])
         .output()
@@ -1868,7 +1866,7 @@ fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
                 child_pid.display()
             ),
         );
-        let mut command = f.env.command(BIN, &f.env.repo);
+        let mut command = f.env.bin(&f.env.repo);
         command
             .env("PATH", path)
             .env("AGT_LS_REMOTE_TIMEOUT", "1")
@@ -1948,7 +1946,7 @@ fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
                 record.display()
             ),
         );
-        let mut run = f.env.command(BIN, &f.env.repo);
+        let mut run = f.env.bin(&f.env.repo);
         run.env("PATH", path)
             .args(["worktree", "remove", &f.wt.to_string_lossy()]);
         match command {
@@ -1999,7 +1997,7 @@ fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
             record.display()
         ),
     );
-    let mut run = f.env.command(BIN, &f.env.repo);
+    let mut run = f.env.bin(&f.env.repo);
     run.env("PATH", path)
         .env_remove("GIT_SSH_COMMAND")
         .env_remove("GIT_SSH")
@@ -2031,7 +2029,7 @@ fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
         let (path, child_pid) = hanging_ls_remote(&f);
         let agt = f
             .env
-            .command(BIN, &f.env.repo)
+            .bin(&f.env.repo)
             .env("PATH", path)
             .env("AGT_LS_REMOTE_TIMEOUT", "60")
             .args(["worktree", "remove", &f.wt.to_string_lossy()])
@@ -2048,7 +2046,7 @@ fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
     use std::os::unix::process::CommandExt;
     let (f, _sub) = with_unheld_tag();
     let (path, child_pid) = hanging_ls_remote(&f);
-    let mut run = f.env.command(BIN, &f.env.repo);
+    let mut run = f.env.bin(&f.env.repo);
     run.env("PATH", path)
         .env("AGT_LS_REMOTE_TIMEOUT", "3")
         .args(["worktree", "remove", &f.wt.to_string_lossy()])

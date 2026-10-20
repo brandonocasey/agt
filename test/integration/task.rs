@@ -9,8 +9,6 @@ use serde_json::{Value, json};
 
 use crate::support::Env;
 
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
-
 pub(crate) struct Task {
     env: Env,
     /// The `agt` command the helpers run: `task` or `sessions`.
@@ -45,7 +43,7 @@ impl Task {
     }
 
     pub(crate) fn command(&self, args: &[&str]) -> std::process::Command {
-        let mut command = self.env.command(BIN, &self.env.repo);
+        let mut command = self.env.bin(&self.env.repo);
         command.arg(self.domain).args(args);
         command
     }

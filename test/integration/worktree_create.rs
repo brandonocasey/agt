@@ -9,11 +9,10 @@ use serde_json::Value;
 
 use crate::support::{Env, executable, path_with};
 
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
 const FAKE_TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-tool.sh");
 
 fn agt(env: &Env, dir: &Path, args: &[&str]) -> Output {
-    env.command(BIN, dir)
+    env.bin(dir)
         .arg("worktree")
         .args(args)
         .env("GIT_CONFIG_COUNT", "1")
@@ -554,7 +553,7 @@ fn prepared(env: &Env, tools: &Path, dir: &Path, args: &[&str]) -> Value {
 
 fn prepare_output(env: &Env, tools: &Path, dir: &Path, args: &[&str], fail: &str) -> Output {
     let path = path_with(tools);
-    env.command(BIN, dir)
+    env.bin(dir)
         .arg("worktree")
         .args(args)
         .env("PATH", path)
@@ -655,7 +654,7 @@ fn mise_is_skipped_without_the_executable_and_nothing_runs_without_a_lockfile() 
     fs::remove_file(tools.join("mise")).unwrap();
     fs::write(env.repo.join("mise.toml"), "").unwrap();
     let output = env
-        .command(BIN, &env.repo)
+        .bin(&env.repo)
         .args(["worktree", "prepare"])
         .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
         .output()
@@ -704,7 +703,7 @@ fn a_missing_tool_is_a_failed_step_with_an_error() {
     fs::remove_file(tools.join("poetry")).unwrap();
     fs::write(env.repo.join("poetry.lock"), "").unwrap();
     let output = env
-        .command(BIN, &env.repo)
+        .bin(&env.repo)
         .args(["worktree", "prepare"])
         .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
         .output()

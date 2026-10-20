@@ -7,8 +7,6 @@ use serde_json::{Value, json};
 
 use crate::support::Env;
 
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
-
 struct Site {
     env: Env,
 }
@@ -32,7 +30,7 @@ impl Site {
 
     fn agt(&self, args: &[&str]) -> Output {
         self.env
-            .command(BIN, &self.env.repo)
+            .bin(&self.env.repo)
             .arg("branch")
             .args(args)
             .output()
@@ -274,7 +272,7 @@ fn landable_without_a_default_branch_names_its_own_flag() {
     env.write("a.txt", "a");
     env.commit_all("a");
     let output = env
-        .command(BIN, &env.repo)
+        .bin(&env.repo)
         .args(["branch", "landable"])
         .output()
         .unwrap();
@@ -295,7 +293,7 @@ fn pushed_prints_the_git_state_when_the_forge_lookup_fails() {
     let missing = site.env.path("no-such-gh");
     let output = site
         .env
-        .command(BIN, &site.env.repo)
+        .bin(&site.env.repo)
         .args(["branch", "pushed"])
         .env("AGT_GH_BIN", &missing)
         .output()

@@ -8,9 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::support::{Env, executable};
-
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
+use crate::support::{BIN, Env, executable};
 
 /// A child process that runs until it is dropped.
 struct Proc(Child);
@@ -131,7 +129,7 @@ fn transcript(env: &Env, session: &str, lines: &[String]) {
 }
 
 fn ps(env: &Env, args: &[&str]) -> Command {
-    let mut command = env.command(BIN, &env.repo);
+    let mut command = env.bin(&env.repo);
     command
         .env(
             "AGT_PRICES",

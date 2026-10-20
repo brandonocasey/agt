@@ -281,7 +281,7 @@ fn a_signal_to_agt_kills_the_forge_tool_and_its_children() {
         let env = changed_on_the_host(&Github);
         let (tool, pid) = slow_tool(&env);
         let agt = env
-            .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+            .bin(&env.repo)
             .args(["issue", "list"])
             .env("AGT_NOW", STALE.to_string())
             .env("AGT_GH_BIN", &tool)

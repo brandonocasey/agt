@@ -7,7 +7,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use super::{BIN, proc_start};
+use super::proc_start;
 use crate::support::Env;
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -91,7 +91,7 @@ impl Site {
             .as_secs();
         let now = i64::try_from(real).unwrap() + self.days_on * 86_400;
         self.env
-            .command(BIN, dir)
+            .bin(dir)
             .env("AGT_NOW", now.to_string())
             .args(["cleanup", "--only", "worktrees"])
             .args(args)
@@ -181,7 +181,7 @@ fn the_default_cleanup_pass_never_removes_a_landed_worktree() {
     site.env.git(&["merge", "-q", "done"]);
     let output = site
         .env
-        .command(BIN, &site.env.repo)
+        .bin(&site.env.repo)
         .args(["cleanup", "--yes"])
         .output()
         .unwrap();
@@ -194,7 +194,7 @@ fn the_default_cleanup_pass_never_removes_a_landed_worktree() {
     // Worktree flags alone do not opt in.
     let output = site
         .env
-        .command(BIN, &site.env.repo)
+        .bin(&site.env.repo)
         .args(["cleanup", "--yes", "--dirty"])
         .output()
         .unwrap();
@@ -207,7 +207,7 @@ fn the_default_cleanup_pass_never_removes_a_landed_worktree() {
     assert!(wt.exists());
     let output = site
         .env
-        .command(BIN, &site.env.repo)
+        .bin(&site.env.repo)
         .args(["cleanup", "--count", "--worktree", "done"])
         .output()
         .unwrap();

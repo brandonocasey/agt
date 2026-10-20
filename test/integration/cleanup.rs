@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
+use crate::support::{BIN, Env};
 
-const BIN: &str = env!("CARGO_BIN_EXE_agt");
 const DAY: i64 = 86_400;
 /// 2027-01-01T00:00:00Z.
 const NOW: i64 = 1_798_761_600;
@@ -140,7 +139,7 @@ impl Prune {
     fn run_at(&self, now: i64, args: &[&str]) -> Value {
         let output = self
             .env
-            .command(BIN, &self.env.repo)
+            .bin(&self.env.repo)
             .arg("cleanup")
             .args(args)
             .env("AGT_NOW", now.to_string())
@@ -1023,7 +1022,7 @@ fn orphan_processes_are_signalled_only_when_named() {
     let run = |args: &[&str]| {
         let output = prune
             .env
-            .command(BIN, &prune.env.repo)
+            .bin(&prune.env.repo)
             .arg("cleanup")
             .args(args)
             .env("AGT_NOW", later().to_string())
@@ -1121,7 +1120,7 @@ fn a_session_is_gone_only_when_no_record_matches_its_process() {
         loop {
             let output = prune
                 .env
-                .command(BIN, &prune.env.repo)
+                .bin(&prune.env.repo)
                 .args(["cleanup", "--only", "processes"])
                 .env("AGT_NOW", later().to_string())
                 .env("AGT_CLEANUP_PID", &child_pid)
@@ -1222,7 +1221,7 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     let count = |prune: &Prune| {
         let output = prune
             .env
-            .command(BIN, &prune.env.repo)
+            .bin(&prune.env.repo)
             .args(["cleanup", "--count"])
             .output()
             .unwrap();
@@ -1488,7 +1487,7 @@ fn the_manual_report_never_asks_a_remote_and_does_not_list_a_worktree_holding_an
     let (path, log) = recording_git(&prune);
     let output = prune
         .env
-        .command(BIN, &prune.env.repo)
+        .bin(&prune.env.repo)
         .arg("cleanup")
         .args(["--only", "manual"])
         .env("AGT_NOW", later().to_string())
@@ -1660,7 +1659,7 @@ fn cleanup_configured_and_current_linked_roots_are_deduplicated() {
     fs::copy(source, &local).unwrap();
     let output = prune
         .env
-        .command(BIN, &linked)
+        .bin(&linked)
         .args(["cleanup", "--only", "reviews"])
         .env("AGT_NOW", NOW.to_string())
         .output()
@@ -1888,7 +1887,7 @@ fn repository_storage_identity_is_private_shared_and_validated() {
     let identity = env.repo.join(".git/agt-repository-id");
     let lock = env.repo.join(".git/.agt-repository-id.lock");
     let preview = env
-        .command(BIN, &env.repo)
+        .bin(&env.repo)
         .args(["cleanup", "--only", "reviews"])
         .output()
         .unwrap();

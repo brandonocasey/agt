@@ -34,7 +34,7 @@ fn run_case(path: &Path) {
             env.respond(&args, body);
         }
     }
-    let mut command = env.command(env!("CARGO_BIN_EXE_agt"), &env.repo);
+    let mut command = env.bin(&env.repo);
     command.arg("ci").args(strings(&case["args"]));
     for (key, value) in case["env"].as_object().unwrap() {
         command.env(key, value.as_str().unwrap());
@@ -109,7 +109,7 @@ fn failures_take_the_host_from_an_mr_url() {
         );
     }
     let output = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .bin(&env.repo)
         .args(["ci", "failures"])
         .arg("https://gitlab.example.com/group/proj/-/merge_requests/5")
         .env("GITLAB_HOST", "ignored.example.com")

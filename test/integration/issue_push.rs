@@ -938,7 +938,7 @@ fn waiting_issue_mutation_does_not_recreate_the_source(attach: bool) {
         vec!["issue", "edit", key, "--title", "Edited"]
     };
     let mut child = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .bin(&env.repo)
         .args(args)
         .env("AGT_OFFLINE", if attach { "0" } else { "1" })
         .stdout(Stdio::piped())

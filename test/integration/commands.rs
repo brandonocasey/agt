@@ -1531,7 +1531,7 @@ fn usage_and_time_are_recorded() {
 /// `agt cleanup --only reviews` at `now`, over every repository in the isolated store.
 fn cleanup_reviews(env: &Env, extra: &[&str], now: &str) -> serde_json::Value {
     let output = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+        .bin(&env.repo)
         .args(["cleanup", "--only", "reviews"])
         .args(extra)
         .env("AGT_NOW", now)

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::support::Env;
 
 fn scan(env: &Env, args: &[&str]) -> Output {
-    env.command(env!("CARGO_BIN_EXE_agt"), &env.repo)
+    env.bin(&env.repo)
         .arg("secrets")
         .args(args)
         .output()
@@ -97,7 +97,7 @@ fn a_missing_path_fails_instead_of_reporting_clean() {
 fn outside_a_repository_it_fails_with_exit_2() {
     let env = Env::new();
     let output = env
-        .command(env!("CARGO_BIN_EXE_agt"), &env.path("home"))
+        .bin(&env.path("home"))
         .arg("secrets")
         .env("GIT_CEILING_DIRECTORIES", env.path(""))
         .output()
