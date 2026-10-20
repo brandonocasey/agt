@@ -54,8 +54,11 @@ enum Command {
     Restore(restore::Cli),
     /// Trust, or stop trusting, a repository's `[worktree.hooks]`; `--list` shows what is trusted.
     Trust(trust::Cli),
-    /// List, show or delete worktree backups.
+    /// List worktree backups (one by id), or delete one.
     Backups(backup::Cli),
+    /// Internal: the detached background setup that `create --background` starts.
+    #[command(hide = true)]
+    Setup(setup::Cli),
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -68,6 +71,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Restore(args) => restore::run(args),
         Command::Trust(args) => trust::run(args),
         Command::Backups(args) => backup::run(args),
+        Command::Setup(args) => setup::run(args),
     }
 }
 

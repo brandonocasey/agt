@@ -29,7 +29,7 @@ enum Command {
     Review(Box<review::cli::Cli>),
     /// Durable task records.
     Task(task::cli::Cli),
-    /// Pushed and landable checks for a branch.
+    /// Pushed and landable checks for a branch (`check`).
     Branch(branch::Cli),
     /// Wait for PR/MR checks and pipelines; GitLab failing specs versus the default branch.
     Ci(ci::Cli),
@@ -53,7 +53,7 @@ enum Command {
     Secrets(secrets::Cli),
     /// Check that this host and repository are set up for agt. Read-only; exit 0 ok, 1 a check failed, 2 warnings only.
     Doctor(doctor::Cli),
-    /// Rerun a check until it succeeds or `--max` seconds pass (exit 3).
+    /// Rerun a check until it succeeds or `--timeout` seconds pass (exit 3).
     Wait(wait::Cli),
 }
 

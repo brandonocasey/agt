@@ -1,4 +1,4 @@
-//! `agt branch pushed` and `landable` against a local bare repository as origin (reached through
+//! `agt branch check` (its `pushed` and `landable` checks) against a local bare repository as origin (reached through
 //! `insteadOf`, so `origin` reads as a GitHub URL) and the fake `gh`.
 
 use std::process::Output;
@@ -47,6 +47,24 @@ impl Site {
             String::from_utf8_lossy(&output.stderr)
         );
         (serde_json::from_slice(&output.stdout).unwrap(), code)
+    }
+
+    /// The `pushed` check's report and the exit code of `agt branch check --checks pushed`.
+    fn pushed(&self, args: &[&str]) -> (Value, i32) {
+        self.single("pushed", args)
+    }
+
+    /// The `landable` check's report and the exit code of `agt branch check --checks landable`.
+    fn landable(&self, args: &[&str]) -> (Value, i32) {
+        self.single("landable", args)
+    }
+
+    fn single(&self, check: &str, args: &[&str]) -> (Value, i32) {
+        let mut all = vec!["check"];
+        all.extend_from_slice(args);
+        all.extend(["--checks", check]);
+        let (report, code) = self.report(&all);
+        (report["checks"][check]["report"].clone(), code)
     }
 
     fn commit(&self, file: &str) -> String {
@@ -123,7 +141,7 @@ fn pushed_equal_without_a_pull_request_exits_zero() {
     let tip = site.commit("a");
     site.env.git(&["push", "-q", "origin", "topic"]);
     site.env.write("dirty.txt", "x");
-    let (report, code) = site.report(&["pushed"]);
+    let (report, code) = site.pushed(&[]);
     assert_eq!(code, 0);
     assert_eq!(report["state"], "equal");
     assert_eq!(report["remote_commit"], tip);
@@ -141,12 +159,12 @@ fn pushed_counts_a_rename_once_and_an_edit_git_status_hides() {
     site.env.git(&["commit", "-q", "-m", "files"]);
     site.env.git(&["push", "-q", "origin", "topic"]);
     site.env.git(&["mv", "old.txt", "new.txt"]);
-    let (report, _) = site.report(&["pushed"]);
+    let (report, _) = site.pushed(&[]);
     assert_eq!(report["uncommitted"], 1);
     site.env
         .git(&["update-index", "--skip-worktree", "hidden.txt"]);
     site.env.write("hidden.txt", "changed\n");
-    let (report, _) = site.report(&["pushed"]);
+    let (report, _) = site.pushed(&[]);
     assert_eq!(report["uncommitted"], 2);
 }
 
@@ -160,7 +178,7 @@ fn pushed_counts_a_staged_path_once_when_its_worktree_edit_is_hidden() {
             site.env.git(&["add", "--", name]);
             site.env.git(&["update-index", flag, "--", name]);
             site.env.write(name, "hidden\n");
-            let (report, _) = site.report(&["pushed"]);
+            let (report, _) = site.pushed(&[]);
             assert_eq!(report["uncommitted"], 1, "{flag}: {name:?}");
         }
     }
@@ -177,7 +195,7 @@ fn pushed_skips_a_worktree_whose_directory_is_gone() {
     site.env
         .git(&["worktree", "add", "-q", tree.to_str().unwrap(), "topic"]);
     std::fs::remove_dir_all(&tree).unwrap();
-    let (report, code) = site.report(&["pushed", "topic"]);
+    let (report, code) = site.pushed(&["topic"]);
     assert_eq!(code, 0);
     assert_eq!(report["state"], "equal");
     assert_eq!(report["uncommitted"], Value::Null);
@@ -187,14 +205,14 @@ fn pushed_skips_a_worktree_whose_directory_is_gone() {
 fn pushed_counts_ahead_behind_diverged_and_missing() {
     let site = Site::new();
     site.pulls(&[]);
-    let (report, code) = site.report(&["pushed"]);
+    let (report, code) = site.pushed(&[]);
     assert_eq!((report["state"].as_str(), code), (Some("missing"), 4));
     assert_eq!(report["remote_commit"], Value::Null);
 
     site.commit("a");
     site.env.git(&["push", "-q", "origin", "topic"]);
     site.commit("b");
-    let (report, code) = site.report(&["pushed", "topic"]);
+    let (report, code) = site.pushed(&["topic"]);
     assert_eq!((report["state"].as_str(), code), (Some("ahead"), 4));
     assert_eq!(
         (report["ahead"].clone(), report["behind"].clone()),
@@ -202,12 +220,12 @@ fn pushed_counts_ahead_behind_diverged_and_missing() {
     );
 
     site.env.git(&["reset", "-q", "--hard", "HEAD~2"]);
-    let (report, _) = site.report(&["pushed"]);
+    let (report, _) = site.pushed(&[]);
     assert_eq!(report["state"], "behind");
     assert_eq!(report["behind"], 1);
 
     site.commit("c");
-    let (report, code) = site.report(&["pushed"]);
+    let (report, code) = site.pushed(&[]);
     assert_eq!((report["state"].as_str(), code), (Some("diverged"), 4));
     assert_eq!(
         (report["ahead"].clone(), report["behind"].clone()),
@@ -222,7 +240,7 @@ fn pushed_reports_a_pull_request_head_and_its_checks() {
     site.env.git(&["push", "-q", "origin", "topic"]);
     site.pulls(&[pull(&tip)]);
     site.checks(&tip, 1);
-    let (report, code) = site.report(&["pushed"]);
+    let (report, code) = site.pushed(&[]);
     assert_eq!(code, 0);
     assert_eq!(report["pr"]["head_matches"], true);
     assert_eq!(
@@ -233,7 +251,7 @@ fn pushed_reports_a_pull_request_head_and_its_checks() {
     let stale = "b".repeat(40);
     site.pulls(&[pull(&stale)]);
     site.checks(&stale, 0);
-    let (report, code) = site.report(&["pushed"]);
+    let (report, code) = site.pushed(&[]);
     assert_eq!(code, 4);
     assert_eq!(report["state"], "equal");
     assert_eq!(report["pr"]["head_matches"], false);
@@ -248,9 +266,10 @@ fn pushed_keeps_the_pull_request_when_only_the_checks_query_fails() {
     let stale = "b".repeat(40);
     site.pulls(&[pull(&stale)]);
     // No answer is registered for the checks query, so the fake `gh` fails it.
-    let output = site.agt(&["pushed"]);
+    let output = site.agt(&["check", "--checks", "pushed"]);
     assert_eq!(output.status.code(), Some(4));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report = report["checks"]["pushed"]["report"].clone();
     assert_eq!(report["pr"]["head_matches"], false);
     assert_eq!(report["pr"]["head"], stale);
     assert_eq!(report["pr"]["pipeline"]["exists"], Value::Null);
@@ -272,7 +291,7 @@ fn landable_reports_counts_and_commits_already_in_the_target() {
     let main = site.commit("n");
     site.env.git(&["push", "-q", "origin", "main"]);
     site.env.git(&["checkout", "-q", "topic"]);
-    let (report, code) = site.report(&["landable"]);
+    let (report, code) = site.landable(&[]);
     assert_eq!(code, 0);
     assert_eq!(report["target"], "origin/main");
     assert_eq!(report["target_commit"], main);
@@ -293,7 +312,7 @@ fn landable_lists_conflicting_paths_against_an_explicit_target() {
     site.env.write("base.txt", "main\n");
     site.env.commit_all("main");
     site.env.git(&["checkout", "-q", "topic"]);
-    let (report, code) = site.report(&["landable", "topic", "--target", "main"]);
+    let (report, code) = site.landable(&["topic", "--base", "main"]);
     assert_eq!(code, 5);
     assert_eq!(report["target"], "main");
     assert_eq!(report["conflicts"], json!(["base.txt"]));
@@ -308,16 +327,16 @@ fn landable_without_a_default_branch_names_its_own_flag() {
     env.commit_all("a");
     let output = env
         .bin(&env.repo)
-        .args(["branch", "landable"])
+        .args(["branch", "check", "--checks", "landable"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = report["checks"]["landable"]["error"].as_str().unwrap();
     assert!(
-        stderr.contains("no default branch found; pass --target"),
-        "{stderr}"
+        error.contains("no default branch found; pass --base"),
+        "{error}"
     );
-    assert!(!stderr.contains("--base"), "{stderr}");
 }
 
 #[test]
@@ -329,12 +348,13 @@ fn pushed_prints_the_git_state_when_the_forge_lookup_fails() {
     let output = site
         .env
         .bin(&site.env.repo)
-        .args(["branch", "pushed"])
+        .args(["branch", "check", "--checks", "pushed"])
         .env("AGT_GH_BIN", &missing)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report = &report["checks"]["pushed"]["report"];
     assert_eq!(report["state"], "equal");
     assert_eq!(report["pr"], Value::Null);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -343,13 +363,13 @@ fn pushed_prints_the_git_state_when_the_forge_lookup_fails() {
 }
 
 #[test]
-fn check_defaults_to_both_and_preserves_wrapper_reports() {
+fn check_defaults_to_both_and_matches_each_selected_alone() {
     let site = Site::new();
     site.pulls(&[]);
     site.commit("a");
     site.env.git(&["push", "-q", "origin", "topic"]);
-    let (pushed, _) = site.report(&["pushed"]);
-    let (landable, _) = site.report(&["landable"]);
+    let (pushed, _) = site.pushed(&[]);
+    let (landable, _) = site.landable(&[]);
     let (report, code) = site.report(&["check"]);
     assert_eq!(code, 0);
     assert_eq!(report["status"], 0);
@@ -371,14 +391,14 @@ fn check_selects_only_the_requested_checks_and_options() {
     site.env
         .git(&["remote", "add", "backup", bare.to_str().unwrap()]);
     let (report, code) = site.report(&[
-        "check", "topic", "--checks", "pushed", "--remote", "backup", "--target", "invalid",
+        "check", "topic", "--checks", "pushed", "--remote", "backup", "--base", "invalid",
     ]);
     assert_eq!(code, 4);
     assert_eq!(report["checks"].as_object().unwrap().len(), 1);
     assert_eq!(report["checks"]["pushed"]["status"], 4);
     assert_eq!(report["checks"]["pushed"]["report"]["remote"], "backup");
     let (report, code) = site.report(&[
-        "check", "--checks", "landable", "--remote", "invalid", "--target", "main",
+        "check", "--checks", "landable", "--remote", "invalid", "--base", "main",
     ]);
     assert_eq!(code, 0);
     assert_eq!(report["checks"].as_object().unwrap().len(), 1);
@@ -396,7 +416,7 @@ fn check_conflicts_take_priority_over_not_pushed_in_either_selection_order() {
     site.env.commit_all("main");
     site.env.git(&["checkout", "-q", "topic"]);
     for checks in ["pushed,landable", "landable,pushed"] {
-        let (report, code) = site.report(&["check", "--checks", checks, "--target", "main"]);
+        let (report, code) = site.report(&["check", "--checks", checks, "--base", "main"]);
         assert_eq!(code, 5);
         assert_eq!(report["status"], 5);
         assert_eq!(report["checks"]["pushed"]["status"], 4);
@@ -417,7 +437,7 @@ fn check_fatal_errors_take_priority_over_conflicts() {
     site.env.write("base.txt", "main\n");
     site.env.commit_all("main");
     site.env.git(&["checkout", "-q", "topic"]);
-    let output = site.agt(&["check", "--remote", "invalid", "--target", "main"]);
+    let output = site.agt(&["check", "--remote", "invalid", "--base", "main"]);
     assert_eq!(output.status.code(), Some(1));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], 1);
@@ -429,11 +449,11 @@ fn check_fatal_errors_take_priority_over_conflicts() {
 fn check_reports_errors_without_hiding_the_other_check() {
     let site = Site::new();
     site.pulls(&[]);
-    for options in [["--target", "invalid"], ["--remote", "invalid"]] {
+    for options in [["--base", "invalid"], ["--remote", "invalid"]] {
         let output = site.agt(&["check", options[0], options[1]]);
         assert_eq!(output.status.code(), Some(1));
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let (failed, other) = if options[0] == "--target" {
+        let (failed, other) = if options[0] == "--base" {
             ("landable", "pushed")
         } else {
             ("pushed", "landable")

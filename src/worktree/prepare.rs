@@ -14,6 +14,7 @@ use super::setup::{self, Step};
 use super::steps::run_step;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
+use crate::core::process;
 use crate::git::Repo;
 
 const MISE_FILES: [&str; 3] = ["mise.toml", ".mise.toml", ".tool-versions"];
@@ -26,44 +27,29 @@ pub struct Cli {
     #[arg(long)]
     clone_deps: bool,
     /// Wait for the background setup `create --background` started, then print its report; exit
-    /// 1 when it failed and 3 when `--max` passes first.
+    /// 1 when it failed and 3 when `--timeout` passes first.
     #[arg(long, conflicts_with = "clone_deps")]
     wait: bool,
     /// Run only the `[worktree.hooks] create` commands, no install steps (to rerun hooks that failed).
     #[arg(long, conflicts_with_all = ["wait", "clone_deps"])]
     hooks: bool,
     /// Give up waiting after this many seconds.
-    #[arg(long, default_value_t = 270, requires = "wait", value_parser = clap::value_parser!(u64).range(1..))]
-    max: u64,
-    /// Internal: run these steps (`prepare`, `hooks`) as the background setup child.
-    #[arg(
-        long,
-        hide = true,
-        value_delimiter = ',',
-        value_parser = ["prepare", "hooks"],
-        conflicts_with_all = ["clone_deps", "wait", "hooks"]
-    )]
-    setup: Vec<String>,
+    #[arg(long, alias = "max", default_value_t = 270, requires = "wait", value_parser = clap::value_parser!(u64).range(1..=process::MAX_WAIT_SECS))]
+    timeout: u64,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
     let dir = dir_or_cwd(cli.path)?;
     if cli.wait {
-        return setup::wait(&dir, cli.max);
-    }
-    if !cli.setup.is_empty() {
-        let steps: Vec<_> = cli
-            .setup
-            .iter()
-            .filter_map(|name| Step::parse(name))
-            .collect();
-        return setup::child(&dir, &steps);
+        return setup::wait(&dir, cli.timeout);
     }
     setup::refuse_while_running(&toplevel(&dir)?)?;
     if cli.hooks {
         let root = toplevel(&dir)?;
-        let (report, ok) = super::hooks::run(&root, super::hooks::Kind::Create)?;
-        return emit(json!({"path": root, "hooks": report, "ok": ok}), ok);
+        let mut value = json!({"path": root});
+        let ok = setup::execute(&root, &[Step::Hooks], &mut value)?;
+        value["ok"] = json!(ok);
+        return emit(value, ok);
     }
     let (value, ok) = prepare(&dir, cli.clone_deps)?;
     emit(value, ok)

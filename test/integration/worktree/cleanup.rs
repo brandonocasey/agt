@@ -210,33 +210,24 @@ fn the_default_cleanup_pass_never_removes_a_landed_worktree() {
 }
 
 #[test]
-fn the_manual_list_leaves_out_what_the_sweep_removed() {
+fn the_manual_list_names_the_command_that_deletes_a_worktree_backup() {
     let site = Site::new();
-    let wt = site.branch("done");
+    site.branch("done");
     site.env.git(&["merge", "-q", "done"]);
-    // The manual list scans the configured roots, so name the repository there.
-    let config = site.env.path("config/agt");
-    fs::create_dir_all(&config).unwrap();
-    fs::write(
-        config.join("config.toml"),
-        format!("[worktree]\nroots = [\"{}\"]\n", site.env.repo.display()),
-    )
-    .unwrap();
-    let output = site.agt_in(
-        &site.env.repo,
-        &["--only", "manual", "--offline", "--recent", "--yes"],
-    );
+    let report = site.run(&["--recent", "--yes"]);
+    let id = report["removed"][0]["id"].as_str().unwrap();
+    let output = site
+        .env
+        .bin(&site.env.repo)
+        .args(["cleanup", "--only", "manual"])
+        .output()
+        .unwrap();
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        report["worktrees"]["repositories"][0]["removed"][0]["branch"],
-        "done"
+        report["manual"]["backups"],
+        json!([format!("agt worktree backups rm {id} --yes")])
     );
-    assert!(!wt.exists());
-    // The path may differ by symlink (`/var` against `/private/var`), so match its last part.
-    let listed = report["manual"]["worktrees"].to_string();
-    let name = wt.file_name().unwrap().to_str().unwrap();
-    assert!(!listed.contains(&format!("/{name} ")), "{listed}");
 }
 
 #[test]

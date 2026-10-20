@@ -13,11 +13,11 @@ pub struct Cli {
     /// List the worktrees of every repository under the configured roots
     /// (`[worktree] roots` in the agt config), not only the current one.
     #[arg(long)]
-    all: bool,
+    all_repos: bool,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let repos = if cli.all {
+    let repos = if cli.all_repos {
         roots::repositories()?.into_iter().map(Repo::at).collect()
     } else {
         vec![Repo::discover()?]
@@ -28,7 +28,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     for repo in repos {
         match rows_of(&repo, &live) {
             Ok(found) => rows.extend(found),
-            Err(error) if cli.all => {
+            Err(error) if cli.all_repos => {
                 warnings.push(format!("{}: {error}", repo.root().display()));
             }
             Err(error) => return Err(error),

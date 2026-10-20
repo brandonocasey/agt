@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use super::idle::Cwds;
 use super::info;
 use super::{gate, hooks, snapshot};
-use crate::core::agents;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
 use crate::git::{Repo, Worktree};
@@ -161,13 +160,6 @@ pub(super) fn refuse<'a>(
         return fail(format!(
             "the current directory is inside {}; run from elsewhere",
             path.display()
-        ));
-    }
-    if let Some(live) = agents::live_in(path) {
-        return fail(format!(
-            "a Claude Code session (pid {}) is running in {}",
-            live.pid,
-            live.cwd.display()
         ));
     }
     Ok(entry)

@@ -42,15 +42,16 @@ pub struct FileMode {
 }
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
+    /// Only this backup (an error when there is none); default: every backup.
+    id: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print one backup's record and directory.
-    Show { id: String },
     /// Delete a backup's ref and directory. Without `--yes` only say what would go.
     Rm {
         id: String,
@@ -62,15 +63,14 @@ enum Command {
 pub fn run(cli: Cli) -> Result<Output> {
     match cli.command {
         None => {
-            let backups: Vec<Value> = all()?
-                .iter()
-                .map(|(record, dir)| summary(record, dir))
-                .collect();
+            let backups: Vec<Value> = match cli.id {
+                Some(id) => vec![find(&id)?],
+                None => all()?,
+            }
+            .iter()
+            .map(|(record, dir)| summary(record, dir))
+            .collect();
             Ok(Output::Json(json!({ "backups": backups })))
-        }
-        Some(Command::Show { id }) => {
-            let (record, dir) = find(&id)?;
-            Ok(Output::Json(summary(&record, &dir)))
         }
         Some(Command::Rm { id, yes }) => {
             let (record, dir) = find(&id)?;
@@ -113,7 +113,7 @@ pub fn id_taken(id: &str) -> bool {
 }
 
 /// Every backup with its directory, oldest first.
-fn all() -> Result<Vec<(Record, PathBuf)>> {
+pub(super) fn all() -> Result<Vec<(Record, PathBuf)>> {
     let mut found = Vec::new();
     let Ok(repos) = fs::read_dir(root()?) else {
         return Ok(found);

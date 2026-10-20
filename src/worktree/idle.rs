@@ -1,7 +1,8 @@
 //! Whether a linked worktree may be removed now: the one check that `agt cleanup`'s candidate
 //! list and the sweep behind `agt cleanup --only worktrees` share. It includes whether any
 //! process other than agt, its ancestors and the calling session's own processes has its
-//! current directory inside the worktree.
+//! current directory, or a live Claude Code session its recorded directory, inside the
+//! worktree.
 
 use std::path::{Path, PathBuf};
 
@@ -79,10 +80,20 @@ pub fn blocker(
     Ok(None)
 }
 
-/// The current directories of all processes, read once on first use.
+/// A process and the directory it counts in: its current one, or for a live Claude Code
+/// session the one its record names.
+#[derive(Clone)]
+struct Where {
+    pid: i32,
+    cwd: PathBuf,
+    session: bool,
+}
+
+/// The current directories of all processes and the recorded ones of live Claude Code
+/// sessions, read once on first use.
 #[derive(Default)]
 pub struct Cwds {
-    all: Option<Result<Vec<(i32, PathBuf)>, String>>,
+    all: Option<Result<Vec<Where>, String>>,
     /// The calling session's other processes, read when one is found inside a worktree.
     session: Option<Vec<i32>>,
 }
@@ -98,8 +109,8 @@ impl Cwds {
         let session = self.session_tree(&inside);
         inside
             .iter()
-            .find(|(pid, _)| !session.contains(pid))
-            .map(|(pid, cwd)| describe(*pid, cwd, true))
+            .find(|here| here.session || !session.contains(&here.pid))
+            .map(|here| describe(here, true))
     }
 
     /// The calling session's own processes inside `root`, which do not block it: stop them
@@ -111,23 +122,23 @@ impl Cwds {
         let session = self.session_tree(&inside);
         inside
             .iter()
-            .filter(|(pid, _)| session.contains(pid))
-            .map(|(pid, cwd)| format!("{} (of the calling session)", describe(*pid, cwd, false)))
+            .filter(|here| !here.session && session.contains(&here.pid))
+            .map(|here| format!("{} (of the calling session)", describe(here, false)))
             .collect()
     }
 
-    fn inside(&mut self, root: &Path) -> Result<Vec<(i32, PathBuf)>, String> {
+    fn inside(&mut self, root: &Path) -> Result<Vec<Where>, String> {
         match self.all.get_or_insert_with(read) {
             Err(why) => Err(why.clone()),
             Ok(all) => Ok(all
                 .iter()
-                .filter(|(_, cwd)| cwd.starts_with(root))
+                .filter(|here| here.cwd.starts_with(root))
                 .cloned()
                 .collect()),
         }
     }
 
-    fn session_tree(&mut self, inside: &[(i32, PathBuf)]) -> &[i32] {
+    fn session_tree(&mut self, inside: &[Where]) -> &[i32] {
         if inside.is_empty() {
             return &[];
         }
@@ -135,22 +146,55 @@ impl Cwds {
     }
 }
 
-/// `pid` and its program name; `full` adds the command line, which names what blocks a removal.
-fn describe(pid: i32, cwd: &Path, full: bool) -> String {
-    let command = agents::read(pid).map_or_else(
+/// The process and its program name; `full` adds the command line, which names what blocks a
+/// removal.
+fn describe(here: &Where, full: bool) -> String {
+    if here.session {
+        return format!(
+            "a Claude Code session (pid {}) is running in {}",
+            here.pid,
+            here.cwd.display()
+        );
+    }
+    let command = agents::read(here.pid).map_or_else(
         || "?".to_owned(),
         |p| match p.cmd.as_str() {
             cmd if full && !cmd.is_empty() => format!("{}: {cmd}", p.comm),
             _ => p.comm,
         },
     );
-    format!("process {pid} ({command}) runs in {}", cwd.display())
+    format!(
+        "process {} ({command}) runs in {}",
+        here.pid,
+        here.cwd.display()
+    )
 }
 
-fn read() -> Result<Vec<(i32, PathBuf)>, String> {
+fn read() -> Result<Vec<Where>, String> {
     let own = agents::lineage();
-    let mut all = agents::cwds_checked().map_err(|error| error.to_string())?;
-    all.retain(|(pid, _)| !own.contains(pid));
+    let mut all: Vec<Where> = agents::cwds_checked()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(pid, cwd)| Where {
+            pid,
+            cwd,
+            session: false,
+        })
+        .collect();
+    // A session record blocks unless it is the calling session itself; its descendants may be
+    // other sessions.
+    let claude = agents::own_claude_pid();
+    all.extend(
+        agents::live()
+            .into_iter()
+            .filter(|live| Some(live.pid) != claude)
+            .map(|live| Where {
+                pid: live.pid,
+                cwd: live.cwd.canonicalize().unwrap_or(live.cwd),
+                session: true,
+            }),
+    );
+    all.retain(|here| !own.contains(&here.pid));
     Ok(all)
 }
 

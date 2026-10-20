@@ -344,7 +344,7 @@ fn claude_pid<'a>(vars: impl IntoIterator<Item = &'a [u8]>) -> Option<i32> {
 }
 
 /// The `CLAUDE_PID` of this process's own environment.
-fn own_claude_pid() -> Option<i32> {
+pub fn own_claude_pid() -> Option<i32> {
     std::env::var("CLAUDE_PID")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -501,24 +501,6 @@ pub fn session_tree() -> Vec<i32> {
         }
     }
     found
-}
-
-/// The pids of the calling session: this process, its ancestors and `CLAUDE_PID` when set.
-pub fn own_pids() -> Vec<i32> {
-    let mut pids = lineage();
-    pids.extend(own_claude_pid());
-    pids
-}
-
-/// The first live Claude Code session, other than the calling one, whose `cwd` is `root` or
-/// inside it.
-pub fn live_in(root: &Path) -> Option<Live> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
-    let own = own_pids();
-    live()
-        .into_iter()
-        .filter(|session| !own.contains(&session.pid))
-        .find(|session| inside(&session.cwd, &root))
 }
 
 /// Whether `path`, links resolved, is `root` or inside it; `root` is already canonical.

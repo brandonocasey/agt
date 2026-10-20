@@ -722,7 +722,7 @@ fn local_repo_bytes_are_counted_once() {
     let live = prune.target("github.com/o/a", "live", 1);
     let lone = live.with_file_name(".lone.lock");
     fs::write(&lone, "1234").unwrap();
-    let report = prune.run(&["--only", "locks"]);
+    let report = prune.run(&["--only", "reviews"]);
     assert_eq!(report["totals"]["bytes"], 4);
 }
 
@@ -881,11 +881,12 @@ fn an_unreadable_repository_directory_is_a_warning_and_the_pass_goes_on() {
     let report = prune.run(&["--only", "reviews"]);
     let plan = prune.run(&[]);
     drop(sealed);
-    // A reader that ignores permissions (root) sees both; otherwise one is a warning.
+    // A reader that ignores permissions (root) sees both; otherwise the directory is a warning
+    // (the lock scan of the same store may warn about it too).
     let seen = report["plan"]["reviews"].as_array().unwrap().len();
     let warned = report["warnings"].as_array().unwrap().len();
     assert!(
-        (seen == 1 && warned == 1) || (seen == 2 && warned == 0),
+        (seen == 1 && warned >= 1) || (seen == 2 && warned == 0),
         "{report}"
     );
     assert!(old.exists());
@@ -930,6 +931,19 @@ fn later() -> i64 {
     i64::try_from(unix_now()).unwrap() + 30 * DAY
 }
 
+/// The worktree paths `agt cleanup --only worktrees --all-repos --offline` plans to remove at
+/// `now`, for the repositories under the configured roots.
+fn sweep_plan(prune: &Prune, now: i64) -> Vec<String> {
+    let report = prune.run_at(now, &["--only", "worktrees", "--all-repos", "--offline"]);
+    report["worktrees"]["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|repository| repository["remove"].as_array().unwrap())
+        .map(|row| row["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 /// Sets a path's modification time to `days` before `NOW`.
 fn age(path: &Path, days: i64) {
     let secs = u64::try_from(NOW - days * DAY).unwrap();
@@ -947,7 +961,7 @@ fn old_file(path: &Path, days: i64) {
 }
 
 #[test]
-fn output_and_scratch_go_whole_once_every_file_is_old() {
+fn files_go_whole_once_every_file_is_old() {
     let prune = Prune::new();
     let cache = prune.env.path("cache").join("agents");
     let output = cache.join("output");
@@ -972,13 +986,13 @@ fn output_and_scratch_go_whole_once_every_file_is_old() {
     let live = harness.join("-Users-me-other/1a1a");
     old_file(&live.join("tasks/out"), 2);
 
-    let report = prune.run(&["--only", "output", "--only", "scratch"]);
+    let report = prune.run(&["--only", "files"]);
     assert_eq!(keys(&report, "output"), ["old"]);
     let session_key = session.to_string_lossy().into_owned();
     assert_eq!(keys(&report, "scratch"), [session_key.as_str(), "task"]);
     assert!(output.join("old").exists());
 
-    let report = prune.run(&["--only", "output", "--only", "scratch", "--yes"]);
+    let report = prune.run(&["--only", "files", "--yes"]);
     assert_eq!(report["deleted"].as_array().unwrap().len(), 3, "{report}");
     assert!(!output.join("old").exists() && output.join("mixed/a.md").exists());
     assert!(output.join("loose.md").exists() && scratch.join(".keep").exists());
@@ -1177,13 +1191,11 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
         manual["branches"],
         json!([format!("git -C {} branch -d done", repo_path.display())])
     );
-    // Merged and clean. Its branch is checked out, so only the worktree is listed.
+    // Merged and clean worktrees are the sweep's: the manual list no longer has them.
+    assert!(manual.get("worktrees").is_none(), "{manual}");
     assert_eq!(
-        manual["worktrees"],
-        json!([format!(
-            "agt worktree remove {} --yes",
-            repo_path.join(".worktrees/busy").display()
-        )])
+        sweep_plan(&prune, later()),
+        [repo_path.join(".worktrees/busy").display().to_string()]
     );
     assert_eq!(
         manual["codex_releases"],
@@ -1212,11 +1224,11 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     let report = prune.run_at(later(), &["--only", "manual", "--yes"]);
     let saved = PathBuf::from(report["manual_report"].as_str().unwrap());
     let text = fs::read_to_string(&saved).unwrap();
-    assert!(text.contains("<!-- count: 5 -->"), "{text}");
+    assert!(text.contains("<!-- count: 4 -->"), "{text}");
     assert!(text.contains(&format!("git -C {} branch -d done", repo_path.display())));
     assert_eq!(
         count(&prune),
-        format!("agt: 5 cleanup candidates in {}\n", saved.display())
+        format!("agt: 4 cleanup candidates in {}\n", saved.display())
     );
     assert!(releases.join("0.9.0").exists() && browsers.join("chromium-1100").exists());
     assert!(repo_path.join(".worktrees/busy").exists());
@@ -1243,7 +1255,7 @@ fn scratch_never_follows_a_link_out_of_the_harness_root() {
     fs::create_dir_all(&harness).unwrap();
     std::os::unix::fs::symlink(&victim, harness.join("evil")).unwrap();
 
-    let report = prune.run(&["--only", "scratch", "--yes"]);
+    let report = prune.run(&["--only", "files", "--yes"]);
     assert_eq!(keys(&report, "scratch"), Vec::<String>::new(), "{report}");
     assert!(
         report["warnings"]
@@ -1257,7 +1269,7 @@ fn scratch_never_follows_a_link_out_of_the_harness_root() {
 }
 
 #[test]
-fn manual_report_skips_a_worktree_changed_in_the_last_3_days() {
+fn the_sweep_plan_skips_a_worktree_changed_in_the_last_3_days() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1275,14 +1287,15 @@ fn manual_report_skips_a_worktree_changed_in_the_last_3_days() {
     git(&["commit", "-q", "--allow-empty", "-m", "one"]);
     git(&["worktree", "add", "-q", ".worktrees/fresh", "-b", "fresh"]);
 
-    let report = prune.run_at(i64::try_from(unix_now()).unwrap(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"], json!([]));
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        sweep_plan(&prune, i64::try_from(unix_now()).unwrap()),
+        Vec::<String>::new()
+    );
+    assert_eq!(sweep_plan(&prune, later()).len(), 1);
 }
 
 #[test]
-fn manual_report_skips_a_worktree_holding_an_ignored_nested_repository() {
+fn the_sweep_plan_skips_a_worktree_holding_an_ignored_nested_repository() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1304,20 +1317,18 @@ fn manual_report_skips_a_worktree_holding_an_ignored_nested_repository() {
         &["worktree", "add", "-q", ".worktrees/done", "-b", "done"],
     );
 
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+    assert_eq!(sweep_plan(&prune, later()).len(), 1);
 
     // An ignored clone has history that a backup cannot hold, so the worktree is not offered.
     let nested = repo.join(".worktrees/done/vendor/lib");
     fs::create_dir_all(&nested).unwrap();
     git(&nested, &["init", "-q"]);
     git(&nested, &["commit", "-q", "--allow-empty", "-m", "lib"]);
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"], json!([]));
+    assert_eq!(sweep_plan(&prune, later()), Vec::<String>::new());
 }
 
 #[test]
-fn manual_report_skips_a_worktree_with_a_process_running_in_it_as_the_sweep_does() {
+fn the_sweep_plan_skips_a_worktree_with_a_process_running_in_it() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1336,17 +1347,15 @@ fn manual_report_skips_a_worktree_with_a_process_running_in_it_as_the_sweep_does
     git(&["worktree", "add", "-q", ".worktrees/done", "-b", "done"]);
     let done = repo.join(".worktrees/done");
 
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+    assert_eq!(sweep_plan(&prune, later()).len(), 1);
 
-    // The sweep keeps a worktree where another process runs, so the list must not offer it.
+    // The sweep keeps a worktree where another process runs.
     let mut child = prune.env.command("sleep", &done).arg("30").spawn().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut listed = 1;
     while listed != 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let report = prune.run_at(later(), &["--only", "manual"]);
-        listed = report["manual"]["worktrees"].as_array().unwrap().len();
+        listed = sweep_plan(&prune, later()).len();
     }
     child.kill().unwrap();
     child.wait().unwrap();
@@ -1354,7 +1363,7 @@ fn manual_report_skips_a_worktree_with_a_process_running_in_it_as_the_sweep_does
 }
 
 #[test]
-fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_directory() {
+fn the_sweep_plan_lists_the_other_rows_when_one_worktree_has_an_unreadable_directory() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1383,14 +1392,13 @@ fn manual_report_lists_the_other_rows_when_one_worktree_has_an_unreadable_direct
     fs::create_dir_all(&locked).unwrap();
     let _sealed = Sealed::new(&locked);
 
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    let listed = report["manual"]["worktrees"].as_array().unwrap();
-    assert_eq!(listed.len(), 1, "{report}");
-    assert!(listed[0].as_str().unwrap().contains("a-open"), "{report}");
+    let listed = sweep_plan(&prune, later());
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].contains("a-open"), "{listed:?}");
 }
 
 #[test]
-fn manual_report_skips_a_worktree_whose_submodule_holds_a_stash() {
+fn the_sweep_plan_skips_a_worktree_whose_submodule_holds_a_stash() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     let origin = prune.env.path("sub-origin");
@@ -1427,14 +1435,12 @@ fn manual_report_skips_a_worktree_whose_submodule_holds_a_stash() {
     let done = repo.join(".worktrees/done");
     git(&done, &["submodule", "update", "--init"]);
 
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);
+    assert_eq!(sweep_plan(&prune, later()).len(), 1);
 
     // A stash lives only in the clone under the worktree's git directory.
     fs::write(done.join("mod/lib.txt"), "changed\n").unwrap();
     git(&done.join("mod"), &["stash", "push", "-q"]);
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(report["manual"]["worktrees"], json!([]));
+    assert_eq!(sweep_plan(&prune, later()), Vec::<String>::new());
 }
 
 /// A `git` in front of the real one that records every command line it is given.
@@ -1448,7 +1454,7 @@ fn recording_git(prune: &Prune) -> (String, PathBuf) {
 }
 
 #[test]
-fn the_manual_report_never_asks_a_remote_and_does_not_list_a_worktree_holding_an_unheld_tag() {
+fn the_offline_sweep_plan_never_asks_a_remote_and_skips_a_worktree_holding_an_unheld_tag() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     let origin = prune.env.path("sub-origin");
@@ -1491,14 +1497,19 @@ fn the_manual_report_never_asks_a_remote_and_does_not_list_a_worktree_holding_an
         .env
         .bin(&prune.env.repo)
         .arg("cleanup")
-        .args(["--only", "manual"])
+        .args(["--only", "worktrees", "--all-repos", "--offline"])
         .env("AGT_NOW", later().to_string())
         .env("PATH", path)
         .output()
         .unwrap();
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["manual"]["worktrees"], json!([]), "{report}");
+    let planned = report["worktrees"]["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|repository| repository["remove"] == json!([]));
+    assert!(planned, "{report}");
     let calls = fs::read_to_string(&log).unwrap();
     assert!(!calls.contains("ls-remote"), "{calls}");
 }

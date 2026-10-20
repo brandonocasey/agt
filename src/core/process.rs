@@ -89,6 +89,35 @@ pub fn status_until(command: &mut Command, deadline: Instant) -> io::Result<Exit
     finish(&mut child, result, true)
 }
 
+/// The longest `--timeout` or `--interval` in seconds (one year), so a deadline never overflows an `Instant`.
+pub const MAX_WAIT_SECS: u64 = 31_536_000;
+
+/// What `poll_until` ended with.
+pub enum Polled<T> {
+    Done(T),
+    TimedOut,
+}
+
+/// Calls `attempt` with the deadline until it returns `Some`, sleeping `interval` between calls
+/// but never past `timeout` from now. `attempt` MUST finish by the deadline it is given.
+pub fn poll_until<T, E>(
+    timeout: Duration,
+    interval: Duration,
+    mut attempt: impl FnMut(Instant) -> Result<Option<T>, E>,
+) -> Result<Polled<T>, E> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(value) = attempt(deadline)? {
+            return Ok(Polled::Done(value));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(Polled::TimedOut);
+        }
+        std::thread::sleep(interval.min(remaining));
+    }
+}
+
 fn wait(child: &mut Child, deadline: Option<Instant>) -> io::Result<ExitStatus> {
     let Some(end) = deadline else {
         return child.wait();

@@ -1,4 +1,4 @@
-//! `agt branch pushed`.
+//! The `pushed` check of `agt branch check`.
 
 use serde_json::{Value, json};
 

@@ -1,65 +1,65 @@
-//! What `agt cleanup` lists for worktrees and branches: work that is already in the default
-//! branch by local ancestry alone. Nothing here touches the network or runs `lsof`.
+//! What `agt cleanup` lists for branches and worktree backups: branches already in the default
+//! branch by local ancestry alone, and the backups `agt worktree remove` made. Nothing here
+//! touches the network or runs `lsof`; removing the worktrees of landed work is
+//! `agt cleanup --only worktrees`.
 
 use std::path::PathBuf;
 
-use super::idle::{Allow, Cwds, blocker};
+use super::backup;
 use super::info;
 use super::landed::Scene;
 use super::roots;
 use crate::core::error::Result;
 use crate::git::Repo;
 
-/// A merged worktree or branch that `agt cleanup --only worktrees` would remove.
+/// A merged branch that `agt cleanup --only worktrees` would delete and no worktree holds.
 pub struct Found {
     pub repo: PathBuf,
-    pub worktree: Option<PathBuf>,
-    pub branch: Option<String>,
+    pub branch: String,
+}
+
+/// A worktree backup `agt worktree remove` made.
+pub struct Backup {
+    pub id: String,
+    /// The backup's directory.
+    pub dir: PathBuf,
+}
+
+/// Every worktree backup, oldest first.
+pub fn backups() -> Result<Vec<Backup>> {
+    Ok(backup::all()?
+        .into_iter()
+        .map(|(record, dir)| Backup { id: record.id, dir })
+        .collect())
 }
 
 /// The candidates of every repository under the configured roots, in repository order.
 pub fn candidates() -> Result<Vec<Found>> {
     let mut found = Vec::new();
-    let mut cwds = Cwds::default();
     for root in roots::repositories()? {
         // A repository git cannot read is none of cleanup's business.
-        if let Ok(mut here) = of(&Repo::at(&root), &mut cwds) {
+        if let Ok(mut here) = of(&Repo::at(&root)) {
             found.append(&mut here);
         }
     }
     Ok(found)
 }
 
-fn of(repo: &Repo, cwds: &mut Cwds) -> Result<Vec<Found>> {
+fn of(repo: &Repo) -> Result<Vec<Found>> {
     let Some(scene) = Scene::read(repo)? else {
         return Ok(Vec::new());
     };
     let main = info::real(&scene.main().path)?;
-    // What the sweep may remove, offline: the same check, with no force flag.
-    let allow = Allow {
-        offline: true,
-        recent: false,
-        dirty: false,
-    };
     let mut found = Vec::new();
     for local in scene.local_findings(repo)? {
-        if !local.finding.verdict.landed() {
+        if !local.finding.verdict.landed() || local.worktree.is_some() {
             continue;
         }
-        match local.worktree {
-            Some(entry) if blocker(&scene, entry, &main, allow, cwds)?.is_none() => {
-                found.push(Found {
-                    repo: main.clone(),
-                    worktree: Some(entry.path.clone()),
-                    branch: None,
-                });
-            }
-            Some(_) => {}
-            None => found.push(Found {
+        if let Some(branch) = local.branch {
+            found.push(Found {
                 repo: main.clone(),
-                worktree: None,
-                branch: local.branch,
-            }),
+                branch,
+            });
         }
     }
     Ok(found)

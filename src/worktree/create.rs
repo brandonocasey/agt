@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::info::main_checkout;
 use super::setup::{self, Step};
-use super::{emit, fast_forward, hooks, port, prepare};
+use super::{emit, fast_forward, hooks};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -31,9 +31,6 @@ pub struct Cli {
     /// Install dependencies afterwards (`agt worktree prepare`).
     #[arg(long)]
     prepare: bool,
-    /// Record a dev-server port afterwards (`agt worktree port`).
-    #[arg(long)]
-    port: bool,
     /// Skip the `[worktree.hooks] create` commands.
     #[arg(long)]
     no_hooks: bool,
@@ -104,25 +101,19 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     value["warnings"] = json!(warnings);
     let dir = PathBuf::from(value["path"].as_str().unwrap_or_default());
-    let mut ok = true;
     let fresh = value["reused"] == false;
     let run_hooks = fresh && has_hooks;
+    let mut steps = Vec::new();
+    if cli.prepare {
+        steps.push(Step::Prepare);
+    }
+    if run_hooks {
+        steps.push(Step::Hooks);
+    }
     if cli.background {
-        // The port is recorded first so the hooks see it as PORT.
-        if cli.port {
-            let (path, number) = port::assign(&dir)?;
-            value["port"] = port::report(&path, number);
-        }
-        let mut steps = Vec::new();
-        if cli.prepare {
-            steps.push(Step::Prepare);
-        }
-        if run_hooks {
-            steps.push(Step::Hooks);
-            // Reported now too: a caller that never waits must still see it.
-            if let Some(untrusted) = resolved.and_then(|resolved| resolved.untrusted) {
-                value["hooks"] = json!({"untrusted": untrusted});
-            }
+        // Reported now too: a caller that never waits must still see it.
+        if run_hooks && let Some(untrusted) = resolved.and_then(|resolved| resolved.untrusted) {
+            value["hooks"] = json!({"untrusted": untrusted});
         }
         value["background"] = if !steps.is_empty() {
             setup::spawn(&dir, &steps)?
@@ -131,23 +122,12 @@ pub fn run(cli: Cli) -> Result<Output> {
         } else {
             json!({"started": false, "reason": "nothing to run"})
         };
-        return emit(value, ok);
+        return emit(value, true);
     }
     if cli.prepare {
         setup::refuse_while_running(&dir)?;
-        let (report, passed) = prepare::prepare(&dir, false)?;
-        value["prepare"] = report;
-        ok = passed;
     }
-    if cli.port {
-        let (path, number) = port::assign(&dir)?;
-        value["port"] = port::report(&path, number);
-    }
-    if run_hooks {
-        let (report, passed) = hooks::run(&dir, hooks::Kind::Create)?;
-        value["hooks"] = report;
-        ok &= passed;
-    }
+    let ok = setup::execute(&dir, &steps, &mut value)?;
     emit(value, ok)
 }
 
