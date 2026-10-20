@@ -7,7 +7,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env};
+use crate::support::{BIN, Env, proc_start};
 
 mod cleanup;
 
@@ -353,21 +353,6 @@ fn refuses_what_it_must_not_remove() {
     assert!(!f.env.path("state/agents/backups").exists());
     f.remove();
     assert!(!f.wt.exists());
-}
-
-/// The `procStart` Claude Code records for `pid`.
-fn proc_start(pid: u32) -> String {
-    if cfg!(target_os = "linux") {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let after = &stat[stat.rfind(')').unwrap() + 2..];
-        after.split(' ').nth(19).unwrap().to_owned()
-    } else {
-        let output = std::process::Command::new("ps")
-            .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
 }
 
 #[test]

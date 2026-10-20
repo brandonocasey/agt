@@ -7,8 +7,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use super::proc_start;
-use crate::support::Env;
+use crate::support::{Env, proc_start, unix_now};
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -85,11 +84,7 @@ impl Site {
     }
 
     fn agt_in(&self, dir: &Path, args: &[&str]) -> Output {
-        let real = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let now = i64::try_from(real).unwrap() + self.days_on * 86_400;
+        let now = i64::try_from(unix_now()).unwrap() + self.days_on * 86_400;
         self.env
             .bin(dir)
             .env("AGT_NOW", now.to_string())

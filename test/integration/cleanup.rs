@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env};
+use crate::support::{BIN, Env, proc_start, unix_now};
 
 const DAY: i64 = 86_400;
 /// 2027-01-01T00:00:00Z.
@@ -928,11 +928,7 @@ fn a_local_repo_with_no_targets_is_listed_only_after_a_quiet_quarter() {
 /// 30 days after the real time, for tests that compare the clock with real process start
 /// times and git timestamps, where the fixed `NOW` would fail once the real date passes it.
 fn later() -> i64 {
-    let real = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    i64::try_from(real).unwrap() + 30 * DAY
+    i64::try_from(unix_now()).unwrap() + 30 * DAY
 }
 
 /// Sets a path's modification time to `days` before `NOW`.
@@ -1068,22 +1064,6 @@ fn orphan_processes_are_signalled_only_when_named() {
         json!([{ "pid": pid, "signal": "SIGTERM" }])
     );
     assert!(child.wait().unwrap().signal().is_some());
-}
-
-/// The `procStart` Claude Code records for `pid`: clock ticks since boot on Linux, `ps`'s
-/// `lstart` text on macOS.
-fn proc_start(pid: u32) -> String {
-    if cfg!(target_os = "linux") {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let after = &stat[stat.rfind(')').unwrap() + 2..];
-        after.split(' ').nth(19).unwrap().to_owned()
-    } else {
-        let output = std::process::Command::new("ps")
-            .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
 }
 
 #[test]
@@ -1296,11 +1276,7 @@ fn manual_report_skips_a_worktree_changed_in_the_last_3_days() {
     git(&["commit", "-q", "--allow-empty", "-m", "one"]);
     git(&["worktree", "add", "-q", ".worktrees/fresh", "-b", "fresh"]);
 
-    let real = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let report = prune.run_at(i64::try_from(real).unwrap(), &["--only", "manual"]);
+    let report = prune.run_at(i64::try_from(unix_now()).unwrap(), &["--only", "manual"]);
     assert_eq!(report["manual"]["worktrees"], json!([]));
     let report = prune.run_at(later(), &["--only", "manual"]);
     assert_eq!(report["manual"]["worktrees"].as_array().unwrap().len(), 1);

@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
-use crate::support::{Env, numbered, snapshot};
+use crate::support::{Env, numbered, snapshot, unix_now};
 
 const FINDINGS: &str = include_str!("../fixtures/findings.json");
 const REVIEWER: &str = r#"[{"model":"gpt-6","effort":"high","harness":"codex","harness_version":"0.162.1","starting_context":"fresh"}]"#;
@@ -681,10 +681,7 @@ fn reviews_expire_by_age() {
     let env = Env::with_branch();
     env.run(&["comment", "--body", "old"]);
     let day = 24 * 60 * 60;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = unix_now();
     let soon = (now + 89 * day).to_string();
     let later = (now + 91 * day).to_string();
 

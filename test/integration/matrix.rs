@@ -12,7 +12,7 @@ use crate::support::scenario::{
     Setup, ids, kinds, local_changes, marked, open_ids, skipped_items, thread, write_starting,
     write_text, writes_for,
 };
-use crate::support::{Env, numbered, snapshot};
+use crate::support::{Env, numbered, snapshot, unix_now};
 
 type Svc<'a> = &'a dyn FakeService;
 
@@ -621,11 +621,7 @@ fn runs_ended_before_the_pr_are_never_published(svc: Svc) {
         &format!("fixed {}", setup.head),
     ]);
     env.run(&["run", "end", "--run", &setup.run]);
-    let later = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600;
+    let later = unix_now() + 3600;
     svc.sync(&setup, &Remote::new());
     env.run_with(
         &["sync", "--pr", svc.number()],

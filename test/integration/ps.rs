@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env, executable};
+use crate::support::{BIN, Env, executable, proc_start};
 
 /// A child process that runs until it is dropped.
 struct Proc(Child);
@@ -47,21 +47,6 @@ impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-/// The `procStart` Claude Code records for `pid`.
-fn proc_start(pid: u32) -> String {
-    if cfg!(target_os = "linux") {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let after = &stat[stat.rfind(')').unwrap() + 2..];
-        after.split(' ').nth(19).unwrap().to_owned()
-    } else {
-        let output = Command::new("ps")
-            .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 }
 
