@@ -78,7 +78,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     };
     if matches!(
         &cli.command,
-        Command::Create(_) | Command::Edit(_) | Command::Comment { .. }
+        Command::Create(_) | Command::Edit(_) | Command::Comment { private: false, .. }
     ) || matches!(&cli.command, Command::Link(args) if args.comment)
     {
         auto::push_changed(&store, &repo, filter, cli.offline, &mut value);
