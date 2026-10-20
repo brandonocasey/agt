@@ -70,6 +70,16 @@ impl Gitlab {
         }
     }
 
+    /// Whether the head pipeline of the MR `iid` tested `sha`; false without a pipeline.
+    pub fn head_pipeline_runs(&self, base: &str, iid: u64, sha: &str) -> Result<bool> {
+        let request = self.merge_request(base, iid)?;
+        let pipeline = &request["head_pipeline"];
+        if pipeline.is_null() {
+            return Ok(false);
+        }
+        self.pipeline_runs(base, pipeline, sha)
+    }
+
     /// Whether `pipeline` tested `sha`. A merged-results pipeline runs on a merge commit whose
     /// parent is `sha`.
     pub fn pipeline_runs(&self, base: &str, pipeline: &Value, sha: &str) -> Result<bool> {

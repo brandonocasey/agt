@@ -22,6 +22,14 @@ pub struct Target {
     pub threads: Vec<Thread>,
 }
 
+/// The highest number among the `ids` that are `prefix` and a number; 0 without one.
+pub fn last_number(ids: impl IntoIterator<Item = impl AsRef<str>>, prefix: &str) -> u32 {
+    ids.into_iter()
+        .filter_map(|id| id.as_ref().strip_prefix(prefix)?.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+}
+
 impl Target {
     /// Adds `thread` without losing anything: the same remote thread (or the same finding) gains
     /// the comments it lacks; a different thread under a taken id (human `h<n>` ids restart per
@@ -43,20 +51,21 @@ impl Target {
             }
             return;
         }
-        let ids = self.threads.iter().map(|thread| thread.id.as_str());
-        let next = ids
-            .filter_map(|id| id.strip_prefix('h')?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let (old, new) = (format!("{}/", thread.id), format!("h{next}/"));
+        let next = self.next_thread_id();
+        let (old, new) = (format!("{}/", thread.id), format!("{next}/"));
         for comment in &mut thread.comments {
             if let Some(rest) = comment.id.strip_prefix(&old) {
                 comment.id = format!("{new}{rest}");
             }
         }
-        thread.id = format!("h{next}");
+        thread.id = next;
         self.threads.push(thread);
+    }
+
+    /// The id of the next human thread: `h` and one more than the highest taken number.
+    pub fn next_thread_id(&self) -> String {
+        let last = last_number(self.threads.iter().map(|thread| &thread.id), "h");
+        format!("h{}", last + 1)
     }
 
     /// Moves runs, threads and records that `self` lacks over from `from`.

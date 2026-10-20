@@ -81,6 +81,15 @@ pub fn format(secs: i64) -> String {
     )
 }
 
+/// The latest of the RFC 3339 `stamps` in Unix seconds; `None` without any.
+pub fn latest<'a>(stamps: impl IntoIterator<Item = &'a str>) -> Result<Option<i64>> {
+    let mut latest = None;
+    for stamp in stamps {
+        latest = latest.max(Some(parse(stamp)?));
+    }
+    Ok(latest)
+}
+
 /// Parses an RFC 3339 timestamp (`T` separator, optional fraction, `Z` or `±HH:MM`) into Unix
 /// seconds.
 pub fn parse(text: &str) -> Result<i64> {

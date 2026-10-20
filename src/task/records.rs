@@ -64,9 +64,9 @@ pub(super) fn read_task(id: &str) -> Result<Value> {
 }
 
 fn with_lock<T>(id: &str, callback: impl FnOnce() -> Result<T>) -> Result<T> {
-    let root = files::ensure_root()?;
+    files::ensure_root()?;
     let _lock = Lock::acquire(
-        root.join(format!(".{id}.lock")),
+        files::lock_path(id)?,
         None,
         &format!("task {id} is being updated; retry"),
     )?;

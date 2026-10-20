@@ -6,7 +6,7 @@ use crate::core::clock;
 use crate::core::error::Result;
 use crate::store::Store;
 use crate::store::model::{ReviewState, Target};
-use crate::store::prune::{PRUNE_AFTER_SECS, Removal};
+use crate::store::prune::{Removal, past_retention};
 
 /// Age reference for pruning: when the PR/MR closed, else the last change.
 pub(super) fn last_change(target: &Target) -> Result<i64> {
@@ -25,7 +25,7 @@ pub(super) fn last_change(target: &Target) -> Result<i64> {
 
 /// Whether the target is old enough to drop at `now`.
 pub fn expired(target: &Target, now: i64) -> Result<bool> {
-    Ok(now - last_change(target)? >= PRUNE_AFTER_SECS)
+    Ok(past_retention(now, last_change(target)?))
 }
 
 /// Removes the expired targets of one repository directory and returns them. Targets that cannot

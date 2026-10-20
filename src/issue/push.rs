@@ -69,7 +69,7 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
         .docs::<Issue>(&tracker.dir, &[TRACKER_FILE])?
         .iter()
         .filter(|issue| merge::has_pending(issue) || (options.force && !issue.conflicts.is_empty()))
-        .map(trackers::doc_name)
+        .map(Issue::doc_name)
         .collect();
     push_names(store, tracker, options, queued, false)
 }
@@ -386,12 +386,8 @@ impl Push<'_> {
             .iter()
             .find(|error| error.what == "create")
             .map(|error| &error.at);
-        let mut latest = None;
-        for at in began.into_iter().chain(failed) {
-            let at = clock::parse(at)?;
-            latest = latest.max(Some(at));
-        }
-        let Some(sent) = latest else {
+        let stamps = began.into_iter().chain(failed).map(String::as_str);
+        let Some(sent) = clock::latest(stamps)? else {
             return Ok(false);
         };
         Ok(within_listing_lag(clock::now_secs()?, sent))

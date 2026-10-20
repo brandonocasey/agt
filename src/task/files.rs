@@ -9,6 +9,11 @@ pub fn root() -> Result<PathBuf> {
     tasks_dir()
 }
 
+/// The lock file that serialises changes to the task `id`.
+pub fn lock_path(id: &str) -> Result<PathBuf> {
+    Ok(root()?.join(format!(".{id}.lock")))
+}
+
 pub fn ensure_root() -> Result<PathBuf> {
     let root = root()?;
     private_dir(&root)?;

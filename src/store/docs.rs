@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::json::{lost_field, persist_json, read_json};
 use super::prune::{Removal, remove_with_lock};
-use super::{Store, create_dir, ctx, fail, validate_key};
+use super::{Store, create_dir, ctx, fail, lock_path, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{lock_file, try_lock_file};
 
@@ -110,7 +110,7 @@ impl Store {
     ) -> Result<R> {
         validate_key(name)?;
         create_dir(dir)?;
-        let _lock = lock_file(&dir.join(format!(".{name}.lock")))?;
+        let _lock = lock_file(&lock_path(dir, name))?;
         let path = dir.join(format!("{name}.json"));
         let mut doc = match read_json::<Value>(&path)? {
             Some(document) => {
@@ -141,8 +141,8 @@ impl Store {
         remove: impl FnOnce(&T) -> bool,
     ) -> Result<Removal> {
         validate_key(name)?;
-        let lock_path = dir.join(format!(".{name}.lock"));
-        let Some(_lock) = try_lock_file(&lock_path)? else {
+        let lock = lock_path(dir, name);
+        let Some(_lock) = try_lock_file(&lock)? else {
             return Ok(Removal::Busy);
         };
         let path = dir.join(format!("{name}.json"));
@@ -154,15 +154,15 @@ impl Store {
         if lost_field_of(&path, &document, &doc)?.is_some() || !remove(&doc) {
             return Ok(Removal::Kept);
         }
-        remove_with_lock(&path, &lock_path).map(Removal::Removed)
+        remove_with_lock(&path, &lock).map(Removal::Removed)
     }
 
     /// Moves the document `from` to `to`, replacing nothing: it fails when `to` exists.
     pub fn rename_doc(&self, dir: &Path, from: &str, to: &str) -> Result<()> {
         validate_key(from)?;
         validate_key(to)?;
-        let from_lock = dir.join(format!(".{from}.lock"));
-        let to_lock = dir.join(format!(".{to}.lock"));
+        let from_lock = lock_path(dir, from);
+        let to_lock = lock_path(dir, to);
         let (first, second) = if from < to {
             (&from_lock, &to_lock)
         } else {

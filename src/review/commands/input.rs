@@ -1,24 +1,16 @@
 use crate::core::error::{Result, fail};
-use crate::core::local;
+use crate::core::text::{argument_or_stdin, bounded};
 use crate::store::model::{Anchor, Side};
 
 use super::MAX_TEXT;
 
 pub(super) fn limited(text: String, name: &str) -> Result<String> {
-    if text.trim().is_empty() {
-        return fail(format!("{name} must not be empty"));
-    }
-    if text.len() > MAX_TEXT {
-        return fail(format!("{name} exceeds {MAX_TEXT} bytes"));
-    }
+    bounded(&text, name, MAX_TEXT, true)?;
     Ok(text)
 }
 
 pub(super) fn read_body(body: &str) -> Result<String> {
-    if body == "-" {
-        return limited(local::read_stdin("body")?, "body");
-    }
-    limited(body.to_owned(), "body")
+    limited(argument_or_stdin(body, "body")?, "body")
 }
 
 pub(super) fn validate_path(path: &str) -> Result<()> {

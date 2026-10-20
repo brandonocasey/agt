@@ -398,6 +398,16 @@ impl Store {
     }
 }
 
+/// The lock file of the document `name` in `dir`.
+fn lock_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!(".{name}.lock"))
+}
+
+/// The lock a publish of the target `key` in `dir` holds.
+fn publish_lock_path(dir: &Path, key: &str) -> PathBuf {
+    dir.join(format!(".{key}.publish.lock"))
+}
+
 fn validate_key(key: &str) -> Result<()> {
     let valid = !key.is_empty()
         && key.len() <= MAX_KEY

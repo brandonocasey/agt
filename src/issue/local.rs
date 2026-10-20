@@ -4,32 +4,27 @@
 use serde_json::Value;
 
 use super::cli::{CreateArgs, EditArgs, LinkArgs, Reason, State};
-use super::trackers::{self, Tracker, doc_name};
+use super::trackers::{self, Tracker};
 use super::view::summary;
 use crate::core::clock;
 use crate::core::config::Config;
 use crate::core::error::{Result, fail};
-use crate::core::local::read_stdin;
 use crate::core::random;
+use crate::core::text::{argument_or_stdin, bounded, within};
 use crate::forge::{self, service};
 use crate::store::Store;
 use crate::store::issues::{Category, Fields, Issue, LinkSource, Links, Note, PrLink, VERSION};
-use crate::store::model::{Author, Comment, Delivery, PostState};
+use crate::store::model::{Author, Comment, Delivery, PostState, last_number};
 
 const MAX_TEXT: usize = 65_536;
 
 /// `text`, or stdin when it is `-`; never empty unless `allow_empty`.
 fn read_text(text: &str, what: &str, allow_empty: bool) -> Result<String> {
-    let text = if text == "-" {
-        read_stdin(what)?
+    let text = argument_or_stdin(text, what)?;
+    if allow_empty {
+        within(&text, what, MAX_TEXT)?;
     } else {
-        text.to_owned()
-    };
-    if !allow_empty && text.trim().is_empty() {
-        return fail(format!("{what} must not be empty"));
-    }
-    if text.len() > MAX_TEXT {
-        return fail(format!("{what} exceeds {MAX_TEXT} bytes"));
+        bounded(&text, what, MAX_TEXT, true)?;
     }
     Ok(text)
 }
@@ -43,7 +38,7 @@ fn change(
 ) -> Result<Value> {
     let (tracker, issue) = trackers::find(store, filter, key)?;
     let now = clock::now()?;
-    let name = doc_name(&issue);
+    let name = issue.doc_name();
     let updated = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
         edit(&tracker, issue)?;
         issue.fields.normalize();
@@ -54,12 +49,7 @@ fn change(
 }
 
 fn next_comment_id(issue: &Issue) -> String {
-    let last = issue
-        .comments
-        .iter()
-        .filter_map(|comment| comment.id.strip_prefix('c')?.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
+    let last = last_number(issue.comments.iter().map(|comment| &comment.id), "c");
     format!("c{}", last + 1)
 }
 
@@ -93,12 +83,7 @@ pub fn note(store: &Store, filter: Option<&str>, key: &str, text: &str) -> Resul
     let text = read_text(text, "note", false)?;
     let now = clock::now()?;
     change(store, filter, key, |_, issue| {
-        let last = issue
-            .notes
-            .iter()
-            .filter_map(|note| note.id.strip_prefix('n')?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
+        let last = last_number(issue.notes.iter().map(|note| &note.id), "n");
         issue.notes.push(Note {
             id: format!("n{}", last + 1),
             text,

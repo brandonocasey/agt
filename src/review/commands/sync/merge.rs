@@ -9,8 +9,8 @@ use crate::forge::markers::{self, agent_attempt, agent_id};
 use crate::forge::service::ReviewService;
 use crate::forge::{CommentData, Draft, Fetched, ThreadData};
 use crate::store::model::{
-    Author, Comment, ImportedRecord, PostState, RecordPost, RemoteKind, Resolution,
-    Run, Target, Thread, ThreadType,
+    Author, Comment, ImportedRecord, PostState, RecordPost, RemoteKind, Resolution, Run, Target,
+    Thread, ThreadType,
 };
 
 fn imported_comment(comment: CommentData, login: &str) -> Comment {

@@ -109,7 +109,7 @@ fn attach(
     issue: &crate::store::issues::Issue,
 ) -> Result<trackers::Tracker> {
     let target = trackers::ensure(store, configured)?;
-    let name = trackers::doc_name(issue);
+    let name = issue.doc_name();
     store.update_existing_doc(
         &source.dir,
         &name,
@@ -175,7 +175,7 @@ pub fn push_changed(
             source
         };
         destination_dir = Some(target.dir.clone());
-        let name = trackers::doc_name(&issue);
+        let name = issue.doc_name();
         let report = super::push::one(store, &target, &name)?;
         if report["failed"]
             .as_array()

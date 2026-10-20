@@ -121,6 +121,14 @@ pub struct WriteError {
     pub at: String,
 }
 
+impl Issue {
+    /// The name of the document: the number, or the local key before the host knows it.
+    pub fn doc_name(&self) -> String {
+        self.number
+            .map_or_else(|| self.key.clone(), |number| number.to_string())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Issue {
     pub version: u32,
@@ -174,8 +182,8 @@ impl super::Store {
         name: &str,
     ) -> crate::core::error::Result<()> {
         super::validate_key(name)?;
-        let _source = lock_file(&source.join(format!(".{name}.lock")))?;
-        let _target = lock_file(&target.join(format!(".{name}.lock")))?;
+        let _source = lock_file(&super::lock_path(source, name))?;
+        let _target = lock_file(&super::lock_path(target, name))?;
         let destination = target.join(format!("{name}.json"));
         match std::fs::symlink_metadata(&destination) {
             Ok(_) => {

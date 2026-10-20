@@ -9,7 +9,7 @@ use crate::forge;
 use crate::review::cli::{AuthorArgs, CommentArgs, ReplyArgs, ResolveArgs};
 use crate::store::model::{
     Anchor, Author, Comment, FindingInfo, KilledFinding, PostState, Resolution, Review, Severity,
-    Side, Target, Thread, ThreadType, Triage,
+    Side, Target, Thread, ThreadType, Triage, last_number,
 };
 
 use super::input::{AnchorInput, build_anchor, limited, read_body};
@@ -24,7 +24,7 @@ pub(super) fn local_comment(
     now: &str,
 ) -> Comment {
     let prefix = format!("{thread}/c");
-    let number = next_number(existing.iter().map(|comment| comment.id.clone()), &prefix) + 1;
+    let number = last_number(existing.iter().map(|comment| &comment.id), &prefix) + 1;
     Comment::new(
         format!("{prefix}{number}"),
         author,
@@ -250,12 +250,6 @@ pub(super) fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<Find
     Ok(findings)
 }
 
-pub(super) fn next_number(ids: impl Iterator<Item = String>, prefix: &str) -> u32 {
-    ids.filter_map(|id| id.strip_prefix(prefix)?.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0)
-}
-
 pub(super) fn finding_add(
     ctx: &Ctx,
     run_id: &str,
@@ -330,7 +324,7 @@ pub(super) fn add_findings(
             .iter()
             .map(|thread| thread.id.clone())
             .chain(passes(target).flat_map(|pass| pass.killed.iter().map(|f| f.id.clone())));
-        let mut number = next_number(ids, &prefix);
+        let mut number = last_number(ids, &prefix);
         let mut threads = Vec::new();
         let mut killed = Vec::new();
         for finding in findings {
@@ -432,10 +426,9 @@ pub(super) fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, default)?;
-        let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
         let thread = local_thread(
             NewThread {
-                id: format!("h{number}"),
+                id: target.next_thread_id(),
                 kind: args.kind,
                 severity: args.severity,
                 anchor,

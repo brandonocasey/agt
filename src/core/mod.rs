@@ -10,4 +10,5 @@ pub mod output;
 pub mod process;
 pub mod random;
 pub mod shell;
+pub mod text;
 pub mod transcripts;

@@ -4,12 +4,10 @@ use serde_json::{Value, json};
 
 use super::{NOT_PUSHED, tip};
 use crate::core::error::{Result, fail};
-use crate::forge::github::Github;
-use crate::forge::gitlab::{Gitlab, ci::base_of_path};
-use crate::forge::landed::{Origin, Pull};
-use crate::forge::transport::CliTransport;
+use crate::forge;
+use crate::forge::landed::Origin;
 use crate::git::Repo;
-use crate::store::model::{Forge, ReviewState};
+use crate::store::model::ReviewState;
 
 pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
     let local = tip(repo, branch)?;
@@ -104,7 +102,14 @@ fn pull_report(repo: &Repo, branch: &str, local: &str) -> Result<Option<Value>> 
         return Ok(None);
     };
     // The PR stands without its checks: a failed check query leaves only `pipeline.exists` null.
-    let exists = pipeline_exists(&origin, &pull).map_or_else(
+    let exists = forge::head_has_pipeline(
+        origin.forge,
+        &origin.host,
+        &origin.repo,
+        pull.number,
+        &pull.head_sha,
+    )
+    .map_or_else(
         |error| {
             eprintln!("warning: pipeline lookup failed, `pipeline.exists` is null: {error}");
             Value::Null
@@ -118,24 +123,4 @@ fn pull_report(repo: &Repo, branch: &str, local: &str) -> Result<Option<Value>> 
         "head_matches": pull.head_sha == local,
         "pipeline": {"sha": pull.head_sha, "exists": exists},
     })))
-}
-
-/// Whether a check run, status or pipeline exists for the head commit of `pull`.
-fn pipeline_exists(origin: &Origin, pull: &Pull) -> Result<bool> {
-    match origin.forge {
-        Forge::Github => {
-            let github = Github::new(Box::new(CliTransport::gh(&origin.host)));
-            Ok(github.pull_checks(&origin.repo, pull.number)?.rollup > 0)
-        }
-        Forge::Gitlab => {
-            let gitlab = Gitlab::new(Box::new(CliTransport::glab(&origin.host)));
-            let base = base_of_path(&origin.repo);
-            let request = gitlab.merge_request(&base, pull.number)?;
-            let pipeline = &request["head_pipeline"];
-            if pipeline.is_null() {
-                return Ok(false);
-            }
-            Ok(gitlab.pipeline_runs(&base, pipeline, &pull.head_sha)?)
-        }
-    }
 }

@@ -260,9 +260,7 @@ impl Plan {
                         if !prunable(&issue, now) {
                             continue;
                         }
-                        let name = issue
-                            .number
-                            .map_or_else(|| issue.key.clone(), |n| n.to_string());
+                        let name = issue.doc_name();
                         let path = dir.join(format!("{name}.json"));
                         self.add(
                         "issues",

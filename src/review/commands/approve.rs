@@ -5,7 +5,7 @@ use crate::review::cli::ApproveArgs;
 use crate::store::model::{Approval, Target, Thread, ThreadType};
 
 use super::Ctx;
-use super::findings::{NewThread, author, local_thread, next_number};
+use super::findings::{NewThread, author, local_thread};
 use super::input::read_body;
 
 /// Records an approval of the head as a general thread for `publish`.
@@ -44,10 +44,9 @@ pub(super) fn approve(ctx: &Ctx, args: &ApproveArgs) -> Result<Value> {
             return Ok(existing.clone());
         }
         let author = author(&args.author, target, default)?;
-        let number = next_number(target.threads.iter().map(|thread| thread.id.clone()), "h") + 1;
         let mut thread = local_thread(
             NewThread {
-                id: format!("h{number}"),
+                id: target.next_thread_id(),
                 kind: ThreadType::Comment,
                 severity: None,
                 anchor: None,

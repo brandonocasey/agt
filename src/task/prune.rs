@@ -11,7 +11,7 @@ use super::records::{is_id, read_task};
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::Lock;
-use crate::store::prune::{PRUNE_AFTER_SECS, Removal};
+use crate::store::prune::{Removal, past_retention};
 
 /// A finished task record that is old enough to drop.
 pub struct Expired {
@@ -29,7 +29,7 @@ fn is_expired(task: &Value, now: i64) -> bool {
         && text("updatedAt")
             .or_else(|| text("createdAt"))
             .and_then(|stamp| clock::parse(stamp).ok())
-            .is_some_and(|updated| now - updated >= PRUNE_AFTER_SECS)
+            .is_some_and(|updated| past_retention(now, updated))
 }
 
 /// The expired task records, by id. A record that cannot be read is left alone.
@@ -70,8 +70,7 @@ pub fn expired(now: i64) -> Result<Vec<Expired>> {
 
 /// Deletes the record under its lock after reading it again; gives up when the lock is held.
 pub fn remove(task: &Expired, now: i64) -> Result<Removal> {
-    let root = files::root()?;
-    let Ok(_lock) = Lock::acquire(root.join(format!(".{}.lock", task.id)), None, "busy") else {
+    let Ok(_lock) = Lock::acquire(files::lock_path(&task.id)?, None, "busy") else {
         return Ok(Removal::Busy);
     };
     match read_task(&task.id) {

@@ -15,6 +15,7 @@ use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_atomic};
 use crate::core::output::Output;
+use crate::core::text::bounded;
 use crate::core::transcripts::Turn;
 use crate::core::transcripts::json::head;
 
@@ -80,13 +81,9 @@ fn index_file() -> Result<PathBuf> {
 
 /// A required argument: not empty and not longer than [`MAX_ARGUMENT`] bytes.
 fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
-    match value {
-        None | Some("") => fail(format!("{name} must not be empty")),
-        Some(value) if value.len() > MAX_ARGUMENT => {
-            fail(format!("{name} exceeds {MAX_ARGUMENT} bytes"))
-        }
-        Some(value) => Ok(value),
-    }
+    let value = value.unwrap_or_default();
+    bounded(value, name, MAX_ARGUMENT, false)?;
+    Ok(value)
 }
 
 fn read_index() -> Result<Index> {

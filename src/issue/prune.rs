@@ -3,7 +3,7 @@
 use crate::core::clock;
 use crate::store::issues::{Category, Issue, LinkSource};
 use crate::store::model::PostState;
-use crate::store::prune::PRUNE_AFTER_SECS;
+use crate::store::prune::past_retention;
 
 use super::merge::has_pending;
 
@@ -34,13 +34,13 @@ pub fn prunable(issue: &Issue, now: i64) -> bool {
     {
         return false;
     }
-    let mut last = None;
-    let remote = issue.remote.as_ref().map(|remote| &remote.updated_at);
-    for stamp in std::iter::once(&issue.updated_at).chain(remote) {
-        let Ok(parsed) = clock::parse(stamp) else {
-            return false;
-        };
-        last = last.max(Some(parsed));
-    }
-    last.is_some_and(|last| now - last >= PRUNE_AFTER_SECS)
+    let remote = issue
+        .remote
+        .as_ref()
+        .map(|remote| remote.updated_at.as_str());
+    let stamps = std::iter::once(issue.updated_at.as_str()).chain(remote);
+    clock::latest(stamps)
+        .ok()
+        .flatten()
+        .is_some_and(|last| past_retention(now, last))
 }

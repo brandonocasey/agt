@@ -179,13 +179,6 @@ pub fn find(store: &Store, filter: Option<&str>, text: &str) -> Result<(Tracker,
     }
 }
 
-/// The name of the document for `issue`: its number, or its local key.
-pub fn doc_name(issue: &Issue) -> String {
-    issue
-        .number
-        .map_or_else(|| issue.key.clone(), |number| number.to_string())
-}
-
 pub fn local(store: &Store) -> Result<Tracker> {
     let dir = store.repo_dir("local")?;
     let doc = store.update_doc(

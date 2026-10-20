@@ -11,13 +11,18 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use super::schema::read_target_intact;
-use super::{Store, ctx, fail, validate_key};
+use super::{Store, ctx, fail, lock_path, publish_lock_path, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{is_current, try_lock_file};
 use crate::store::model::Target;
 
 /// How long a finished thing is kept before `prune` drops it.
 pub const PRUNE_AFTER_SECS: i64 = 90 * 24 * 60 * 60;
+
+/// Whether something last changed at `last` has been kept for [`PRUNE_AFTER_SECS`] at `now`.
+pub fn past_retention(now: i64, last: i64) -> bool {
+    now - last >= PRUNE_AFTER_SECS
+}
 
 /// The outcome of one guarded deletion.
 #[derive(Debug, PartialEq, Eq)]
@@ -47,12 +52,12 @@ impl Store {
         remove: impl FnOnce(&Target) -> Result<bool>,
     ) -> Result<Removal> {
         validate_key(key)?;
-        let lock_path = dir.join(format!(".{key}.lock"));
-        let Some(_lock) = try_lock_file(&lock_path)? else {
+        let lock = lock_path(dir, key);
+        let Some(_lock) = try_lock_file(&lock)? else {
             return Ok(Removal::Busy);
         };
         // A publish in flight has the target's comments in hand; deleting under it would lose them.
-        let publish_path = dir.join(format!(".{key}.publish.lock"));
+        let publish_path = publish_lock_path(dir, key);
         let created = !publish_path.exists();
         let Some(file) = try_lock_file(&publish_path)? else {
             return Ok(Removal::Busy);
@@ -73,7 +78,7 @@ impl Store {
             return Ok(Removal::Kept);
         }
         publish.unlink = true;
-        let bytes = remove_with_lock(&path, &lock_path)?;
+        let bytes = remove_with_lock(&path, &lock)?;
         Ok(Removal::Removed(bytes))
     }
 }
