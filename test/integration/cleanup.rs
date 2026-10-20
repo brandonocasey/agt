@@ -289,7 +289,7 @@ fn task_locks_outlive_their_pruned_record_until_the_next_pass_removes_them() {
     let live = prune.task("live", "active", 5);
     let tasks = prune.agents().join("tasks");
     let [old_lock, live_lock, orphan, held] =
-        ["done-old", "live", "orphan", "busy"].map(|id| tasks.join(format!(".{id}.lock")));
+        ["done-old", "live", "orphan", "busy"].map(|id| tasks.join(format!(".{id}.flock")));
     for path in [&old_lock, &live_lock, &orphan, &held] {
         File::create(path).unwrap();
     }
@@ -299,11 +299,11 @@ fn task_locks_outlive_their_pruned_record_until_the_next_pass_removes_them() {
     assert!(!old.exists() && live.exists());
     // Pruning the record leaves its lock file, so a racing update never recreates one.
     assert!(old_lock.exists());
-    assert_eq!(keys(&report, "locks"), [".busy.lock", ".orphan.lock"]);
+    assert_eq!(keys(&report, "locks"), [".busy.flock", ".orphan.flock"]);
     assert!(!orphan.exists() && held.exists() && live_lock.exists());
     drop(guard);
     let report = prune.run(&["--yes"]);
-    assert_eq!(keys(&report, "locks"), [".busy.lock", ".done-old.lock"]);
+    assert_eq!(keys(&report, "locks"), [".busy.flock", ".done-old.flock"]);
     assert!(!old_lock.exists() && !held.exists() && live_lock.exists());
 }
 
@@ -536,7 +536,7 @@ fn busy_issue_and_task_locks_skip_the_item() {
     let guard = File::options().write(true).open(&lock).unwrap();
     guard.lock().unwrap();
     let task = prune.task("busy-task", "complete", 400);
-    let task_lock = prune.agents().join("tasks/.busy-task.lock");
+    let task_lock = prune.agents().join("tasks/.busy-task.flock");
     File::create(&task_lock).unwrap();
     let task_guard = File::options().write(true).open(&task_lock).unwrap();
     task_guard.lock().unwrap();

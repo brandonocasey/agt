@@ -134,12 +134,12 @@ pub fn write_json(path: &Path, value: &impl Serialize, durable: bool) -> Result<
 }
 
 /// Applies `change` to the JSON document at `path` (the default when missing) under the flock on
-/// the sibling `.lock` file, and writes it when `change` returns true; returns that flag.
+/// the sibling `.flock` file, and writes it when `change` returns true; returns that flag.
 pub fn update_json<T: DeserializeOwned + Default + Serialize>(
     path: &Path,
     change: impl FnOnce(&mut T) -> Result<bool>,
 ) -> Result<bool> {
-    let _lock = lock_file(&path.with_extension("lock"))?;
+    let _lock = lock_file(&path.with_extension("flock"))?;
     let mut document = read_json(path)?.unwrap_or_default();
     let changed = change(&mut document)?;
     if changed {

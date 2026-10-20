@@ -892,7 +892,7 @@ unknown flag or command, a bad `--status`, a `--revision` below 1, no command at
 2 and clap's message; other errors exit with 1.
 
 Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/tasks/<id>.json`
-(mode 0600, directory 0700), guarded by a `.<id>.lock` file (an advisory lock that goes when the process dies) and a `revision` that every
+(mode 0600, directory 0700), guarded by a `.<id>.flock` file (an advisory lock that goes when the process dies) and a `revision` that every
 write must name (record `version` 1). The command that finds and searches sessions is
 `agt sessions search`.
 

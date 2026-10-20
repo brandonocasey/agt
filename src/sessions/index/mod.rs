@@ -227,7 +227,7 @@ fn deduplicate(turns: Vec<Turn>) -> Vec<Merged> {
 fn index_sessions(options: &SearchArgs, session: Option<&str>) -> Result<Indexed> {
     let directory = ensure_index_root()?;
     let _lock = lock_file_or_busy(
-        &directory.join(".lock"),
+        &directory.join(".flock"),
         Some(LOCK_WAIT),
         "session index is being updated; retry",
     )?;

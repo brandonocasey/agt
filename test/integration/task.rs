@@ -246,13 +246,13 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
     ]);
     assert!(error.contains("next-step exceeds"), "{error}");
     assert!(!task.tasks().join("large-create.json").exists());
-    assert!(!task.tasks().join(".large-create.lock").exists());
+    assert!(!task.tasks().join(".large-create.flock").exists());
     let error = task.fail(&["update", "nosuch", "--revision", "1", "--next-step", "x"]);
     assert!(error.contains("does not exist"), "{error}");
-    assert!(!task.tasks().join(".nosuch.lock").exists());
+    assert!(!task.tasks().join(".nosuch.flock").exists());
     task.run(&["create", "dup", "--objective", "Work"]);
     task.fail(&["create", "dup", "--objective", "Again"]);
-    assert!(task.tasks().join(".dup.lock").exists());
+    assert!(task.tasks().join(".dup.flock").exists());
     task.run(&["create", "large-check", "--objective", "Work"]);
     for field in ["code-revision", "inputs", "environment"] {
         let flag = format!("--check-{field}");
@@ -283,7 +283,7 @@ fn a_held_task_lock_fails_fast_and_dies_with_its_holder() {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(task.tasks().join(".busy.lock"))
+        .open(task.tasks().join(".busy.flock"))
         .unwrap();
     held.lock().unwrap();
     let error = task.fail(&["update", "busy", "--revision", "1", "--next-step", "x"]);
@@ -291,6 +291,17 @@ fn a_held_task_lock_fails_fast_and_dies_with_its_holder() {
     drop(held);
     assert_eq!(
         task.run(&["update", "busy", "--revision", "1", "--next-step", "x"])["revision"],
+        2
+    );
+}
+
+#[test]
+fn a_leftover_lock_directory_at_an_older_agt_path_does_not_block_the_lock() {
+    let task = Task::new();
+    task.run(&["create", "old", "--objective", "Work"]);
+    fs::create_dir(task.tasks().join(".old.lock")).unwrap();
+    assert_eq!(
+        task.run(&["update", "old", "--revision", "1", "--next-step", "x"])["revision"],
         2
     );
 }

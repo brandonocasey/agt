@@ -98,7 +98,7 @@ pub fn orphan_locks() -> Result<Vec<PathBuf>> {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(id) = name
             .strip_prefix('.')
-            .and_then(|name| name.strip_suffix(".lock"))
+            .and_then(|name| name.strip_suffix(".flock"))
             .filter(|id| is_id(id))
         else {
             continue;
@@ -126,7 +126,7 @@ pub fn remove_orphan_lock(path: &Path) -> Result<Removal> {
     let id = path
         .file_name()
         .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix('.')?.strip_suffix(".lock"))
+        .and_then(|name| name.strip_prefix('.')?.strip_suffix(".flock"))
         .filter(|id| is_id(id));
     let Some(id) = id else {
         return Ok(Removal::Kept);

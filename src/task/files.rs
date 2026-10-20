@@ -11,7 +11,7 @@ pub fn root() -> Result<PathBuf> {
 
 /// The lock file that serialises changes to the task `id`.
 pub fn lock_path(id: &str) -> Result<PathBuf> {
-    Ok(root()?.join(format!(".{id}.lock")))
+    Ok(root()?.join(format!(".{id}.flock")))
 }
 
 pub fn ensure_root() -> Result<PathBuf> {
