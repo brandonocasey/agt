@@ -14,9 +14,7 @@ use crate::core::env;
 use crate::core::error::{Result, fail};
 use crate::forge::transport;
 use crate::store::Store;
-
-/// Entries of the lookup file older than this are of no use to any max age worth setting.
-pub const DAY: i64 = 24 * 60 * 60;
+use crate::store::sidecars::Lookups;
 
 /// How long all forge calls of one command may take together.
 const TIME_CAP: Duration = Duration::from_secs(15);
@@ -72,10 +70,7 @@ pub fn record_failure(store: &Store, dir: &Path, key: &str) {
         return;
     };
     let mut lookups = store.load_lookups(dir);
-    lookups
-        .failures
-        .retain(|_, at| clock::parse(at).is_ok_and(|at| (0..DAY).contains(&(now - at))));
-    lookups.failures.insert(key.to_owned(), clock::format(now));
+    Lookups::remember(&mut lookups.failures, key, now);
     let _ = store.save_lookups(dir, &lookups);
 }
 

@@ -142,8 +142,7 @@ pub fn parse(text: &str) -> Result<i64> {
             sign * (number(hours)? * 3600 + number(minutes)? * 60)
         }
     };
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+    if !days_in_month(year, month).is_some_and(|length| (1..=length).contains(&day))
         || hour > 23
         || minute > 59
         || second > 60
@@ -225,15 +224,8 @@ static DATE: LazyLock<Regex> =
 pub fn local_midnight(date: &str) -> Option<f64> {
     let found = DATE.captures(date)?;
     let [year, month, day] = [1, 2, 3].map(|index| found[index].parse::<i32>().unwrap_or(0));
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let length = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if !(1..=length).contains(&day) {
+    let length = days_in_month(year.into(), month.into())?;
+    if !(1..=length).contains(&i64::from(day)) {
         return None;
     }
     // SAFETY: an all-zero `tm` is a valid value to fill in.
@@ -242,6 +234,18 @@ pub fn local_midnight(date: &str) -> Option<f64> {
     tm.tm_mon = month - 1;
     tm.tm_mday = day;
     Some(mktime_local(&mut tm) as f64)
+}
+
+/// The days of `month` (1 to 12) in `year`; `None` for any other month.
+fn days_in_month(year: i64, month: i64) -> Option<i64> {
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if leap => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
 }
 
 /// Rewrites a forge timestamp in the store's `YYYY-MM-DDTHH:MM:SSZ` form.
@@ -289,6 +293,10 @@ mod tests {
     fn rejects_other_forms() {
         assert!(parse("2026-10-16 12:00:00Z").is_err());
         assert!(parse("2026-13-16T12:00:00Z").is_err());
+        assert!(parse("2026-02-31T12:00:00Z").is_err());
+        assert!(parse("2026-04-31T12:00:00Z").is_err());
+        assert!(parse("2026-02-29T12:00:00Z").is_err());
+        assert!(parse("2024-02-29T12:00:00Z").is_ok());
         assert!(parse("2026-10-16T12:00:00").is_err());
     }
 

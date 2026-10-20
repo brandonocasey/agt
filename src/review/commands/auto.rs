@@ -12,6 +12,7 @@ use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::auto::{self, Offline, Policy};
 use crate::store::model::{ReviewState, TargetKind};
+use crate::store::sidecars::Lookups;
 
 /// Held while the repository syncs or looks a PR/MR up, so two reads do not repeat each other.
 const SYNC_LOCK: &str = "auto-sync";
@@ -153,10 +154,7 @@ fn locked(
 fn remember_miss(ctx: &Ctx, branch: &str) -> Result<()> {
     let now = clock::now_secs()?;
     let mut lookups = ctx.store.load_lookups(&ctx.dir);
-    lookups
-        .misses
-        .retain(|_, at| clock::parse(at).is_ok_and(|at| (0..auto::DAY).contains(&(now - at))));
-    lookups.misses.insert(branch.to_owned(), clock::format(now));
+    Lookups::remember(&mut lookups.misses, branch, now);
     ctx.store.save_lookups(&ctx.dir, &lookups)
 }
 

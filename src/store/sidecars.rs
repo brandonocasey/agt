@@ -47,6 +47,18 @@ pub struct Lookups {
     #[serde(default)]
     pub failures: std::collections::BTreeMap<String, String>,
 }
+
+impl Lookups {
+    /// Records `key` in `entries` (`misses` or `failures`) as of `now`, dropping entries a day old
+    /// or more: no max age worth setting reads them.
+    pub fn remember(entries: &mut std::collections::BTreeMap<String, String>, key: &str, now: i64) {
+        entries.retain(|_, at| {
+            clock::parse(at).is_ok_and(|at| (0..clock::SECS_PER_DAY).contains(&(now - at)))
+        });
+        entries.insert(key.to_owned(), clock::format(now));
+    }
+}
+
 impl Store {
     pub fn load_account(&self, dir: &Path) -> Result<Option<Account>> {
         read_json(&dir.join(ACCOUNT_FILE))
