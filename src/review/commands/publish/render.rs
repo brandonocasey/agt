@@ -56,12 +56,16 @@ pub(super) fn kind_heading(thread: &Thread) -> String {
 
 /// The pass that raised a finding.
 pub(super) fn finding_pass<'a>(target: &'a Target, finding: &FindingInfo) -> Option<&'a Pass> {
+    pass_of(target, &finding.run, &finding.pass)
+}
+
+fn pass_of<'a>(target: &'a Target, run: &str, pass: &str) -> Option<&'a Pass> {
     target
         .runs
         .iter()
-        .filter(|run| run.id == finding.run)
+        .filter(|candidate| candidate.id == run)
         .flat_map(|run| &run.passes)
-        .find(|pass| pass.id == finding.pass)
+        .find(|candidate| candidate.id == pass)
 }
 
 /// What a pass did, with its emoji: `🔍 full review`, `🔹 partial review`, `🙈 blind review`,
@@ -240,12 +244,7 @@ pub(super) fn review_body(
     let mut text = String::new();
     match passes.as_slice() {
         [(run, pass)] => {
-            let pass = target
-                .runs
-                .iter()
-                .filter(|candidate| candidate.id == *run)
-                .flat_map(|run| &run.passes)
-                .find(|candidate| candidate.id == *pass);
+            let pass = pass_of(target, run, pass);
             let blind = pass.is_some_and(|pass| pass.locked);
             let emoji = if blind { "🙈" } else { "🔍" };
             let _ = write!(text, "**{emoji} Agent review {run}**");

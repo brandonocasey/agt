@@ -44,12 +44,57 @@ pub(super) fn summary_body(
         .threads
         .iter()
         .filter(|thread| {
-            thread
-                .finding
-                .as_ref()
-                .is_some_and(|finding| covered.iter().any(|covered| covered.run.id == finding.run))
+            covered
+                .iter()
+                .any(|covered| raised_in(thread, &covered.run.id, None))
         })
         .collect();
+    let reviews: Vec<(bool, String)> = commits
+        .unwrap_or_default()
+        .iter()
+        .map(|commit| commit_review(covered, commit))
+        .collect();
+    let commits = commits.filter(|commits| !commits.is_empty());
+    let mut text = headline(covered, &findings, commits, &reviews);
+    if !findings.is_empty() {
+        findings_table(&mut text, target, &findings);
+    }
+    if let Some(commits) = commits {
+        commit_table(&mut text, commits, &reviews);
+    }
+    steps(&mut text, covered, commits.unwrap_or_default(), &findings);
+    agents(&mut text, covered, &findings);
+    let marks = markers_block(covered, &findings, attempt);
+    fit(&mut text, MAX_BODY.saturating_sub(marks.chars().count()));
+    text.push_str(&marks);
+    text
+}
+
+/// Whether `thread` is a finding of `run` (of pass `pass` when given).
+fn raised_in(thread: &Thread, run: &str, pass: Option<&str>) -> bool {
+    thread
+        .finding
+        .as_ref()
+        .is_some_and(|finding| finding.run == run && pass.is_none_or(|pass| finding.pass == pass))
+}
+
+/// The opening of a collapsed section, up to the start of its content.
+fn open_section(text: &mut String, title: &str) {
+    let _ = write!(text, "\n\n<details><summary>{title}</summary>\n\n");
+}
+
+fn close_section(text: &mut String) {
+    text.push_str("\n</details>");
+}
+
+/// The verdict line: open findings at the head, the findings tally, and how many commits were
+/// reviewed.
+fn headline(
+    covered: &[Covered],
+    findings: &[&Thread],
+    commits: Option<&[CommitInfo]>,
+    reviews: &[(bool, String)],
+) -> String {
     let open = findings.iter().filter(|thread| is_open(thread)).count();
     let head = covered.last().map_or("", |covered| covered.head.as_str());
     let emoji = if open == 0 { "✅" } else { "⚠️" };
@@ -61,18 +106,13 @@ pub(super) fn summary_body(
             text,
             "{}: {}.",
             count(findings.len(), "finding"),
-            tally(&findings)
+            tally(findings)
         );
     }
-    let reviews: Vec<(bool, String)> = commits
-        .unwrap_or_default()
-        .iter()
-        .map(|commit| commit_review(covered, commit))
-        .collect();
-    if let Some(commits) = commits.filter(|commits| !commits.is_empty()) {
+    if let Some(commits) = commits {
         let missing: Vec<&str> = commits
             .iter()
-            .zip(&reviews)
+            .zip(reviews)
             .filter(|(_, (reviewed, _))| !reviewed)
             .map(|(commit, _)| short(&commit.sha))
             .collect();
@@ -97,43 +137,38 @@ pub(super) fn summary_body(
             }
         }
     }
-    if !findings.is_empty() {
-        findings_table(&mut text, target, &findings);
-    }
-    if let Some(commits) = commits.filter(|commits| !commits.is_empty()) {
-        let reviewed = reviews.iter().filter(|(reviewed, _)| *reviewed).count();
-        let _ = write!(
+    text
+}
+
+/// The collapsed commits table, each commit with how it was reviewed.
+fn commit_table(text: &mut String, commits: &[CommitInfo], reviews: &[(bool, String)]) {
+    let reviewed = reviews.iter().filter(|(reviewed, _)| *reviewed).count();
+    open_section(
+        text,
+        &format!("📦 {}: {reviewed} reviewed", count(commits.len(), "commit")),
+    );
+    text.push_str("| Commit | Subject | Review |\n|---|---|---|\n");
+    for (commit, (_, review)) in commits.iter().zip(reviews).take(MAX_COMMITS) {
+        let _ = writeln!(
             text,
-            "\n\n<details><summary>📦 {}: {reviewed} reviewed</summary>\n\n\
-             | Commit | Subject | Review |\n|---|---|---|\n",
-            count(commits.len(), "commit")
+            "| {} | {} | {review} |",
+            short(&commit.sha),
+            cell(&clip(&commit.subject, CELL))
         );
-        for (commit, (_, review)) in commits.iter().zip(&reviews).take(MAX_COMMITS) {
-            let _ = writeln!(
-                text,
-                "| {} | {} | {review} |",
-                short(&commit.sha),
-                cell(&clip(&commit.subject, CELL))
-            );
-        }
-        if commits.len() > MAX_COMMITS {
-            let _ = writeln!(text, "\n{} more not listed.", commits.len() - MAX_COMMITS);
-        }
-        text.push_str("\n</details>");
     }
-    steps(&mut text, covered, commits.unwrap_or_default(), &findings);
-    agents(&mut text, covered, &findings);
+    if commits.len() > MAX_COMMITS {
+        let _ = writeln!(text, "\n{} more not listed.", commits.len() - MAX_COMMITS);
+    }
+    close_section(text);
+}
+
+/// The record marker of every covered run, newest first, then the marker of this summary.
+fn markers_block(covered: &[Covered], findings: &[&Thread], attempt: &str) -> String {
     let mut marks = String::new();
     for covered in covered.iter().rev() {
         let open = findings
             .iter()
-            .filter(|thread| {
-                thread
-                    .finding
-                    .as_ref()
-                    .is_some_and(|finding| finding.run == covered.run.id)
-                    && is_open(thread)
-            })
+            .filter(|thread| raised_in(thread, &covered.run.id, None) && is_open(thread))
             .count();
         let _ = write!(
             marks,
@@ -146,9 +181,7 @@ pub(super) fn summary_body(
         "\n{}",
         markers::agent(markers::SUMMARY_ID, Some(attempt))
     );
-    fit(&mut text, MAX_BODY.saturating_sub(marks.chars().count()));
-    text.push_str(&marks);
-    text
+    marks
 }
 
 /// Cuts `text` at a line to at most `max` characters, closing the code block and sections the
@@ -197,13 +230,15 @@ fn close_fence(text: &mut String) {
 
 /// The collapsed findings table, then the text of each finding that was not posted inline.
 fn findings_table(text: &mut String, target: &Target, findings: &[&Thread]) {
-    let _ = write!(
+    open_section(
         text,
-        "\n\n<details><summary>📝 {}: {}</summary>\n\n\
-         | Finding | Where | Raised in | Outcome |\n|---|---|---|---|\n",
-        count(findings.len(), "finding"),
-        tally(findings)
+        &format!(
+            "📝 {}: {}",
+            count(findings.len(), "finding"),
+            tally(findings)
+        ),
     );
+    text.push_str("| Finding | Where | Raised in | Outcome |\n|---|---|---|---|\n");
     let mut notes = String::new();
     let mut unposted = 0;
     for thread in findings {
@@ -263,7 +298,7 @@ fn findings_table(text: &mut String, target: &Target, findings: &[&Thread]) {
         );
     }
     text.push_str(&notes);
-    text.push_str("\n</details>");
+    close_section(text);
 }
 
 /// The collapsed, numbered steps of every run, and the time each run took.
@@ -277,12 +312,7 @@ fn steps(text: &mut String, covered: &[Covered], commits: &[CommitInfo], finding
             let raised: Vec<&Thread> = findings
                 .iter()
                 .copied()
-                .filter(|thread| {
-                    thread
-                        .finding
-                        .as_ref()
-                        .is_some_and(|finding| finding.run == run.id && finding.pass == pass.id)
-                })
+                .filter(|thread| raised_in(thread, &run.id, Some(&pass.id)))
                 .collect();
             steps.push(pass_step(run, pass, raised.len()));
             outcome_steps(&mut steps, commits, &raised);
@@ -300,10 +330,12 @@ fn steps(text: &mut String, covered: &[Covered], commits: &[CommitInfo], finding
     let total = total
         .map(|secs| format!(", {}", duration(secs)))
         .unwrap_or_default();
-    let _ = write!(
+    open_section(
         text,
-        "\n\n<details><summary>🧭 How it was reviewed: {}{total}</summary>\n\n",
-        count(steps.len(), "step")
+        &format!(
+            "🧭 How it was reviewed: {}{total}",
+            count(steps.len(), "step")
+        ),
     );
     for (index, step) in steps.iter().enumerate() {
         let _ = writeln!(text, "{}. {step}", index + 1);
@@ -311,7 +343,7 @@ fn steps(text: &mut String, covered: &[Covered], commits: &[CommitInfo], finding
     if !spent.is_empty() {
         let _ = writeln!(text, "\n{}", spent.join(" "));
     }
-    text.push_str("\n</details>");
+    close_section(text);
 }
 
 /// One pass as a sentence: who read what, and what it found.
