@@ -12,9 +12,11 @@ use crate::core::clock;
 use crate::forge::markers;
 use crate::git::CommitInfo;
 use crate::review::commands::approve::is_open;
+use crate::review::commands::qa::{CheckState, environment};
 use crate::review::commands::usage::run_spend;
 use crate::store::model::{
-    Anchor, Author, CommitPatch, Pass, PassKind, Resolution, Reviewer, Run, Side, Target, Thread,
+    Anchor, Author, CommitPatch, Outcome, Pass, PassKind, QaRun, Resolution, Reviewer, Run, Side,
+    Target, Thread,
 };
 
 /// Longest finding gist or commit subject in a table cell.
@@ -37,6 +39,7 @@ pub(super) struct Covered<'a> {
 pub(super) fn summary_body(
     target: &Target,
     covered: &[Covered],
+    qa: &QaSummary,
     commits: Option<&[CommitInfo]>,
     attempt: &str,
 ) -> String {
@@ -55,19 +58,168 @@ pub(super) fn summary_body(
         .map(|commit| commit_review(covered, commit))
         .collect();
     let commits = commits.filter(|commits| !commits.is_empty());
-    let mut text = headline(covered, &findings, commits, &reviews);
-    if !findings.is_empty() {
-        findings_table(&mut text, target, &findings);
+    let mut text = String::new();
+    if !covered.is_empty() {
+        text = headline(covered, &findings, commits, &reviews);
+        if !findings.is_empty() {
+            findings_table(&mut text, target, &findings);
+        }
+        if let Some(commits) = commits {
+            commit_table(&mut text, commits, &reviews);
+        }
+        steps(&mut text, covered, commits.unwrap_or_default(), &findings);
+        agents(&mut text, covered, &findings);
     }
-    if let Some(commits) = commits {
-        commit_table(&mut text, commits, &reviews);
+    if !qa.runs.is_empty() {
+        qa_section(&mut text, target, qa);
     }
-    steps(&mut text, covered, commits.unwrap_or_default(), &findings);
-    agents(&mut text, covered, &findings);
-    let marks = markers_block(covered, &findings, attempt);
+    let marks = markers_block(covered, &findings, qa, attempt);
     fit(&mut text, MAX_BODY.saturating_sub(marks.chars().count()));
     text.push_str(&marks);
     text
+}
+
+/// The QA runs a summary covers, with the latest check of each name at the PR/MR head.
+pub(super) struct QaSummary<'a> {
+    pub(super) runs: Vec<&'a QaRun>,
+    pub(super) checks: Vec<CheckState<'a>>,
+    pub(super) head: String,
+    pub(super) approved: bool,
+}
+
+/// The QA verdict line, the checks table and the threads the checks found.
+fn qa_section(text: &mut String, target: &Target, qa: &QaSummary) {
+    let threads: Vec<&Thread> = target
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread.check.as_deref().is_some_and(|check| {
+                qa.runs.iter().any(|run| {
+                    check
+                        .strip_prefix(run.id.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+                })
+            })
+        })
+        .collect();
+    // Unresolved, as the findings tally counts them: a posted general comment the host cannot
+    // resolve still needs an answer here.
+    let open = threads.iter().filter(|thread| !thread.resolved).count();
+    let stale = qa.checks.iter().filter(|state| !state.current).count();
+    let blocked = qa
+        .checks
+        .iter()
+        .any(|state| state.check.outcome.blocks_approval());
+    let emoji = if blocked || stale > 0 || open > 0 {
+        "⚠️"
+    } else {
+        "✅"
+    };
+    let mut results: Vec<String> = [
+        Outcome::Pass,
+        Outcome::Fail,
+        Outcome::Blocked,
+        Outcome::Skipped,
+    ]
+    .into_iter()
+    .filter_map(|wanted| {
+        let number = qa
+            .checks
+            .iter()
+            .filter(|state| state.check.outcome == wanted)
+            .count();
+        (number > 0).then(|| format!("{number} {}", wanted.as_str()))
+    })
+    .collect();
+    if stale > 0 {
+        results.push(format!("{stale} stale"));
+    }
+    if open > 0 {
+        results.push(format!("{} open", count(open, "finding")));
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    let _ = write!(
+        text,
+        "**{emoji} Agent QA at {}: {}: {}.**",
+        short(&qa.head),
+        count(qa.checks.len(), "check"),
+        results.join(", ")
+    );
+    if qa.approved {
+        text.push_str(" Approved.");
+    }
+    open_section(text, &format!("🧪 {}", count(qa.checks.len(), "check")));
+    text.push_str("| Check | Result | Environment | Evidence |\n|---|---|---|---|\n");
+    for state in &qa.checks {
+        let check = state.check;
+        let emoji = match check.outcome {
+            Outcome::Pass => "✅",
+            Outcome::Fail => "❌",
+            Outcome::Blocked => "⛔",
+            Outcome::Skipped => "⏭️",
+        };
+        let stale = if state.current { "" } else { " (stale)" };
+        let links: Vec<String> = check
+            .evidence
+            .iter()
+            .filter(|item| item.starts_with("https://") || item.starts_with("http://"))
+            .enumerate()
+            .map(|(index, url)| format!("[{}]({url})", index + 1))
+            .collect();
+        let local = check.evidence.len() - links.len();
+        let mut evidence = links.join(" ");
+        if local > 0 {
+            if !evidence.is_empty() {
+                evidence.push(' ');
+            }
+            let _ = write!(evidence, "{local} local");
+        }
+        let _ = writeln!(
+            text,
+            "| {} | {emoji} {}{stale} | {} | {evidence} |",
+            cell(&clip(&check.name, CELL)),
+            check.outcome.as_str(),
+            cell(&clip(&environment(state.run, check).join(", "), CELL)),
+        );
+    }
+    close_section(text);
+    if threads.is_empty() {
+        return;
+    }
+    open_section(
+        text,
+        &format!(
+            "🔎 {}: {}",
+            count(threads.len(), "QA finding"),
+            tally(&threads)
+        ),
+    );
+    text.push_str("| Finding | Check | Outcome |\n|---|---|---|\n");
+    for thread in &threads {
+        let check = thread.check.as_deref().unwrap_or_default();
+        let name = qa
+            .runs
+            .iter()
+            .flat_map(|run| &run.checks)
+            .find(|known| known.id == check)
+            .map_or(check, |known| known.name.as_str());
+        let said = thread
+            .comments
+            .first()
+            .map(|first| first.body.as_str())
+            .unwrap_or_default();
+        let _ = writeln!(
+            text,
+            "| **{}:** {} | {} | {} |",
+            kind_heading(thread),
+            cell(&gist(said)),
+            cell(&clip(name, CELL)),
+            cell(&outcome(thread)),
+        );
+    }
+    close_section(text);
 }
 
 /// Whether `thread` is a finding of `run` (of pass `pass` when given).
@@ -163,8 +315,16 @@ fn commit_table(text: &mut String, commits: &[CommitInfo], reviews: &[(bool, Str
 }
 
 /// The record marker of every covered run, newest first, then the marker of this summary.
-fn markers_block(covered: &[Covered], findings: &[&Thread], attempt: &str) -> String {
+fn markers_block(
+    covered: &[Covered],
+    findings: &[&Thread],
+    qa: &QaSummary,
+    attempt: &str,
+) -> String {
     let mut marks = String::new();
+    for run in qa.runs.iter().rev() {
+        let _ = write!(marks, "\n{}", markers::qa_record(&run.id, &qa.head));
+    }
     for covered in covered.iter().rev() {
         let open = findings
             .iter()

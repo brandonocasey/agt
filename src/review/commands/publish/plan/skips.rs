@@ -209,13 +209,19 @@ impl Planner<'_> {
     }
 
     pub(super) fn run_before_pr(&self, target: &Target, run_id: &str) -> Option<Skip> {
-        let run = target.runs.iter().find(|run| run.id == run_id)?;
+        let (publication, ended) = match target.runs.iter().find(|run| run.id == run_id) {
+            Some(run) => (&run.publication_target, &run.ended_at),
+            None => {
+                let run = target.qa_runs.iter().find(|run| run.id == run_id)?;
+                (&run.publication_target, &run.ended_at)
+            }
+        };
         // Retry eligibility MUST name this PR/MR so a later attachment cannot expose earlier runs.
-        if run.publication_target.as_deref() == Some(self.review.url.as_str()) {
+        if publication.as_deref() == Some(self.review.url.as_str()) {
             return None;
         }
         let attached = self.review.attached_at.as_deref()?;
-        let ended = run.ended_at.as_deref()?;
+        let ended = ended.as_deref()?;
         // Timestamps share one fixed-width UTC format, so they order as text.
         (ended < attached).then(|| Skip::BeforeLink {
             run: run_id.to_owned(),

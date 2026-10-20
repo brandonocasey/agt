@@ -23,6 +23,11 @@ pub struct Target {
     pub runs: Vec<Run>,
     pub records: Vec<ImportedRecord>,
     pub threads: Vec<Thread>,
+    /// QA runs: what was tested, where, and the outcome. Kept apart from `runs` so review
+    /// coverage never counts a test as a review. Absent until the first one, so builds without
+    /// QA still write targets that have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qa_runs: Vec<QaRun>,
 }
 
 /// The highest number among the `ids` that are `prefix` and a number; 0 without one.
@@ -79,6 +84,17 @@ impl Target {
         self.threads.push(thread);
     }
 
+    /// The summary record slot of a review or QA run.
+    pub fn record_mut(&mut self, run: &str) -> Option<&mut Option<RecordPost>> {
+        if let Some(found) = self.runs.iter_mut().find(|known| known.id == run) {
+            return Some(&mut found.record);
+        }
+        self.qa_runs
+            .iter_mut()
+            .find(|known| known.id == run)
+            .map(|found| &mut found.record)
+    }
+
     /// The id of the next human thread: `h` and one more than the highest taken number.
     pub fn next_thread_id(&self) -> String {
         let last = last_number(self.threads.iter().map(|thread| &thread.id), "h");
@@ -90,6 +106,11 @@ impl Target {
         for run in from.runs {
             if !self.runs.iter().any(|known| known.id == run.id) {
                 self.runs.push(run);
+            }
+        }
+        for run in from.qa_runs {
+            if !self.qa_runs.iter().any(|known| known.id == run.id) {
+                self.qa_runs.push(run);
             }
         }
         for thread in from.threads {
@@ -268,6 +289,94 @@ impl Delivery {
     }
 }
 
+/// One QA session: the checks a tester ran against the branch and where.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct QaRun {
+    pub id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub tester: Author,
+    /// `key=value` facts of the environment every check ran in, such as `browser=firefox`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    pub checks: Vec<Check>,
+    /// The summary comment this run's record landed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordPost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<QaApproval>,
+    /// The PR/MR an automatic publish of this run linked; see `Run::publication_target`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage: Vec<RoleUsage>,
+}
+
+/// One tested scenario and its outcome at the state it ran against.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Check {
+    pub id: String,
+    pub name: String,
+    pub kind: CheckKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// `key=value` facts that add to or override the run's environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    pub outcome: Outcome,
+    /// Screenshot or log paths, or URLs. Only URLs are posted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// `None` when the work tree had uncommitted changes.
+    pub head: Option<String>,
+    pub tree: String,
+    pub recorded_at: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckKind {
+    Manual,
+    Automated,
+    Exploratory,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Outcome {
+    Pass,
+    Fail,
+    Blocked,
+    Skipped,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Blocked => "blocked",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    /// Whether this outcome stops a QA approval.
+    pub fn blocks_approval(self) -> bool {
+        matches!(self, Self::Fail | Self::Blocked)
+    }
+}
+
+/// A QA approval of `head`; no host approval is sent for it.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct QaApproval {
+    pub head: String,
+    pub approved_at: String,
+}
+
 /// Publish state of a run's final record.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RecordPost {
@@ -362,6 +471,9 @@ pub struct Thread {
     /// host's approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+    /// The QA check (`qa-xxxx.k1`) this thread was found by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
 }
 
 impl Thread {
@@ -409,6 +521,7 @@ impl Thread {
             created_at,
             updated_at,
             approval: None,
+            check: None,
         }
     }
 

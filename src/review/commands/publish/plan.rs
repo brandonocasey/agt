@@ -10,18 +10,20 @@ use serde_json::{Value, json};
 use super::Options;
 
 use super::render::{body, record_head, review_body};
-use super::summary::{Covered, summary_body};
+use super::summary::{Covered, QaSummary, summary_body};
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::markers;
 use crate::forge::service::{Capabilities, DraftPoster, Inline, Position, Request, ReviewService};
 use crate::git::{CommitInfo, Repo};
 use crate::review::commands::Ctx;
+use crate::review::commands::qa::latest;
 use crate::review::commands::status::run_reviews_at;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::view::author_label;
 use crate::store::model::{
-    Author, Comment, PostState, RemoteKind, RemoteThread, Resolution, Review, Run, Target, Thread,
+    Author, Comment, PostState, QaRun, RemoteKind, RemoteThread, Resolution, Review, Run, Target,
+    Thread,
 };
 
 /// Stands for the id of the draft a dry run has not created yet.
@@ -508,11 +510,28 @@ impl<'a> Planner<'a> {
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .collect();
-        let unposted = runs.iter().any(|run| {
-            run.record
-                .as_ref()
-                .is_none_or(|record| record.delivery.post != PostState::Posted)
-        });
+        let qa_runs: Vec<&QaRun> = target
+            .qa_runs
+            .iter()
+            .filter(|run| self.run.is_none_or(|selected| selected == run.id))
+            .filter(|run| run.ended_at.is_some() && !run.checks.is_empty())
+            .filter(|run| self.run_before_pr(target, &run.id).is_none())
+            .collect();
+        let records = || {
+            runs.iter()
+                .map(|run| &run.record)
+                .chain(qa_runs.iter().map(|run| &run.record))
+                .filter_map(Option::as_ref)
+        };
+        let unposted = runs
+            .iter()
+            .map(|run| &run.record)
+            .chain(qa_runs.iter().map(|run| &run.record))
+            .any(|record| {
+                record
+                    .as_ref()
+                    .is_none_or(|record| record.delivery.post != PostState::Posted)
+            });
         let reason = self
             .foreign()
             .map(|whose| Skip::Foreign {
@@ -527,7 +546,7 @@ impl<'a> Planner<'a> {
                 .collect();
             return Ok((Vec::new(), held));
         }
-        if runs.is_empty() {
+        if runs.is_empty() && qa_runs.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
         let covered = runs
@@ -550,8 +569,20 @@ impl<'a> Planner<'a> {
                 });
             }
         }
+        let head = &self.review.head_sha;
+        let head_tree = self.repo.tree_of(head).ok();
+        let qa = QaSummary {
+            checks: latest(&qa_runs, head_tree.as_deref()),
+            runs: qa_runs.clone(),
+            head: head.clone(),
+            approved: target.qa_runs.iter().any(|run| {
+                run.approval
+                    .as_ref()
+                    .is_some_and(|approval| approval.head == *head)
+            }),
+        };
         let render = |attempt: &str| {
-            let text = summary_body(&visible, &covered, commits.as_deref(), attempt);
+            let text = summary_body(&visible, &covered, &qa, commits.as_deref(), attempt);
             match self.run {
                 Some(run) => text.replace(
                     &markers::agent(markers::SUMMARY_ID, Some(attempt)),
@@ -561,10 +592,10 @@ impl<'a> Planner<'a> {
             }
         };
         // The posted summary: the comment the latest run's record landed in, when it is one.
-        let posted = runs
-            .iter()
+        let posted = records()
+            .collect::<Vec<_>>()
+            .into_iter()
             .rev()
-            .filter_map(|run| run.record.as_ref())
             .find(|record| {
                 record.remote_id.is_some()
                     && record
@@ -597,6 +628,7 @@ impl<'a> Planner<'a> {
         let runs = covered
             .iter()
             .map(|covered| (covered.run.id.clone(), covered.head.clone()))
+            .chain(qa_runs.iter().map(|run| (run.id.clone(), head.clone())))
             .collect();
         Ok((
             vec![self.write(Item::Summary { runs, remote }, request, &text)],

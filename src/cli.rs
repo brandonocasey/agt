@@ -29,6 +29,8 @@ pub struct Cli {
 enum Command {
     /// Local PR/MR-style review threads.
     Review(Box<review::cli::Cli>),
+    /// What was tested, where, and what came up: QA checks and threads beside the review.
+    Qa(Box<review::cli::QaCli>),
     /// Durable task records.
     Task(task::cli::Cli),
     /// Pushed and landable checks for a branch (`check`).
@@ -63,6 +65,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     cli.offline.install();
     match cli.command {
         Command::Review(args) => review::commands::run(*args),
+        Command::Qa(args) => review::commands::run_qa(*args),
         Command::Task(args) => task::cli::run(args),
         Command::Branch(args) => branch::run(args),
         Command::Ci(args) => ci::run(args),

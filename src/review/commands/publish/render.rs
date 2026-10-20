@@ -115,6 +115,15 @@ pub(super) fn body(
     }
     if finding.is_some() {
         let _ = write!(text, "**{}:** ", kind_heading(thread));
+    } else if let Some(name) = thread.check.as_deref().filter(|_| first).map(|id| {
+        target
+            .qa_runs
+            .iter()
+            .flat_map(|run| &run.checks)
+            .find(|check| check.id == id)
+            .map_or(id, |check| check.name.as_str())
+    }) {
+        let _ = write!(text, "**{} · 🧪 QA: {name}:** ", kind_heading(thread));
     }
     let said = comment.body.trim_end();
     let mut sign = signature(&comment.author);

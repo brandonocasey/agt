@@ -316,6 +316,20 @@ pub(super) fn show(ctx: &Ctx, id: &str) -> Result<Value> {
             }
         }
     }
+    for run in &target.qa_runs {
+        if run.id == id {
+            return Ok(json!({ "target": scope.key, "kind": "qa-run", "run": run }));
+        }
+        if let Some(check) = run.checks.iter().find(|check| check.id == id) {
+            return Ok(json!({
+                "target": scope.key,
+                "kind": "check",
+                "run": run.id,
+                "check": check,
+                "env": super::qa::environment(run, check),
+            }));
+        }
+    }
     Err(not_found())
 }
 

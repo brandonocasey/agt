@@ -1,9 +1,12 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use std::path::Path;
+
 use crate::core::clock;
-use crate::core::error::{Result, fail};
-use crate::store::model::{Run, Usage};
+use crate::core::error::{Result, ctx, fail};
+use crate::core::local::read_source;
+use crate::store::model::{RoleUsage, Run, Usage};
 
 /// Time and tokens of a run: wall time, time in passes (reviewing), time between passes and
 /// after the last (fixing), and the tokens reviewers and the main session reported.
@@ -34,6 +37,21 @@ pub fn run_spend(run: &Run) -> Value {
         "main_tokens": (main_tokens > 0).then_some(main_tokens),
         "roles": run.usage,
     })
+}
+
+/// The main session's spend by role, as `run end --usage` reads it from a file or `-` (stdin).
+pub(super) fn read_role_usage(source: &Path) -> Result<Vec<RoleUsage>> {
+    let inputs: Vec<UsageInput> = serde_json::from_str(&read_source(source, "usage")?)
+        .map_err(ctx("parse usage (expected a JSON array)"))?;
+    inputs
+        .iter()
+        .map(|input| {
+            Ok(RoleUsage {
+                role: input.who("role")?,
+                usage: input.usage(),
+            })
+        })
+        .collect()
 }
 
 /// One agent's spend as `pass end` and `run end` read it: `reviewer` (pass) or `role` (run).

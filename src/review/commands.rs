@@ -6,7 +6,7 @@ use crate::git::Repo;
 use crate::review::cli::{AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction};
 use crate::store::Store;
 use crate::store::model::{
-    Pass, PassKind, Reveal, RoleUsage, Run, Severity, Target, TargetKind, Thread, ThreadType,
+    Pass, PassKind, Reveal, Run, Severity, Target, TargetKind, Thread, ThreadType,
 };
 
 mod approve;
@@ -15,6 +15,7 @@ mod findings;
 mod input;
 pub mod prune;
 mod publish;
+mod qa;
 mod run;
 mod scope;
 mod status;
@@ -23,11 +24,10 @@ mod usage;
 mod view;
 use self::approve::approve;
 use self::findings::{comment, finding_kill, reply, resolve};
+pub use self::qa::run_qa;
 use self::run::{pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
-use self::usage::UsageInput;
 use self::view::{list, show};
-use crate::core::local::read_source;
 
 const MAX_TEXT: usize = 65_536;
 
@@ -125,21 +125,7 @@ pub fn run(cli: Cli) -> Result<Output> {
                 .zip(reveal_disagree)
                 .map(|(agree, disagree)| Reveal { agree, disagree });
             let usage = match usage {
-                Some(source) => {
-                    let inputs: Vec<UsageInput> =
-                        serde_json::from_str(&read_source(&source, "usage")?).map_err(
-                            crate::core::error::ctx("parse usage (expected a JSON array)"),
-                        )?;
-                    inputs
-                        .iter()
-                        .map(|input| {
-                            Ok(RoleUsage {
-                                role: input.who("role")?,
-                                usage: input.usage(),
-                            })
-                        })
-                        .collect::<Result<_>>()?
-                }
+                Some(source) => usage::read_role_usage(&source)?,
                 None => Vec::new(),
             };
             let mut ended = run_end(&ctx, &run, reveal, head.as_deref(), usage)?;

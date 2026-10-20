@@ -16,7 +16,10 @@ impl Ctx {
         if self.selection.target.is_some() || self.selection.range.is_some() {
             return Ok(());
         }
-        let has_run = |target: &Target| target.runs.iter().any(|known| known.id == run);
+        let has_run = |target: &Target| {
+            target.runs.iter().any(|known| known.id == run)
+                || target.qa_runs.iter().any(|known| known.id == run)
+        };
         let scope = self.scope();
         if let Ok(scope) = &scope
             && scope.existing.as_ref().is_some_and(has_run)
@@ -435,6 +438,7 @@ impl Ctx {
             runs: Vec::new(),
             records: Vec::new(),
             threads: Vec::new(),
+            qa_runs: Vec::new(),
         }
     }
 

@@ -138,12 +138,8 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
         Item::Summary { runs, remote } => {
             let text = texts.next().flatten();
             for (run, head) in runs {
-                if let Some(run) = target
-                    .runs
-                    .iter_mut()
-                    .find(|candidate| candidate.id == *run)
-                {
-                    let previous = run.record.take();
+                if let Some(record) = target.record_mut(run) {
+                    let previous = record.take();
                     let url = previous
                         .as_ref()
                         .filter(|record| record.remote_id == *remote)
@@ -161,7 +157,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
                     }
                     let mut delivery = Delivery::new(PostState::Posting);
                     delivery.begin(attempt, text.clone());
-                    run.record = Some(RecordPost {
+                    *record = Some(RecordPost {
                         delivery,
                         head: head.clone(),
                         remote_id: remote.clone(),
@@ -279,12 +275,8 @@ pub(super) fn save(
                 .comment_created(review_url, response)
                 .ok_or_else(|| Error("no comment id returned for the summary".into()))?;
             change(ctx, target, |target| {
-                for run in target
-                    .runs
-                    .iter_mut()
-                    .filter(|run| runs.iter().any(|(id, _)| *id == run.id))
-                {
-                    if let Some(record) = run.record.as_mut() {
+                for (run, _) in runs {
+                    if let Some(Some(record)) = target.record_mut(run) {
                         landed(record, id.clone(), url.clone());
                     }
                 }

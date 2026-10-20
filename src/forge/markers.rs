@@ -8,6 +8,7 @@ use crate::store::model::Delivery;
 const AGENT: &str = "<!-- agent-review id=";
 const FINDING: &str = "<!-- review-finding v1 id=";
 const RECORD: &str = "<!-- review-record v2 ";
+const QA_RECORD: &str = "<!-- qa-record v1 ";
 const CLOSE: &str = "-->";
 /// Local id prefix of the body of a GitHub review that `publish` posts; sync skips those.
 const REVIEW_ID: &str = "review/";
@@ -31,6 +32,12 @@ pub fn finding(id: &str, sha: &str) -> String {
 /// The marker of a run record.
 pub fn record(run: &str, head: &str, reviews_at_head: usize, open: usize) -> String {
     format!("{RECORD}id={run} head={head} reviews-at-head={reviews_at_head} open={open} {CLOSE}")
+}
+
+/// The marker of a QA run record. It differs from a review record so no QA run ever counts as
+/// a review.
+pub fn qa_record(run: &str, head: &str) -> String {
+    format!("{QA_RECORD}id={run} head={head} {CLOSE}")
 }
 
 /// The local id of the body of the review that carries a batch of comments at `commit`.
@@ -106,15 +113,7 @@ pub struct RecordMarker {
 /// Every `review-record` marker of `body`: one in a run's own record, one per run in a
 /// summary. Only the marker lines that end the body count, not a record the text quotes.
 pub fn parse_records(body: &str) -> Vec<RecordMarker> {
-    let mut trailer: Vec<&str> = body
-        .lines()
-        .rev()
-        .map(str::trim)
-        .skip_while(|line| line.is_empty())
-        .take_while(|line| line.starts_with("<!--") && line.ends_with(CLOSE))
-        .collect();
-    trailer.reverse();
-    trailer
+    trailer(body)
         .into_iter()
         .filter_map(|line| {
             let inner = line.strip_prefix(RECORD)?.strip_suffix(CLOSE)?;
@@ -131,6 +130,33 @@ pub fn parse_records(body: &str) -> Vec<RecordMarker> {
             })
         })
         .collect()
+}
+
+/// The run ids of every `qa-record` marker that ends `body`.
+pub fn parse_qa_records(body: &str) -> Vec<String> {
+    trailer(body)
+        .into_iter()
+        .filter_map(|line| {
+            let inner = line.strip_prefix(QA_RECORD)?.strip_suffix(CLOSE)?;
+            inner
+                .split_whitespace()
+                .find_map(|pair| pair.strip_prefix("id="))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The marker lines that end `body`, in order.
+fn trailer(body: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = body
+        .lines()
+        .rev()
+        .map(str::trim)
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| line.starts_with("<!--") && line.ends_with(CLOSE))
+        .collect();
+    lines.reverse();
+    lines
 }
 
 #[cfg(test)]
@@ -164,6 +190,24 @@ mod tests {
             "<!-- review-record v2 id=rv-7k2m head=abc reviews-at-head=2 open=1 -->"
         );
         assert_eq!(review_id("abc"), "review/abc");
+        assert_eq!(
+            qa_record("qa-7k2m", "abc"),
+            "<!-- qa-record v1 id=qa-7k2m head=abc -->"
+        );
+    }
+
+    #[test]
+    fn qa_records_are_not_review_records() {
+        let body = format!(
+            "text\n{}\n{}\n{}",
+            qa_record("qa-1", "abc"),
+            record("rv-1", "abc", 1, 0),
+            agent(SUMMARY_ID, None)
+        );
+        assert_eq!(parse_qa_records(&body), ["qa-1"]);
+        let runs: Vec<String> = parse_records(&body).into_iter().map(|r| r.run).collect();
+        assert_eq!(runs, ["rv-1"]);
+        assert!(parse_qa_records(&format!("{}\ntext", qa_record("qa-1", "abc"))).is_empty());
     }
 
     #[test]

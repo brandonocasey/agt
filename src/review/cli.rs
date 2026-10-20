@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 
-use crate::store::model::{PassKind, Severity, Side, ThreadType, Triage};
+use crate::store::model::{CheckKind, Outcome, PassKind, Severity, Side, ThreadType, Triage};
 
 #[derive(Args)]
 pub struct Cli {
@@ -339,4 +339,123 @@ pub struct ListArgs {
 pub enum Format {
     Json,
     Prompt,
+}
+
+/// `agt qa`: what was tested, where, and what came up, stored with the review threads.
+#[derive(Args)]
+pub struct QaCli {
+    /// Use this stored target key instead of the current branch.
+    #[arg(long, global = true, conflicts_with = "range")]
+    pub target: Option<String>,
+    /// Test a commit (`<rev>`) or a range (`<from>..<to>`) instead of the current branch.
+    #[arg(long, global = true)]
+    pub range: Option<String>,
+    /// Branch the merge-base is taken against [default: origin/HEAD, then main or master].
+    #[arg(long, global = true, value_name = "REF")]
+    pub default_branch: Option<String>,
+    #[command(subcommand)]
+    pub command: QaCommand,
+}
+
+#[derive(Subcommand)]
+pub enum QaCommand {
+    /// Start or end a QA run.
+    Run {
+        #[command(subcommand)]
+        action: QaRunAction,
+    },
+    /// Record one tested scenario and its outcome at the current state.
+    Check(CheckArgs),
+    /// Open a thread for something a check found.
+    Finding(QaFindingArgs),
+    /// List the latest outcome of every check and the QA threads.
+    List,
+    /// Show a QA run (`qa-xxxx`), check (`qa-xxxx.k1`) or thread.
+    Show { id: String },
+    /// Report the latest outcome of each check at a head and whether QA can approve. Never writes.
+    Status {
+        /// Commit to evaluate instead of the current head and work tree.
+        #[arg(long)]
+        head: Option<String>,
+    },
+    /// Approve the head for QA. Refused with no checks, a failing, blocked or stale check, or an
+    /// open bug, requirement or question found by a check. Sends no host approval.
+    Approve,
+    /// Post local QA and review items to an own PR/MR, as `agt review publish` does.
+    Publish {
+        /// Print every payload without posting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
+        #[arg(long)]
+        pr: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum QaRunAction {
+    /// Start a QA run; prints its id.
+    Start {
+        /// Environment fact every check of the run shares, as `key=value` (repeatable).
+        #[arg(long, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Who tests [default: git user.name].
+        #[command(flatten)]
+        tester: AuthorArgs,
+    },
+    /// End a QA run.
+    End {
+        #[arg(long)]
+        run: String,
+        /// What the session spent, as a JSON array of `{"role", "tokens", "duration_ms",
+        /// "tool_uses"}`, from a file or `-` for stdin.
+        #[arg(long, value_name = "FILE")]
+        usage: Option<PathBuf>,
+    },
+}
+
+#[derive(Args)]
+pub struct CheckArgs {
+    #[arg(long)]
+    pub run: String,
+    /// What was tested, such as `login with an expired password`. A later check of the same
+    /// name replaces this one.
+    #[arg(long)]
+    pub name: String,
+    #[arg(long, value_enum)]
+    pub outcome: Outcome,
+    #[arg(long, value_enum, default_value = "manual")]
+    pub kind: CheckKind,
+    /// The steps taken, or `-` for stdin.
+    #[arg(long)]
+    pub steps: Option<String>,
+    /// The command an automated check ran.
+    #[arg(long)]
+    pub command: Option<String>,
+    /// Environment fact that adds to or overrides the run's, as `key=value` (repeatable).
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+    /// Screenshot or log path, or URL (repeatable). Only URLs are posted.
+    #[arg(long)]
+    pub evidence: Vec<String>,
+    #[arg(long)]
+    pub note: Option<String>,
+}
+
+#[derive(Args)]
+pub struct QaFindingArgs {
+    /// The check that found it, such as `qa-7k2m.k1`.
+    #[arg(long)]
+    pub check: String,
+    #[arg(long = "type", value_enum)]
+    pub kind: ThreadType,
+    /// Required for a bug.
+    #[arg(long, value_enum)]
+    pub severity: Option<Severity>,
+    /// What happened, or `-` for stdin.
+    #[arg(long)]
+    pub body: String,
+    /// Who found it [default: the run's tester].
+    #[command(flatten)]
+    pub author: AuthorArgs,
 }
