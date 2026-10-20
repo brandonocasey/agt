@@ -87,15 +87,41 @@ pub fn sync_dir(dir: &Path) -> Result<()> {
         .map_err(ctx(format!("sync {}", dir.display())))
 }
 
-/// The JSON document at `path`, `None` when the file does not exist.
+/// The JSON document at `path`, `None` when the file does not exist. It must be a regular
+/// file. Writers replace files by rename, so a file
+/// swapped between the check and the open is read again; only a path that keeps changing fails.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(ctx(format!("parse {}", path.display()))),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => fail(format!("read {}: {error}", path.display())),
+    const ATTEMPTS: usize = 100;
+    for _ in 0..ATTEMPTS {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return fail(format!("stat {}: {error}", path.display())),
+        };
+        if !meta.file_type().is_file() {
+            return fail(format!(
+                "{} must be a regular file, not a symbolic link",
+                path.display()
+            ));
+        }
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            // Replaced by a rename of a file that is gone again, or removed.
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return fail(format!("open {}: {error}", path.display())),
+        };
+        let opened = file
+            .metadata()
+            .map_err(ctx(format!("stat {}", path.display())))?;
+        if opened.ino() != meta.ino() || opened.dev() != meta.dev() {
+            continue;
+        }
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)
+            .map_err(ctx(format!("read {}", path.display())))?;
+        return serde_json::from_str(&raw).map_err(ctx(format!("parse {}", path.display())));
     }
+    fail(format!("{} changed while opening; retry", path.display()))
 }
 
 /// Writes `value` as indented JSON with a final newline, privately and atomically; see
@@ -323,6 +349,22 @@ mod tests {
         drop(held);
         let again = lock_file_within(&path, Some(Duration::from_millis(100))).unwrap();
         assert!(again.is_some());
+    }
+
+    #[test]
+    fn read_json_refuses_a_symbolic_link_and_reads_through_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let error = read_json::<Map>(&link).unwrap_err();
+        assert!(error.0.contains("must be a regular file"), "{}", error.0);
+        assert!(
+            read_json::<Map>(&dir.path().join("none.json"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -5,8 +5,9 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::json::{lost_field, persist_json, read_json};
+use super::json::{lost_field, persist_json};
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::read_json;
 use crate::store::model::{Target, VERSION};
 
 const _: () = assert!(REVIEW_MIGRATIONS.len() + 1 == VERSION as usize);

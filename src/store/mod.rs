@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use self::docs::read_entries;
-use self::json::read_json;
 use self::schema::{
     REVIEW_MIGRATIONS, Schema, is_target_document, is_target_file, parse_target, read_target,
     read_target_for_write, read_target_intact, write_target,
 };
 use crate::core::error::{Result, ctx, fail};
+use crate::core::local::read_json;
 use crate::core::local::{self, lock_file, try_lock_file};
 use crate::store::model::{Target, VERSION};
 

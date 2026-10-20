@@ -9,10 +9,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::json::{lost_field, persist_json, read_json};
+use super::json::{lost_field, persist_json};
 use super::prune::{Removal, remove_with_lock};
 use super::{Store, create_dir, ctx, fail, lock_path, validate_key};
 use crate::core::error::Result;
+use crate::core::local::read_json;
 use crate::core::local::{lock_file, try_lock_file};
 
 /// The entries of `dir` in name order; a missing directory has none.
