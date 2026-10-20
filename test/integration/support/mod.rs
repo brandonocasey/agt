@@ -9,6 +9,7 @@ use serde_json::Value;
 
 pub mod forge;
 pub mod issue;
+pub mod process;
 pub mod scenario;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agt");

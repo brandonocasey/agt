@@ -3,15 +3,15 @@
 //! scenarios run against GitHub and GitLab, the review ones against GitHub.
 
 use std::fs;
-use std::path::Path;
 use std::process::Output;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::issue_read::synced;
+use crate::support::Env;
 use crate::support::issue::{Github, Gitlab, IssueFake, NOW, Spec};
-use crate::support::{Env, executable};
+use crate::support::process::{assert_gone, assert_signal_kills_the_tool, slow_tool};
 
 type Fake<'a> = &'a dyn IssueFake;
 
@@ -208,32 +208,6 @@ fn a_missing_tool_leaves_the_local_read_and_one_line(fake: Fake) {
     assert!(skipped_reason(&output).contains("run "));
 }
 
-/// A tool that starts a child, records its pid and then sleeps for a minute.
-pub(crate) fn slow_tool(env: &Env) -> (String, std::path::PathBuf) {
-    let tool = env.path("slow-forge.sh");
-    let pid = env.path("slow.pid");
-    executable(
-        &tool,
-        format!(
-            "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
-            pid.display()
-        ),
-    );
-    (tool.display().to_string(), pid)
-}
-
-pub(crate) fn assert_gone(pid: &Path) {
-    let pid: i32 = fs::read_to_string(pid).unwrap().trim().parse().unwrap();
-    for _ in 0..100 {
-        // SAFETY: signal 0 only asks whether the process exists.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("process {pid} is still running");
-}
-
 fn a_slow_forge_is_killed_at_the_cap(fake: Fake) {
     let env = changed_on_the_host(fake);
     let local = read(&env, STALE, &["list"], &[("AGT_OFFLINE", "1")]);
@@ -254,25 +228,6 @@ fn a_slow_forge_is_killed_at_the_cap(fake: Fake) {
     assert_eq!(output.stdout, local.stdout);
     assert!(skipped_reason(&output).contains("timed out"));
     assert_gone(&pid);
-}
-
-/// Sends `signal` to `agt` once the tool it waits on has recorded its child in `pid`, and checks
-/// that agt died of that signal and left neither the tool nor its child behind.
-pub(crate) fn assert_signal_kills_the_tool(mut agt: std::process::Child, signal: i32, pid: &Path) {
-    let started = Instant::now();
-    while fs::read_to_string(pid).map_or(true, |text| text.trim().is_empty()) {
-        assert!(started.elapsed() < Duration::from_secs(20), "no child");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let id = i32::try_from(agt.id()).unwrap();
-    // SAFETY: plain kill(2) of the agt process this test started.
-    unsafe { libc::kill(id, signal) };
-    let status = agt.wait().unwrap();
-    assert_eq!(
-        std::os::unix::process::ExitStatusExt::signal(&status),
-        Some(signal)
-    );
-    assert_gone(pid);
 }
 
 #[test]

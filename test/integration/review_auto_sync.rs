@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::auto_sync::{LOCAL, SKIPPED, assert_gone, skipped_reason, slow_tool};
+use crate::auto_sync::{LOCAL, SKIPPED, skipped_reason};
 use crate::support::forge::{assert_read_only, github};
 use crate::support::issue::NOW;
+use crate::support::process::{assert_gone, slow_tool};
 use crate::support::scenario::Setup;
 use crate::support::{Env, executable};
 

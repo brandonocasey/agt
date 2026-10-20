@@ -2022,7 +2022,7 @@ fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        crate::auto_sync::assert_signal_kills_the_tool(agt, signal, &child_pid);
+        crate::support::process::assert_signal_kills_the_tool(agt, signal, &child_pid);
     }
 }
 
@@ -2055,7 +2055,7 @@ fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
     unsafe { libc::kill(id, libc::SIGHUP) };
     // agt lives on to the timeout and refuses, killing the check then.
     assert_eq!(agt.wait().unwrap().code(), Some(1));
-    crate::auto_sync::assert_gone(&child_pid);
+    crate::support::process::assert_gone(&child_pid);
 }
 
 #[test]
