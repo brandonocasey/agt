@@ -496,7 +496,7 @@ fn general(kind: RemoteKind, comment: CommentData, review_state: Option<String>)
 }
 
 fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
-    let Some((owner, name)) = repo.split_once('/') else {
+    let Some((owner, name)) = forge::split_repo_strict(repo) else {
         return fail(format!("GitHub repository must be owner/name: {repo}"));
     };
     let pager = Pager {

@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use super::Github;
 use crate::forge::service::{Request, Var};
+use crate::forge::split_repo_strict;
 use crate::forge::transport::TransportError;
 
 const QUERY: &str = "query PullChecks($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){number url state mergedAt closed headRefOid commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion title detailsUrl isRequired(pullRequestNumber:$number) checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl isRequired(pullRequestNumber:$number)}}}}}}}}}}";
@@ -82,8 +83,7 @@ fn check(node: &Value) -> Option<Value> {
 impl Github {
     /// The PR `number` of `repo` (`owner/name`) and its required checks, in one read.
     pub fn pull_checks(&self, repo: &str, number: u64) -> Result<Pull, TransportError> {
-        let (owner, name) = repo
-            .split_once('/')
+        let (owner, name) = split_repo_strict(repo)
             .ok_or_else(|| TransportError::new(format!("not an owner/repo: {repo}")))?;
         let mut cursor: Option<String> = None;
         let mut checks = Vec::new();

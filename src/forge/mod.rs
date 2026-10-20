@@ -73,9 +73,14 @@ pub fn gitlab_state(text: &str) -> Option<ReviewState> {
     }
 }
 
+/// The owner and name of `owner/name`; `None` without a slash.
+pub fn split_repo_strict(repo: &str) -> Option<(&str, &str)> {
+    repo.split_once('/')
+}
+
 /// The owner and name of `owner/name`; both empty without a slash.
 pub fn split_repo(repo: &str) -> (&str, &str) {
-    repo.split_once('/').unwrap_or_default()
+    split_repo_strict(repo).unwrap_or_default()
 }
 
 /// The web page of `sha` in the repository of the PR/MR `review`.

@@ -83,7 +83,7 @@ impl IssueService for Github {
             .iter()
             .map(parse_comment)
             .collect::<Result<Vec<_>>>()?;
-        let (owner, name) = subject.repo.split_once('/').unwrap_or((subject.repo, ""));
+        let (owner, name) = forge::split_repo(subject.repo);
         let links = transport.json(&Request::graphql(vec![
             Var::text("owner", owner),
             Var::text("name", name),

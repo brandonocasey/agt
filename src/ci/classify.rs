@@ -3,6 +3,9 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::forge::{github_state, gitlab_state};
+use crate::store::model::ReviewState;
+
 /// A JSON object that starts with `status` and `reason`.
 pub type State = Value;
 
@@ -118,13 +121,14 @@ pub fn classify(head: &Head, view: &Value, rollup: usize, checks: &[Value]) -> S
     if view["headRefOid"] != head.expected {
         return head_mismatch(head, &view["headRefOid"], url);
     }
-    if state_text == "MERGED" || present(&view["mergedAt"]) {
+    let state = state_text.as_str().and_then(github_state);
+    if state == Some(ReviewState::Merged) || present(&view["mergedAt"]) {
         return with("complete", "merged", json!({"url": url}));
     }
-    if state_text == "CLOSED" || present(&view["closed"]) {
+    if state == Some(ReviewState::Closed) || present(&view["closed"]) {
         return with("blocked", "closed", json!({"url": url}));
     }
-    if state_text != "OPEN" {
+    if state != Some(ReviewState::Open) {
         return with(
             "blocked",
             "unknown_pull_request_state",
@@ -261,10 +265,11 @@ pub fn classify_gitlab(head: &Head, mr: &Value, jobs: Option<&[Value]>) -> State
     if mr["sha"] != head.expected {
         return head_mismatch(head, &mr["sha"], url);
     }
-    if state_text == "merged" {
+    let state = state_text.as_str().and_then(gitlab_state);
+    if state == Some(ReviewState::Merged) {
         return with("complete", "merged", json!({"url": url}));
     }
-    if state_text == "closed" {
+    if state == Some(ReviewState::Closed) {
         return with("blocked", "closed", json!({"url": url}));
     }
     let merge_status = &mr["detailed_merge_status"];
@@ -276,7 +281,7 @@ pub fn classify_gitlab(head: &Head, mr: &Value, jobs: Option<&[Value]>) -> State
             json!({"url": url, "mergeStatus": merge_status}),
         );
     }
-    if state_text != "opened" {
+    if state != Some(ReviewState::Open) {
         return with(
             "blocked",
             "unknown_pull_request_state",
