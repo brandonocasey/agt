@@ -717,6 +717,32 @@ fn gitlab_list_mine_asks_for_created_by_me() {
 }
 
 #[test]
+fn a_self_hosted_origin_is_found_through_the_hosts_file() {
+    let env = setup("git@git.example.invalid:g/p.git");
+    let refused = err(&env, &["list"]);
+    assert!(refused.contains("origin is not a GitHub or GitLab host"), "{refused}");
+    let dir = env.path("config/agt");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("hosts.json"),
+        r#"{"git.example.invalid": {"service": "gitlab"}}"#,
+    )
+    .unwrap();
+    let probed = env.forge_calls().len();
+    let mr = gl_mr(&json!({"merge_when_pipeline_succeeds": false}));
+    gl_get(&env, &format!("{GL_MRS}{GL_LIST}"), &format!("[{mr}]"));
+    let rows = ok(&env, &["list"]);
+    assert_eq!(rows[0]["number"], 3);
+    assert!(
+        env.forge_calls()[probed..]
+            .iter()
+            .all(|call| call.starts_with("git.example.invalid\t")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
 fn gitlab_merge_refuses_a_head_that_is_not_the_sha() {
     let env = gitlab();
     gl_get(

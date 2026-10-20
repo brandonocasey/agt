@@ -2,9 +2,6 @@ pub(super) mod merge;
 mod records;
 mod trust;
 
-use std::collections::HashMap;
-
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use self::merge::{claim_git_names, merge};
@@ -13,8 +10,7 @@ use super::scope::Adoption;
 use super::{Ctx, Scope};
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
-use crate::core::local;
-use crate::forge::anchors;
+use crate::forge::{anchors, hosts};
 use crate::forge::service::{self, ReviewService, ReviewSubject};
 use crate::forge::{self, Fetched};
 use crate::git::Repo;
@@ -164,7 +160,7 @@ fn known_forge(ctx: &Ctx, host: &str) -> Result<Option<Forge>> {
         .load_account(&ctx.dir)?
         .filter(|account| account.host == host)
         .map(|account| account.forge);
-    Ok(service::detect(host, hosts_file(host)?, cached))
+    Ok(service::detect(host, hosts::named(host)?, cached))
 }
 
 /// The forge of `host`, never guessed; see [`known_forge`].
@@ -176,38 +172,6 @@ fn detect(ctx: &Ctx, host: &str) -> Result<Forge> {
              `glab auth status` knows, or an entry for it in $XDG_CONFIG_HOME/agt/hosts.json"
         ))
     })
-}
-
-#[derive(Deserialize)]
-struct HostEntry {
-    service: Forge,
-}
-
-/// The forge the hosts file names for `host`, if any.
-fn hosts_file(host: &str) -> Result<Option<Forge>> {
-    let (Ok(current), Ok(base)) = (local::agt_config_file("hosts.json"), local::config_home())
-    else {
-        return Ok(None);
-    };
-    let path = local::current_or_older(current, base.join("agent-review").join("hosts.json"));
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return fail(format!("read {}: {error}", path.display())),
-    };
-    // Entries stay unparsed until one names this host, so an entry for another host that this
-    // build does not understand never breaks it.
-    let hosts: HashMap<String, serde_json::Value> = serde_json::from_str(&text)
-        .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
-    let Some((_, entry)) = hosts
-        .into_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(host))
-    else {
-        return Ok(None);
-    };
-    let entry: HostEntry = serde_json::from_value(entry)
-        .map_err(|error| Error(format!("{} entry for {host}: {error}", path.display())))?;
-    Ok(Some(entry.service))
 }
 
 fn authenticate(forge: Forge, host: &str) -> Result<(Box<dyn ReviewService>, String)> {

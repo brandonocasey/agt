@@ -220,11 +220,7 @@ fn number(text: &str, remote: &Remote) -> Result<u64> {
 
 impl Remote {
     fn connect(repo: &Repo) -> Result<Self> {
-        let Some(origin) = Origin::of(repo)? else {
-            return fail(
-                "origin is not a GitHub or GitLab host that gh or glab is logged in to (no origin remote, an unknown forge, or gh/glab not authenticated for it)",
-            );
-        };
+        let origin = Origin::require(repo)?;
         let service = (kind(origin.forge).connect)(&origin.host);
         Ok(Self { origin, service })
     }

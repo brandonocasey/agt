@@ -117,11 +117,7 @@ fn gitlab_host() -> Result<String> {
 
 /// The host and repository of `origin`, which must be on the forge the target names.
 fn origin(platform: Forge) -> Result<(String, String)> {
-    let Some(origin) = Origin::of(&Repo::discover()?)? else {
-        return fail(
-            "origin is not a GitHub or GitLab host that gh or glab is logged in to (no origin remote, an unknown forge, or gh/glab not authenticated for it)",
-        );
-    };
+    let origin = Origin::require(&Repo::discover()?)?;
     if origin.forge != platform {
         return fail(format!(
             "origin {} is {}, but the target is a {} reference",

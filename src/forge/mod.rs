@@ -4,6 +4,7 @@ pub mod auto;
 mod contract;
 pub mod github;
 pub mod gitlab;
+pub mod hosts;
 pub mod issue;
 pub mod landed;
 pub mod markers;

@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use crate::support::Env;
 
 const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-steps.sh");
-const GITHUB_TARGET: &str = "owner/repo#42@abc123";
-const GITLAB_TARGET: &str = "group/sub/project!7@abc123";
+const GITHUB_TARGET: &str = "owner/repo#42";
+const GITLAB_TARGET: &str = "group/sub/project!7";
 const GITLAB_PROJECT: &str = "projects/group%2Fsub%2Fproject";
 const GET: &str = "api -X GET";
 
@@ -319,14 +319,14 @@ fn follows_the_check_rollup_pages() {
 
 #[test]
 fn reports_a_head_change() {
-    let outcome = run(&[step(
-        "PullChecks",
-        &pull(json!({"headRefOid": "def456"}), &[]),
-    )]);
+    let outcome = run(&[
+        step("PullChecks", &open(&[run_node("t", "IN_PROGRESS", None)])),
+        step("PullChecks", &pull(json!({"headRefOid": "def456"}), &[])),
+    ]);
     assert_eq!(outcome.status, 1, "{}", outcome.stderr);
-    assert_eq!(outcome.events[0]["reason"], "head_changed");
-    assert_eq!(outcome.events[0]["expectedHead"], "abc123");
-    assert_eq!(outcome.events[0]["observedHead"], "def456");
+    assert_eq!(outcome.events[1]["reason"], "head_changed");
+    assert_eq!(outcome.events[1]["expectedHead"], "abc123");
+    assert_eq!(outcome.events[1]["observedHead"], "def456");
     assert_eq!(last(&outcome)["reason"], "action_required");
 }
 
@@ -765,7 +765,6 @@ fn reports_gitlab_merge_request_states_without_querying_jobs() {
         (json!({"state": "closed"}), 1, "closed"),
         (json!({"state": "mystery"}), 1, "unknown_pull_request_state"),
         (json!({"head_pipeline": null}), 1, "no_required_checks"),
-        (json!({"sha": "def456"}), 1, "head_changed"),
         (json!({"sha": null}), 1, "missing_pull_request_data"),
     ];
     for (fields, status, reason) in cases {
@@ -776,6 +775,24 @@ fn reports_gitlab_merge_request_states_without_querying_jobs() {
         assert_eq!(outcome.status, status, "{reason}: {}", outcome.stderr);
         assert_eq!(outcome.events[0]["reason"], reason);
     }
+}
+
+#[test]
+fn a_gitlab_head_change_after_the_first_read_is_reported() {
+    let mr = mr_path("merge_requests/7");
+    let outcome = gitlab(&[
+        step(
+            &format!("{GET} {mr}"),
+            &merge_request(json!({"state": "locked"})),
+        ),
+        step(
+            &format!("{GET} {mr}"),
+            &merge_request(json!({"state": "locked", "sha": "def456"})),
+        ),
+    ]);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[1]["reason"], "head_changed");
+    assert_eq!(outcome.events[1]["expectedHead"], "abc123");
 }
 
 #[test]
