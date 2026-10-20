@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
-use crate::forge::gitlab::project_path;
+use crate::forge::gitlab::{self, project_path};
 use crate::forge::service::{Method, Request};
 use crate::forge::transport::Transport;
-use crate::forge::{self, encode};
+use crate::forge::encode;
 use crate::store::model::ReviewState;
 
 fn base(repo: &str) -> String {
@@ -29,16 +29,17 @@ fn mr(node: &Value) -> Pr {
         "" | "checking" | "unchecked" | "preparing" => "unknown",
         _ => "blocked",
     };
+    let shared = gitlab::pull_node(node);
     Pr {
         id: node["iid"].to_string(),
-        number: node["iid"].as_u64().unwrap_or_default(),
-        url: text("web_url"),
-        title: text("title"),
-        state: forge::gitlab_state(&text("state")).unwrap_or(ReviewState::Open),
+        number: shared.number.unwrap_or_default(),
+        url: shared.url,
+        title: shared.title,
+        state: shared.state.unwrap_or(ReviewState::Open),
         draft: node["draft"].as_bool().unwrap_or(false),
-        head_branch: text("source_branch"),
-        base_branch: text("target_branch"),
-        head_sha: text("sha"),
+        head_branch: shared.head_branch,
+        base_branch: shared.base,
+        head_sha: shared.head_sha,
         author: node["author"]["username"]
             .as_str()
             .unwrap_or_default()
@@ -57,13 +58,7 @@ fn mr(node: &Value) -> Pr {
         mergeable: mergeable.to_owned(),
         merge_state: detailed,
         conflicts,
-        same_repo: match (
-            node["source_project_id"].as_u64(),
-            node["target_project_id"].as_u64(),
-        ) {
-            (Some(source), Some(target)) => source == target,
-            _ => true,
-        },
+        same_repo: shared.same_repo.unwrap_or(true),
         squash,
         merge_queue: false,
     }

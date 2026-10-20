@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::core::error::{Error, Result};
 use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::Transport;
-use crate::forge::{self, encode};
+use crate::forge::{self, PullNode, encode, github, gitlab};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
@@ -111,47 +111,30 @@ impl Origin {
 }
 
 fn github_pull(node: &Value) -> Result<Pull> {
-    let merged = node["mergedAt"].as_str().is_some();
-    let state = node["state"]
-        .as_str()
-        .and_then(forge::github_state)
-        .filter(|state| merged || *state != ReviewState::Merged);
-    Ok(Pull {
-        number: node["number"]
-            .as_u64()
-            .ok_or_else(|| Error("a GitHub pull request has no number".into()))?,
-        url: forge::text(node, "/url").unwrap_or_default(),
-        title: forge::text(node, "/title").unwrap_or_default(),
-        closed_at: forge::text(node, "/closedAt"),
-        state,
-        base: forge::text(node, "/baseRefName").unwrap_or_default(),
-        head_branch: forge::text(node, "/headRefName").unwrap_or_default(),
-        head_sha: forge::text(node, "/headRefOid").unwrap_or_default(),
-        same_repo: node["isCrossRepository"] == Value::Bool(false),
-    })
+    pull(
+        github::pull_node(node),
+        "a GitHub pull request has no number",
+    )
 }
 
 fn gitlab_pull(node: &Value) -> Result<Pull> {
-    let merged = node["merged_at"].as_str().is_some();
-    let state = node["state"]
-        .as_str()
-        .and_then(forge::gitlab_state)
-        .filter(|state| merged || *state != ReviewState::Merged);
-    let (source, target) = (
-        node["source_project_id"].as_u64(),
-        node["target_project_id"].as_u64(),
-    );
+    pull(gitlab::pull_node(node), "a GitLab merge request has no iid")
+}
+
+/// A merged state needs a merge timestamp, and a head branch counts as in the repository only
+/// when the node says so.
+fn pull(node: PullNode, no_number: &str) -> Result<Pull> {
     Ok(Pull {
-        number: node["iid"]
-            .as_u64()
-            .ok_or_else(|| Error("a GitLab merge request has no iid".into()))?,
-        url: forge::text(node, "/web_url").unwrap_or_default(),
-        title: forge::text(node, "/title").unwrap_or_default(),
-        closed_at: forge::text(node, "/closed_at"),
-        state,
-        base: forge::text(node, "/target_branch").unwrap_or_default(),
-        head_branch: forge::text(node, "/source_branch").unwrap_or_default(),
-        head_sha: forge::text(node, "/sha").unwrap_or_default(),
-        same_repo: source.is_some() && source == target,
+        number: node.number.ok_or_else(|| Error(no_number.into()))?,
+        url: node.url,
+        title: node.title,
+        closed_at: node.closed_at,
+        state: node
+            .state
+            .filter(|state| node.merged || *state != ReviewState::Merged),
+        base: node.base,
+        head_branch: node.head_branch,
+        head_sha: node.head_sha,
+        same_repo: node.same_repo == Some(true),
     })
 }

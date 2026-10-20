@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
-use crate::forge;
 use crate::forge::service::{Method, Request, Var};
 use crate::forge::transport::Transport;
+use crate::forge::{self, github};
 use crate::store::model::ReviewState;
 
 const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
@@ -25,16 +25,17 @@ fn pr(node: &Value) -> Pr {
         ("MERGEABLE", _) => "mergeable",
         _ => "unknown",
     };
+    let shared = github::pull_node(node);
     Pr {
         id: text("/id"),
-        number: node["number"].as_u64().unwrap_or_default(),
-        url: text("/url"),
-        title: text("/title"),
-        state: forge::github_state(&text("/state")).unwrap_or(ReviewState::Open),
+        number: shared.number.unwrap_or_default(),
+        url: shared.url,
+        title: shared.title,
+        state: shared.state.unwrap_or(ReviewState::Open),
         draft: node["isDraft"].as_bool().unwrap_or(false),
-        head_branch: text("/headRefName"),
-        base_branch: text("/baseRefName"),
-        head_sha: text("/headRefOid"),
+        head_branch: shared.head_branch,
+        base_branch: shared.base,
+        head_sha: shared.head_sha,
         author: text("/author/login"),
         labels: node
             .pointer("/labels/nodes")
@@ -52,7 +53,7 @@ fn pr(node: &Value) -> Pr {
             .and_then(Value::as_str)
             .map(str::to_lowercase),
         conflicts: mergeable == "conflicting",
-        same_repo: node["isCrossRepository"].as_bool() != Some(true),
+        same_repo: shared.same_repo.unwrap_or(true),
         squash: false,
         mergeable: mergeable.to_owned(),
         merge_state,

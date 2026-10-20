@@ -156,12 +156,7 @@ pub fn find(store: &Store, filter: Option<&str>, text: &str) -> Result<(Tracker,
 
 pub fn local(store: &Store) -> Result<Tracker> {
     let dir = store.repo_dir("local")?;
-    let doc = store.update_doc(
-        &dir,
-        TRACKER_FILE,
-        TrackerDoc::local,
-        |doc| Ok(doc.clone()),
-    )?;
+    let doc = store.update_doc(&dir, TRACKER_FILE, TrackerDoc::local, |doc| Ok(doc.clone()))?;
     Ok(Tracker { dir, doc })
 }
 

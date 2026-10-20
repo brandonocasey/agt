@@ -11,7 +11,7 @@ use crate::forge::service::{
     Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
-use crate::forge::{self, CommentData, Draft, Fetched, PrInfo, ThreadData};
+use crate::forge::{self, CommentData, Draft, Fetched, PrInfo, PullNode, ThreadData};
 use crate::git::Repo;
 use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
 use serde_json::json;
@@ -42,6 +42,29 @@ pub const KIND: Kind = Kind {
 
 pub fn connect(host: &str) -> Gitlab {
     Gitlab::new(Box::new(CliTransport::glab(host)))
+}
+
+/// The shared fields of a REST merge request node.
+pub fn pull_node(node: &Value) -> PullNode {
+    let text = |pointer: &str| forge::text(node, pointer).unwrap_or_default();
+    PullNode {
+        number: node["iid"].as_u64(),
+        url: text("/web_url"),
+        title: text("/title"),
+        state: node["state"].as_str().and_then(forge::gitlab_state),
+        merged: node["merged_at"].as_str().is_some(),
+        closed_at: forge::text(node, "/closed_at"),
+        base: text("/target_branch"),
+        head_branch: text("/source_branch"),
+        head_sha: text("/sha"),
+        same_repo: match (
+            node["source_project_id"].as_u64(),
+            node["target_project_id"].as_u64(),
+        ) {
+            (Some(source), Some(target)) => Some(source == target),
+            _ => None,
+        },
+    }
 }
 
 const CAPS: Capabilities = Capabilities {

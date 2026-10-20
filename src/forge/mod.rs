@@ -154,6 +154,25 @@ pub fn percent_encode(text: &str, keep: &[u8]) -> String {
     out
 }
 
+/// The fields of a PR/MR node that every read of one shares, as the forge wrote them. Each reader
+/// decides what a missing number, state or fork flag means.
+pub struct PullNode {
+    pub number: Option<u64>,
+    pub url: String,
+    pub title: String,
+    /// `None` for a state this build does not know.
+    pub state: Option<ReviewState>,
+    /// The node has a merge timestamp.
+    pub merged: bool,
+    /// When it was closed, as the forge wrote it.
+    pub closed_at: Option<String>,
+    pub base: String,
+    pub head_branch: String,
+    pub head_sha: String,
+    /// Whether the head branch lives in the repository itself; `None` when the node does not say.
+    pub same_repo: Option<bool>,
+}
+
 pub struct PrInfo {
     pub repo: String,
     pub url: String,

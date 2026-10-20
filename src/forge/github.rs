@@ -11,7 +11,7 @@ use crate::forge::service::{
     Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Var,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
-use crate::forge::{self, CommentData, Fetched, PrInfo, ThreadData};
+use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData};
 use crate::git::Repo;
 use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
 use serde_json::json;
@@ -66,6 +66,23 @@ pub const KIND: Kind = Kind {
 
 pub fn connect(host: &str) -> Github {
     Github::new(Box::new(CliTransport::gh(host)))
+}
+
+/// The shared fields of a GraphQL `PullRequest` node.
+pub fn pull_node(node: &Value) -> PullNode {
+    let text = |pointer: &str| forge::text(node, pointer).unwrap_or_default();
+    PullNode {
+        number: node["number"].as_u64(),
+        url: text("/url"),
+        title: text("/title"),
+        state: node["state"].as_str().and_then(forge::github_state),
+        merged: node["mergedAt"].as_str().is_some(),
+        closed_at: forge::text(node, "/closedAt"),
+        base: text("/baseRefName"),
+        head_branch: text("/headRefName"),
+        head_sha: text("/headRefOid"),
+        same_repo: node["isCrossRepository"].as_bool().map(|cross| !cross),
+    }
 }
 
 const CAPS: Capabilities = Capabilities {
