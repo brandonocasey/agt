@@ -17,7 +17,7 @@ use crate::store::model::Target;
 use crate::store::prune::PRUNE_AFTER_SECS;
 use crate::store::prune::backups::Backup;
 use crate::store::{Namespace, Store};
-use crate::task::prune::{Expired, expired as expired_tasks};
+use crate::task::prune::{Expired, expired as expired_tasks, orphan_locks};
 
 pub const CATEGORIES: [&str; 10] = [
     "reviews",
@@ -51,6 +51,8 @@ pub enum Action {
         name: String,
     },
     Task(Expired),
+    /// A task lock file whose record is gone.
+    TaskLock(PathBuf),
     Lock {
         root: PathBuf,
         namespace: Namespace,
@@ -303,12 +305,25 @@ impl Plan {
                 Action::Task(task),
             );
         }
+        let locks = orphan_locks();
+        for path in self.attempt(&root, locks).unwrap_or_default() {
+            self.add(
+                "locks",
+                path.clone(),
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                "task lock file whose record no longer exists".into(),
+                size(&path),
+                Action::TaskLock(path),
+            );
+        }
         Ok(())
     }
 
-    /// Lock files in `store` whose document is gone. A task's lock file exists only
-    /// next to its record (a refused create or update takes none) and pruning the record
-    /// removes it, so task locks are not looked at. Callers MUST plan the store's local repositories
+    /// Lock files in `store` whose document is gone. Task lock files are left to
+    /// [`Plan::tasks`], since pruning a task record keeps its lock file. Callers MUST plan the store's local repositories
     /// first: a listed local repository deletes its own stray locks.
     fn stray_locks(&mut self, store: &Store, namespace: Namespace) {
         let found = store.stray_locks();

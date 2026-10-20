@@ -29,7 +29,7 @@ pub(super) fn is_id(id: &str) -> bool {
         })
 }
 
-fn task_path(id: &str) -> Result<PathBuf> {
+pub(super) fn task_path(id: &str) -> Result<PathBuf> {
     Ok(files::root()?.join(format!("{id}.json")))
 }
 

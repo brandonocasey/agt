@@ -283,6 +283,31 @@ fn tasks_drop_when_complete_for_90_days_and_the_index_stays() {
 }
 
 #[test]
+fn task_locks_outlive_their_pruned_record_until_the_next_pass_removes_them() {
+    let prune = Prune::new();
+    let old = prune.task("done-old", "complete", 91);
+    let live = prune.task("live", "active", 5);
+    let tasks = prune.agents().join("tasks");
+    let [old_lock, live_lock, orphan, held] =
+        ["done-old", "live", "orphan", "busy"].map(|id| tasks.join(format!(".{id}.lock")));
+    for path in [&old_lock, &live_lock, &orphan, &held] {
+        File::create(path).unwrap();
+    }
+    let guard = File::options().write(true).open(&held).unwrap();
+    guard.lock().unwrap();
+    let report = prune.run(&["--yes"]);
+    assert!(!old.exists() && live.exists());
+    // Pruning the record leaves its lock file, so a racing update never recreates one.
+    assert!(old_lock.exists());
+    assert_eq!(keys(&report, "locks"), [".busy.lock", ".orphan.lock"]);
+    assert!(!orphan.exists() && held.exists() && live_lock.exists());
+    drop(guard);
+    let report = prune.run(&["--yes"]);
+    assert_eq!(keys(&report, "locks"), [".busy.lock", ".done-old.lock"]);
+    assert!(!old_lock.exists() && !held.exists() && live_lock.exists());
+}
+
+#[test]
 fn stray_locks_go_unless_held_or_their_document_exists() {
     let prune = Prune::new();
     let live = prune.target("github.com/o/a", "live", 1);

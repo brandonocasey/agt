@@ -2,15 +2,15 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use super::files;
-use super::records::{is_id, read_task};
+use super::records::{is_id, read_task, task_path};
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::lock_file_within;
+use crate::core::local::{is_current, lock_file_within, try_lock};
 use crate::store::prune::{Removal, past_retention};
 
 /// A finished task record that is old enough to drop.
@@ -78,8 +78,63 @@ pub fn remove(task: &Expired, now: i64) -> Result<Removal> {
         Ok(current) if is_expired(&current, now) => {}
         _ => return Ok(Removal::Kept),
     }
+    // The lock file stays: unlinking it would let a racing `update` that already read the
+    // record open a fresh lock file that no record owns. [`orphan_locks`] collects it later.
     fs::remove_file(&task.path).map_err(ctx(format!("remove {}", task.path.display())))?;
-    // Waiters on the old lock inode notice the unlink and retry on a fresh file.
-    fs::remove_file(&lock).map_err(ctx(format!("remove {}", lock.display())))?;
     Ok(Removal::Removed(task.bytes))
+}
+
+/// Task lock files whose record does not exist, sorted.
+pub fn orphan_locks() -> Result<Vec<PathBuf>> {
+    let root = files::root()?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return fail(format!("read {}: {error}", root.display())),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(ctx(format!("read {}", root.display())))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(id) = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".lock"))
+            .filter(|id| is_id(id))
+        else {
+            continue;
+        };
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) && !task_path(id)?.exists() {
+            found.push(entry.path());
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Deletes a lock file from [`orphan_locks`] while holding its lock, unless another process
+/// holds it, it was replaced, or its record came back. Opening without `create` keeps a lock
+/// that vanished gone.
+pub fn remove_orphan_lock(path: &Path) -> Result<Removal> {
+    let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Removal::Kept),
+        Err(error) => return fail(format!("open {}: {error}", path.display())),
+    };
+    if !try_lock(&file, path)? {
+        return Ok(Removal::Busy);
+    }
+    let id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix('.')?.strip_suffix(".lock"))
+        .filter(|id| is_id(id));
+    let Some(id) = id else {
+        return Ok(Removal::Kept);
+    };
+    if !is_current(&file, path)? || task_path(id)?.exists() {
+        return Ok(Removal::Kept);
+    }
+    let bytes = file.metadata().map_or(0, |meta| meta.len());
+    fs::remove_file(path).map_err(ctx(format!("remove {}", path.display())))?;
+    Ok(Removal::Removed(bytes))
 }
