@@ -34,13 +34,9 @@ pub const CODEX_STANDALONE_DIR: &str = "packages/standalone";
 /// Path fragment of the skill files an agent reads.
 pub const SKILLS_PATH: &str = "/skills/";
 
-/// What a user message the harness wrote, not the person, starts with: a tag (Codex's
-/// `<environment_context>` and `<skills_instructions>`, Claude Code's `<command-...>` and
-/// `<system-reminder>`), Codex's `# AGENTS.md instructions`, or Claude Code's `Caveat:`.
-pub const INJECTED_PREFIXES: [&str; 3] = ["<", "# AGENTS.md instructions", "Caveat:"];
-
-/// The user-message starts only a harness writes. The session index drops just these, so a
-/// prompt the person typed that starts with `<` stays searchable.
+/// The user-message starts only a harness writes: Codex's `# AGENTS.md instructions`,
+/// `<environment_context>` and `<skills_instructions>`, and the `<system...>` and
+/// `<developer...>` tags.
 pub const HARNESS_PREFIXES: [&str; 5] = [
     "# AGENTS.md instructions",
     "<environment_context>",
@@ -48,6 +44,11 @@ pub const HARNESS_PREFIXES: [&str; 5] = [
     "<system",
     "<developer",
 ];
+
+/// Further starts of a user message that a typed prompt can share: any tag (Claude Code's
+/// `<command-...>` and `<system-reminder>`) or Claude Code's `Caveat:`. Reports of what a
+/// person typed drop these too; the session index keeps them.
+pub const TYPED_PREFIXES: [&str; 2] = ["<", "Caveat:"];
 
 /// Path fragment of files under Codex's config directory.
 const CODEX_PATH: &str = "/.codex/";

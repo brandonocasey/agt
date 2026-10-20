@@ -234,7 +234,7 @@ fn user_text(payload: &Value) -> Option<String> {
         .as_array()?
         .iter()
         .map(|item| text(item, "text"))
-        .filter(|text| !injected(text))
+        .filter(|text| !injected(text, false))
         .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }

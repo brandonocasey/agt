@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use clap::Args;
 use serde::Serialize;
@@ -14,11 +13,10 @@ use super::fmt::{grouped, round, table, tok};
 use super::spend::session_cost;
 use crate::core::agents::{self, CodexProc};
 use crate::core::clock;
-use crate::core::error::{Error, Result, ctx};
+use crate::core::error::{Result, ctx};
 use crate::core::harness::Harness;
 use crate::core::local;
 use crate::core::output::Output;
-use crate::core::process;
 use crate::core::transcripts::json::{SHORT_ID, head};
 use crate::core::transcripts::{codex_sessions, session_files};
 use crate::git::Repo;
@@ -32,14 +30,9 @@ use crate::git::Repo;
 /// rollout's last `task_started` has no later `task_complete` or `turn_aborted`, else `idle`.
 ///
 /// `--watch` polls forever and prints one JSON line per event: `blocked` (a Claude Code session
-/// has been `waiting` for `--blocked-after` seconds; once per waiting stretch), `cleared` (a
-/// blocked session left `waiting`, `reason` `answered`, or a new waiting stretch replaced it,
-/// `reason` `new_prompt`) and `ended` (a session's process is gone). `--notify` posts a
-/// desktop notification for each `blocked` event. `--exec PROGRAM [-- ARGS...]` runs the
-/// program (no shell) per event with the event JSON on stdin and `AGT_PS_EVENT`, `AGT_PS_PID`,
-/// `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`, `AGT_PS_STATUS_SECS`
-/// and `AGT_PS_REASON` (`cleared` only) in its environment, its stdout going to stderr. Handlers run one at a time and block polling
-/// until they exit; one that exits non-zero only prints a warning.
+/// has been `waiting` for 60 seconds; once per waiting stretch), `cleared` (a blocked session
+/// left `waiting`, `reason` `answered`, or a new waiting stretch replaced it, `reason`
+/// `new_prompt`) and `ended` (a session's process is gone).
 #[derive(Args)]
 pub struct Cli {
     /// Print rows as JSON.
@@ -48,21 +41,9 @@ pub struct Cli {
     /// Print an event line when a session is blocked, unblocked or ended, until interrupted.
     #[arg(long, conflicts_with = "json")]
     watch: bool,
-    /// Seconds a session must have been waiting before it is blocked.
-    #[arg(long, default_value_t = 60, requires = "watch")]
-    blocked_after: i64,
     /// Seconds between polls.
     #[arg(long, default_value_t = 5, requires = "watch")]
     interval: u64,
-    /// Post a desktop notification for each blocked session.
-    #[arg(long, requires = "watch")]
-    notify: bool,
-    /// Run this program for each event.
-    #[arg(long, requires = "watch")]
-    exec: Option<String>,
-    /// Arguments for the `--exec` program.
-    #[arg(last = true, requires = "exec")]
-    exec_args: Vec<String>,
     /// Stop after this many polls.
     #[arg(long, hide = true, requires = "watch")]
     max_polls: Option<u64>,
@@ -248,6 +229,9 @@ fn codex_status(path: &Path) -> (&'static str, Option<i64>) {
     ("idle", None)
 }
 
+/// Seconds a session must have been waiting before it is blocked.
+const BLOCKED_AFTER: i64 = 60;
+
 /// What `--watch` remembers of one Claude Code session between polls.
 struct Seen {
     row: Row,
@@ -261,56 +245,9 @@ fn watch(cli: &Cli) -> Result<()> {
     let mut polls = 0;
     loop {
         let now = clock::now_secs()?;
-        let mut rows = claude_rows(now, None, &mut false);
-        let mut events = Vec::new();
-        // A session missing from one poll while its process runs keeps its previous state.
-        let gone = |pid: &i32| !agents::exists(*pid);
-        for (pid, old) in &seen {
-            if !rows.iter().any(|row| row.pid == *pid) && gone(pid) {
-                events.push(Event::of("ended", &old.row, now, None));
-            }
-        }
-        seen.retain(|pid, _| rows.iter().any(|row| row.pid == *pid) || !gone(pid));
-        for row in rows.drain(..) {
-            let pid = row.pid;
-            let waiting = row.status.as_deref() == Some("waiting");
-            let since = row.status_secs.map(|secs| now - secs);
-            let mut blocked = seen.get(&pid).is_some_and(|old| old.blocked);
-            // A new waiting stretch behind a blocked one ends the old stretch and starts afresh.
-            if blocked
-                && waiting
-                && let Some(old) = seen.get(&pid)
-                && old.since.is_some()
-                && since.is_some()
-                && old.since != since
-            {
-                events.push(Event::of("cleared", &old.row, now, Some("new_prompt")));
-                blocked = false;
-            }
-            let now_blocked = if waiting {
-                blocked
-                    || row
-                        .status_secs
-                        .is_some_and(|secs| secs >= cli.blocked_after)
-            } else {
-                false
-            };
-            if now_blocked && !blocked {
-                events.push(Event::of("blocked", &row, now, None));
-            } else if blocked && !waiting {
-                events.push(Event::of("cleared", &row, now, Some("answered")));
-            }
-            seen.insert(
-                pid,
-                Seen {
-                    row,
-                    blocked: now_blocked,
-                    since,
-                },
-            );
-        }
-        for event in &events {
-            emit(cli, event)?;
+        let rows = claude_rows(now, None, &mut false);
+        for event in poll(&mut seen, rows, now, agents::exists) {
+            emit(&event)?;
         }
         polls += 1;
         if cli.max_polls.is_some_and(|max| polls >= max) {
@@ -318,6 +255,58 @@ fn watch(cli: &Cli) -> Result<()> {
         }
         clock::sleep(cli.interval);
     }
+}
+
+/// The events one poll produces from the rows now running and what the last polls saw.
+/// `exists` says whether a pid still runs.
+fn poll(
+    seen: &mut HashMap<i32, Seen>,
+    mut rows: Vec<Row>,
+    now: i64,
+    exists: impl Fn(i32) -> bool,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    // A session missing from one poll while its process runs keeps its previous state.
+    let gone = |pid: &i32| !exists(*pid);
+    for (pid, old) in &*seen {
+        if !rows.iter().any(|row| row.pid == *pid) && gone(pid) {
+            events.push(Event::of("ended", &old.row, now, None));
+        }
+    }
+    seen.retain(|pid, _| rows.iter().any(|row| row.pid == *pid) || !gone(pid));
+    for row in rows.drain(..) {
+        let pid = row.pid;
+        let waiting = row.status.as_deref() == Some("waiting");
+        let since = row.status_secs.map(|secs| now - secs);
+        let mut blocked = seen.get(&pid).is_some_and(|old| old.blocked);
+        // A new waiting stretch behind a blocked one ends the old stretch and starts afresh.
+        if blocked
+            && waiting
+            && let Some(old) = seen.get(&pid)
+            && old.since.is_some()
+            && since.is_some()
+            && old.since != since
+        {
+            events.push(Event::of("cleared", &old.row, now, Some("new_prompt")));
+            blocked = false;
+        }
+        let now_blocked =
+            waiting && (blocked || row.status_secs.is_some_and(|secs| secs >= BLOCKED_AFTER));
+        if now_blocked && !blocked {
+            events.push(Event::of("blocked", &row, now, None));
+        } else if blocked && !waiting {
+            events.push(Event::of("cleared", &row, now, Some("answered")));
+        }
+        seen.insert(
+            pid,
+            Seen {
+                row,
+                blocked: now_blocked,
+                since,
+            },
+        );
+    }
+    events
 }
 
 /// A row and what happened to it, as a `--watch` line.
@@ -342,84 +331,12 @@ impl Event {
     }
 }
 
-fn emit(cli: &Cli, event: &Event) -> Result<()> {
+fn emit(event: &Event) -> Result<()> {
     let line = serde_json::to_string(event).map_err(ctx("encode event"))?;
     let mut out = std::io::stdout().lock();
     writeln!(out, "{line}")
         .and_then(|()| out.flush())
-        .map_err(ctx("write stdout"))?;
-    drop(out);
-    if cli.notify && event.event == "blocked" {
-        notify(&event.row);
-    }
-    if let Some(program) = &cli.exec
-        && let Err(error) = exec(program, &cli.exec_args, event, &line)
-    {
-        eprintln!("warning: {error}");
-    }
-    Ok(())
-}
-
-/// Runs `program` with the event on stdin and in `AGT_PS_*` variables, and waits for it.
-fn exec(program: &str, args: &[String], event: &Event, line: &str) -> Result<()> {
-    let row = &event.row;
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .env("AGT_PS_EVENT", event.event)
-        .env("AGT_PS_PID", row.pid.to_string())
-        .env("AGT_PS_SESSION", row.session.as_deref().unwrap_or_default())
-        .env("AGT_PS_NAME", row.name.as_deref().unwrap_or_default())
-        .env(
-            "AGT_PS_CWD",
-            row.cwd.as_deref().map(Path::as_os_str).unwrap_or_default(),
-        )
-        .env(
-            "AGT_PS_WAITING_FOR",
-            row.waiting_for.as_deref().unwrap_or_default(),
-        )
-        .env(
-            "AGT_PS_STATUS_SECS",
-            row.status_secs
-                .map(|secs| secs.to_string())
-                .unwrap_or_default(),
-        )
-        .env("AGT_PS_REASON", event.reason.unwrap_or_default())
-        // The event stream on stdout stays one JSON line per event.
-        .stdout(std::io::stderr());
-    let status = process::status(&mut command, Some(format!("{line}\n").as_bytes()))
-        .map_err(|error| Error(format!("run {program}: {error}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error(format!("{program} exited with {status}")))
-    }
-}
-
-fn notify(row: &Row) {
-    let who = row
-        .name
-        .as_deref()
-        .or_else(|| row.cwd.as_deref().and_then(Path::to_str))
-        .unwrap_or("a session");
-    let title = format!("agt: {who} is blocked");
-    let body = row.waiting_for.as_deref().unwrap_or("waiting for input");
-    #[cfg(target_os = "linux")]
-    let result = notify_rust::Notification::new()
-        .summary(&title)
-        .body(body)
-        .show()
-        .map(|_| ());
-    #[cfg(target_os = "macos")]
-    let result = mac_notification_sys::Notification::new()
-        .title(&title)
-        .message(body)
-        .asynchronous(true)
-        .send()
-        .map(|_| ());
-    if let Err(error) = result {
-        eprintln!("warning: notification failed: {error}");
-    }
+        .map_err(ctx("write stdout"))
 }
 
 /// The model, context tokens and cost from the session's transcripts. When they or the price
@@ -620,5 +537,53 @@ mod tests {
         );
         let blocked = Event::of("blocked", &row(), 0, None);
         assert!(json!(blocked).get("reason").is_none());
+    }
+
+    fn waiting(secs: i64) -> Row {
+        let mut waiting = row();
+        waiting.status_secs = Some(secs);
+        waiting
+    }
+
+    fn kinds(events: &[Event]) -> Vec<&'static str> {
+        events.iter().map(|event| event.event).collect()
+    }
+
+    #[test]
+    fn a_session_is_blocked_once_per_waiting_stretch_and_cleared_when_answered() {
+        let mut seen = HashMap::new();
+        assert!(poll(&mut seen, vec![waiting(10)], 1000, |_| true).is_empty());
+        let events = poll(&mut seen, vec![waiting(70)], 1060, |_| true);
+        assert_eq!(kinds(&events), ["blocked"]);
+        assert!(poll(&mut seen, vec![waiting(100)], 1090, |_| true).is_empty());
+        let mut idle = row();
+        idle.status = Some("idle".into());
+        let events = poll(&mut seen, vec![idle], 1120, |_| true);
+        assert_eq!(kinds(&events), ["cleared"]);
+        assert_eq!(events[0].reason, Some("answered"));
+    }
+
+    #[test]
+    fn a_new_waiting_stretch_behind_a_blocked_one_clears_it_and_blocks_afresh() {
+        let mut seen = HashMap::new();
+        poll(&mut seen, vec![waiting(100)], 1000, |_| true);
+        // Waiting 20s at +30 started after the old stretch began: a new prompt.
+        let events = poll(&mut seen, vec![waiting(20)], 1030, |_| true);
+        assert_eq!(kinds(&events), ["cleared"]);
+        assert_eq!(events[0].reason, Some("new_prompt"));
+        let events = poll(&mut seen, vec![waiting(80)], 1090, |_| true);
+        assert_eq!(kinds(&events), ["blocked"]);
+    }
+
+    #[test]
+    fn a_session_ends_only_when_its_process_is_gone() {
+        let mut seen = HashMap::new();
+        poll(&mut seen, vec![waiting(100)], 1000, |_| true);
+        // Its record is missing from one poll but the process runs: no event, state kept.
+        assert!(poll(&mut seen, Vec::new(), 1030, |_| true).is_empty());
+        assert!(seen.contains_key(&7));
+        let events = poll(&mut seen, Vec::new(), 1060, |_| false);
+        assert_eq!(kinds(&events), ["ended"]);
+        assert!(seen.is_empty());
     }
 }

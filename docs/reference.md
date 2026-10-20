@@ -65,7 +65,6 @@ Environment variables agt reads, or sets for programs it runs:
 | `AGT_PRICES` | `sessions` | Price file to use instead of `model-prices.json` | user |
 | `AGT_LS_REMOTE_TIMEOUT` | `worktree`, `cleanup` | Seconds a remote check may take (default 10) | user |
 | `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |
-| `AGT_PS_EVENT`, `AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`, `AGT_PS_STATUS_SECS`, `AGT_PS_REASON` | `ps --exec` | Set by agt for the program it runs | set by agt |
 | `AGT_NOW` | all | Unix seconds replacing the current time | test only |
 | `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
 | `AGT_GH_BIN`, `AGT_GLAB_BIN` | everything that calls a forge | Program to run instead of `gh` or `glab` | test only |
@@ -1061,7 +1060,10 @@ result whose `exit_code` is not 0 is an error, read as Claude Code's `Exit code 
 `friction` as `claude -p` ones are. In `cache-gaps` a Codex cache miss shows as uncached input,
 priced at the input rate. A session is labelled by the last 8 characters of its thread id (UUIDv7
 ids start with a timestamp); a subagent rollout is grouped under its role and its parent's
-session. Default Claude Code roots are every `~/.claude*/projects`, links followed.
+session. Without `--root`, reports and `search` read the same directories: Codex's `sessions` and
+`archived_sessions`, and each Claude Code profile's `projects`, `archive` and `archives` (links
+followed). Reports therefore also count transcripts kept in the `archive` directories, whose
+harness is read off each file's first line; `search` additionally reads the prompt history files.
 
 `search` finds sessions and what was typed in them, with a private index
 of the human turns in Codex and Claude transcripts, prompt history files and
@@ -1100,20 +1102,13 @@ share the directory, or the platform cannot read the process's directory, `sessi
 rollout has no later `task_complete` or `turn_aborted`, else `idle`; `status_secs` counts from
 that event's timestamp (only the file's last 256 KiB is read).
 
-`agt ps --watch [--blocked-after SECS] [--interval SECS] [--notify] [--exec PROGRAM [-- ARGS...]]`
-polls every `--interval` seconds (default 5) until interrupted and prints one JSON line per event
-for Claude Code sessions: `blocked` (the session has been `waiting` for `--blocked-after` seconds,
-default 60; once per waiting stretch, with `waiting_for`), `cleared` (a blocked session left
-`waiting`, with `reason` `answered`, or a new waiting stretch replaced the blocked one, with `reason` `new_prompt`) and `ended` (its process is gone). Each line holds the row's fields plus `event` and
-`at`. `--notify` posts a desktop notification per `blocked` event through native APIs:
-the desktop notification service over D-Bus on Linux, and Notification Center on macOS.
-Notification failures warn on stderr and polling continues. `--exec` runs
-the program, without a shell, once per event with the event JSON on stdin and `AGT_PS_EVENT`,
-`AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`,
-`AGT_PS_STATUS_SECS` and (for `cleared`) `AGT_PS_REASON` set. The program's stdout goes to agt's stderr, so stdout stays one JSON line
-per event. It runs synchronously: polling waits until it exits. A program that exits non-zero only
-warns on stderr. A session whose process still runs but is missing from one poll keeps its state
-and is not reported `ended`.
+`agt ps --watch [--interval SECS]` polls every `--interval` seconds (default 5) until
+interrupted and prints one JSON line per event for Claude Code sessions: `blocked` (the session
+has been `waiting` for 60 seconds; once per waiting stretch, with `waiting_for`), `cleared` (a
+blocked session left `waiting`, with `reason` `answered`, or a new waiting stretch replaced the
+blocked one, with `reason` `new_prompt`) and `ended` (its process is gone). Each line holds the
+row's fields plus `event` and `at`. A session whose process still runs but is missing from one
+poll keeps its state and is not reported `ended`.
 
 ## Worktrees
 

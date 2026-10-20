@@ -38,30 +38,35 @@ pub struct Transcript {
     pub scripted: bool,
 }
 
-/// Every Claude Code profile's `projects` directory.
-pub fn claude_projects(home: &Path) -> Vec<PathBuf> {
-    harness::claude_profiles(home)
-        .into_iter()
-        .map(|profile| profile.join("projects"))
-        .filter(|projects| projects.is_dir())
-        .collect()
+/// A directory that can hold transcripts, and the harness it belongs to when it is known.
+pub struct Root {
+    pub path: PathBuf,
+    /// `None` for a root that can hold either harness, where each file's first line says which.
+    pub harness: Option<Harness>,
 }
 
-/// Codex session roots: live sessions, then archived ones.
-pub fn codex_roots(home: &Path) -> [PathBuf; 2] {
+/// Every directory that can hold transcripts, for reports and the session index alike: Codex's
+/// live and archived sessions, then each Claude Code profile's `projects`, `archive` and
+/// `archives`.
+pub fn roots(home: &Path) -> Vec<Root> {
     let codex = home.join(harness::CODEX_DIR);
-    [codex.join("sessions"), codex.join("archived_sessions")]
-}
-
-/// Every directory that can hold transcripts: Codex's roots, then each Claude Code profile's
-/// `archive` and `archives`, and its `projects` when `projects` is set.
-pub fn all_roots(home: &Path, projects: bool) -> Vec<PathBuf> {
-    let mut roots = codex_roots(home).to_vec();
+    let mut roots: Vec<Root> = ["sessions", "archived_sessions"]
+        .into_iter()
+        .map(|name| Root {
+            path: codex.join(name),
+            harness: Some(Harness::Codex),
+        })
+        .collect();
     for profile in harness::claude_profiles(home) {
-        if projects {
-            roots.push(profile.join("projects"));
-        }
-        roots.extend(["archive", "archives"].map(|name| profile.join(name)));
+        roots.push(Root {
+            path: profile.join("projects"),
+            harness: Some(Harness::Claude),
+        });
+        // Archived transcripts have no fixed layout: the first line tells the harness.
+        roots.extend(["archive", "archives"].map(|name| Root {
+            path: profile.join(name),
+            harness: None,
+        }));
     }
     roots
 }
@@ -257,7 +262,7 @@ impl Transcript {
 pub fn codex_sessions(home: &Path, cwd: &Path, since: i64) -> Vec<String> {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
     let mut found = Vec::new();
-    for step in Walker::new(vec![codex_roots(home)[0].clone()]) {
+    for step in Walker::new(vec![roots(home)[0].path.clone()]) {
         let Step::File(path) = step else {
             continue;
         };
@@ -293,7 +298,12 @@ pub fn session_files(home: &Path, session: &str) -> Vec<Transcript> {
     if session.is_empty() || session.contains('/') {
         return found;
     }
-    for projects in claude_projects(home) {
+    let all = roots(home);
+    let projects = all
+        .iter()
+        .filter(|root| root.harness == Some(Harness::Claude) && root.path.is_dir())
+        .map(|root| root.path.clone());
+    for projects in projects {
         // Claude Code names a session's file and subagent directory after its id, so the
         // projects are not searched file by file.
         let Ok(entries) = fs::read_dir(&projects) else {
@@ -323,7 +333,12 @@ pub fn session_files(home: &Path, session: &str) -> Vec<Transcript> {
             }
         }
     }
-    for step in Walker::new(all_roots(home, false)) {
+    for step in Walker::new(
+        all.iter()
+            .filter(|root| root.harness != Some(Harness::Claude))
+            .map(|root| root.path.clone())
+            .collect(),
+    ) {
         if let Step::File(file) = step
             && belongs_to(&file, session)
         {

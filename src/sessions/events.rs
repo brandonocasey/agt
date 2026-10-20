@@ -320,7 +320,7 @@ pub(super) fn user_text(record: &Value) -> Option<String> {
     if let Some(bash) = BASH_INPUT.captures(content) {
         return Some(format!("! {}", bash[1].trim()));
     }
-    if injected(content) {
+    if injected(content, false) {
         return None;
     }
     Some(content.to_owned())

@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::core::harness::Harness;
-use crate::core::transcripts::{
-    Step, Transcript, Walker, claude_projects, codex_roots, is_scratch,
-};
+use crate::core::transcripts::{Step, Transcript, Walker, is_scratch, roots};
 use crate::sessions::Scope;
 
 fn modified(path: &Path) -> Option<f64> {
@@ -46,14 +44,9 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
     let home = &scope.home;
     // A root named on the command line can hold either harness; each file says which.
     let roots: Vec<(PathBuf, Option<Harness>)> = if scope.roots.is_empty() {
-        claude_projects(home)
+        roots(home)
             .into_iter()
-            .map(|root| (root, Some(Harness::Claude)))
-            .chain(
-                codex_roots(home)
-                    .into_iter()
-                    .map(|root| (root, Some(Harness::Codex))),
-            )
+            .map(|root| (root.path, root.harness))
             .collect()
     } else {
         scope

@@ -2,13 +2,13 @@
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::core::error::Result;
 use crate::core::local::{error_code, home};
-use crate::core::transcripts::{Step, Walker, all_roots, belongs_to, history_files};
+use crate::core::transcripts::{Step, Walker, belongs_to, history_files, roots};
 
 #[derive(Clone, Serialize)]
 pub struct Unreadable {
@@ -57,7 +57,7 @@ fn lossy(path: &Path) -> String {
 /// Lists every transcript file, with the ones that belong to `session` first.
 pub fn discover(session: Option<&str>) -> Result<Discovered> {
     let home = home()?;
-    let roots = all_roots(&home, true);
+    let roots: Vec<PathBuf> = roots(&home).into_iter().map(|root| root.path).collect();
     let mut files: Vec<String> = history_files(&home)
         .iter()
         .map(|file| lossy(file))
