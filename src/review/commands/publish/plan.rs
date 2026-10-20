@@ -564,8 +564,16 @@ impl<'a> Planner<'a> {
                 .threads
                 .retain(|thread| self.selected_thread(thread));
             for thread in &mut visible.threads {
+                // A QA finding's text is its first comment, whoever wrote it.
+                let first = thread
+                    .comments
+                    .first()
+                    .filter(|_| thread.check.is_some())
+                    .map(|first| first.id.clone());
                 thread.comments.retain(|comment| {
-                    !comment.local && self.run.is_none_or(|run| comment_in_run(comment, run))
+                    !comment.local
+                        && (first.as_ref() == Some(&comment.id)
+                            || self.run.is_none_or(|run| comment_in_run(comment, run)))
                 });
             }
         }

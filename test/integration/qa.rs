@@ -98,6 +98,10 @@ fn the_latest_check_of_a_name_counts_until_the_content_changes() {
     assert_eq!(status["qa"]["stale"], 2);
     assert_eq!(status["qa"]["approvable"], false);
     assert_eq!(env.run(&["status"])["qa"], status["qa"]);
+    // `--head` evaluates the commit, never the work tree.
+    let at_head = qa(&env, &["status", "--head", "HEAD"]);
+    assert_eq!(at_head["qa"]["stale"], 0);
+    assert_eq!(env.run(&["status", "--head", "HEAD"])["qa"], at_head["qa"]);
     assert!(qa_fail(&env, &["approve"]).contains("uncommitted"));
     env.commit_all("more");
     assert!(qa_fail(&env, &["approve"]).contains("is stale: login"));
@@ -316,5 +320,22 @@ fn auto_publish_of_a_qa_run_carries_its_human_findings() {
         .find(|input| input.contains("Agent QA"))
         .unwrap_or_else(|| panic!("no QA record posted: {inputs:?}"));
     assert!(record.contains("1 finding open"), "{record}");
+    assert!(record.contains("Payment hangs."), "{record}");
     assert!(!record.contains("✅ Agent QA"), "{record}");
+}
+
+/// A target whose branch is gone has no head; both statuses still show its QA state.
+#[test]
+fn a_headless_target_still_reports_qa() {
+    let env = changed_branch();
+    env.git(&["switch", "-q", "-c", "gone"]);
+    let run = start(&env, &[]);
+    check(&env, &run, "login", "pass", &[]);
+    let key = qa(&env, &["status"])["target"].as_str().unwrap().to_owned();
+    env.git(&["switch", "-q", "feat"]);
+    env.git(&["branch", "-q", "-D", "gone"]);
+    let review = env.run(&["--target", &key, "status"]);
+    assert_eq!(review["head"], Value::Null, "{review}");
+    assert_eq!(review["qa"], qa(&env, &["--target", &key, "status"])["qa"]);
+    assert_eq!(review["qa"]["stale"], 1, "{review}");
 }

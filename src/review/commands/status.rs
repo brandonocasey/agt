@@ -462,7 +462,12 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         "outdated_threads": threads.outdated,
         "held_questions": threads.held,
         "runs": run_views(target),
-        "qa": super::qa::qa_state(target, &head, Some(&ctx.reviewed_state(&scope)?.1)),
+        // Checks are judged against the work tree only where the worktree block read it.
+        "qa": super::qa::qa_state(
+            target,
+            &head,
+            Some(worktree["tree"].as_str().unwrap_or(&head_tree)),
+        ),
     }))
 }
 
@@ -514,6 +519,7 @@ pub(super) fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
         "outdated_threads": threads.outdated,
         "held_questions": threads.held,
         "runs": run_views(target),
+        "qa": super::qa::qa_state(target, "", None),
     })
 }
 
