@@ -108,7 +108,7 @@ fn offline_keeps_review_reads_local() {
     fs::create_dir_all(env.path("config").join("agt")).unwrap();
     fs::write(
         env.path("config").join("agt").join("config.toml"),
-        "[sync]\nauto = false\n",
+        "[sync]\nauto_pull = false\n",
     )
     .unwrap();
     let output = review_now(env, at, &["list"], &[]);

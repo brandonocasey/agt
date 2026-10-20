@@ -236,7 +236,7 @@ mod tests {
         assert!(!sync.auto_pull);
         assert!(!sync.auto_push);
         assert_eq!(sync.max_age_secs, 300);
-        let (_dir, config) = load("[sync]\nauto = false\nmax_age_secs = 60\n");
+        let (_dir, config) = load("[sync]\nauto_pull = false\nmax_age_secs = 60\n");
         let sync = config.unwrap().sync;
         assert!(!sync.auto_pull);
         assert_eq!(sync.max_age_secs, 60);
@@ -265,13 +265,6 @@ mod tests {
         assert_eq!(config.sync.max_age_secs, 17);
         assert_eq!(config.worktree.roots, Some(vec!["c".into()]));
         assert!(config.issues.tracker.is_empty());
-        std::fs::write(&local, "[sync]\nauto = false\nauto_pull = true\n").unwrap();
-        assert!(
-            Config::load_paths(&global, &local)
-                .unwrap_err()
-                .0
-                .contains("duplicate field")
-        );
     }
 
     #[test]

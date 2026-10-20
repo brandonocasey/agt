@@ -10,6 +10,15 @@ static NUMERIC: LazyLock<Regex> =
 /// A table with a dash rule under the headers. The first column and text columns are left
 /// aligned and numeric columns right aligned.
 pub fn table(out: &mut String, headers: &[&str], rows: &[Vec<String>]) {
+    render(out, headers, rows, true);
+}
+
+/// Like [`table`], with every column left aligned.
+pub fn table_left(out: &mut String, headers: &[&str], rows: &[Vec<String>]) {
+    render(out, headers, rows, false);
+}
+
+fn render(out: &mut String, headers: &[&str], rows: &[Vec<String>], numbers_right: bool) {
     let width = |text: &str| text.chars().count();
     let widths: Vec<usize> = headers
         .iter()
@@ -24,7 +33,8 @@ pub fn table(out: &mut String, headers: &[&str], rows: &[Vec<String>]) {
         .collect();
     let numeric: Vec<bool> = (0..headers.len())
         .map(|index| {
-            index > 0
+            numbers_right
+                && index > 0
                 && rows.iter().all(|row| {
                     let cell = &row[index];
                     NUMERIC.is_match(if cell.is_empty() { "0" } else { cell })

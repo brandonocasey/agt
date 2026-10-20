@@ -15,7 +15,7 @@ impl Out {
 pub fn table<S: AsRef<str>>(out: &Out, headers: &[S], rows: &[Vec<String>]) {
     let headers: Vec<&str> = headers.iter().map(AsRef::as_ref).collect();
     let mut text = String::new();
-    crate::core::table::table(&mut text, &headers, rows);
+    crate::core::table::table_left(&mut text, &headers, rows);
     for line in text.lines() {
         out.line(line);
     }

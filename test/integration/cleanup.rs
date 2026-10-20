@@ -512,7 +512,9 @@ fn busy_issue_and_task_locks_skip_the_item() {
     guard.lock().unwrap();
     let task = prune.task("busy-task", "complete", 400);
     let task_lock = prune.agents().join("tasks/.busy-task.lock");
-    fs::create_dir(&task_lock).unwrap();
+    File::create(&task_lock).unwrap();
+    let task_guard = File::options().write(true).open(&task_lock).unwrap();
+    task_guard.lock().unwrap();
     let report = prune.run(&["--yes"]);
     assert!(issue.exists() && task.exists());
     let skipped = report["skipped"].as_array().unwrap();
@@ -523,7 +525,7 @@ fn busy_issue_and_task_locks_skip_the_item() {
             .all(|item| item["why"].as_str().unwrap().contains("locked"))
     );
     drop(guard);
-    fs::remove_dir(&task_lock).unwrap();
+    drop(task_guard);
     prune.run_settled(&["--yes"]);
     assert!(!issue.exists() && !task.exists());
 }
