@@ -100,23 +100,25 @@ fn optional(value: Option<&String>, name: &str) -> Result<Value> {
 pub fn create(args: &Create) -> Result<Output> {
     let id = args.target.id()?;
     let objective = limited(Some(&args.objective), "objective")?;
+    // Everything that can fail on its input comes before the lock, so a refused create
+    // leaves no lock file without a record.
+    let now = clock::now_iso_millis()?;
+    let parent_pr = optional(args.fields.parent_pr.as_ref(), "parent-pr")?;
+    let target_branch = optional(args.fields.target_branch.as_ref(), "target-branch")?;
+    let task_boundary = optional(args.fields.task_boundary.as_ref(), "task-boundary")?;
+    let context = context();
+    let authorization = match &args.fields.authorization {
+        Some(provenance) => json!({
+            "provenance": limited(Some(provenance), "authorization")?,
+            "scope": limited(Some(args.fields.scope.as_deref().unwrap_or("unspecified")), "scope")?,
+        }),
+        None => Value::Null,
+    };
+    let next_step = optional(args.fields.next_step.as_ref(), "next-step")?;
     with_lock(&id, || {
         if task_path(&id)?.exists() {
             return fail(format!("task {id} already exists"));
         }
-        let now = clock::now_iso_millis()?;
-        let parent_pr = optional(args.fields.parent_pr.as_ref(), "parent-pr")?;
-        let target_branch = optional(args.fields.target_branch.as_ref(), "target-branch")?;
-        let task_boundary = optional(args.fields.task_boundary.as_ref(), "task-boundary")?;
-        let context = context();
-        let authorization = match &args.fields.authorization {
-            Some(provenance) => json!({
-                "provenance": limited(Some(provenance), "authorization")?,
-                "scope": limited(Some(args.fields.scope.as_deref().unwrap_or("unspecified")), "scope")?,
-            }),
-            None => Value::Null,
-        };
-        let next_step = optional(args.fields.next_step.as_ref(), "next-step")?;
         write_task(&json!({
             "version": 1,
             "id": id,
@@ -164,6 +166,8 @@ fn check_revision(task: &Value, expected: i64) -> Result<i64> {
 
 pub fn update(args: &Update) -> Result<Output> {
     let id = args.target.id()?;
+    // A task that does not exist gets no lock file.
+    read_task(&id)?;
     with_lock(&id, || {
         let mut task = read_task(&id)?;
         let revision = check_revision(&task, args.revision)?;

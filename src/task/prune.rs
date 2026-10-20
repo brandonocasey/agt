@@ -1,4 +1,4 @@
-//! Which task records `agt cleanup` may drop, taking the same lock directory as a task update.
+//! Which task records `agt cleanup` may drop, taking the same lock file as a task update.
 
 use std::fs;
 use std::io::ErrorKind;

@@ -246,6 +246,13 @@ fn rejects_oversized_persisted_fields_without_changing_or_locking_the_task() {
     ]);
     assert!(error.contains("next-step exceeds"), "{error}");
     assert!(!task.tasks().join("large-create.json").exists());
+    assert!(!task.tasks().join(".large-create.lock").exists());
+    let error = task.fail(&["update", "nosuch", "--revision", "1", "--next-step", "x"]);
+    assert!(error.contains("does not exist"), "{error}");
+    assert!(!task.tasks().join(".nosuch.lock").exists());
+    task.run(&["create", "dup", "--objective", "Work"]);
+    task.fail(&["create", "dup", "--objective", "Again"]);
+    assert!(task.tasks().join(".dup.lock").exists());
     task.run(&["create", "large-check", "--objective", "Work"]);
     for field in ["code-revision", "inputs", "environment"] {
         let flag = format!("--check-{field}");
