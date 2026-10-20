@@ -1,24 +1,27 @@
+mod approval;
+mod placement;
+pub(super) mod skips;
+
+use self::placement::Spot;
+use self::skips::{Held, Skip, Skipped, Unsupported};
+
 use serde_json::{Value, json};
 
 use super::Options;
 
-use super::render::{body, location, record_head, review_body, short};
+use super::render::{body, record_head, review_body};
 use super::summary::{Covered, summary_body};
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::markers;
-use crate::forge::service::{
-    ApproveCap, Capabilities, DraftPoster, Inline, Placement, Position, Request, ReviewService,
-};
+use crate::forge::service::{Capabilities, DraftPoster, Inline, Position, Request, ReviewService};
 use crate::git::{CommitInfo, Repo};
 use crate::review::commands::Ctx;
-use crate::review::commands::approve::blocking_threads;
 use crate::review::commands::status::run_reviews_at;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::view::author_label;
 use crate::store::model::{
-    Anchor, Approval, Author, Comment, Pass, PassKind, PostState, RemoteKind, RemoteThread,
-    Resolution, Review, Run, Side, Target, Thread,
+    Author, Comment, PostState, RemoteKind, RemoteThread, Resolution, Review, Run, Target, Thread,
 };
 
 /// Stands for the id of the draft a dry run has not created yet.
@@ -138,17 +141,6 @@ pub(super) struct Batch {
     pub(super) comments: Vec<(Position, String)>,
 }
 
-/// Where a comment goes on the host.
-pub(super) enum Spot {
-    InDiff(Position),
-    /// No anchor: a general comment.
-    General,
-    /// A file the PR/MR does not change: a general comment naming the location.
-    OtherFile(String),
-    /// Lines of a changed file that are not placeable in the PR/MR diff; never posted.
-    Outside,
-}
-
 /// The posting plan for one target state; built the same way for a dry run and a real one.
 pub(super) struct Planner<'a> {
     ctx: &'a Ctx,
@@ -170,142 +162,6 @@ pub(super) fn allowed(author: &Author, login: &str) -> bool {
     match author {
         Author::Agent { .. } => true,
         Author::Human { login: name, .. } => name == login,
-    }
-}
-
-/// Why something is not posted.
-#[derive(Clone)]
-pub(super) enum Skip {
-    NotNamed,
-    /// `--only` names threads, so the summary is held.
-    OnlyThreads,
-    /// The PR/MR is someone else's (`--not-own`).
-    Foreign {
-        whose: String,
-        held: Held,
-    },
-    PassOpen {
-        run: String,
-        pass: String,
-    },
-    PassLocked {
-        run: String,
-        pass: String,
-        cycle: u32,
-    },
-    NotAllowed {
-        author: String,
-        login: String,
-    },
-    BeforeLink {
-        run: String,
-        url: String,
-    },
-    OutsideDiff,
-    HeadMoved {
-        approved: String,
-        head: String,
-    },
-    OpenFindings(Vec<String>),
-    /// The service lacks a capability the item needs.
-    Unsupported {
-        service: &'static str,
-        what: Unsupported,
-    },
-}
-
-#[derive(Clone)]
-pub(super) enum Held {
-    Threads,
-    Records,
-}
-
-#[derive(Clone)]
-pub(super) enum Unsupported {
-    SelfApproval { posted_as_comment: bool },
-    FormalApproval,
-    Resolve,
-    Unresolve,
-}
-
-impl std::fmt::Display for Skip {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotNamed => write!(f, "not named by --only"),
-            Self::OnlyThreads => write!(f, "--only posts named threads, not the summary"),
-            Self::Foreign {
-                whose,
-                held: Held::Threads,
-            } => write!(
-                f,
-                "{whose}: --not-own posts only replies and resolves on others' threads (add \
-                 --findings for ours)"
-            ),
-            Self::Foreign {
-                whose,
-                held: Held::Records,
-            } => write!(f, "{whose}: the summary is never posted there"),
-            Self::PassOpen { run, pass } => write!(f, "pass {run}.{pass} has not ended"),
-            Self::PassLocked { run, pass, cycle } => write!(
-                f,
-                "pass {run}.{pass} is locked until a reveal pass in cycle {cycle} or the run ends"
-            ),
-            Self::NotAllowed { author, login } => write!(f, "written by {author}, not {login}"),
-            Self::BeforeLink { run, url } => {
-                write!(f, "run {run} ended before the target was linked to {url}")
-            }
-            Self::OutsideDiff => write!(
-                f,
-                "its lines are not in the PR/MR diff of the reviewed range"
-            ),
-            Self::HeadMoved { approved, head } => {
-                write!(
-                    f,
-                    "it approves {approved}, but the PR/MR head is now {head}"
-                )
-            }
-            Self::OpenFindings(ids) => {
-                write!(f, "open findings block approval: {}", ids.join(", "))
-            }
-            Self::Unsupported { service, what } => match what {
-                Unsupported::SelfApproval {
-                    posted_as_comment: false,
-                } => write!(f, "{service} does not let the author approve their own PR"),
-                Unsupported::SelfApproval {
-                    posted_as_comment: true,
-                } => write!(
-                    f,
-                    "{service} does not let the author approve their own PR; posted as a comment"
-                ),
-                Unsupported::FormalApproval => {
-                    write!(f, "{service} has no formal approval; posted as a comment")
-                }
-                Unsupported::Resolve => {
-                    write!(f, "{service} cannot resolve threads; cleared locally")
-                }
-                Unsupported::Unresolve => {
-                    write!(f, "{service} cannot reopen threads; cleared locally")
-                }
-            },
-        }
-    }
-}
-
-pub(super) struct Skipped {
-    pub(super) item: String,
-    pub(super) reason: Skip,
-}
-
-impl Skipped {
-    pub(super) fn new(item: &str, reason: Skip) -> Self {
-        Self {
-            item: item.to_owned(),
-            reason,
-        }
-    }
-
-    pub(super) fn view(&self) -> Value {
-        json!({ "item": self.item, "reason": self.reason.to_string() })
     }
 }
 
@@ -511,221 +367,6 @@ impl<'a> Planner<'a> {
         (writes, skipped, expected)
     }
 
-    /// An approval's writes: a comment, plus the host's approval when formal, and a note on
-    /// a formal approval the host does not allow. Only for the head it approved, and only
-    /// while no finding blocks approval.
-    fn approval(
-        &self,
-        thread: &Thread,
-        first: &Comment,
-        approval: &Approval,
-        target: &Target,
-    ) -> std::result::Result<(Vec<Write>, RemoteKind, Option<Skip>), Skip> {
-        self.approvable(approval, target)?;
-        let head = &self.review.head_sha;
-        let text = body(target, thread, first, None, self.attempt);
-        let subject = self.connection.subject();
-        // A note, not a thread: some hosts make threads resolvable, so they can block merging.
-        let note = || {
-            self.write(
-                Item::Thread {
-                    comment: first.id.clone(),
-                },
-                self.service().note(subject, &text),
-                &text,
-            )
-        };
-        let own = self.foreign().is_none();
-        match self.caps().approve {
-            ApproveCap::Review { self_allowed } if approval.formal && (self_allowed || !own) => {
-                let request = self.service().approve(subject, head, Some(&text));
-                let write = self.write(
-                    Item::ApprovalReview {
-                        comment: first.id.clone(),
-                    },
-                    request,
-                    &text,
-                );
-                Ok((vec![write], RemoteKind::Review, None))
-            }
-            ApproveCap::Review { .. } => {
-                let reason = approval.formal.then(|| Skip::Unsupported {
-                    service: self.service().name(),
-                    what: Unsupported::SelfApproval {
-                        posted_as_comment: true,
-                    },
-                });
-                Ok((vec![note()], RemoteKind::General, reason))
-            }
-            ApproveCap::Call
-                if approval.formal && !approval.approved && approval.refused.is_none() =>
-            {
-                let approve = Write {
-                    item: Item::Approve {
-                        thread: thread.id.clone(),
-                    },
-                    request: Some(self.service().approve(subject, head, None)),
-                    sent: vec![None],
-                };
-                Ok((vec![approve, note()], RemoteKind::General, None))
-            }
-            ApproveCap::None if approval.formal => {
-                let reason = Skip::Unsupported {
-                    service: self.service().name(),
-                    what: Unsupported::FormalApproval,
-                };
-                Ok((vec![note()], RemoteKind::General, Some(reason)))
-            }
-            ApproveCap::Call | ApproveCap::None => Ok((vec![note()], RemoteKind::General, None)),
-        }
-    }
-
-    /// The host's approval for a posted approval thread that is formal but not yet accepted.
-    fn pending_approve(
-        &self,
-        thread: &Thread,
-        target: &Target,
-    ) -> Option<std::result::Result<Write, Skip>> {
-        let approval = thread.approval.as_ref()?;
-        if !approval.formal || approval.approved || approval.refused.is_some() {
-            return None;
-        }
-        // Posted as the approving review itself, as when its response was lost and sync
-        // claimed it.
-        if thread
-            .remote
-            .as_ref()
-            .is_some_and(|remote| remote.kind == RemoteKind::Review)
-            || self.held(thread).is_some()
-        {
-            return None;
-        }
-        let own = self.foreign().is_none();
-        let caps = self.caps();
-        if caps.approve == ApproveCap::None {
-            return None;
-        }
-        if own
-            && caps.approve
-                == (ApproveCap::Review {
-                    self_allowed: false,
-                })
-        {
-            return Some(Err(Skip::Unsupported {
-                service: self.service().name(),
-                what: Unsupported::SelfApproval {
-                    posted_as_comment: false,
-                },
-            }));
-        }
-        if let Err(reason) = self.approvable(approval, target) {
-            return Some(Err(reason));
-        }
-        Some(Ok(Write {
-            item: Item::Approve {
-                thread: thread.id.clone(),
-            },
-            request: Some(self.service().approve(
-                self.connection.subject(),
-                &self.review.head_sha,
-                None,
-            )),
-            sent: vec![None],
-        }))
-    }
-
-    /// Whether an approval may go out now: at the head it approved, with no blocking finding.
-    fn approvable(&self, approval: &Approval, target: &Target) -> std::result::Result<(), Skip> {
-        let head = &self.review.head_sha;
-        if &approval.head != head {
-            return Err(Skip::HeadMoved {
-                approved: short(&approval.head).to_owned(),
-                head: short(head).to_owned(),
-            });
-        }
-        let blocking: Vec<String> = blocking_threads(target).map(str::to_owned).collect();
-        if blocking.is_empty() {
-            Ok(())
-        } else {
-            Err(Skip::OpenFindings(blocking))
-        }
-    }
-
-    /// Why a new thread is not posted: a finding of a pass still in progress, or another
-    /// person's text.
-    fn blocked(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<Skip> {
-        if let Some(reason) = self.held(thread) {
-            return Some(reason);
-        }
-        if let Some(reason) = self.pre_pr(target, thread) {
-            return Some(reason);
-        }
-        if let Some(finding) = &thread.finding {
-            let passes: Vec<&Pass> = target
-                .runs
-                .iter()
-                .filter(|run| run.id == finding.run)
-                .flat_map(|run| &run.passes)
-                .collect();
-            let pass = passes.iter().find(|pass| pass.id == finding.pass);
-            let Some(pass) = pass.filter(|pass| pass.ended_at.is_some()) else {
-                return Some(Skip::PassOpen {
-                    run: finding.run.clone(),
-                    pass: finding.pass.clone(),
-                });
-            };
-            // A blind pass's findings stay hidden from the host until its reveal ends, or its
-            // run ends when the harness cannot continue reviewers for a reveal.
-            let run_ended = target
-                .runs
-                .iter()
-                .any(|run| run.id == finding.run && run.ended_at.is_some());
-            let revealed = run_ended
-                || passes.iter().any(|later| {
-                    later.kind == PassKind::Reveal
-                        && later.cycle == pass.cycle
-                        && later.number > pass.number
-                        && later.ended_at.is_some()
-                });
-            if pass.locked && !revealed {
-                return Some(Skip::PassLocked {
-                    run: finding.run.clone(),
-                    pass: finding.pass.clone(),
-                    cycle: pass.cycle,
-                });
-            }
-        }
-        if !allowed(&first.author, &self.connection.login) {
-            return Some(Skip::NotAllowed {
-                author: author_label(&first.author),
-                login: self.connection.login.clone(),
-            });
-        }
-        None
-    }
-
-    /// Why a finding is not the PR/MR's business: its run ended before the target was linked
-    /// to it, so it reviewed history from before the PR/MR.
-    fn pre_pr(&self, target: &Target, thread: &Thread) -> Option<Skip> {
-        let run = &thread.finding.as_ref()?.run;
-        self.run_before_pr(target, run)
-    }
-
-    fn run_before_pr(&self, target: &Target, run_id: &str) -> Option<Skip> {
-        let run = target.runs.iter().find(|run| run.id == run_id)?;
-        // Retry eligibility MUST name this PR/MR so a later attachment cannot expose earlier runs.
-        if run.publication_target.as_deref() == Some(self.review.url.as_str()) {
-            return None;
-        }
-        let attached = self.review.attached_at.as_deref()?;
-        let ended = run.ended_at.as_deref()?;
-        // Timestamps share one fixed-width UTC format, so they order as text.
-        (ended < attached).then(|| Skip::BeforeLink {
-            run: run_id.to_owned(),
-            url: self.review.url.clone(),
-        })
-    }
-
     fn publish_draft(&self, drafts: &dyn DraftPoster, comment: &str, draft: &str) -> Write {
         Write {
             item: Item::PublishDraft {
@@ -735,57 +376,6 @@ impl<'a> Planner<'a> {
             request: Some(drafts.publish_draft(self.connection.subject(), draft)),
             sent: vec![None],
         }
-    }
-
-    /// The place of an anchored comment in the PR/MR diff. A file the PR/MR does not change,
-    /// or a finding on a whole file, gets a general comment; lines of a changed file that fit
-    /// no hunk are outside.
-    fn spot(&self, anchor: &Anchor) -> Spot {
-        let wanted = match anchor.side {
-            Side::New => anchor.line,
-            Side::Old => anchor.old_line,
-        };
-        let single;
-        let anchor = if self.caps().ranges {
-            anchor
-        } else {
-            single = Anchor {
-                start_line: None,
-                ..anchor.clone()
-            };
-            &single
-        };
-        let placed = match (&anchor.commit, wanted) {
-            (Some(commit), Some(line)) => {
-                self.service()
-                    .place(self.repo, self.review, anchor, commit, line)
-            }
-            _ => None,
-        };
-        match placed {
-            Some(Placement::InDiff(position)) => Spot::InDiff(position),
-            Some(Placement::OtherFile) => Spot::OtherFile(location(anchor)),
-            None if wanted.is_none() || !self.in_pr_diff(&anchor.path) => {
-                Spot::OtherFile(location(anchor))
-            }
-            None => Spot::Outside,
-        }
-    }
-
-    /// Whether the PR/MR diff changes this file; unknown counts as changed, so nothing
-    /// unplaceable is posted.
-    fn in_pr_diff(&self, path: &str) -> bool {
-        let files = self.pr_files.get_or_init(|| {
-            let head = &self.review.head_sha;
-            let diff = self
-                .review
-                .base_sha
-                .as_deref()
-                .and_then(|base| self.repo.merge_base(base, head).ok().flatten())
-                .and_then(|base| self.repo.diff_u0(&base, head).ok());
-            diff.map(|diff| anchors::parse(&diff)).unwrap_or_default()
-        });
-        files.is_empty() || files.iter().any(|file| file.touches(path))
     }
 
     /// Unposted comments on posted threads, then resolve and reopen changes.
@@ -1021,55 +611,6 @@ impl<'a> Planner<'a> {
         let base = self.repo.merge_base(base, head).ok().flatten()?;
         self.repo.commits(Some(&base), head).ok()
     }
-
-    /// Why a thread of ours is held: not named by `--only`, or on someone else's PR/MR
-    /// without `--findings`. An approval the user named with `--only` may go there.
-    fn held(&self, thread: &Thread) -> Option<Skip> {
-        let named_approval = thread.approval.is_some() && self.only.contains(&thread.id);
-        self.unnamed(thread)
-            .or_else(|| self.foreign_threads().filter(|_| !named_approval))
-    }
-
-    fn selected_thread(&self, thread: &Thread) -> bool {
-        self.run.is_none_or(|run| {
-            thread
-                .finding
-                .as_ref()
-                .is_some_and(|finding| finding.run == run)
-                || thread
-                    .comments
-                    .first()
-                    .is_some_and(|comment| comment_in_run(comment, run))
-        })
-    }
-
-    fn unnamed(&self, thread: &Thread) -> Option<Skip> {
-        (!self.only.is_empty() && !self.only.contains(&thread.id)).then_some(Skip::NotNamed)
-    }
-
-    /// Why our findings and local threads are held on someone else's PR/MR, unless
-    /// `--findings` asks for them.
-    fn foreign_threads(&self) -> Option<Skip> {
-        self.foreign()
-            .filter(|_| !self.findings)
-            .map(|whose| Skip::Foreign {
-                whose,
-                held: Held::Threads,
-            })
-    }
-
-    /// Whose PR/MR this is when it is not ours (`--not-own`): a final record there would
-    /// speak for its author, and our findings and threads go out only with `--findings`.
-    fn foreign(&self) -> Option<String> {
-        let author = self.review.author.as_deref();
-        (author != Some(self.connection.login.as_str())).then(|| {
-            format!(
-                "{} is authored by {}",
-                self.review.url,
-                author.unwrap_or("an unknown user")
-            )
-        })
-    }
 }
 
 /// A thread imported from the host, started by someone else or outside this store.
@@ -1079,55 +620,4 @@ pub(super) fn imported(thread: &Thread) -> bool {
 
 fn comment_in_run(comment: &Comment, selected: &str) -> bool {
     matches!(&comment.author, Author::Agent { run: Some(run), .. } if run == selected)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn skip_reasons_read_as_they_are_posted() {
-        let foreign = |held| Skip::Foreign {
-            whose: "https://h/pull/1 is authored by bob".into(),
-            held,
-        };
-        assert_eq!(
-            foreign(Held::Records).to_string(),
-            "https://h/pull/1 is authored by bob: the summary is never posted there"
-        );
-        assert_eq!(
-            foreign(Held::Threads).to_string(),
-            "https://h/pull/1 is authored by bob: --not-own posts only replies and resolves on \
-             others' threads (add --findings for ours)"
-        );
-        let head = Skip::HeadMoved {
-            approved: "aaaaaaa".into(),
-            head: "bbbbbbb".into(),
-        };
-        assert_eq!(
-            head.to_string(),
-            "it approves aaaaaaa, but the PR/MR head is now bbbbbbb"
-        );
-        let open = Skip::OpenFindings(vec!["f1".into(), "f2".into()]);
-        assert_eq!(open.to_string(), "open findings block approval: f1, f2");
-    }
-
-    #[test]
-    fn unsupported_capabilities_name_the_service() {
-        let unsupported = |what| Skip::Unsupported {
-            service: "Forgejo",
-            what,
-        };
-        assert_eq!(
-            unsupported(Unsupported::Resolve).to_string(),
-            "Forgejo cannot resolve threads; cleared locally"
-        );
-        assert_eq!(
-            unsupported(Unsupported::SelfApproval {
-                posted_as_comment: true
-            })
-            .to_string(),
-            "Forgejo does not let the author approve their own PR; posted as a comment"
-        );
-    }
 }

@@ -14,7 +14,8 @@ use crate::core::error::{Error, Result, fail};
 use crate::forge::service::Capabilities;
 use crate::store::model::{PostState, RemoteKind, RemoteThread, Target};
 use exec::run_writes;
-use plan::{Planner, Skipped};
+use plan::Planner;
+use plan::skips::Skipped;
 
 /// `publish` flags.
 pub(super) struct Options {
