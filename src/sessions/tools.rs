@@ -1,6 +1,7 @@
 //! `tools` and `cache-gaps`: what tool results cost, and what idle gaps cost.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::LazyLock;
 
 use indexmap::IndexMap;
@@ -22,7 +23,7 @@ static PREAMBLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:cd\s+\S+|[A-Za-z_]\w*=\S*)\s*(?:&&|;)\s*)+").expect("valid pattern")
 });
 
-pub(super) fn tool_key(name: &str, input: &Value) -> String {
+pub(super) fn tool_key(name: &str, input: &Value, home: &Path) -> String {
     if name == "Bash" {
         let command = text(input, "command");
         let command = PREAMBLE.replace(command.trim(), "");
@@ -34,12 +35,13 @@ pub(super) fn tool_key(name: &str, input: &Value) -> String {
     }
     if name == "Read" {
         let path = text(input, "file_path");
-        let kind =
-            if path.contains(harness::SKILLS_PATH) || path.contains(harness::CLAUDE_DIR_PREFIX) {
-                "skills/rules"
-            } else {
-                "code/other"
-            };
+        let kind = if path.contains(harness::SKILLS_PATH)
+            || harness::in_claude_profile(Path::new(path), home)
+        {
+            "skills/rules"
+        } else {
+            "code/other"
+        };
         return format!("Read:{kind}");
     }
     if name.starts_with("mcp__") {
@@ -415,13 +417,20 @@ mod tests {
 
     #[test]
     fn bash_keys_skip_cd_and_assignments() {
-        let key = |command: &str| tool_key("Bash", &json!({ "command": command }));
+        let home = Path::new("/home/al");
+        let key = |command: &str| tool_key("Bash", &json!({ "command": command }), home);
         assert_eq!(key("cd /x && FOO=1; /usr/bin/git status"), "Bash:git");
         assert_eq!(key("  "), "Bash");
-        assert_eq!(tool_key("mcp__slack__post", &json!({})), "mcp:slack");
+        assert_eq!(tool_key("mcp__slack__post", &json!({}), home), "mcp:slack");
         assert_eq!(
-            tool_key("Read", &json!({"file_path": "/a/skills/x.md"})),
+            tool_key("Read", &json!({"file_path": "/a/skills/x.md"}), home),
             "Read:skills/rules"
+        );
+        let read = |path: &str| tool_key("Read", &json!({ "file_path": path }), home);
+        assert_eq!(read("/home/al/.claude/rules/x.md"), "Read:skills/rules");
+        assert_eq!(
+            read("/home/al/repo/.claude/settings.json"),
+            "Read:code/other"
         );
     }
 }

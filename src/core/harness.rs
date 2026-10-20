@@ -31,11 +31,6 @@ pub const CODEX_DIR: &str = ".codex";
 /// Where Codex keeps its standalone releases, relative to [`CODEX_DIR`].
 pub const CODEX_STANDALONE_DIR: &str = "packages/standalone";
 
-/// Transcript project directory names (a working directory with `/` and `.` as `-`) of scratch,
-/// probe and `/tmp` sessions.
-pub const SCRATCH_PROJECT_PATTERN: &str =
-    r"-cache-agents-scratch|-cache-claude-tmp|^-private-tmp|^-tmp";
-
 /// Path fragment of the skill files an agent reads.
 pub const SKILLS_PATH: &str = "/skills/";
 
@@ -114,4 +109,72 @@ pub fn claude_profiles(home: &Path) -> Vec<PathBuf> {
     profiles.sort();
     profiles.dedup();
     profiles
+}
+
+/// A working directory or config path as Claude Code names its project directory: every
+/// character but a letter or digit is `-`.
+pub fn project_name(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// A regex for the transcript project directory names of scratch, probe and `/tmp` sessions:
+/// the scratch directory, Claude Code's temporary files, and `/private/tmp` and `/tmp`.
+pub fn scratch_project_pattern() -> String {
+    format!(
+        "{}|{}|^-private-tmp|^-tmp",
+        project_name(SCRATCH_DIR),
+        project_name(CLAUDE_TMP_DIR)
+    )
+}
+
+/// Whether `path` is inside a Claude Code profile directory: `.claude` or `.claude-<name>`
+/// directly under `home`, or `$CLAUDE_CONFIG_DIR`.
+pub fn in_claude_profile(path: &Path, home: &Path) -> bool {
+    let under_home = path.strip_prefix(home).is_ok_and(|rest| {
+        let mut parts = rest.components();
+        parts.next().is_some_and(|first| {
+            first
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with(CLAUDE_DIR_PREFIX)
+        }) && parts.next().is_some()
+    });
+    under_home
+        || std::env::var_os(CLAUDE_CONFIG_ENV)
+            .filter(|dir| !dir.is_empty())
+            .is_some_and(|dir| path.starts_with(dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_scratch_pattern_names_the_scratch_and_tmp_directories() {
+        assert_eq!(
+            scratch_project_pattern(),
+            r"-cache-agents-scratch|-cache-claude-tmp|^-private-tmp|^-tmp"
+        );
+    }
+
+    #[test]
+    fn only_claude_profile_directories_count_as_claude_paths() {
+        let home = Path::new("/home/al");
+        for inside in [
+            "/home/al/.claude/rules/x.md",
+            "/home/al/.claude-work/skills/y",
+        ] {
+            assert!(in_claude_profile(Path::new(inside), home), "{inside}");
+        }
+        for outside in [
+            "/home/al/repo/.claude/settings.json",
+            "/home/al/.claude.json",
+            "/home/al/.claude",
+            "/srv/.claude/x",
+        ] {
+            assert!(!in_claude_profile(Path::new(outside), home), "{outside}");
+        }
+    }
 }

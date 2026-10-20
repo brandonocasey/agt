@@ -18,7 +18,7 @@ use crate::core::harness::{self, Harness};
 const MAX_FIRST_LINE: u64 = 1024 * 1024;
 
 static SCRATCH: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(harness::SCRATCH_PROJECT_PATTERN).expect("valid pattern"));
+    LazyLock::new(|| Regex::new(&harness::scratch_project_pattern()).expect("valid pattern"));
 
 /// Whether a project directory name is a scratch or probe directory, such as one under `/tmp`.
 pub fn is_scratch(project: &str) -> bool {
@@ -210,7 +210,7 @@ impl Transcript {
         };
         if let Some(meta) = meta {
             return Self {
-                project: codex::project(&meta.cwd),
+                project: harness::project_name(&meta.cwd),
                 session: meta.session,
                 agent: meta.agent,
                 scripted: meta.scripted,

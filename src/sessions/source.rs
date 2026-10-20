@@ -137,7 +137,7 @@ impl Loaded {
     }
 }
 
-fn compact(record: &serde_json::Value, needs: Needs) -> Option<serde_json::Value> {
+fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serde_json::Value> {
     use crate::core::transcripts::json::{get, text};
     use serde_json::{Value, json};
 
@@ -150,7 +150,8 @@ fn compact(record: &serde_json::Value, needs: Needs) -> Option<serde_json::Value
                 let mut summary = json!({"type": "tool_use", "id": get(block, "id")});
                 if needs.tools {
                     summary["tool_key"] =
-                        super::tools::tool_key(text(block, "name"), get(block, "input")).into();
+                        super::tools::tool_key(text(block, "name"), get(block, "input"), home)
+                            .into();
                     summary["input_tokens"] =
                         super::tools::est_text_tokens(&get(block, "input").to_string()).into();
                 }
@@ -209,7 +210,7 @@ pub fn load(scope: &Scope, needs: Needs) -> impl Iterator<Item = Loaded> + '_ {
     transcripts(scope).into_iter().map(move |transcript| {
         let mut records = Vec::new();
         transcript.records(&scope.since_iso, |record| {
-            if let Some(summary) = compact(record, needs) {
+            if let Some(summary) = compact(record, needs, &scope.home) {
                 records.push(summary);
             }
         });
@@ -223,6 +224,8 @@ pub fn load(scope: &Scope, needs: Needs) -> impl Iterator<Item = Loaded> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOME: &str = "/home/al";
 
     #[test]
     fn reports_reuse_records_after_the_source_disappears() {
@@ -283,7 +286,8 @@ mod tests {
                 Needs {
                     calls: true,
                     ..Needs::default()
-                }
+                },
+                Path::new(HOME)
             )
             .is_none()
         );
@@ -293,7 +297,8 @@ mod tests {
                 Needs {
                     friction: true,
                     ..Needs::default()
-                }
+                },
+                Path::new(HOME)
             )
             .is_none()
         );
@@ -305,6 +310,7 @@ mod tests {
                 friction: true,
                 ..Needs::default()
             },
+            Path::new(HOME),
         )
         .expect("tool result summary");
         let block = &summary["message"]["content"][0];
@@ -338,6 +344,7 @@ mod tests {
                         calls: true,
                         ..Needs::default()
                     },
+                    Path::new(HOME),
                 )
             })
             .collect();

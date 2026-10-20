@@ -97,13 +97,6 @@ pub fn meta(first: &Value) -> Option<Meta> {
     })
 }
 
-/// A working directory as Claude Code names its project directory.
-pub fn project(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
 /// The exit line of a failed shell call, in either of the forms Codex writes.
 static EXIT_CODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(?:Process exited with code |Exit code: )([1-9][0-9]*)\s*$")
@@ -467,6 +460,6 @@ mod tests {
         let meta = meta(&first).expect("session meta");
         assert_eq!(meta.agent, "explorer");
         assert_eq!(meta.session, "99999zzz");
-        assert_eq!(project(&meta.cwd), "-w-x-y");
+        assert_eq!(crate::core::harness::project_name(&meta.cwd), "-w-x-y");
     }
 }
