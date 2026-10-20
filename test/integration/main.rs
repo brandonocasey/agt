@@ -10,6 +10,7 @@ mod issue_push;
 mod issue_queue;
 mod issue_read;
 mod matrix;
+mod offline;
 mod pr;
 mod ps;
 mod publish;

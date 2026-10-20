@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
+use crate::forge::auto::Offline;
 use crate::git::Repo;
 
 /// Exit status of `pushed` when the remote branch is not equal to the local one, or its PR/MR
@@ -87,6 +88,10 @@ pub fn run(cli: Cli) -> Result<Output> {
         remote,
         base,
     } = cli.command;
+    if checks.contains(&Check::Pushed) {
+        // The answer is the remote's tip and the forge's PR/MR; no local copy stands in.
+        Offline::current().forbid("agt branch check --checks pushed")?;
+    }
     let branch = branch_of(&repo, branch)?;
     let mut reports = serde_json::Map::new();
     let mut status = 0;

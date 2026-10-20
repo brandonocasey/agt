@@ -14,6 +14,7 @@ use super::setup::{self, Step};
 use super::{emit, fast_forward, hooks};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
+use crate::forge::auto::Offline;
 use crate::git::Repo;
 use crate::git::base::{Candidate, candidates, choose};
 
@@ -144,6 +145,10 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
         return Ok(false);
     }
     let heads = format!("refs/heads/{branch}");
+    // Whether origin has the branch cannot be answered from a local copy that lacks it.
+    Offline::current().forbid(&format!(
+        "asking origin whether {branch} exists; pass --base to start a new branch"
+    ))?;
     let present = repo.remote_has("origin", &heads).or_else(|error| {
         fail(format!(
             "cannot tell whether {branch} exists on origin: {error}; pass --base to start a new branch anyway"
@@ -202,7 +207,20 @@ fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
     let inside = Repo::at(dir);
     let submodules = dir.join(".gitmodules").exists();
     if submodules {
-        inside.git(&["submodule", "update", "--init", "--recursive"])?;
+        // Offline, only submodules already cloned under the main checkout's `.git/modules`
+        // can be filled: git refuses every network transport.
+        let offline = Offline::current().is_set();
+        let mut args = vec![
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.file.allow=always",
+        ];
+        if !offline {
+            args.clear();
+        }
+        args.extend(["submodule", "update", "--init", "--recursive"]);
+        inside.git(&args)?;
     }
     value["path"] = json!(dir);
     value["branch"] = json!(branch);

@@ -2,6 +2,7 @@
 //! default and the local one.
 
 use crate::core::error::{Error, Result, fail};
+use crate::forge::auto::Offline;
 use crate::git::Repo;
 
 /// The default branch of one remote (fetched just now) or of this repository.
@@ -11,11 +12,17 @@ pub struct Candidate {
     pub commit: String,
 }
 
-/// Every remote's live default branch, fetched, then the local default branch. `flag` names the
+/// Every remote's live default branch, fetched (unless `--offline`), then the local default branch. `flag` names the
 /// option the caller offers to name the base itself, for the error when none is found.
 pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
-    for remote in repo.git(&["remote"])?.lines() {
+    // Offline, the remotes' tips are not refreshed: the local default branch alone is weighed.
+    let remotes = if Offline::current().is_set() {
+        String::new()
+    } else {
+        repo.git(&["remote"])?
+    };
+    for remote in remotes.lines() {
         let named = |error: Error| Error(format!("remote {remote}: {error}"));
         let heads = repo
             .git(&["ls-remote", "--symref", remote, "HEAD"])

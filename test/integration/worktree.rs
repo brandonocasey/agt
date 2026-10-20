@@ -1227,6 +1227,40 @@ fn untracked_files_in_a_submodule_block_removal_whatever_status_is_configured_to
 }
 
 #[test]
+fn offline_removal_asks_no_remote_about_a_tag_and_holds_it() {
+    let (f, sub) = with_submodule();
+    unpushed_branch(&f, &sub, "tmp");
+    let tip = wgit(&f.env, &sub, &["rev-parse", "tmp"]);
+    wgit(&f.env, &sub, &["branch", "-D", "tmp"]);
+    wgit(&f.env, &sub, &["tag", "kept-tag", &tip]);
+    let log = f.env.path("asked.log");
+    let path = f.env.git_wrapper(
+        "wrapper",
+        &format!(
+            "case \"$*\" in *ls-remote*) echo \"$*\" >> '{}';; esac\n",
+            log.display()
+        ),
+    );
+    let wt = f.wt.to_string_lossy().into_owned();
+    let remove = |flags: &[&str]| {
+        let mut command = f.env.bin(&f.env.repo);
+        command
+            .args(flags)
+            .args(["worktree", "remove", &wt, "--yes"]);
+        command.env("PATH", &path).output().unwrap()
+    };
+    let online = remove(&[]);
+    assert_eq!(online.status.code(), Some(1));
+    assert!(log.exists(), "the control run asks the remote");
+    fs::remove_file(&log).unwrap();
+    let offline = remove(&["--offline"]);
+    assert_eq!(offline.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&offline.stderr);
+    assert!(error.contains("kept-tag"), "{error}");
+    assert!(!log.exists(), "--offline asked the remote");
+}
+
+#[test]
 fn a_submodule_tag_a_linked_worktree_or_an_unfinished_operation_blocks_removal() {
     let (f, sub) = with_submodule();
     unpushed_branch(&f, &sub, "tmp");

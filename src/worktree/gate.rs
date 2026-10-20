@@ -13,6 +13,7 @@ use super::disposable::is_os_junk;
 use super::{info, nested};
 use crate::core::env;
 use crate::core::error::{Result, fail};
+use crate::forge::auto::Offline;
 use crate::git::Repo;
 
 /// Files in a git directory that mark an unfinished rebase, merge, cherry-pick, revert or
@@ -29,9 +30,9 @@ const UNFINISHED: [&str; 8] = [
 ];
 
 /// Refuses, naming the repository and the reason, when removing the worktree at `worktree`
-/// would delete work that exists nowhere else.
+/// would delete work that exists nowhere else. Under `--offline` it is [`check_offline`].
 pub fn check(worktree: &Path, main: &Path) -> Result<()> {
-    check_with(worktree, main, true)
+    check_with(worktree, main, !Offline::current().is_set())
 }
 
 /// [`check`] without the network: a tag that no local commit holds counts as unheld, so the

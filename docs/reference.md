@@ -59,7 +59,7 @@ Environment variables agt reads, or sets for programs it runs:
 
 | Variable | Used by | Meaning | Kind |
 | --- | --- | --- | --- |
-| `AGT_OFFLINE` | every command | Anything but empty, `0` or `false` acts as the root `--offline` flag, which `agt pr` and `agt ci` refuse under, `agt doctor` skips its login checks under, and `review`, `issue` and `cleanup --only worktrees` honour as before | user |
+| `AGT_OFFLINE` | every command | Anything but empty, `0` or `false` acts as the root `--offline` flag, which every command that reaches a remote honours (see [Offline](#offline)) | user |
 | `AGT_PRICES` | `sessions` | Price file to use instead of `model-prices.json` | user |
 | `AGT_LS_REMOTE_TIMEOUT` | `worktree`, `cleanup` | Seconds a remote check may take (default 10) | user |
 | `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |
@@ -896,6 +896,26 @@ Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/ta
 write must name (record `version` 1). The command that finds and searches sessions is
 `agt sessions search`.
 
+## Offline
+
+The root `--offline` flag (or `AGT_OFFLINE=1`) keeps agt from running `git fetch`, `git ls-remote`
+and `git push` and from calling `gh` or `glab`. A step that only refreshes is skipped; a command
+whose answer comes from the remote refuses with `offline mode forbids <what>` (exit 1, or 2 for
+`ci`) before it calls anything.
+
+| Command | Under `--offline` |
+| --- | --- |
+| `pr` (all), `ci` (all) | Refuse. |
+| `review sync`, `publish`, `status --sync`, `list --sync` | Refuse. Other review commands stay local: no automatic pull before a read, no automatic publish at `run end`. |
+| `issue sync`, `issue push` | Refuse. Other issue commands stay local: no automatic pull or push. |
+| `branch check` | `--checks pushed` refuses (the remote tip and the PR/MR are the answer, also by default). `--checks landable` weighs the local default branch only and fetches no remote. |
+| `worktree create` | Weighs the local default branch only. A branch with no local branch and no `origin/<branch>` tracking ref refuses unless `--base` is given, since only origin can say whether it exists. Submodules are filled only from clones already on the host (no network transport). |
+| `worktree remove` | Checks as `agt cleanup --only worktrees --offline` does: a tag that no commit elsewhere holds counts as unheld, so removal refuses naming it. |
+| `worktree prepare`, `create --prepare` | Refuse when `mise install` or a lockfile install would run, since those download. `--hooks`, `--wait` and `--clone-deps` without other installs run. |
+| `cleanup --only worktrees` | No `ls-remote` for tags and no forge evidence. |
+| `doctor` | Skips the `gh`/`glab` login checks. |
+| `task`, `sessions`, `ps`, `secrets`, `wait`, `worktree list/port/restore` | Local already. `wait` and the worktree hooks run your commands, which agt does not restrict. |
+
 ## Branch
 
 `agt branch check` runs push and merge checks and prints one JSON report.
@@ -908,7 +928,7 @@ agt branch check [BRANCH] [--checks pushed,landable] [--remote origin] [--base B
 Its `checks` object holds each check's `status` and `report`, or `error` when it fails
 (for a single selected check too). Every selected check runs even when one fails. The exit status
 prioritizes errors (1), then conflicts (5), then an unpushed branch (4), otherwise success (0).
-`--remote` applies to the pushed check; `--base` applies to the landable check.
+`--remote` applies to the pushed check; `--base` applies to the landable check. `--offline` refuses the pushed check (see [Offline](#offline)).
 
 `BRANCH` defaults to the current branch. The `pushed` check fetches `refs/heads/<branch>` from the remote,
 pins the fetched commit and compares it with the local tip: `state` is `equal`, `ahead`, `behind`,
@@ -923,7 +943,7 @@ code follows the git state alone. Status 0 only when `state` is `equal` and
 any PR/MR head matches; 4 otherwise.
 
 The `landable` check compares the branch with `--base`, which defaults to the newest default base among
-every remote's live default branch and the local one (the choice `agt worktree create` makes).
+every remote's live default branch and the local one (the choice `agt worktree create` makes); under `--offline` the local one alone.
 It reports `behind` and `ahead` counts, `conflicts` (the paths `git merge-tree --write-tree`
 cannot merge) and `already_in_target` (commits of the branch whose patch the target has, from
 `git cherry`). Status 0 without conflicts, 5 with conflicts.

@@ -15,6 +15,7 @@ use super::steps::run_step;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
 use crate::core::process;
+use crate::forge::auto::Offline;
 use crate::git::Repo;
 
 const MISE_FILES: [&str; 3] = ["mise.toml", ".mise.toml", ".tool-versions"];
@@ -60,6 +61,14 @@ pub(super) fn prepare(dir: &Path, clone_deps: bool) -> Result<(Value, bool)> {
     let root = toplevel(dir)?;
     let main = main_checkout(&Repo::at(&root))?.path;
     let same = fs::canonicalize(&main).ok() == fs::canonicalize(&root).ok();
+    // `mise install` and the lockfile installs download; refuse before a clone changes anything.
+    let downloads = (MISE_FILES.iter().any(|name| root.join(name).exists()) && on_path("mise"))
+        || installs(&root)
+            .iter()
+            .any(|(file, _)| !clone_deps || !is_node_lockfile(file));
+    if downloads {
+        Offline::current().forbid("agt worktree prepare installs")?;
+    }
     let mut steps = Vec::new();
     let mut commands: Vec<(Vec<String>, Option<&str>)> = Vec::new();
     if MISE_FILES.iter().any(|name| root.join(name).exists()) && on_path("mise") {
