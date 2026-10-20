@@ -689,7 +689,7 @@ fn gitlab_update_sets_fields_labels_and_draft_state() {
         inputs(&env)[0].1,
         json!({"description": "B", "add_labels": "a,b", "remove_labels": "c"})
     );
-    ok(&env, &["update", "3", "--ready"]);
+    ok(&env, &["update", "3", "--draft=false"]);
     assert_eq!(inputs(&env)[1].1, json!({"title": "Add a"}));
     ok(&env, &["update", "3", "--title", "Draft: New", "--draft"]);
     assert_eq!(inputs(&env)[2].1, json!({"title": "Draft: New"}));
@@ -736,7 +736,7 @@ fn github_ready_and_draft_run_their_mutations() {
         &["api", "graphql", "-f", "query=PrDraft", "-f", "id=PR_node"],
         "{}",
     );
-    ok(&env, &["update", "7", "--ready"]);
+    ok(&env, &["update", "7", "--draft=false"]);
     ok(&env, &["update", "7", "--draft"]);
     let calls = env.forge_calls().join("\n");
     assert_eq!(calls.matches("query=PrDraft").count(), 2);

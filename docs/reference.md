@@ -943,14 +943,14 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 `agt ci` waits for PR/MR checks and triages GitLab failures.
 
 ```sh
-agt ci wait TARGET... [--sha SHA] [--timeout SEC] [--interval SEC] [--max-interval SEC]
-agt ci failures <mr> [-n N] [-R group/project]
+agt ci wait TARGET... [--timeout SEC] [--interval SEC] [--max-interval SEC]
+agt ci failures <mr> [--limit N]
 ```
 
 `wait` takes one or more targets: GitHub `OWNER/REPO#PR[@SHA]`, GitLab `GROUP/PROJECT!IID[@SHA]`,
 a PR or MR URL, `#PR` or `!IID` in the current repository (named by its `origin` remote), and a
 GitLab pipeline id (current repository) or pipeline URL. Without `@SHA` the head read by the first
-poll is pinned, and a later head is a change. `--sha SHA` is for a single PR or MR right after a
+poll is pinned, and a later head is a change. `@SHA` on a PR or MR target is for right after a
 push: the target stays pending (`waiting_for_pipeline`) until the head and, on GitLab, a pipeline
 (or merged-results pipeline) is on that commit.
 
@@ -968,10 +968,10 @@ query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
-`failures <mr>` is GitLab only (`123`, `!123` or an MR URL; `-R` or the current repository
-names the project). It lists the failed and retried jobs of the MR's head pipeline, the failing
+`failures <mr>` is GitLab only (`123`, `!123`, `group/project!123` or an MR URL; without a project the current repository
+is used). It lists the failed and retried jobs of the MR's head pipeline, the failing
 specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the last
-N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
+`--limit` (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
 `pending` or `unclear`.
 
 ## PR
@@ -983,7 +983,7 @@ comes from the `origin` remote, and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`
 agt pr view [<n>|<url>] [--branch B]
 agt pr list [--mine] [--branch B] [--state open|merged|all]
 agt pr create --title T [--body B] [--base BRANCH] [--draft]
-agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--ready|--draft]
+agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--draft[=false]]
 agt pr merge <n> --sha HEAD [--method merge|squash|rebase] [--auto]
 agt pr auto-merge off|on <n> [--sha HEAD]
 ```
@@ -999,7 +999,7 @@ open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head sta
 `sha`); `--auto` merges when checks pass (GitHub needs `--method` unless auto-merge was on, and merges a
 PR that can merge now at once, as gh does, unless its base branch requires a merge queue, where
 auto-merge queues it; `auto-merge on` does the same; plain `merge` without `--auto` on such a PR also adds it to the queue this way (so it needs `--method`); GitLab
-cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLab would squash). Branch lookups (`view`, `create`) ignore PRs/MRs from forks. `list --mine` asks the forge for your own PRs/MRs, so older ones are found. `create` without `--base` needs a resolvable default branch, else pass `--base`. It never deletes the branch.
+cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLab would squash). `update --draft` converts to a draft and `--draft=false` marks it ready for review. Branch lookups (`view`, `create`) ignore PRs/MRs from forks. `list --mine` asks the forge for your own PRs/MRs, so older ones are found. `create` without `--base` needs a resolvable default branch, else pass `--base`. It never deletes the branch.
 
 `auto-merge off` records the method it disables in `$XDG_STATE_HOME/agents/pr/auto-merge.json`
 (keyed by host, repository and number) and reads the state back; `auto-merge on` re-enables it with
