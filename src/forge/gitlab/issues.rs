@@ -70,8 +70,8 @@ impl IssueService for Gitlab {
             ) {
                 Ok(items) => items,
                 // Older servers lack one of the routes; the issue itself was just read.
-                Err(error) if error.0.contains("(HTTP 404)") => Vec::new(),
-                Err(error) => return Err(error),
+                Err(error) if error.status == Some(404) => Vec::new(),
+                Err(error) => return Err(error.into()),
             };
             for item in &items {
                 if let Some(link) = parse_mr(item, subject.repo) {
@@ -238,6 +238,55 @@ mod tests {
         IssueSubject {
             repo: "g/p",
             number: 3,
+        }
+    }
+
+    struct MissingRoutes {
+        status: Option<u16>,
+        message: &'static str,
+    }
+
+    impl Transport for MissingRoutes {
+        fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
+            let crate::forge::service::Endpoint::Rest(path) = &request.endpoint else {
+                unreachable!()
+            };
+            if path.contains("closed_by") || path.contains("related_merge_requests") {
+                return Err(TransportError {
+                    status: self.status,
+                    message: self.message.into(),
+                });
+            }
+            let body = if path.contains("discussions") {
+                json!([])
+            } else {
+                json!({"iid":3,"id":30,"web_url":"https://gitlab.test/g/p/-/issues/3", "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"})
+            };
+            Ok(Response {
+                headers: Vec::new(),
+                body,
+            })
+        }
+
+        fn render(&self, _request: &Request) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn optional_issue_routes_use_status_instead_of_message() {
+        for (status, message, succeeds) in [
+            (Some(404), "route unavailable", true),
+            (Some(500), "proxy mentioned (HTTP 404)", false),
+            (None, "tool mentioned (HTTP 404)", false),
+            (Some(429), "rate limited", false),
+        ] {
+            let service = Gitlab::new(Box::new(MissingRoutes { status, message }));
+            assert_eq!(
+                service.fetch_issue(subject()).is_ok(),
+                succeeds,
+                "{status:?}"
+            );
         }
     }
 

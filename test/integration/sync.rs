@@ -550,3 +550,102 @@ fn gitlab_host_comes_from_glab_or_gitlab_host() {
         other.forge_calls()
     );
 }
+
+#[test]
+fn github_malformed_pages_preserve_synced_threads() {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    env.run(&["sync"]);
+    let before = env.run(&["list"]);
+    let target_path = env.state().join("gh-42.json");
+    let stored_before = std::fs::read(&target_path).unwrap();
+    for case in [
+        "nodes",
+        "page_info",
+        "boolean",
+        "empty_cursor",
+        "null_cursor",
+        "graphql_errors",
+        "repeat",
+        "cycle",
+        "nested_nodes",
+        "nested_page_info",
+        "nested_repeat",
+    ] {
+        github::sync_fixtures(&setup);
+        let vars = [
+            ("RUN", setup.run.as_str()),
+            ("HEAD", setup.head.as_str()),
+            ("BASE", setup.base.as_str()),
+            ("REPO", "me/repo"),
+            ("NUMBER", "42"),
+        ];
+        let mut page: Value =
+            serde_json::from_str(&fixture("github/threads-1.json", &vars)).unwrap();
+        let connection = &mut page["data"]["repository"]["pullRequest"]["reviewThreads"];
+        let mut args = github::graphql("me", "repo", "42", "PullRequest");
+        match case {
+            "nodes" => connection["nodes"] = Value::Null,
+            "page_info" => {
+                connection.as_object_mut().unwrap().remove("pageInfo");
+            }
+            "boolean" => connection["pageInfo"]["hasNextPage"] = json!("false"),
+            "empty_cursor" => connection["pageInfo"]["endCursor"] = json!(""),
+            "null_cursor" => connection["pageInfo"]["endCursor"] = Value::Null,
+            "graphql_errors" => page = json!({"errors":[{"message":"unavailable"}]}),
+            "repeat" => {
+                args = github::with_cursor(args, "t-2");
+            }
+            "cycle" => {
+                let second = json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"t-3"}}}}}});
+                env.respond(
+                    &github::with_cursor(args.clone(), "t-2")
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    &second.to_string(),
+                );
+                args = github::with_cursor(args, "t-3");
+            }
+            "nested_nodes" => connection["nodes"][0]["comments"]["nodes"] = Value::Null,
+            "nested_page_info" => {
+                connection["nodes"][0]["comments"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("pageInfo");
+            }
+            "nested_repeat" => {
+                page = json!({"data":{"node":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"c-a1"}}}}});
+                args = [
+                    "api",
+                    "graphql",
+                    "-f",
+                    "id=PRRT_a",
+                    "-f",
+                    "query=ThreadComments",
+                    "-f",
+                    "cursor=c-a1",
+                ]
+                .map(str::to_owned)
+                .to_vec();
+            }
+            _ => unreachable!(),
+        }
+        env.respond(
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            &page.to_string(),
+        );
+        let error = env.fail(&["sync"], None);
+        assert!(
+            error.contains("GitHub") || error.contains("returned errors"),
+            "{case}: {error}"
+        );
+        assert_eq!(env.run(&["list"]), before, "{case}");
+        assert_eq!(
+            std::fs::read(&target_path).unwrap(),
+            stored_before,
+            "{case}"
+        );
+    }
+}

@@ -2,6 +2,7 @@ pub mod ci;
 mod issues;
 
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
@@ -378,6 +379,7 @@ impl Pager<'_> {
         let mut nodes = Vec::new();
         let mut first = None;
         let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
         loop {
             let mut vars = vec![
                 Var::text("owner", self.owner.clone()),
@@ -393,8 +395,8 @@ impl Pager<'_> {
             let page = response
                 .pointer(&pointer)
                 .ok_or_else(|| Error(format!("GitHub returned no {connection}")))?;
-            nodes.extend(page["nodes"].as_array().cloned().unwrap_or_default());
-            cursor = next_cursor(page);
+            nodes.extend(connection_nodes(page)?.iter().cloned());
+            cursor = next_cursor(page, &mut seen)?;
             if first.is_none() {
                 first = Some(response.clone());
             }
@@ -410,6 +412,7 @@ impl Pager<'_> {
             "query ThreadComments($id:ID!,$cursor:String){{node(id:$id){{... on PullRequestReviewThread{{comments(first:100,after:$cursor){{pageInfo{{hasNextPage endCursor}} nodes{{{COMMENT_FIELDS}}}}}}}}}}}"
         );
         let mut nodes = Vec::new();
+        let mut seen = HashSet::from([cursor.clone()]);
         let mut cursor = Some(cursor);
         while let Some(after) = cursor {
             let response = self.gh.json(&Request::graphql(vec![
@@ -420,19 +423,34 @@ impl Pager<'_> {
             let page = response
                 .pointer("/data/node/comments")
                 .ok_or_else(|| Error(format!("GitHub returned no comments for {thread}")))?;
-            nodes.extend(page["nodes"].as_array().cloned().unwrap_or_default());
-            cursor = next_cursor(page);
+            nodes.extend(connection_nodes(page)?.iter().cloned());
+            cursor = next_cursor(page, &mut seen)?;
         }
         Ok(nodes)
     }
 }
 
-fn next_cursor(page: &Value) -> Option<String> {
-    if page.pointer("/pageInfo/hasNextPage") == Some(&Value::Bool(true)) {
-        forge::text(page, "/pageInfo/endCursor")
-    } else {
-        None
+fn connection_nodes(page: &Value) -> Result<&Vec<Value>> {
+    page["nodes"]
+        .as_array()
+        .ok_or_else(|| Error("GitHub connection nodes is not an array".into()))
+}
+
+fn next_cursor(page: &Value, seen: &mut HashSet<String>) -> Result<Option<String>> {
+    let has_next = page
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error("GitHub connection has no boolean pageInfo.hasNextPage".into()))?;
+    if !has_next {
+        return Ok(None);
     }
+    let cursor = forge::text(page, "/pageInfo/endCursor")
+        .filter(|cursor| !cursor.is_empty())
+        .ok_or_else(|| Error("GitHub connection has no next page cursor".into()))?;
+    if !seen.insert(cursor.clone()) {
+        return fail("GitHub connection repeated a page cursor");
+    }
+    Ok(Some(cursor))
 }
 
 fn comment(node: &Value) -> Result<CommentData> {
@@ -455,12 +473,8 @@ fn state(text: &str) -> ReviewState {
 
 fn review_thread(pager: &Pager, node: &Value) -> Result<ThreadData> {
     let id = forge::required(node, "/id", "GitHub review thread")?;
-    let mut nodes = node
-        .pointer("/comments/nodes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if let Some(cursor) = next_cursor(&node["comments"]) {
+    let mut nodes = connection_nodes(&node["comments"])?.clone();
+    if let Some(cursor) = next_cursor(&node["comments"], &mut HashSet::new())? {
         nodes.extend(pager.thread_comments(&id, cursor)?);
     }
     let comments = nodes.iter().map(comment).collect::<Result<Vec<_>>>()?;

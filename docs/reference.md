@@ -578,6 +578,8 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 - Threads and comments the host no longer returns are kept and flagged
   `deleted_remote: true` with `deleted_seen_at`; they are never dropped and
   are not open. The flag clears if they come back.
+- Malformed GitHub connection pages or repeated pagination cursors fail the fetch.
+  The failed fetch leaves stored threads and publication retry markers unchanged.
 - The authenticated login is cached in `.account.json` in the repository's
   store directory.
 

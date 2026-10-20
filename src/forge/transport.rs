@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::core::env;
-use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::error::{Error, ctx};
 use crate::core::process;
 use crate::forge::service::{self, Endpoint, Pagination, Request, Var};
 use crate::store::model::Forge;
@@ -77,16 +77,20 @@ pub trait Transport {
 
 impl dyn Transport + '_ {
     /// The body of a read that must answer with JSON.
-    pub fn json(&self, request: &Request) -> Result<Value> {
+    pub fn json(&self, request: &Request) -> std::result::Result<Value, TransportError> {
         match self.send(request)?.body {
-            Value::Null => fail("the host sent an empty reply"),
+            Value::Null => Err(TransportError::new("the host sent an empty reply")),
             body => Ok(body),
         }
     }
 
     /// Every item of a paginated read, page by page as `pagination` says. `GraphqlCursor` is the
     /// service's own loop.
-    pub fn items(&self, request: &Request, pagination: &Pagination) -> Result<Vec<Value>> {
+    pub fn items(
+        &self,
+        request: &Request,
+        pagination: &Pagination,
+    ) -> std::result::Result<Vec<Value>, TransportError> {
         let mut items = Vec::new();
         let mut request = request.clone();
         if *pagination == Pagination::CliPaginate {
@@ -97,7 +101,11 @@ impl dyn Transport + '_ {
             let next = next_page(pagination, &request, &response);
             match response.body {
                 Value::Array(page) => items.extend(page),
-                other => return fail(format!("a page is not an array: {other}")),
+                other => {
+                    return Err(TransportError::new(format!(
+                        "a page is not an array: {other}"
+                    )));
+                }
             }
             match next {
                 Some(next) => request = next,

@@ -1088,3 +1088,40 @@ fn an_empty_rollup_is_pending_right_after_the_wait_starts() {
         ]
     );
 }
+
+#[test]
+fn gitlab_jobs_404_is_permanent() {
+    let outcome = gitlab(&[
+        step(&mr_path("merge_requests/7"), &merge_request(json!({}))),
+        failing(&jobs_path(), "glab: Not Found (HTTP 404)", 1),
+        step(&mr_path("merge_requests/7"), &merge_request(json!({}))),
+        step(&jobs_path(), &jobs("success")),
+    ]);
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "final"]);
+    assert!(
+        outcome.events[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Not Found")
+    );
+    assert_eq!(last(&outcome)["reason"], "action_required");
+}
+
+#[test]
+fn gitlab_jobs_rate_limit_is_transient() {
+    let passed = merge_request(json!({
+        "detailed_merge_status": "mergeable",
+        "head_pipeline": {"id":99,"status":"success","web_url":"u"}
+    }));
+    let outcome = gitlab(&[
+        step(&mr_path("merge_requests/7"), &passed),
+        failing(&jobs_path(), "glab: rate limited (HTTP 429)", 1),
+        step(&mr_path("merge_requests/7"), &passed),
+        step(&jobs_path(), &jobs("success")),
+        step(&mr_path("merge_requests/7"), &passed),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}

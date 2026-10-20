@@ -64,7 +64,7 @@ fn pr(node: &Value) -> Pr {
 fn graphql(t: &dyn Transport, query: &str, vars: Vec<Var>) -> Result<Value> {
     let mut all = vec![Var::text("query", query)];
     all.extend(vars);
-    t.json(&Request::graphql(all))
+    Ok(t.json(&Request::graphql(all))?)
 }
 
 pub fn view(t: &dyn Transport, repo: &str, number: u64) -> Result<Pr> {

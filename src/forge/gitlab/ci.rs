@@ -16,15 +16,13 @@ pub fn base_of_id(id: i64) -> String {
 
 impl Gitlab {
     fn read(&self, path: String) -> Result<Value> {
-        match self.transport.send(&Request::get(path))?.body {
-            Value::Null => Err(TransportError::new("the host sent an empty reply")),
-            body => Ok(body),
-        }
+        let transport: &dyn forge::transport::Transport = self.transport.as_ref();
+        transport.json(&Request::get(path))
     }
 
     fn list(&self, path: String) -> Result<Vec<Value>> {
         let transport: &dyn forge::transport::Transport = self.transport.as_ref();
-        Ok(transport.items(&Request::get(path), &Pagination::CliPaginate)?)
+        transport.items(&Request::get(path), &Pagination::CliPaginate)
     }
 
     /// The project at `path` with namespace, or the current repository's for `None`.
