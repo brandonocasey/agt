@@ -110,5 +110,5 @@ Windows is not supported.
 ## Start here
 
 Follow [Getting started](docs/getting-started.md) to install `agt` and try local issues and reviews.
-Use the [command reference](docs/reference.md) for flags, configuration, storage, and detailed behavior.
+Use the [command reference](docs/reference.md) for flags, storage, and detailed behavior, and [configuration and environment](docs/reference.md#configuration-and-environment) for config files and `AGT_*` variables.
 For development checks and repository conventions, see [AGENTS.md](AGENTS.md).

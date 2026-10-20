@@ -6,7 +6,7 @@ For installation and a local example, follow [Getting started](getting-started.m
 
 ## On this page
 
-- [Output and errors](#output-and-errors)
+- [Output and errors](#output-and-errors) and [configuration and environment](#configuration-and-environment)
 - Review: [targets](#targets), [commands](#commands), [coverage](#reviewed-counting-and-pruning-rules), [sync](#sync), [publish](#publish), [store](#store), [finding input](#finding-input)
 - [Issues](#issues) and [tasks](#tasks)
 - [Worktrees](#worktrees) and [branch checks](#branch)
@@ -38,9 +38,40 @@ Task records and `sessions cost --json` always use indented JSON, including when
 `cleanup --count` prints a count message when saved candidates remain.
 
 Errors print `agt: error: <message>` on stderr and normally exit with status 1.
+`agt ci` and `agt secrets` exit with status 2 for an error, with the same message line.
 Usage errors exit with status 2. Some commands use additional exit statuses for
 results such as conflicts, timeouts, or warnings; see their sections below.
 Timestamps are RFC 3339 in UTC, such as `2026-10-16T12:00:00Z`.
+
+## Configuration and environment
+
+Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
+`XDG_CONFIG_HOME` is unset or relative). None is required.
+
+| File | Keys and defaults | Described in |
+| --- | --- | --- |
+| `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
+| `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
+| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}`; the older `$XDG_CONFIG_HOME/agent-review/hosts.json` is read only when this one is missing | [Sync](#sync) |
+| `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model; the older `~/.config/agents/model-prices.json` is read only when this one is missing | [Sessions](#sessions) |
+
+Unknown keys and invalid values in the TOML files are errors that name the file and the key.
+
+Environment variables agt reads, or sets for programs it runs:
+
+| Variable | Used by | Meaning | Kind |
+| --- | --- | --- | --- |
+| `AGT_OFFLINE` | `review`, `issue`, `cleanup --only worktrees` | Anything but empty, `0` or `false` acts as `--offline` | user |
+| `AGT_PRICES` | `sessions` | Price file to use instead of `model-prices.json` | user |
+| `AGT_LS_REMOTE_TIMEOUT` | `worktree`, `cleanup` | Seconds a remote check may take (default 10) | user |
+| `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |
+| `AGT_PS_EVENT`, `AGT_PS_PID`, `AGT_PS_SESSION`, `AGT_PS_NAME`, `AGT_PS_CWD`, `AGT_PS_WAITING_FOR`, `AGT_PS_STATUS_SECS`, `AGT_PS_REASON` | `ps --exec` | Set by agt for the program it runs | set by agt |
+| `AGT_NOW` | all | Unix seconds replacing the current time | test only |
+| `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
+| `AGT_GH_BIN`, `AGT_GLAB_BIN` | everything that calls a forge | Program to run instead of `gh` or `glab` | test only |
+| `AGT_GIT_BIN`, `AGT_MISE_BIN` | `doctor` | Program to run instead of `git` or `mise` for its version checks; other commands still run `git` | test only |
+| `AGT_CLEANUP_TMP` | `cleanup` | Directory standing in for `/tmp` when looking for session scratch files | test only |
+| `AGT_CLEANUP_PID` | `cleanup` | Limits the orphan-process sweep to this pid; `0` looks at none | test only |
 
 ## Targets
 
@@ -1213,13 +1244,12 @@ text is never printed, not even in errors. Rules (one table in `src/secrets/rule
 `github-token`, `gitlab-token`, `slack-token`, `aws-key-id`, `private-key`, `jwt` and
 `generic-assignment` (`key`, `token`, `secret` or `password` set to a quoted value of 8 or more characters, or a bare 16+ character token ending the line as in `.env`, `export` and YAML lines; neither
 may be a placeholder, `$VAR`, `${VAR}`, an env var name or `changeme`). A line
-containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error, including a `PATH` that does not exist (with `--staged`, one that is not on disk, in the index or in the staged diff).
+containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match, 2 on an error (reported as `agt: error: <message>`), including a `PATH` that does not exist (with `--staged`, one that is not on disk, in the index or in the staged diff).
 
 ## Wait
 
 `agt wait [--max S] [--every S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every
-`--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. It replaces the
-`agent-wait` script. Agents run it in the background so they wake within the prompt cache's five
+`--every` (5) seconds until it succeeds, for at most `--max` (270) seconds. Agents run it in the background so they wake within the prompt cache's five
 minutes to look at a long job. Exit status: 0 the check passed (`agt wait: done after Ns`), 3
 `--max` passed first, 2 usage.
 
@@ -1236,8 +1266,10 @@ warning); the running agt version against the one `mise ls --current` pins for
 `mise trust` or "fix the mise error above"); the global git ignore covering
 `.worktrees/` and `/.cache/agents/scratch/`; the state and config directories and both config
 files parsing; and, inside a repository, the origin, the default branch and stray agt lock
-files. All subprocesses share a 30-second budget. Exit status: 0 all ok, 1 any fail, 2 only
-warnings.
+files. The scratch-ignore and mise-pin checks are agt conventions, not requirements of git or
+mise: a missing `/.cache/agents/scratch/` ignore is a warning, and the version is compared only
+when mise pins `github:brandonocasey/agt` (no pin is ok). All subprocesses share a
+30-second budget. Exit status: 0 all ok, 1 any fail, 2 only warnings.
 
 ## Issues
 

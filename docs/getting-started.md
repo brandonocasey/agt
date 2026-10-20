@@ -109,3 +109,4 @@ These previews can read remote data but do not publish it.
 
 Automatic syncing is optional; [the sync settings](reference.md#issues) control pulls and pushes separately.
 Use only the parts of `agt` that fit your work.
+Config file paths, their keys and the `AGT_*` environment variables are listed in [configuration and environment](reference.md#configuration-and-environment).
