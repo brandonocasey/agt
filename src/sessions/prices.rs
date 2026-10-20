@@ -9,6 +9,24 @@ use crate::core::error::{Error, Result};
 use crate::core::local;
 use crate::core::transcripts::json::{count, get, text};
 
+/// The usage keys of a response, in the order input, cache write, cache read, output.
+pub const USAGE_KEYS: [&str; 4] = [
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+];
+
+/// The tokens of a response's `usage`, in the order of [`USAGE_KEYS`].
+pub fn tokens(usage: &Value) -> [i64; 4] {
+    USAGE_KEYS.map(|key| count(usage, key))
+}
+
+/// The context a response read: its input, cache write and cache read tokens.
+pub fn context(usage: &Value) -> i64 {
+    tokens(usage)[..3].iter().sum()
+}
+
 pub struct Prices {
     models: Map<String, Value>,
 }
@@ -87,13 +105,7 @@ impl Prices {
     /// USD parts for one response, or `None` for a model the file does not price.
     pub fn usd(&self, model: &str, usage: &Value) -> Option<Parts> {
         let base = self.rates(model)?;
-        let [input, written, read, output] = [
-            "input_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
-            "output_tokens",
-        ]
-        .map(|key| count(usage, key) as f64);
+        let [input, written, read, output] = tokens(usage).map(|count| count as f64);
         let over = get(base, "over");
         let rates = if base.get("over").is_some()
             && input + written + read > get(over, "prompt_tokens").as_f64().unwrap_or_default()

@@ -7,19 +7,13 @@ use serde_json::{Map, Value, json};
 
 use crate::core::error::{Result, fail};
 use crate::core::output;
-use crate::core::transcripts::json::{count, tail, text};
-use crate::core::transcripts::session_files;
+use crate::core::transcripts::json::{tail, text};
+use crate::core::transcripts::{Call, session_files};
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, grouped, median, round, tok};
-use crate::sessions::prices::Prices;
+use crate::sessions::prices::{Parts, Prices, USAGE_KEYS, context, tokens};
 use crate::sessions::source::Loaded;
 
-const USAGE_KEYS: [&str; 4] = [
-    "input_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-    "output_tokens",
-];
 const BY_KEYS: [&str; 6] = ["agent", "model", "project", "session", "file", "harness"];
 
 #[derive(Default)]
@@ -29,6 +23,29 @@ struct Group {
     tokens: [i64; 4],
     /// USD for input, cache writes, cache reads and output.
     usd: [f64; 4],
+}
+
+impl Group {
+    /// Counts `call` and prices it; `None` for a model the price file does not list.
+    fn add(&mut self, call: &Call, prices: &Prices) -> Option<Parts> {
+        self.calls += 1;
+        self.tools += call.tools as i64;
+        for (total, count) in self.tokens.iter_mut().zip(tokens(&call.usage)) {
+            *total += count;
+        }
+        let parts = prices.usd(&call.model, &call.usage)?;
+        for (sum, value) in self.usd.iter_mut().zip(parts.values()) {
+            *sum += value;
+        }
+        Some(parts)
+    }
+}
+
+/// Puts a group's token counts into a JSON row under their usage key names.
+fn insert_tokens(object: &mut Map<String, Value>, tokens: [i64; 4]) {
+    for (name, total) in USAGE_KEYS.iter().zip(tokens) {
+        object.insert((*name).to_owned(), json!(total));
+    }
 }
 
 struct Row {
@@ -77,19 +94,9 @@ impl Cost {
                 .groups
                 .entry(self.keys.iter().map(|key| fields(key)).collect())
                 .or_default();
-            group.calls += 1;
-            group.tools += call.tools as i64;
-            for (total, key) in group.tokens.iter_mut().zip(USAGE_KEYS) {
-                *total += count(&call.usage, key);
-            }
             self.fast += i64::from(text(&call.usage, "speed") == "fast");
-            match self.prices.usd(&call.model, &call.usage) {
-                None => *self.unpriced.entry(call.model.clone()).or_default() += 1,
-                Some(parts) => {
-                    for (sum, value) in group.usd.iter_mut().zip(parts.values()) {
-                        *sum += value;
-                    }
-                }
+            if group.add(&call, &self.prices).is_none() {
+                *self.unpriced.entry(call.model.clone()).or_default() += 1;
             }
         }
     }
@@ -121,9 +128,7 @@ impl Cost {
                     }
                     object.insert("calls".into(), json!(row.group.calls));
                     object.insert("tool_calls".into(), json!(row.group.tools));
-                    for (name, total) in USAGE_KEYS.iter().zip(row.group.tokens) {
-                        object.insert((*name).to_owned(), json!(total));
-                    }
+                    insert_tokens(&mut object, row.group.tokens);
                     object.insert("usd".into(), json!(row.usd));
                     for (name, part) in ["usd_input", "usd_write", "usd_read", "usd_output"]
                         .iter()
@@ -209,6 +214,7 @@ pub fn session_cost(session: &str) -> Result<SessionCost> {
     let prices = Prices::load()?;
     let mut seen = HashSet::new();
     let mut cost = SessionCost::default();
+    let mut group = Group::default();
     let found = session_files(&super::source::home(), session);
     if found.is_empty() {
         return fail(format!("session {session} has no transcripts"));
@@ -218,23 +224,17 @@ pub fn session_cost(session: &str) -> Result<SessionCost> {
         if transcript.agent == "main"
             && let Some(call) = calls.last()
         {
-            let context = USAGE_KEYS[..3]
-                .iter()
-                .map(|key| count(&call.usage, key))
-                .sum();
-            cost.last = Some((call.model.clone(), context));
+            cost.last = Some((call.model.clone(), context(&call.usage)));
         }
         for call in calls {
-            cost.calls += 1;
-            for (total, key) in cost.tokens.iter_mut().zip(USAGE_KEYS) {
-                *total += count(&call.usage, key);
-            }
-            match prices.usd(&call.model, &call.usage) {
+            match group.add(&call, &prices) {
                 Some(parts) => cost.usd += parts.total(),
                 None => cost.unpriced_calls += 1,
             }
         }
     }
+    cost.calls = group.calls;
+    cost.tokens = group.tokens;
     Ok(cost)
 }
 
@@ -245,9 +245,7 @@ pub fn session(id: &str, as_json: bool) -> Result<String> {
         let mut object = Map::new();
         object.insert("session".into(), json!(id));
         object.insert("calls".into(), json!(cost.calls));
-        for (name, total) in USAGE_KEYS.iter().zip(cost.tokens) {
-            object.insert((*name).to_owned(), json!(total));
-        }
+        insert_tokens(&mut object, cost.tokens);
         object.insert("usd".into(), json!(round(cost.usd, 4)));
         object.insert("unpriced_calls".into(), json!(cost.unpriced_calls));
         return output::pretty(&Value::Object(object));
@@ -286,15 +284,7 @@ impl Agents {
         if calls.is_empty() {
             return;
         }
-        let context: Vec<i64> = calls
-            .iter()
-            .map(|call| {
-                USAGE_KEYS[..3]
-                    .iter()
-                    .map(|key| count(&call.usage, key))
-                    .sum()
-            })
-            .collect();
+        let context: Vec<i64> = calls.iter().map(|call| context(&call.usage)).collect();
         let usd = calls.iter().fold(0.0, |sum, call| {
             sum + self
                 .prices

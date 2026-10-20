@@ -13,7 +13,7 @@ use crate::core::transcripts::Kind;
 use crate::core::transcripts::json::{count, get, head, key, object, text, truthy};
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, grouped, tok};
-use crate::sessions::prices::Prices;
+use crate::sessions::prices::{Prices, tokens};
 use crate::sessions::source::Loaded;
 use crate::sessions::spend::short_project;
 
@@ -47,6 +47,13 @@ pub(super) fn tool_key(name: &str, input: &Value) -> String {
     }
     name.to_owned()
 }
+
+/// What a cache write, a cache read and an output token are taken to cost relative to an
+/// input token when estimating the share of cost that tool traffic carries; the price file's
+/// per-model rates are not used.
+const WRITE_WEIGHT: f64 = 2.0;
+const READ_WEIGHT: f64 = 0.1;
+const OUTPUT_WEIGHT: f64 = 5.0;
 
 /// About four characters per token; an image counts 1,600.
 pub(super) fn est_tokens(content: &Value) -> f64 {
@@ -82,7 +89,6 @@ impl Tools {
         }
     }
     pub fn feed(&mut self, transcript: &Loaded) {
-        let (write, read, output) = (2.0, 0.1, 5.0);
         let mut seen = HashSet::new();
         let mut pending: HashMap<String, (String, f64)> = HashMap::new();
         let mut results: Vec<(i64, f64, f64, String)> = Vec::new();
@@ -100,11 +106,12 @@ impl Tools {
                 let id = get(message, "id");
                 if truthy(id) && truthy(get(message, "usage")) && seen.insert(key(id)) {
                     calls += 1;
-                    let usage = get(message, "usage");
-                    self.grand += count(usage, "input_tokens") as f64
-                        + count(usage, "cache_creation_input_tokens") as f64 * write
-                        + count(usage, "cache_read_input_tokens") as f64 * read
-                        + count(usage, "output_tokens") as f64 * output;
+                    let [input_tokens, written, cached, produced] =
+                        tokens(get(message, "usage")).map(|count| count as f64);
+                    self.grand += input_tokens
+                        + written * WRITE_WEIGHT
+                        + cached * READ_WEIGHT
+                        + produced * OUTPUT_WEIGHT;
                 }
                 for block in get(message, "content").as_array().into_iter().flatten() {
                     if text(block, "type") == "tool_use" {
@@ -139,7 +146,8 @@ impl Tools {
             let entry = self.totals.entry(name).or_insert((0, 0.0, 0.0));
             entry.0 += 1;
             entry.1 += result;
-            entry.2 += result * (write + read * later) + input * (output + read * later);
+            entry.2 += result * (WRITE_WEIGHT + READ_WEIGHT * later)
+                + input * (OUTPUT_WEIGHT + READ_WEIGHT * later);
         }
     }
 
