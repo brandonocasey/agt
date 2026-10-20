@@ -32,6 +32,8 @@ notify-rust = { version = "4.18.2", default-features = false, features = ["z"] }
 mac-notification-sys = "0.6.15"
 
 [dev-dependencies]
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+syn = { version = "2.0.119", features = ["full", "visit"] }
 assert_cmd = "2.1.1"
 assert_fs = "1.1.3"
 

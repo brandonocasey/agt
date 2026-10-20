@@ -129,39 +129,194 @@ const DOMAINS: [&str; 10] = [
 ];
 const FOUNDATIONS: [&str; 4] = ["core", "store", "git", "forge"];
 
-/// `path` is relative to `src/`. Returns one message per offending line.
+/// `path` MUST be relative to `src/`. Macro bodies are checked for absolute paths without expansion.
 fn violations(path: &str, text: &str) -> Vec<String> {
-    let top = path.split(['/', '.']).next().unwrap_or("");
-    let mut found = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        let code = line.split("//").next().unwrap_or("");
-        let mut rest = code;
-        while let Some(at) = rest.find("crate::") {
-            let after = &rest[at + "crate::".len()..];
-            let module: String = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            let bad = if after.starts_with('{') {
-                Some("brace-imports from the crate root hide the module".to_owned())
-            } else if DOMAINS.contains(&module.as_str())
-                && (FOUNDATIONS.contains(&top) || (DOMAINS.contains(&top) && top != module))
-            {
-                Some(format!("`{top}` must not import `{module}`"))
-            } else {
-                None
-            };
-            if let Some(reason) = bad {
-                found.push(format!(
-                    "src/{path}:{}: {reason}: {}",
-                    index + 1,
-                    line.trim()
-                ));
-            }
-            rest = after;
+    use syn::visit::Visit;
+
+    let syntax = match syn::parse_file(text) {
+        Ok(syntax) => syntax,
+        Err(error) => return vec![format!("src/{path}:{}: {error}", error.span().start().line)],
+    };
+    let mut module: Vec<String> = path
+        .trim_end_matches(".rs")
+        .split('/')
+        .map(str::to_owned)
+        .collect();
+    if module
+        .last()
+        .is_some_and(|name| ["mod", "lib", "main"].contains(&name.as_str()))
+    {
+        module.pop();
+    }
+    let mut scan = BoundaryScan {
+        path,
+        text,
+        top: module.first().cloned().unwrap_or_default(),
+        module,
+        found: Vec::new(),
+    };
+    scan.visit_file(&syntax);
+    scan.found
+}
+
+struct BoundaryScan<'a> {
+    path: &'a str,
+    text: &'a str,
+    top: String,
+    module: Vec<String>,
+    found: Vec<String>,
+}
+
+impl BoundaryScan<'_> {
+    fn record(&mut self, span: proc_macro2::Span, reason: &str) {
+        let line = span.start().line;
+        let prefix = format!("src/{}:{line}: ", self.path);
+        if !self.found.iter().any(|found| found.starts_with(&prefix)) {
+            let source = self.text.lines().nth(line.saturating_sub(1)).unwrap_or("");
+            self.found
+                .push(format!("{prefix}{reason}: {}", source.trim()));
         }
     }
-    found
+
+    fn resolve(&self, names: &[String]) -> Option<Vec<String>> {
+        let mut resolved = self.module.clone();
+        let mut parts = names.iter();
+        match parts.next()?.as_str() {
+            "crate" => resolved.clear(),
+            "self" => {}
+            "super" => {
+                resolved.pop()?;
+            }
+            _ => return None,
+        }
+        for name in parts {
+            if name == "super" {
+                resolved.pop()?;
+            } else if name != "self" {
+                resolved.push(name.clone());
+            }
+        }
+        Some(resolved)
+    }
+
+    fn check(&mut self, names: &[String], span: proc_macro2::Span) {
+        let Some(resolved) = self.resolve(names) else {
+            return;
+        };
+        let Some(module) = resolved.first() else {
+            return;
+        };
+        if DOMAINS.contains(&module.as_str())
+            && (FOUNDATIONS.contains(&self.top.as_str())
+                || (DOMAINS.contains(&self.top.as_str()) && &self.top != module))
+        {
+            self.record(span, &format!("`{}` must not import `{module}`", self.top));
+        }
+    }
+
+    fn macro_tokens(&mut self, stream: proc_macro2::TokenStream) {
+        use proc_macro2::{Delimiter, TokenTree};
+        let tokens = stream.into_iter().collect::<Vec<_>>();
+        for token in &tokens {
+            if let TokenTree::Group(group) = token {
+                self.macro_tokens(group.stream());
+            }
+        }
+        for window in tokens.windows(4) {
+            let [
+                TokenTree::Ident(root),
+                TokenTree::Punct(first),
+                TokenTree::Punct(second),
+                next,
+            ] = window
+            else {
+                continue;
+            };
+            if identifier(root) != "crate" || first.as_char() != ':' || second.as_char() != ':' {
+                continue;
+            }
+            match next {
+                TokenTree::Ident(module) => {
+                    self.check(&["crate".into(), identifier(module)], root.span())
+                }
+                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => self.record(
+                    root.span(),
+                    "brace-imports from the crate root hide the module",
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    fn use_tree(&mut self, tree: &syn::UseTree, names: &mut Vec<String>) {
+        use syn::spanned::Spanned;
+        match tree {
+            syn::UseTree::Path(path) => {
+                names.push(identifier(&path.ident));
+                self.use_tree(&path.tree, names);
+                names.pop();
+            }
+            syn::UseTree::Group(group) => {
+                if names.first().is_some_and(|name| name == "crate") && names.len() == 1 {
+                    self.record(
+                        group.span(),
+                        "brace-imports from the crate root hide the module",
+                    );
+                }
+                for item in &group.items {
+                    self.use_tree(item, names);
+                }
+            }
+            syn::UseTree::Name(name) => {
+                names.push(identifier(&name.ident));
+                self.check(names, name.span());
+                names.pop();
+            }
+            syn::UseTree::Rename(rename) => {
+                names.push(identifier(&rename.ident));
+                self.check(names, rename.span());
+                names.pop();
+            }
+            syn::UseTree::Glob(glob) => self.check(names, glob.span()),
+        }
+    }
+}
+
+fn identifier(ident: &syn::Ident) -> String {
+    ident.to_string().trim_start_matches("r#").to_owned()
+}
+
+impl<'ast> syn::visit::Visit<'ast> for BoundaryScan<'_> {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        self.module.push(identifier(&item.ident));
+        syn::visit::visit_item_mod(self, item);
+        self.module.pop();
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        self.use_tree(&item.tree, &mut Vec::new());
+    }
+
+    fn visit_meta_list(&mut self, meta: &'ast syn::MetaList) {
+        self.macro_tokens(meta.tokens.clone());
+        syn::visit::visit_meta_list(self, meta);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.macro_tokens(mac.tokens.clone());
+        syn::visit::visit_macro(self, mac);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        use syn::spanned::Spanned;
+        let names = path
+            .segments
+            .iter()
+            .map(|part| identifier(&part.ident))
+            .collect::<Vec<_>>();
+        self.check(&names, path.span());
+        syn::visit::visit_path(self, path);
+    }
 }
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -220,4 +375,138 @@ fn the_boundary_scan_flags_bad_imports() {
         .is_empty()
     );
     assert!(violations("cli.rs", "use crate::review;").is_empty());
+}
+
+#[test]
+fn the_boundary_scan_resolves_rust_paths() {
+    for (path, code) in [
+        ("store/mod.rs", "use crate ::\n review::Cli;"),
+        ("forge/mod.rs", "use super::review::Cli;"),
+        ("core/x/y.rs", "use super::super::super::review::Cli;"),
+        ("core/x/mod.rs", "use super::super::review::Cli;"),
+        (
+            "core/mod.rs",
+            "mod nested { use super::super::review::Cli; }",
+        ),
+        ("core/mod.rs", "use super::{review::Cli};"),
+    ] {
+        let found = violations(path, code);
+        assert_eq!(found.len(), 1, "{path}: {code}: {found:?}");
+    }
+    for code in [
+        "use super::local::Thing;",
+        "mod nested { use super::super::local::Thing; }",
+        "const TEXT: &str = r#\"crate::review\"#; /* crate::review */",
+    ] {
+        assert!(violations("core/x.rs", code).is_empty(), "{code}");
+    }
+}
+
+#[test]
+fn the_boundary_scan_handles_rust_syntax_without_text_false_positives() {
+    for (path, code) in [
+        ("store/mod.rs", "use crate::{core::Thing};"),
+        ("core/mod.rs", "use {super::review::Thing as Renamed};"),
+        (
+            "core/mod.rs",
+            "mod a { mod b { use super::{super::{super::review::Thing}}; } }",
+        ),
+        ("forge/github.rs", "type Alias = crate::r#review::Thing;"),
+        ("review/mod.rs", "fn f(_: &crate::issue::Thing) {}"),
+        ("core/mod.rs", "fn f() { crate ::\nreview :: action(); }"),
+        ("core/mod.rs", "type Alias = Vec<crate::issue::Thing>;"),
+        ("store/mod.rs", "use crate::review::*;"),
+    ] {
+        let found = violations(path, code);
+        assert_eq!(found.len(), 1, "{path}: {code}: {found:?}");
+    }
+    for (path, code) in [
+        (
+            "core/mod.rs",
+            "/* crate::review */ const S: &str = \"crate::issue\";",
+        ),
+        (
+            "core/mod.rs",
+            "const S: &str = r###\"crate::{review};\"###;",
+        ),
+        (
+            "review/x.rs",
+            "use super::local::Thing; type Alias = self::nested::Thing;",
+        ),
+        (
+            "review/mod.rs",
+            "mod x { mod y { use super::super::local::Thing; } }",
+        ),
+        (
+            "cleanup/mod.rs",
+            "use crate::review::prune; use super::issue::prune;",
+        ),
+        ("core/x.rs", "use super::{local::Thing, other::Type};"),
+    ] {
+        assert!(violations(path, code).is_empty(), "{path}: {code}");
+    }
+    let parse_error = violations("core/mod.rs", "use crate::review::{");
+    assert_eq!(parse_error.len(), 1);
+    assert!(parse_error[0].contains("src/core/mod.rs:"));
+}
+
+#[test]
+fn the_boundary_scan_checks_absolute_paths_in_macro_tokens() {
+    for code in [
+        r#"fn f() { println!("{}", crate::review::value()); }"#,
+        "macro_rules! bad { () => { crate::review::value() }; }",
+        "#[anything(crate::review)] fn f() {}",
+        "macro_rules! bad { () => { $crate::r#review::value() }; }",
+        "macro_rules! bad { () => { use crate::{core}; }; }",
+        "fn f() { outer!({ inner!([crate :: review :: value()]); }); }",
+    ] {
+        let found = violations("core/mod.rs", code);
+        assert_eq!(found.len(), 1, "{code}: {found:?}");
+    }
+    for code in [
+        r#"fn f() { println!("crate::review"); }"#,
+        r##"macro_rules! safe { () => { r#"crate::{review}"# }; }"##,
+        "macro_rules! safe { () => { crate::core::value() }; }",
+    ] {
+        assert!(violations("core/mod.rs", code).is_empty(), "{code}");
+    }
+}
+
+#[test]
+fn integration_commands_isolate_inherited_git_configuration() {
+    let env = Env::new();
+    if std::env::var_os("AGT_TEST_GIT_ENV_CHILD").is_some() {
+        assert_eq!(env.git(&["config", "user.name"]), "Tester");
+        assert_eq!(env.git(&["config", "user.email"]), "tester@example.com");
+        assert!(
+            env.git(&["var", "GIT_AUTHOR_IDENT"])
+                .starts_with("Tester <tester@example.com>")
+        );
+        return;
+    }
+    let test = std::env::current_exe().unwrap();
+    let output = env
+        .command(test.to_str().unwrap(), &env.repo)
+        .args([
+            "--exact",
+            "agt::integration_commands_isolate_inherited_git_configuration",
+            "--nocapture",
+        ])
+        .env("AGT_TEST_GIT_ENV_CHILD", "1")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "user.name")
+        .env("GIT_CONFIG_VALUE_0", "inherited name")
+        .env(
+            "GIT_CONFIG_PARAMETERS",
+            "'user.email=inherited@example.com'",
+        )
+        .env("GIT_AUTHOR_NAME", "inherited author")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

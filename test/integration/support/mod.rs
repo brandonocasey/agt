@@ -16,15 +16,8 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_agt");
 pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
-/// Every variable agt or the git it runs reads from the caller's environment; `Env::command`
-/// clears them so a developer shell cannot change a test. Tests that need one set it after.
+/// Non-Git variables that can change a test. Tests that need one set it after `Env::command`.
 const SCRUBBED_ENV: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
     "GH_HOST",
     "GITLAB_HOST",
     "AGT_NOW",
@@ -104,6 +97,11 @@ impl Env {
     pub fn command(&self, program: &str, dir: &Path) -> Command {
         let mut command = Command::new(program);
         command.current_dir(dir);
+        for (name, _) in std::env::vars_os() {
+            if name.as_encoded_bytes().starts_with(b"GIT_") {
+                command.env_remove(name);
+            }
+        }
         for name in SCRUBBED_ENV {
             command.env_remove(name);
         }
