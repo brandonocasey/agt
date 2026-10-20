@@ -9,8 +9,8 @@ use crate::forge::markers::{self, agent_attempt, agent_id};
 use crate::forge::service::ReviewService;
 use crate::forge::{CommentData, Draft, Fetched, ThreadData};
 use crate::store::model::{
-    Author, Comment, ImportedRecord, PostState, RecordPost, RemoteKind, Resolution, Run, Target,
-    Thread, ThreadType,
+    Author, Comment, ImportedRecord, PostState, QaRun, RecordPost, RemoteKind, Resolution, Run,
+    Target, Thread, ThreadType,
 };
 
 fn imported_comment(comment: CommentData, login: &str) -> Comment {
@@ -42,6 +42,7 @@ pub(super) fn merge(
         threads,
         runs,
         records,
+        qa_runs,
         ..
     } = target;
     merge_threads(
@@ -50,7 +51,7 @@ pub(super) fn merge(
         fetched.drafts,
         &trust,
         now,
-        &mut |comment, trust| take_record(runs, records, comment, trust),
+        &mut |comment, trust| take_record(runs, qa_runs, records, comment, trust),
     )
 }
 
@@ -172,30 +173,42 @@ pub(super) fn claim_git_names(target: &mut Target, login: &str) {
 /// posted when it is their write; false when the comment holds no record.
 fn take_record(
     runs: &mut [Run],
+    qa_runs: &mut [QaRun],
     records: &mut Vec<ImportedRecord>,
     comment: &CommentData,
     trust: &Trust,
 ) -> bool {
     let found = parse_records(comment);
-    if found.is_empty() {
+    let qa_found = markers::parse_qa_records(&comment.body);
+    if found.is_empty() && qa_found.is_empty() {
         return false;
     }
     let own = trust.own_id(comment);
     // A run's own record names the run in its id; the summary holds every run it lists.
     let claimed: Vec<&str> = match own.as_deref() {
-        Some(markers::SUMMARY_ID) => found.iter().map(|record| record.run.as_str()).collect(),
+        Some(markers::SUMMARY_ID) => found
+            .iter()
+            .map(|record| record.run.as_str())
+            .chain(qa_found.iter().map(String::as_str))
+            .collect(),
         Some(id) => markers::record_run(id).into_iter().collect(),
         None => Vec::new(),
     };
-    for run in runs
+    let posts = runs
         .iter_mut()
         .filter(|run| claimed.contains(&run.id.as_str()))
-    {
+        .filter_map(|run| run.record.as_mut())
+        .chain(
+            qa_runs
+                .iter_mut()
+                .filter(|run| claimed.contains(&run.id.as_str()))
+                .filter_map(|run| run.record.as_mut()),
+        );
+    for post in posts {
         // While an edit of the comment is out, the host shows the old text until the edit's
         // attempt appears.
-        if let Some(post) = &mut run.record
-            && (post.remote_id.as_deref() == Some(comment.id.as_str())
-                || (post.remote_id.is_none() && post.delivery.is_posting()))
+        if (post.remote_id.as_deref() == Some(comment.id.as_str())
+            || (post.remote_id.is_none() && post.delivery.is_posting()))
             && (!post.delivery.is_posting()
                 || post.delivery.is_attempt(agent_attempt(&comment.body)))
         {

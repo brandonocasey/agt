@@ -14,6 +14,7 @@ mod offline;
 mod pr;
 mod ps;
 mod publish;
+mod qa;
 mod review_auto_sync;
 mod reviewed;
 mod secrets;

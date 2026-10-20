@@ -68,12 +68,23 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
             .url
             .clone();
         exec::change(ctx, &target, |target| {
-            let run = target
+            let missing = || Error(format!("completed run {selected} not found"));
+            let publication = match target
                 .runs
                 .iter_mut()
                 .find(|run| &run.id == selected && run.ended_at.is_some())
-                .ok_or_else(|| Error(format!("completed run {selected} not found")))?;
-            run.publication_target = Some(url);
+            {
+                Some(run) => &mut run.publication_target,
+                None => {
+                    &mut target
+                        .qa_runs
+                        .iter_mut()
+                        .find(|run| &run.id == selected && run.ended_at.is_some())
+                        .ok_or_else(missing)?
+                        .publication_target
+                }
+            };
+            *publication = Some(url);
             Ok(())
         })?;
     }

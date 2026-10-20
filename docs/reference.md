@@ -8,6 +8,7 @@ For installation and a local example, follow [Getting started](getting-started.m
 
 - [Output and errors](#output-and-errors) and [configuration and environment](#configuration-and-environment)
 - Review: [targets](#targets), [commands](#commands), [coverage](#reviewed-counting-and-pruning-rules), [sync](#sync), [publish](#publish), [store](#store), [finding input](#finding-input)
+- [QA](#qa): checks, QA findings and the QA approval
 - [Issues](#issues) and [tasks](#tasks)
 - [Worktrees](#worktrees) and [branch checks](#branch)
 - [Pull and merge requests](#pr) and [CI](#ci)
@@ -321,6 +322,51 @@ agt review publish --only rv-7k2m.c1p0.r1.f1,h1
 [Publish](#publish).
 
 Cleanup: `agt cleanup --only reviews` (plan) and `--yes` (delete), for every repository.
+
+## QA
+
+`agt qa` records what was tested, where, and what came up. It records tests people or agents
+ran; it does not run them. QA lives in the same target as the review, so it takes the same
+`--target`, `--range` and `--default-branch` flags, and its threads are review threads.
+
+```sh
+agt qa run start --env browser=firefox --env os=linux --model claude-opus-5-5 --harness claude-code
+# {"target": "branch-feat%2Flogin-...", "run": "qa-4f2a", "tester": {...}}
+agt qa check --run qa-4f2a --name "login with an expired password" --outcome pass \
+  --steps - --evidence https://example.com/shot.png --evidence shots/login.png <<'EOF'
+Open /login, enter the expired account, submit.
+EOF
+agt qa check --run qa-4f2a --name "checkout total" --outcome fail --env browser=chrome
+agt qa finding --check qa-4f2a.k2 --type bug --severity high --body "The total ignores the coupon."
+agt qa run end --run qa-4f2a
+agt qa status                       # latest outcome per check, blockers, approvable
+agt qa approve                      # refused while anything blocks
+agt qa publish --dry-run            # as agt review publish
+```
+
+- A check records its name, kind (`manual`, `automated`, `exploratory`), outcome (`pass`, `fail`,
+  `blocked`, `skipped`), steps, command, environment, evidence and note, against the current
+  head and tree. A dirty work tree is recorded by its tree, with no head.
+- `--env key=value` on a check adds to the run's environment; the same key replaces the run's
+  value.
+- The latest check of a name replaces earlier ones. A check is current while the evaluated tree
+  equals the tree it ran against, so a rebase that changes no content keeps it; new content
+  makes it stale.
+- `finding` opens a general thread linked to the check (`check` field). Its author defaults to
+  the run's tester. Reply to and resolve it with `agt review reply` and `agt review resolve`.
+  An open QA bug, requirement or question also blocks the review's approval.
+- `approve` records an approval of the head on the newest QA run. It needs a clean work tree, at
+  least one check, no latest check that fails, is blocked or is stale, and no open bug,
+  requirement or question found by a check. It sends no host approval.
+- `agt review status` carries the same QA state under `qa` (`null` before the first QA run).
+  QA runs never count as reviews.
+- `show` takes a QA run (`qa-4f2a`) or check (`qa-4f2a.k1`) id, as does `agt review show`.
+- `publish` adds a QA section to the PR/MR summary: a verdict line, a checks table, and the QA
+  findings. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
+  a `<!-- qa-record v1 id=<run> head=<sha> -->` marker, distinct from review records, which
+  `sync` reads to mark the run's record posted. A QA finding posts as a general comment headed
+  `**🐛 bug (high) · 🧪 QA: <check name>:**`. With `sync.auto_push = true`, `run end`
+  publishes the ended QA run, as `agt review run end` does.
 
 ## Cleanup
 
