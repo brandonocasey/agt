@@ -168,13 +168,14 @@ fn plain(title: &str) -> &str {
 pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) -> Result<()> {
     let mut body = serde_json::Map::new();
     let title = changes.title.as_deref().unwrap_or(&current.title);
-    if changes.ready {
-        body.insert("title".into(), json!(plain(title)));
-    } else if changes.draft {
-        body.insert("title".into(), json!(format!("Draft: {}", plain(title))));
-    } else if let Some(title) = &changes.title {
-        body.insert("title".into(), json!(title));
-    }
+    match changes.draft {
+        Some(false) => body.insert("title".into(), json!(plain(title))),
+        Some(true) => body.insert("title".into(), json!(format!("Draft: {}", plain(title)))),
+        None => changes
+            .title
+            .as_ref()
+            .and_then(|title| body.insert("title".into(), json!(title))),
+    };
     if let Some(text) = &changes.body {
         body.insert("description".into(), json!(text));
     }

@@ -32,10 +32,15 @@ pub fn run(cli: Cli) -> Result<Output> {
         cli.command,
         Command::List(_) | Command::Show { .. } | Command::Status
     ) {
-        auto::sync_stale(&store, &repo, filter, cli.offline)?;
+        auto::sync_stale(
+            &store,
+            &repo,
+            filter,
+            crate::forge::auto::Offline::current(),
+        )?;
     }
     if matches!(cli.command, Command::Sync | Command::Push { .. }) {
-        cli.offline.forbid("issue sync and push")?;
+        crate::forge::auto::Offline::current().forbid("issue sync and push")?;
     }
     let mut value = match &cli.command {
         Command::Sync => {
@@ -81,7 +86,13 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Create(_) | Command::Edit(_) | Command::Comment { private: false, .. }
     ) || matches!(&cli.command, Command::Link(args) if args.comment)
     {
-        auto::push_changed(&store, &repo, filter, cli.offline, &mut value);
+        auto::push_changed(
+            &store,
+            &repo,
+            filter,
+            crate::forge::auto::Offline::current(),
+            &mut value,
+        );
     }
     Ok(Output::Json(value))
 }

@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use crate::support::Env;
 
 const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-steps.sh");
-const GITHUB_TARGET: &str = "owner/repo#42@abc123";
-const GITLAB_TARGET: &str = "group/sub/project!7@abc123";
+const GITHUB_TARGET: &str = "owner/repo#42";
+const GITLAB_TARGET: &str = "group/sub/project!7";
 const GITLAB_PROJECT: &str = "projects/group%2Fsub%2Fproject";
 const GET: &str = "api -X GET";
 
@@ -319,14 +319,14 @@ fn follows_the_check_rollup_pages() {
 
 #[test]
 fn reports_a_head_change() {
-    let outcome = run(&[step(
-        "PullChecks",
-        &pull(json!({"headRefOid": "def456"}), &[]),
-    )]);
+    let outcome = run(&[
+        step("PullChecks", &open(&[run_node("t", "IN_PROGRESS", None)])),
+        step("PullChecks", &pull(json!({"headRefOid": "def456"}), &[])),
+    ]);
     assert_eq!(outcome.status, 1, "{}", outcome.stderr);
-    assert_eq!(outcome.events[0]["reason"], "head_changed");
-    assert_eq!(outcome.events[0]["expectedHead"], "abc123");
-    assert_eq!(outcome.events[0]["observedHead"], "def456");
+    assert_eq!(outcome.events[1]["reason"], "head_changed");
+    assert_eq!(outcome.events[1]["expectedHead"], "abc123");
+    assert_eq!(outcome.events[1]["observedHead"], "def456");
     assert_eq!(last(&outcome)["reason"], "action_required");
 }
 
@@ -365,8 +365,8 @@ fn sha_waits_for_the_head_to_reach_the_commit() {
                 &open(&[run_node("t", "COMPLETED", Some("SUCCESS"))]),
             ),
         ],
-        "owner/repo#42",
-        &["--sha", "abc123"],
+        "owner/repo#42@abc123",
+        &[],
         &[],
     );
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
@@ -377,17 +377,10 @@ fn sha_waits_for_the_head_to_reach_the_commit() {
 }
 
 #[test]
-fn sha_needs_one_pull_request_or_merge_request() {
-    let both = run_args(&[], &["o/r#1", "o/r#2"], &["--sha", "abc123"], &[]);
-    assert_eq!(both.status, 2);
-    assert!(both.stderr.contains("--sha"), "{}", both.stderr);
-    let pipeline = run_args(
-        &[],
-        &["https://gitlab.example.test/g/p/-/pipelines/9"],
-        &["--sha", "abc123"],
-        &[],
-    );
-    assert_eq!(pipeline.status, 2);
+fn the_sha_flag_is_gone_in_favour_of_the_target_suffix() {
+    let flag = run_args(&[], &["o/r#1"], &["--sha", "abc123"], &[]);
+    assert_eq!(flag.status, 2);
+    assert!(flag.stderr.contains("--sha"), "{}", flag.stderr);
 }
 
 #[test]
@@ -772,7 +765,6 @@ fn reports_gitlab_merge_request_states_without_querying_jobs() {
         (json!({"state": "closed"}), 1, "closed"),
         (json!({"state": "mystery"}), 1, "unknown_pull_request_state"),
         (json!({"head_pipeline": null}), 1, "no_required_checks"),
-        (json!({"sha": "def456"}), 1, "head_changed"),
         (json!({"sha": null}), 1, "missing_pull_request_data"),
     ];
     for (fields, status, reason) in cases {
@@ -783,6 +775,24 @@ fn reports_gitlab_merge_request_states_without_querying_jobs() {
         assert_eq!(outcome.status, status, "{reason}: {}", outcome.stderr);
         assert_eq!(outcome.events[0]["reason"], reason);
     }
+}
+
+#[test]
+fn a_gitlab_head_change_after_the_first_read_is_reported() {
+    let mr = mr_path("merge_requests/7");
+    let outcome = gitlab(&[
+        step(
+            &format!("{GET} {mr}"),
+            &merge_request(json!({"state": "locked"})),
+        ),
+        step(
+            &format!("{GET} {mr}"),
+            &merge_request(json!({"state": "locked", "sha": "def456"})),
+        ),
+    ]);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[1]["reason"], "head_changed");
+    assert_eq!(outcome.events[1]["expectedHead"], "abc123");
 }
 
 #[test]
@@ -924,8 +934,8 @@ fn sha_waits_for_a_gitlab_pipeline_on_the_commit() {
             ),
             step(&format!("{GET} {mr}"), &current("success")),
         ],
-        "group/sub/project!7",
-        &["--sha", "abc123"],
+        "group/sub/project!7@abc123",
+        &[],
         &[("GITLAB_HOST", "gitlab.example.test")],
     );
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
@@ -954,8 +964,8 @@ fn a_merged_results_pipeline_runs_the_commit_its_parent_names() {
             ),
             step(&format!("{GET} {mr}"), &merged_results),
         ],
-        "group/sub/project!7",
-        &["--sha", "abc123"],
+        "group/sub/project!7@abc123",
+        &[],
         &[("GITLAB_HOST", "gitlab.example.test")],
     );
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);

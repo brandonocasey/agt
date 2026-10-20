@@ -11,8 +11,9 @@ use serde_json::Value;
 use crate::core::config::{self, Config};
 use crate::core::harness;
 use crate::core::local;
-use crate::forge::service;
+use crate::forge::auto::Offline;
 use crate::forge::transport::Cli;
+use crate::forge::{hosts, service};
 use crate::git::Repo;
 use crate::store::model::Forge;
 
@@ -151,8 +152,14 @@ fn login_hint(forge: Forge, host: Option<&str>) -> String {
 }
 
 fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
+    if Offline::current().is_set() {
+        return vec![Row::ok("auth", "skipped: offline")];
+    }
     let mut rows = Vec::new();
-    let own = origin_host.map(|host| (host, service::detect(host, None, None)));
+    let own = origin_host.map(|host| {
+        let named = hosts::named(host).ok().flatten();
+        (host, service::detect(host, named, None))
+    });
     if let Some((host, forge)) = own {
         let name = format!("auth {host}");
         rows.push(match forge {

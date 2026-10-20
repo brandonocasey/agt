@@ -1,9 +1,7 @@
 {
  "args": [
   "failures",
-  "5",
-  "-R",
-  "group/proj"
+  "group/proj!5"
  ],
  "env": {},
  "responses": [

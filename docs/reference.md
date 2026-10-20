@@ -52,7 +52,7 @@ Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
 | --- | --- | --- |
 | `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
 | `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
-| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}`; the older `$XDG_CONFIG_HOME/agent-review/hosts.json` is read only when this one is missing | [Sync](#sync) |
+| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}`; the older `$XDG_CONFIG_HOME/agent-review/hosts.json` is read only when this one is missing | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
 | `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model; the older `~/.config/agents/model-prices.json` is read only when this one is missing | [Sessions](#sessions) |
 
 Unknown keys and invalid values in the TOML files are errors that name the file and the key.
@@ -61,7 +61,7 @@ Environment variables agt reads, or sets for programs it runs:
 
 | Variable | Used by | Meaning | Kind |
 | --- | --- | --- | --- |
-| `AGT_OFFLINE` | `review`, `issue`, `cleanup --only worktrees` | Anything but empty, `0` or `false` acts as `--offline` | user |
+| `AGT_OFFLINE` | every command | Anything but empty, `0` or `false` acts as the root `--offline` flag, which `agt pr` and `agt ci` refuse under, `agt doctor` skips its login checks under, and `review`, `issue` and `cleanup --only worktrees` honour as before | user |
 | `AGT_PRICES` | `sessions` | Price file to use instead of `model-prices.json` | user |
 | `AGT_LS_REMOTE_TIMEOUT` | `worktree`, `cleanup` | Seconds a remote check may take (default 10) | user |
 | `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |
@@ -940,14 +940,14 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 `agt ci` waits for PR/MR checks and triages GitLab failures.
 
 ```sh
-agt ci wait TARGET... [--sha SHA] [--timeout SEC] [--interval SEC] [--max-interval SEC]
-agt ci failures <mr> [-n N] [-R group/project]
+agt ci wait TARGET... [--timeout SEC] [--interval SEC] [--max-interval SEC]
+agt ci failures <mr> [--limit N]
 ```
 
 `wait` takes one or more targets: GitHub `OWNER/REPO#PR[@SHA]`, GitLab `GROUP/PROJECT!IID[@SHA]`,
 a PR or MR URL, `#PR` or `!IID` in the current repository (named by its `origin` remote), and a
 GitLab pipeline id (current repository) or pipeline URL. Without `@SHA` the head read by the first
-poll is pinned, and a later head is a change. `--sha SHA` is for a single PR or MR right after a
+poll is pinned, and a later head is a change. `@SHA` on a PR or MR target is for right after a
 push: the target stays pending (`waiting_for_pipeline`) until the head and, on GitLab, a pipeline
 (or merged-results pipeline) is on that commit.
 
@@ -965,10 +965,10 @@ query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
-`failures <mr>` is GitLab only (`123`, `!123` or an MR URL; `-R` or the current repository
-names the project). It lists the failed and retried jobs of the MR's head pipeline, the failing
+`failures <mr>` is GitLab only (`123`, `!123`, `group/project!123` or an MR URL; without a project the current repository
+is used). It lists the failed and retried jobs of the MR's head pipeline, the failing
 specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the last
-N (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
+`--limit` (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
 `pending` or `unclear`.
 
 ## PR
@@ -980,7 +980,7 @@ comes from the `origin` remote, and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`
 agt pr view [<n>|<url>] [--branch B]
 agt pr list [--mine] [--branch B] [--state open|merged|all]
 agt pr create --title T [--body B] [--base BRANCH] [--draft]
-agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--ready|--draft]
+agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--draft[=false]]
 agt pr merge <n> --sha HEAD [--method merge|squash|rebase] [--auto]
 agt pr auto-merge off|on <n> [--sha HEAD]
 ```
@@ -996,7 +996,7 @@ open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head sta
 `sha`); `--auto` merges when checks pass (GitHub needs `--method` unless auto-merge was on, and merges a
 PR that can merge now at once, as gh does, unless its base branch requires a merge queue, where
 auto-merge queues it; `auto-merge on` does the same; plain `merge` without `--auto` on such a PR also adds it to the queue this way (so it needs `--method`); GitLab
-cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLab would squash). Branch lookups (`view`, `create`) ignore PRs/MRs from forks. `list --mine` asks the forge for your own PRs/MRs, so older ones are found. `create` without `--base` needs a resolvable default branch, else pass `--base`. It never deletes the branch.
+cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLab would squash). `update --draft` converts to a draft and `--draft=false` marks it ready for review. Branch lookups (`view`, `create`) ignore PRs/MRs from forks. `list --mine` asks the forge for your own PRs/MRs, so older ones are found. `create` without `--base` needs a resolvable default branch, else pass `--base`. It never deletes the branch.
 
 `auto-merge off` records the method it disables in `$XDG_STATE_HOME/agents/pr/auto-merge.json`
 (keyed by host, repository and number) and reads the state back; `auto-merge on` re-enables it with
@@ -1157,7 +1157,7 @@ roots = ["~/Projects/*/*", "~/projects/*/*"]
 
 `agt cleanup --only worktrees` finds work that already landed in the default branch and removes it: in the current repository, or with `--all-repos` in every repository under the roots. Its report is the `worktrees` field of the cleanup report. Without `--yes` it prints the plan (`plan: true`; per repository `remove`, `delete`, `kept` and `warnings`, each candidate with its `verdict`, `evidence` and the exact `action`) and changes nothing except fetching PR heads into the object store. With `--yes` the lists are `removed` (`path`, backup `id` and `ref`), `deleted` (`branch`, `tip`, `verdict`, `evidence`, `restore`: the `git branch <name> <tip>` that brings it back), `kept` (`branch` or `path`, `verdict`, `reason`) (a `closed` row also carries the PR/MR's `head` sha, `title` and `closed_at`, read from the forge lookup) and `warnings`. `--worktree <branch-or-path>` (repeatable, with or without `--yes`) limits the pass to the named rows: a name is a local branch or a worktree path, a worktree row and its branch go together, and unnamed rows are never judged or touched. Each named row is judged exactly as the plan judges it, so it is acted on only while it still qualifies; one that does not is listed under the repository's `skipped` (the `kept` row, with its reason, in place of `kept`), and a name that matches no row (protected, unknown or gone) is listed in `worktrees.skipped` with a reason. It never touches the default branch, `main`, `master` or `develop` by name, the main checkout's branch, the current branch or the worktree holding the current directory, and it never deletes a remote branch, pushes, closes a PR, resets or discards files.
 
-A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or `origin` is neither GitHub nor GitLab, the repository's PRs/MRs for that source branch are listed (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. An open PR gives `open` (kept, even when an older PR merged); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from `origin` and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). The forge host is found from `origin` as `agt review` finds it, without its `hosts.json`.
+A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or `origin` is neither GitHub nor GitLab, the repository's PRs/MRs for that source branch are listed (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. An open PR gives `open` (kept, even when an older PR merged); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from `origin` and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). The forge host is found from `origin` as `agt review` finds it, including its `hosts.json`.
 
 A linked worktree whose branch is `merged` or `squash-merged`, or whose detached HEAD is in the default branch, is removed first, exactly as `remove --yes` does (snapshot backup, then `git worktree remove --force` once), and then its branch is deleted. It is kept when it is locked, missing, holds a submodule or a nested git repository `remove` would refuse, has a live Claude Code session in it (as `remove`), or any process with its current directory inside it (native process APIs on macOS, `/proc/*/cwd` on Linux; unreadable individual processes are skipped, but a failed process enumeration keeps the worktree and reports the reason). It is kept as `recent` when anything in it changed in the last 3 days (its HEAD commit time, the mtime of its git dir's `HEAD`, `index` or `logs/HEAD`, or of any tracked or untracked non-ignored file), so a worktree just made by `create` survives, unless `--recent` is passed. It is also kept as `dirty` when it has modified tracked files or untracked files that are not disposable, unless `--dirty` is passed; the snapshot preserves them either way. A kept worktree keeps its branch.
 

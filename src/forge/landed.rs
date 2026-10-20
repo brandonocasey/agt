@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::core::error::{Error, Result};
 use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::Transport;
-use crate::forge::{self, PullNode, encode, github, gitlab};
+use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
@@ -35,17 +35,29 @@ pub struct Pull {
 }
 
 impl Origin {
-    /// The forge `origin` is on; `None` when there is no origin or it is no GitHub or GitLab
-    /// host that `gh` or `glab` knows.
+    /// The forge `origin` is on, with the hosts file as the first hint; `None` when there is no
+    /// origin or it is no GitHub or GitLab host that agt can identify.
     pub fn of(repo: &Repo) -> Result<Option<Self>> {
         let Some((host, path)) = repo.origin_location()? else {
             return Ok(None);
         };
-        Ok(service::detect(&host, None, None).map(|forge| Self {
-            forge,
-            host,
-            repo: path,
-        }))
+        Ok(
+            service::detect(&host, hosts::named(&host)?, None).map(|forge| Self {
+                forge,
+                host,
+                repo: path,
+            }),
+        )
+    }
+
+    /// Like [`Origin::of`], but a repository without a usable `origin` is an error.
+    pub fn require(repo: &Repo) -> Result<Self> {
+        Self::of(repo)?.ok_or_else(|| {
+            Error(
+                "origin is not a GitHub or GitLab host that gh or glab is logged in to (no origin remote, an unknown forge, or gh/glab not authenticated for it)"
+                    .into(),
+            )
+        })
     }
 
     /// Every PR/MR of the repository whose source branch is `branch`, all states, all pages.

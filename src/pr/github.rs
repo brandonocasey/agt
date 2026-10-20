@@ -213,10 +213,10 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
             Some(Value::Object(body)),
         ))?;
     }
-    let mutation = match (changes.ready, changes.draft) {
-        (true, _) => "markPullRequestReadyForReview",
-        (_, true) => "convertPullRequestToDraft",
-        _ => return Ok(()),
+    let mutation = match changes.draft {
+        Some(false) => "markPullRequestReadyForReview",
+        Some(true) => "convertPullRequestToDraft",
+        None => return Ok(()),
     };
     let query = format!(
         "mutation PrDraft($id:ID!){{{mutation}(input:{{pullRequestId:$id}}){{pullRequest{{number}}}}}}"

@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::Args;
@@ -151,8 +152,9 @@ pub fn lock_for_sync(
     Ok(Ok(SyncLocks { _sync, _other }))
 }
 
-/// The `--offline` flag, which `AGT_OFFLINE` set to anything but empty, `0` or `false` also
-/// turns on.
+/// The root `--offline` flag, which `AGT_OFFLINE` set to anything but empty, `0` or `false` also
+/// turns on. `agt` records it once after parsing and every command reads it with
+/// [`Offline::current`].
 #[derive(Args, Clone, Copy)]
 pub struct Offline {
     /// Disable automatic and explicit remote access (also `AGT_OFFLINE=1`).
@@ -160,10 +162,19 @@ pub struct Offline {
     given: bool,
 }
 
+static GIVEN: AtomicBool = AtomicBool::new(false);
+
 impl Offline {
-    /// Whether the flag was typed, which the environment does not count.
-    pub fn given(self) -> bool {
-        self.given
+    /// Records the parsed flag for [`Offline::current`].
+    pub fn install(self) {
+        GIVEN.store(self.given, Ordering::Relaxed);
+    }
+
+    /// The flag the command line carried (off until [`Offline::install`] runs).
+    pub fn current() -> Self {
+        Self {
+            given: GIVEN.load(Ordering::Relaxed),
+        }
     }
 
     pub fn is_set(self) -> bool {

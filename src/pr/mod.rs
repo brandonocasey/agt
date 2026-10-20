@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{self, Output};
+use crate::forge::auto::Offline;
 use crate::forge::landed::Origin;
 use crate::forge::service::{ReviewService, SERVICES, kind};
 use crate::forge::{PrRef, parse_pr};
@@ -102,12 +103,9 @@ enum Command {
         add_label: Vec<String>,
         #[arg(long = "remove-label", value_name = "LABEL")]
         remove_label: Vec<String>,
-        /// Mark as ready for review.
-        #[arg(long, conflicts_with = "draft")]
-        ready: bool,
-        /// Convert to a draft.
-        #[arg(long)]
-        draft: bool,
+        /// Convert to a draft; `--draft=false` marks it ready for review.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        draft: Option<bool>,
     },
     /// Merge only while the head is --sha (the forge enforces it too). Never deletes the branch
     /// or bypasses protections.
@@ -144,8 +142,8 @@ pub struct Changes {
     pub body: Option<String>,
     pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
-    pub ready: bool,
-    pub draft: bool,
+    /// `Some(true)` converts to a draft, `Some(false)` marks it ready.
+    pub draft: Option<bool>,
 }
 
 /// A PR/MR as every subcommand reports it.
@@ -223,11 +221,7 @@ fn number(text: &str, remote: &Remote) -> Result<u64> {
 
 impl Remote {
     fn connect(repo: &Repo) -> Result<Self> {
-        let Some(origin) = Origin::of(repo)? else {
-            return fail(
-                "origin is not a GitHub or GitLab host that gh or glab is logged in to (no origin remote, an unknown forge, or gh/glab not authenticated for it)",
-            );
-        };
+        let origin = Origin::require(repo)?;
         let service = (kind(origin.forge).connect)(&origin.host);
         Ok(Self { origin, service })
     }
@@ -345,6 +339,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 fn execute(command: Command) -> Result<Output> {
+    Offline::current().forbid("agt pr")?;
     let repo = Repo::discover()?;
     let remote = Remote::connect(&repo)?;
     let (t, slug) = (remote.service.transport(), remote.origin.repo.as_str());
@@ -413,7 +408,6 @@ fn execute(command: Command) -> Result<Output> {
             body,
             add_label,
             remove_label,
-            ready,
             draft,
         } => {
             let changes = Changes {
@@ -421,18 +415,16 @@ fn execute(command: Command) -> Result<Output> {
                 body,
                 add_labels: add_label,
                 remove_labels: remove_label,
-                ready,
                 draft,
             };
             if changes.title.is_none()
                 && changes.body.is_none()
                 && changes.add_labels.is_empty()
                 && changes.remove_labels.is_empty()
-                && !ready
-                && !draft
+                && changes.draft.is_none()
             {
                 return fail(
-                    "nothing to update: pass --title, --body, --add-label, --remove-label, --ready or --draft",
+                    "nothing to update: pass --title, --body, --add-label, --remove-label or --draft",
                 );
             }
             let at = number(&given, &remote)?;

@@ -689,7 +689,7 @@ fn gitlab_update_sets_fields_labels_and_draft_state() {
         inputs(&env)[0].1,
         json!({"description": "B", "add_labels": "a,b", "remove_labels": "c"})
     );
-    ok(&env, &["update", "3", "--ready"]);
+    ok(&env, &["update", "3", "--draft=false"]);
     assert_eq!(inputs(&env)[1].1, json!({"title": "Add a"}));
     ok(&env, &["update", "3", "--title", "Draft: New", "--draft"]);
     assert_eq!(inputs(&env)[2].1, json!({"title": "Draft: New"}));
@@ -717,6 +717,35 @@ fn gitlab_list_mine_asks_for_created_by_me() {
 }
 
 #[test]
+fn a_self_hosted_origin_is_found_through_the_hosts_file() {
+    let env = setup("git@git.example.invalid:g/p.git");
+    let refused = err(&env, &["list"]);
+    assert!(
+        refused.contains("origin is not a GitHub or GitLab host"),
+        "{refused}"
+    );
+    let dir = env.path("config/agt");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("hosts.json"),
+        r#"{"git.example.invalid": {"service": "gitlab"}}"#,
+    )
+    .unwrap();
+    let probed = env.forge_calls().len();
+    let mr = gl_mr(&json!({"merge_when_pipeline_succeeds": false}));
+    gl_get(&env, &format!("{GL_MRS}{GL_LIST}"), &format!("[{mr}]"));
+    let rows = ok(&env, &["list"]);
+    assert_eq!(rows[0]["number"], 3);
+    assert!(
+        env.forge_calls()[probed..]
+            .iter()
+            .all(|call| call.starts_with("git.example.invalid\t")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
 fn gitlab_merge_refuses_a_head_that_is_not_the_sha() {
     let env = gitlab();
     gl_get(
@@ -736,7 +765,7 @@ fn github_ready_and_draft_run_their_mutations() {
         &["api", "graphql", "-f", "query=PrDraft", "-f", "id=PR_node"],
         "{}",
     );
-    ok(&env, &["update", "7", "--ready"]);
+    ok(&env, &["update", "7", "--draft=false"]);
     ok(&env, &["update", "7", "--draft"]);
     let calls = env.forge_calls().join("\n");
     assert_eq!(calls.matches("query=PrDraft").count(), 2);
@@ -805,4 +834,25 @@ fn gitlab_auto_merge_on_that_merges_at_once_succeeds_and_forgets_the_memo() {
     assert_eq!(on["merged"], true);
     assert_eq!(on["pr"]["state"], "merged");
     assert!(!std::fs::read_to_string(&record).unwrap().contains("squash"));
+}
+
+#[test]
+fn offline_refuses_every_pr_command() {
+    let env = github();
+    for offline in [false, true] {
+        let mut command = env.bin(&env.repo);
+        if offline {
+            command.arg("--offline");
+        } else {
+            command.env("AGT_OFFLINE", "1");
+        }
+        let output = command.args(["pr", "list"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("offline mode forbids agt pr"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(env.forge_calls().is_empty());
 }

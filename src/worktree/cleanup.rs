@@ -27,8 +27,6 @@ pub struct Options {
     /// Set from `agt cleanup --yes`.
     #[arg(skip)]
     pub yes: bool,
-    #[command(flatten)]
-    offline: Offline,
     /// Also remove worktrees with uncommitted work; the snapshot backup keeps it.
     #[arg(long)]
     dirty: bool,
@@ -47,7 +45,6 @@ impl Options {
     pub fn flag_given(&self) -> Option<&'static str> {
         [
             (self.all, "--all-repos"),
-            (self.offline.given(), "--offline"),
             (self.dirty, "--dirty"),
             (self.recent, "--recent"),
             (!self.only.is_empty(), "--worktree"),
@@ -168,7 +165,7 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
         report.warnings.push("no default branch found".into());
         return Ok(report);
     };
-    let origin = if cli.offline.is_set() {
+    let origin = if Offline::current().is_set() {
         None
     } else {
         Origin::of(repo)?
@@ -279,7 +276,7 @@ fn remove_worktree(
 ) -> Result<bool> {
     let path = &entry.path;
     let allow = Allow {
-        offline: cli.offline.is_set(),
+        offline: Offline::current().is_set(),
         recent: cli.recent,
         dirty: cli.dirty,
     };
