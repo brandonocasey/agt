@@ -39,7 +39,7 @@ pub const KIND: Kind = Kind {
     connect_issue: |host| Box::new(connect(host)),
 };
 
-fn connect(host: &str) -> Gitlab {
+pub fn connect(host: &str) -> Gitlab {
     Gitlab::new(Box::new(CliTransport::glab(host)))
 }
 

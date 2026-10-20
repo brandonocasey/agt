@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::core::error::Result;
 use crate::core::transcripts::json::text;
-use crate::forge::gitlab::Gitlab;
+use crate::forge::gitlab::{self, Gitlab};
 use crate::forge::gitlab::ci::base_of_id;
 use crate::forge::transport::CliTransport;
 
@@ -54,10 +54,10 @@ impl Project {
 
     /// A service of its own, since a transport is not shared between threads.
     fn service(&self) -> Gitlab {
-        Gitlab::new(match &self.host {
-            Some(host) => Box::new(CliTransport::glab(host)),
-            None => Box::new(CliTransport::glab_configured()),
-        })
+        match &self.host {
+            Some(host) => gitlab::connect(host),
+            None => Gitlab::new(Box::new(CliTransport::glab_configured())),
+        }
     }
 
     pub fn merge_request(&self, iid: u64) -> Result<Value> {

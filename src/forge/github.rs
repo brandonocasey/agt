@@ -63,7 +63,7 @@ pub const KIND: Kind = Kind {
     connect_issue: |host| Box::new(connect(host)),
 };
 
-fn connect(host: &str) -> Github {
+pub fn connect(host: &str) -> Github {
     Github::new(Box::new(CliTransport::gh(host)))
 }
 

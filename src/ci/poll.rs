@@ -6,10 +6,9 @@ use super::classify::{
     Head, State, blocked, classify, classify_gitlab, classify_pipeline, present,
 };
 use super::target::Resolved;
-use crate::forge::github::Github;
-use crate::forge::gitlab::Gitlab;
 use crate::forge::gitlab::project_path;
-use crate::forge::transport::{CliTransport, TransportError};
+use crate::forge::transport::TransportError;
+use crate::forge::{github, gitlab};
 use crate::store::model::Forge;
 
 /// Whether repeating the read may succeed: a rate limit, a timeout, a server error or a failure
@@ -78,7 +77,7 @@ pub fn snapshot(
 type Polled = Result<(State, Option<String>), TransportError>;
 
 fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
-    let github = Github::new(Box::new(CliTransport::gh(&target.host)));
+    let github = github::connect(&target.host);
     let pull = github.pull_checks(&target.repo, target.target.number)?;
     let head = head.or_else(|| pull.view["headRefOid"].as_str().map(str::to_owned));
     let expected = head.as_deref().unwrap_or("");
@@ -92,7 +91,7 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
 }
 
 fn pipeline(target: &Resolved) -> Result<State, TransportError> {
-    let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
+    let gitlab = gitlab::connect(&target.host);
     let base = project_path(&target.repo);
     let pipeline = gitlab.pipeline(&base, target.target.number)?;
     let jobs = gitlab.pipeline_jobs(&base, target.target.number, false)?;
@@ -100,7 +99,7 @@ fn pipeline(target: &Resolved) -> Result<State, TransportError> {
 }
 
 fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
-    let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
+    let gitlab = gitlab::connect(&target.host);
     let base = project_path(&target.repo);
     let mr = gitlab.merge_request(&base, target.target.number)?;
     let head = head.or_else(|| mr["sha"].as_str().map(str::to_owned));

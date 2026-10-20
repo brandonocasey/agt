@@ -13,10 +13,8 @@ pub mod transport;
 use serde_json::Value;
 
 use crate::core::error::{Error, Result};
-use crate::forge::github::Github;
-use crate::forge::gitlab::Gitlab;
 use crate::forge::service::SERVICES;
-use crate::forge::transport::{CliTransport, TransportError};
+use crate::forge::transport::TransportError;
 use crate::store::model::{
     Author, Comment, Forge, PostState, RemoteComment, RemoteThread, Review, ReviewState,
 };
@@ -89,11 +87,11 @@ pub fn head_has_pipeline(
 ) -> std::result::Result<bool, TransportError> {
     match forge {
         Forge::Github => {
-            let github = Github::new(Box::new(CliTransport::gh(host)));
+            let github = github::connect(host);
             Ok(github.pull_checks(repo, number)?.rollup > 0)
         }
         Forge::Gitlab => {
-            let gitlab = Gitlab::new(Box::new(CliTransport::glab(host)));
+            let gitlab = gitlab::connect(host);
             gitlab.head_pipeline_runs(&gitlab::project_path(repo), number, head_sha)
         }
     }
