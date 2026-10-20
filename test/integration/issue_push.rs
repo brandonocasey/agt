@@ -761,7 +761,7 @@ fn automatic_create_attaches_one_issue_and_returns_its_canonical_key() {
     );
     assert_eq!(env.forge_writes(fake), [fake.create_call().join(" ")]);
     let calls = env.forge_calls().len();
-    env.issue(&["note", "5", "Private"]);
+    env.issue(&["comment", "5", "Private", "--private"]);
     env.issue(&["link", "5", "--branch", "feat/private"]);
     env.issue(&["link", "5", "--pr", "7"]);
     assert_eq!(env.forge_calls().len(), calls);

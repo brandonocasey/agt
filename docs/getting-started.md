@@ -62,7 +62,7 @@ List open issues, then find this one by its text:
 
 ```sh
 agt issue --offline list
-agt issue --offline search "retry"
+agt issue --offline list --text "retry"
 ```
 
 The issue stays available after your chat or terminal closes.

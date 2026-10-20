@@ -1859,7 +1859,7 @@ fn repository_storage_identity_survives_relocation_after_private_edits() {
     fs::rename(env.repo.join(".agt/issues"), &legacy).unwrap();
     fs::remove_dir_all(env.path("state").join("agents/repository-imports")).unwrap();
     env.issue(&["list"]);
-    env.issue(&["note", "1", "Private relocation note"]);
+    env.issue(&["comment", "1", "Private relocation note", "--private"]);
     let review = env.run(&["run", "start"]);
     let review_key = review["target"].as_str().unwrap();
     let records = env.path("state").join("agents/repository-imports");

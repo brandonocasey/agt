@@ -1323,7 +1323,7 @@ Host and repository comparisons ignore ASCII case; existing tracker keys stay un
 
 ### Auto-sync of issues
 
-Reads (`list`, `show`, `search`, `status`, `find`) stay local unless
+Reads (`list`, `show`, `status`) stay local unless
 `sync.auto_pull = true`. Enabled pulls refresh applicable trackers when unsynced
 or at least `max_age_secs` old. Failures back off for that interval and print
 `agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
@@ -1340,20 +1340,17 @@ opt into remote access independently of automatic settings. `--offline` and
 | Command | What it does |
 | --- | --- |
 | `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Skips an issue whose `updated_at` is unchanged. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts` per tracker. |
-| `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending]` | Summaries; `pending` is whether anything is queued for the issue. |
+| `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending] [--text T] [--pr <n\|url>] [--branch B] [--title T]` | Summaries; `pending` is whether anything is queued for the issue. `--state` defaults to `open`, or to `all` when `--text`, `--pr`, `--branch` or `--title` is given. `--text` is a case-insensitive match over title, body, comments and notes; `matched` says where. `--pr`, `--branch` and `--title` look issues up: issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which; an issue that matches any of the three lookups is kept. All filters combine with AND. |
 | `show <key>` | The issue, its comments, links, notes, what is queued (`queued`), conflicts and errors. |
-| `search <text>` | Case-insensitive match over title, body, comments and notes; `matched` says where. |
 | `status` | Per tracker: counts, issues with queued changes, conflicts, errors, `push` and the last sync. |
-| `find --pr <n\|url>` / `find --branch <name>` / `--title <text>` | Issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which. |
-| `link <key> --pr\|--issue\|--review\|--task\|--branch <value>` | A local link, never sent. With `--pr <n\|url> --comment` it also queues a comment `Linked: <url>`, once per PR/MR. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
-| `note <key> <text>` | A private note, never sent. |
+| `link <key> --pr\|--branch <value>` | A local link, never sent. With `--pr <n\|url> --comment` it also queues a comment `Linked: <url>`, once per PR/MR. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
 
 Queued writes (`<text>` is read from stdin when it is `-`):
 
 | Command | Queues |
 | --- | --- |
-| `comment <key> <text>` | A comment. |
-| `create --title T [--body B] [--label L]... [--assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. |
+| `comment <key> <text> [--private]` | A comment. With `--private` it is kept as a note on the issue instead, never queued and never sent. |
+| `create --title T [--body B] [--add-label L]... [--add-assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. `--label` and `--assignee` are accepted for `--add-label` and `--add-assignee`. |
 | `edit <key> [--title T] [--body B] [--state open\|closed [--reason completed\|not-planned]] [--add-label L]... [--remove-label L]... [--add-assignee A]... [--remove-assignee A]...` | Any of these in one change; at least one is required. A reason is GitHub only. GitLab takes one assignee here; removals apply first, so one call can swap it. |
 
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then

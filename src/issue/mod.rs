@@ -32,9 +32,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         cli.command,
         Command::List(_)
             | Command::Show { .. }
-            | Command::Search { .. }
             | Command::Status
-            | Command::Find(_)
     ) {
         auto::sync_stale(&store, &repo, filter, cli.offline)?;
     }
@@ -49,12 +47,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
         Command::List(args) => view::list(&store, filter, args)?,
         Command::Show { key } => view::show(&store, filter, key)?,
-        Command::Search { text } => view::search(&store, filter, text)?,
         Command::Status => view::status(&store, filter)?,
-        Command::Find(args) => view::find(&store, filter, args)?,
         Command::Link(args) => local::link(&store, filter, args)?,
-        Command::Note { key, text } => local::note(&store, filter, key, text)?,
-        Command::Comment { key, text } => local::comment(&store, filter, key, text)?,
+        Command::Comment { key, text, private } => {
+            local::comment(&store, filter, key, text, *private)?
+        }
         Command::Create(args) => {
             let config = if filter.is_some() && filter != Some("local") {
                 Config::load_for_repo(&repo)?
