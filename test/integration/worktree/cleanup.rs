@@ -549,7 +549,7 @@ fn agt_offline_in_the_environment_skips_the_forge_too() {
 
     let output = site
         .env
-        .command(BIN, &site.env.repo)
+        .bin(&site.env.repo)
         .env("AGT_OFFLINE", "1")
         .args(["cleanup", "--only", "worktrees", "--yes"])
         .output()

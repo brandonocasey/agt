@@ -908,27 +908,15 @@ mod tests {
 
     #[test]
     fn current_branch_is_not_confused_by_a_tag_of_the_same_name() {
-        let root = tempfile::tempdir().unwrap();
-        let repo = Repo::at(root.path());
-        git(root.path(), &["init", "-q", "-b", "topic"]);
-        git(
-            root.path(),
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@example.com",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "first",
-            ],
-        );
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        let repo = Repo::at(&root);
+        sandbox.git(&root, &["init", "-q", "-b", "topic"]);
+        sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
         assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
-        git(root.path(), &["tag", "topic"]);
+        sandbox.git(&root, &["tag", "topic"]);
         assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
-        git(root.path(), &["checkout", "-q", "--detach"]);
+        sandbox.git(&root, &["checkout", "-q", "--detach"]);
         assert_eq!(repo.current_branch().unwrap(), None);
     }
 
