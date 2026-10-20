@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::json::{lost_field, persist_json, read_document};
+use super::json::{lost_field, persist_json, read_json};
 use crate::core::error::{Result, ctx, fail};
 use crate::store::model::{Target, VERSION};
 
@@ -29,13 +29,13 @@ pub(super) fn is_target_document(document: &Value) -> bool {
 }
 
 pub(super) fn is_target_file(path: &Path) -> Result<bool> {
-    Ok(read_document(path)?.is_some_and(|document| is_target_document(&document)))
+    Ok(read_json::<Value>(path)?.is_some_and(|document| is_target_document(&document)))
 }
 
 /// Reads the target a caller asked for by key. A file of another document kind is an error so
 /// that a write never replaces it.
 pub(super) fn read_target(path: &Path, schema: Schema) -> Result<Option<Target>> {
-    match read_document(path)? {
+    match read_json::<Value>(path)? {
         Some(document) => parse_target(path, document, schema).map(|(target, _)| Some(target)),
         None => Ok(None),
     }
@@ -47,7 +47,7 @@ pub(super) fn read_target_intact(
     path: &Path,
     schema: Schema,
 ) -> Result<Option<std::result::Result<Target, String>>> {
-    let Some(document) = read_document(path)? else {
+    let Some(document) = read_json::<Value>(path)? else {
         return Ok(None);
     };
     if !is_target_document(&document) {
@@ -65,7 +65,7 @@ pub(super) fn read_target_intact(
 /// Like [`read_target`], for a caller that will write the target back. Refuses a file holding
 /// fields this build does not know, because writing it would silently drop them.
 pub(super) fn read_target_for_write(path: &Path, schema: Schema) -> Result<Option<Target>> {
-    let Some(document) = read_document(path)? else {
+    let Some(document) = read_json::<Value>(path)? else {
         return Ok(None);
     };
     let (target, document) = parse_target(path, document, schema)?;

@@ -227,7 +227,8 @@ impl Store {
                                 path.display()
                             ));
                         }
-                        let Some(document) = super::json::read_document(&path)? else {
+                        let Some(document) = super::json::read_json::<serde_json::Value>(&path)?
+                        else {
                             continue;
                         };
                         if document.get("host").and_then(serde_json::Value::as_str)

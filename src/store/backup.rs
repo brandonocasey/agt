@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use super::json::read_document;
+use super::json::read_json;
 use super::{Store, create_dir};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::{lock_file, sync_dir};
@@ -20,7 +20,7 @@ impl Store {
         if self.backed_up.load(Ordering::Acquire) {
             return Ok(());
         }
-        let stored = read_document(path)?
+        let stored = read_json::<Value>(path)?
             .and_then(|document| document.get("version").and_then(Value::as_u64));
         let Some(stored) = stored.filter(|version| *version < u64::from(self.schema.version))
         else {

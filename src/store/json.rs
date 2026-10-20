@@ -50,10 +50,6 @@ pub(super) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     fail(format!("{} changed while opening; retry", path.display()))
 }
 
-pub(super) fn read_document(path: &Path) -> Result<Option<Value>> {
-    read_json(path)
-}
-
 /// The first field of `original` that `written` lacks, as a path.
 pub(super) fn lost_field(original: &Value, written: &Value, at: &str) -> Option<String> {
     match (original, written) {

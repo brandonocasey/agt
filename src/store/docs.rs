@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::json::{lost_field, persist_json, read_document};
+use super::json::{lost_field, persist_json, read_json};
 use super::prune::{Removal, remove_with_lock};
 use super::{Store, create_dir, ctx, fail, validate_key};
 use crate::core::error::Result;
@@ -35,7 +35,7 @@ impl Store {
     pub fn load_doc<T: DeserializeOwned>(&self, dir: &Path, name: &str) -> Result<Option<T>> {
         validate_key(name)?;
         let path = dir.join(format!("{name}.json"));
-        read_document(&self.read_path(&path))?
+        read_json::<Value>(&self.read_path(&path))?
             .map(|document| self.parse_doc(&path, document))
             .transpose()
     }
@@ -44,7 +44,7 @@ impl Store {
     pub fn docs<T: DeserializeOwned>(&self, dir: &Path, skip: &[&str]) -> Result<Vec<T>> {
         let mut docs = Vec::new();
         for path in self.doc_paths(dir, skip)? {
-            if let Some(document) = read_document(&path)? {
+            if let Some(document) = read_json::<Value>(&path)? {
                 docs.push(self.parse_doc(&path, document)?);
             }
         }
@@ -60,7 +60,7 @@ impl Store {
     ) -> Result<(Vec<T>, Vec<String>)> {
         let (mut docs, mut unknown) = (Vec::new(), Vec::new());
         for path in self.doc_paths(dir, skip)? {
-            let Some(document) = read_document(&path)? else {
+            let Some(document) = read_json::<Value>(&path)? else {
                 continue;
             };
             let doc: T = self.parse_doc(&path, document.clone())?;
@@ -112,7 +112,7 @@ impl Store {
         create_dir(dir)?;
         let _lock = lock_file(&dir.join(format!(".{name}.lock")))?;
         let path = dir.join(format!("{name}.json"));
-        let mut doc = match read_document(&path)? {
+        let mut doc = match read_json::<Value>(&path)? {
             Some(document) => {
                 let doc: T = self.parse_doc(&path, document.clone())?;
                 // Writing a file with fields this build does not know would drop them.
@@ -146,7 +146,7 @@ impl Store {
             return Ok(Removal::Busy);
         };
         let path = dir.join(format!("{name}.json"));
-        let Some(document) = read_document(&path)? else {
+        let Some(document) = read_json::<Value>(&path)? else {
             return Ok(Removal::Kept);
         };
         let doc: T = self.parse_doc(&path, document.clone())?;

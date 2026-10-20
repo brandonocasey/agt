@@ -14,7 +14,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use self::json::read_document;
+use self::json::read_json;
 use self::schema::{
     REVIEW_MIGRATIONS, Schema, is_target_document, is_target_file, parse_target, read_target,
     read_target_for_write, read_target_intact, write_target,
@@ -163,7 +163,7 @@ impl Store {
                 continue;
             }
             let path = entry.path();
-            let Some(document) = read_document(&path)? else {
+            let Some(document) = read_json::<serde_json::Value>(&path)? else {
                 continue;
             };
             if is_target_document(&document) {
