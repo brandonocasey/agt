@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env, Sealed, proc_start, unix_now};
+use crate::support::{Env, Sealed, proc_start, unix_now};
 
 const DAY: i64 = 86_400;
 /// 2027-01-01T00:00:00Z.
