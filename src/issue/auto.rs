@@ -7,7 +7,7 @@ use super::sync::sync_tracker;
 use super::trackers;
 use crate::core::config::Tracker;
 use crate::core::error::{Error, Result};
-use crate::forge::auto::{self, Policy};
+use crate::forge::auto::{self, Offline, Policy};
 use crate::store::Store;
 use crate::store::issues::{TRACKER_FILE, TrackerDoc};
 
@@ -22,7 +22,7 @@ pub fn sync_stale(
     store: &Store,
     repo: &crate::git::Repo,
     filter: Option<&str>,
-    offline: bool,
+    offline: Offline,
 ) -> Result<()> {
     let Some(mut policy) = Policy::resolve_for_repo(repo, offline) else {
         return Ok(());
@@ -76,18 +76,14 @@ enum Stop {
 
 fn sync_one(store: &Store, configured: &Tracker, dir: &std::path::Path) -> Result<(), Stop> {
     let busy = |why: &str| Stop::Busy(Error(why.into()));
-    let Some(_sync) = store
-        .try_publish_lock(dir, SYNC_LOCK)
-        .map_err(Stop::Failed)?
-    else {
-        return Err(busy("another agt is syncing"));
-    };
-    let Some(_push) = store
-        .try_publish_lock(dir, PUSH_LOCK)
-        .map_err(Stop::Failed)?
-    else {
-        return Err(busy("a push is running"));
-    };
+    let _locks = auto::lock_for_sync(
+        store,
+        dir,
+        SYNC_LOCK,
+        Some((PUSH_LOCK, "a push is running")),
+    )
+    .map_err(Stop::Failed)?
+    .map_err(busy)?;
     let tracker = trackers::ensure(store, configured).map_err(Stop::Failed)?;
     sync_tracker(store, tracker).map(drop).map_err(Stop::Failed)
 }
@@ -149,22 +145,12 @@ pub fn push_changed(
     store: &Store,
     repo: &crate::git::Repo,
     filter: Option<&str>,
-    offline: bool,
+    offline: Offline,
     value: &mut serde_json::Value,
 ) {
-    if auto::is_offline(offline) {
+    let Some(config) = auto::push_config(repo, offline) else {
         return;
-    }
-    let config = match crate::core::config::Config::load_for_repo(repo) {
-        Ok(config) => config,
-        Err(error) => {
-            auto::skipped(&error.0);
-            return;
-        }
     };
-    if !config.sync.auto_push {
-        return;
-    }
     let Some(key) = value
         .get("key")
         .and_then(serde_json::Value::as_str)

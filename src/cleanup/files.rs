@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::core::clock;
+use crate::core::env;
 use crate::core::error::{Error, Result};
 use crate::core::harness;
 use crate::core::local;
@@ -32,7 +33,7 @@ pub struct Stale {
 /// Settings point it at `~/.cache/claude-tmp`; older sessions used `/tmp`.
 pub fn harness_roots() -> Result<Vec<PathBuf>> {
     let uid = unsafe { libc::getuid() };
-    let tmp = std::env::var_os(TMP_OVERRIDE).map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    let tmp = PathBuf::from(env::value_or(TMP_OVERRIDE, "/tmp"));
     Ok(vec![local::home()?.join(harness::CLAUDE_TMP_DIR), tmp]
         .into_iter()
         .map(|base| base.join(format!("claude-{uid}")))

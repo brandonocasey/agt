@@ -5,9 +5,8 @@ pub struct Cli {
     /// Only this tracker: its key (`gh-github.com-owner-repo`) or `owner/repo`.
     #[arg(long, global = true, value_name = "KEY")]
     pub tracker: Option<String>,
-    /// Disable all network access (also `AGT_OFFLINE=1`).
-    #[arg(long, global = true)]
-    pub offline: bool,
+    #[command(flatten)]
+    pub offline: crate::forge::auto::Offline,
     #[command(subcommand)]
     pub command: Command,
 }

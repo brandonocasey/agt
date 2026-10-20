@@ -76,10 +76,8 @@ pub fn run(cli: Cli) -> Result<Output> {
     );
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
-    if crate::forge::auto::is_offline(cli.offline)
-        && matches!(cli.command, Command::Sync { .. } | Command::Publish { .. })
-    {
-        return crate::core::error::fail("offline mode forbids review sync and publish");
+    if matches!(cli.command, Command::Sync { .. } | Command::Publish { .. }) {
+        cli.offline.forbid("review sync and publish")?;
     }
     let mut ctx = Ctx::new(
         selection,

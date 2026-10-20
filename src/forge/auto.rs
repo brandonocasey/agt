@@ -2,12 +2,16 @@
 //! domains decide what to sync; this module decides whether to, how long a forge call may take
 //! and what a failure looks like. A failed auto-sync never fails the read.
 
+use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
+use clap::Args;
+
 use crate::core::clock;
 use crate::core::config::Config;
-use crate::core::error::Result;
+use crate::core::env;
+use crate::core::error::{Result, fail};
 use crate::forge::transport;
 use crate::store::Store;
 
@@ -27,17 +31,8 @@ pub struct Policy {
 }
 
 impl Policy {
-    pub fn resolve_for_repo(repo: &crate::git::Repo, offline: bool) -> Option<Self> {
-        if is_offline(offline) {
-            return None;
-        }
-        let config = match Config::load_for_repo(repo) {
-            Ok(config) => config,
-            Err(error) => {
-                skipped(&error.0);
-                return None;
-            }
-        };
+    pub fn resolve_for_repo(repo: &crate::git::Repo, offline: Offline) -> Option<Self> {
+        let config = load_unless_offline(repo, offline)?;
         if !config.sync.auto_pull {
             return None;
         }
@@ -114,18 +109,83 @@ pub fn skipped(reason: &str) {
     eprintln!("agt: sync skipped ({reason}); showing local data");
 }
 
-/// `AGT_OFFLINE` set to anything but empty, `0` or `false`.
-pub fn is_offline(offline: bool) -> bool {
-    offline
-        || std::env::var("AGT_OFFLINE")
-            .is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false"))
+/// The configuration when auto-push is on and the command is not offline; otherwise `None`,
+/// with a configuration that cannot be read left as a skipped-sync line on stderr.
+pub fn push_config(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {
+    load_unless_offline(repo, offline).filter(|config| config.sync.auto_push)
+}
+
+fn load_unless_offline(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {
+    if offline.is_set() {
+        return None;
+    }
+    match Config::load_for_repo(repo) {
+        Ok(config) => Some(config),
+        Err(error) => {
+            skipped(&error.0);
+            None
+        }
+    }
+}
+
+/// The locks a sync holds: the repository's sync lock and, when a target is being published,
+/// that target's publish lock. Released on drop.
+pub struct SyncLocks {
+    _sync: File,
+    _other: Option<File>,
+}
+
+/// Takes the lock named `sync_key` and then `other` (a key and the message for when it is
+/// held); `Err` is the reason another process holds one.
+pub fn lock_for_sync(
+    store: &Store,
+    dir: &Path,
+    sync_key: &str,
+    other: Option<(&str, &'static str)>,
+) -> Result<std::result::Result<SyncLocks, &'static str>> {
+    let Some(_sync) = store.try_publish_lock(dir, sync_key)? else {
+        return Ok(Err("another agt is syncing"));
+    };
+    let _other = match other {
+        Some((key, busy)) => match store.try_publish_lock(dir, key)? {
+            Some(lock) => Some(lock),
+            None => return Ok(Err(busy)),
+        },
+        None => None,
+    };
+    Ok(Ok(SyncLocks { _sync, _other }))
+}
+
+/// The `--offline` flag, which `AGT_OFFLINE` set to anything but empty, `0` or `false` also
+/// turns on.
+#[derive(Args, Clone, Copy)]
+pub struct Offline {
+    /// Disable automatic and explicit remote access (also `AGT_OFFLINE=1`).
+    #[arg(long = "offline", global = true)]
+    given: bool,
+}
+
+impl Offline {
+    /// Whether the flag was typed, which the environment does not count.
+    pub fn given(self) -> bool {
+        self.given
+    }
+
+    pub fn is_set(self) -> bool {
+        self.given || env::flag("AGT_OFFLINE")
+    }
+
+    /// Refuses `what` when offline.
+    pub fn forbid(self, what: &str) -> Result<()> {
+        if self.is_set() {
+            return fail(format!("offline mode forbids {what}"));
+        }
+        Ok(())
+    }
 }
 
 fn time_cap() -> Duration {
-    std::env::var(CAP_OVERRIDE)
-        .ok()
-        .and_then(|millis| millis.parse().ok())
-        .map_or(TIME_CAP, Duration::from_millis)
+    env::number(CAP_OVERRIDE).map_or(TIME_CAP, Duration::from_millis)
 }
 
 #[cfg(test)]

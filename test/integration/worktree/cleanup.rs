@@ -545,6 +545,29 @@ fn offline_skips_the_forge() {
 }
 
 #[test]
+fn agt_offline_in_the_environment_skips_the_forge_too() {
+    let site = Site::new();
+    let wt = site.branch("sq");
+    let tip = site.tip("sq");
+    site.squash("sq");
+    site.pulls("sq", &[merged(7, "sq", &tip)]);
+
+    let output = site
+        .env
+        .command(BIN, &site.env.repo)
+        .env("AGT_OFFLINE", "1")
+        .args(["cleanup", "--only", "worktrees", "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report = &report["worktrees"]["repositories"][0];
+    assert_eq!(site.kept(report, "sq")["verdict"], "unmerged");
+    assert!(wt.exists());
+    assert_eq!(site.env.forge_calls(), Vec::<String>::new());
+}
+
+#[test]
 fn a_failed_forge_call_is_unknown_and_keeps_everything() {
     let site = Site::new();
     site.branch("sq");

@@ -18,7 +18,7 @@ pub use cli::Cli;
 use cli::Command;
 
 use crate::core::config::Config;
-use crate::core::error::{Result, fail};
+use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::git::Repo;
 use crate::store::{Namespace, Store};
@@ -38,10 +38,8 @@ pub fn run(cli: Cli) -> Result<Output> {
     ) {
         auto::sync_stale(&store, &repo, filter, cli.offline)?;
     }
-    if matches!(cli.command, Command::Sync | Command::Push { .. })
-        && crate::forge::auto::is_offline(cli.offline)
-    {
-        return fail("offline mode forbids issue sync and push");
+    if matches!(cli.command, Command::Sync | Command::Push { .. }) {
+        cli.offline.forbid("issue sync and push")?;
     }
     let mut value = match &cli.command {
         Command::Sync => {

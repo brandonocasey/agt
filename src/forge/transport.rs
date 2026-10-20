@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::core::env;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;
 use crate::forge::service::{self, Endpoint, Pagination, Request, Var};
@@ -172,16 +173,11 @@ pub struct Cli {
     env: Vec<(&'static str, String)>,
 }
 
-/// The program for a forge tool: the `AGT_*` override, else the tool on `PATH`.
-fn tool_program(name: &str, default: &str) -> std::ffi::OsString {
-    std::env::var_os(name).unwrap_or_else(|| default.into())
-}
-
 impl Cli {
     pub fn gh(host: &str) -> Self {
         let name = service::kind(Forge::Github).tool;
         Self {
-            program: tool_program("AGT_GH_BIN", name),
+            program: env::value_or("AGT_GH_BIN", name),
             name,
             env: vec![("GH_HOST", host.to_owned())],
         }
@@ -198,7 +194,7 @@ impl Cli {
     pub fn glab_configured() -> Self {
         let name = service::kind(Forge::Gitlab).tool;
         Self {
-            program: tool_program("AGT_GLAB_BIN", name),
+            program: env::value_or("AGT_GLAB_BIN", name),
             name,
             env: Vec::new(),
         }
@@ -208,7 +204,7 @@ impl Cli {
     /// overrides the program.
     pub fn other(name: &'static str, over: &str) -> Self {
         Self {
-            program: tool_program(over, name),
+            program: env::value_or(over, name),
             name,
             env: Vec::new(),
         }

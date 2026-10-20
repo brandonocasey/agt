@@ -13,6 +13,7 @@ use super::remove::{refuse, removal};
 use super::{gate, info, roots};
 use crate::core::clock;
 use crate::core::error::Result;
+use crate::forge::auto::Offline;
 use crate::forge::landed::Origin;
 use crate::git::{Repo, Worktree};
 
@@ -27,9 +28,8 @@ pub struct Options {
     /// Set from `agt cleanup --yes`.
     #[arg(skip)]
     pub yes: bool,
-    /// Judge by local ancestry only; do not ask GitHub or GitLab.
-    #[arg(long)]
-    offline: bool,
+    #[command(flatten)]
+    offline: Offline,
     /// Also remove worktrees with uncommitted work; the snapshot backup keeps it.
     #[arg(long)]
     dirty: bool,
@@ -48,7 +48,7 @@ impl Options {
     pub fn flag_given(&self) -> Option<&'static str> {
         [
             (self.all, "--all-repos"),
-            (self.offline, "--offline"),
+            (self.offline.given(), "--offline"),
             (self.dirty, "--dirty"),
             (self.recent, "--recent"),
             (!self.only.is_empty(), "--worktree"),
@@ -169,7 +169,11 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
         report.warnings.push("no default branch found".into());
         return Ok(report);
     };
-    let origin = if cli.offline { None } else { Origin::of(repo)? };
+    let origin = if cli.offline.is_set() {
+        None
+    } else {
+        Origin::of(repo)?
+    };
     let main = info::real(&scene.main().path)?;
     let shared = Repo::at(&main);
     for entry in scene.entries.iter().skip(1).filter(|e| e.branch.is_none()) {
@@ -364,7 +368,7 @@ fn blocker(
     if let Err(error) = refuse(&scene.entries, &real, main) {
         return Ok(Some((None, error.to_string())));
     }
-    let gated = if cli.offline {
+    let gated = if cli.offline.is_set() {
         gate::check_offline(&real, main)
     } else {
         gate::check(&real, main)

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use super::disposable::is_os_junk;
 use super::{info, nested};
+use crate::core::env;
 use crate::core::error::{Result, fail};
 use crate::git::Repo;
 
@@ -363,10 +364,7 @@ fn missing_elsewhere(elsewhere: &[PathBuf], commits: Vec<String>) -> Vec<String>
 
 /// Seconds a remote check may take: 10, or `AGT_LS_REMOTE_TIMEOUT`.
 fn remote_timeout() -> u64 {
-    std::env::var("AGT_LS_REMOTE_TIMEOUT")
-        .ok()
-        .and_then(|seconds| seconds.parse().ok())
-        .unwrap_or(10)
+    env::number("AGT_LS_REMOTE_TIMEOUT").unwrap_or(10)
 }
 
 /// The tags the first remote of the repository advertises, as ref name and object id; an error

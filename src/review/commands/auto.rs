@@ -10,13 +10,13 @@ use super::sync::{self, Connection};
 use super::{Ctx, Scope};
 use crate::core::clock;
 use crate::core::error::{Error, Result};
-use crate::forge::auto::{self, Policy};
+use crate::forge::auto::{self, Offline, Policy};
 use crate::store::model::{ReviewState, TargetKind};
 
 /// Held while the repository syncs or looks a PR/MR up, so two reads do not repeat each other.
 const SYNC_LOCK: &str = "auto-sync";
 
-pub(super) fn sync_stale(ctx: &Ctx, offline: bool) -> Result<()> {
+pub(super) fn sync_stale(ctx: &Ctx, offline: Offline) -> Result<()> {
     let Some(policy) = Policy::resolve_for_repo(&ctx.repo, offline) else {
         return Ok(());
     };
@@ -132,16 +132,13 @@ fn locked(
     failure: &str,
     find: impl FnOnce(&Ctx) -> Result<Option<Connection>>,
 ) -> Result<bool> {
-    let Some(_sync) = ctx.store.try_publish_lock(&ctx.dir, SYNC_LOCK)? else {
-        return Err(Error("another agt is syncing".into()));
-    };
-    let _publish = match key {
-        Some(key) => match ctx.store.try_publish_lock(&ctx.dir, key)? {
-            Some(lock) => Some(lock),
-            None => return Err(Error("a publish is running".into())),
-        },
-        None => None,
-    };
+    let _locks = auto::lock_for_sync(
+        &ctx.store,
+        &ctx.dir,
+        SYNC_LOCK,
+        key.map(|key| (key, "a publish is running")),
+    )?
+    .map_err(|busy| Error(busy.into()))?;
     let result = find(ctx).and_then(|found| match found {
         Some(connection) => sync::sync_with(ctx, &connection).map(|_| true),
         None => Ok(false),
@@ -163,15 +160,11 @@ fn remember_miss(ctx: &Ctx, branch: &str) -> Result<()> {
     ctx.store.save_lookups(&ctx.dir, &lookups)
 }
 
-pub(super) fn publish_ended(ctx: &mut Ctx, run: &str, offline: bool) {
-    if auto::is_offline(offline) {
+pub(super) fn publish_ended(ctx: &mut Ctx, run: &str, offline: Offline) {
+    if auto::push_config(&ctx.repo, offline).is_none() {
         return;
     }
     auto::attempt(|| {
-        let config = crate::core::config::Config::load_for_repo(&ctx.repo)?;
-        if !config.sync.auto_push {
-            return Ok(());
-        }
         super::publish::publish(
             ctx,
             None,

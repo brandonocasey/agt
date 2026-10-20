@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod clock;
 pub mod config;
+pub mod env;
 pub mod error;
 pub mod group;
 pub mod harness;

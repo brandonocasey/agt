@@ -15,9 +15,8 @@ pub struct Cli {
     /// Branch the merge-base is taken against [default: origin/HEAD, then main or master].
     #[arg(long, global = true, value_name = "REF")]
     pub default_branch: Option<String>,
-    /// Disable automatic and explicit remote access (also `AGT_OFFLINE=1`).
-    #[arg(long, global = true)]
-    pub offline: bool,
+    #[command(flatten)]
+    pub offline: crate::forge::auto::Offline,
     #[command(subcommand)]
     pub command: Command,
 }
