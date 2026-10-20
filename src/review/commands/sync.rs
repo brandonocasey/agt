@@ -185,11 +185,9 @@ struct HostEntry {
 
 /// The forge the hosts file names for `host`, if any.
 fn hosts_file(host: &str) -> Result<Option<Forge>> {
-    let (Ok(current), Ok(base)) = (local::agt_config_file("hosts.json"), local::config_home())
-    else {
+    let Ok(path) = local::agt_config_file("hosts.json") else {
         return Ok(None);
     };
-    let path = local::current_or_older(current, base.join("agent-review").join("hosts.json"));
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

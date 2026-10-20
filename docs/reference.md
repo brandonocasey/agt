@@ -22,9 +22,7 @@ review coverage checks; older versions count every merge commit as unreviewed.
 Repositories with SHA-1 or SHA-256 object IDs both work.
 
 Up to 0.4.0, the binary was `agent-review`; its commands lacked the `review` prefix.
-Its stores remain readable. Posted comment markers retain the `agent-review` name,
-and `$XDG_CONFIG_HOME/agent-review/hosts.json` is still read when `$XDG_CONFIG_HOME/agt/hosts.json`
-does not exist.
+Its stores remain readable. Posted comment markers retain the `agent-review` name.
 
 A `v*` tag publishes release archives through the [release workflow](../.github/workflows/release.yml).
 
@@ -52,8 +50,8 @@ Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
 | --- | --- | --- |
 | `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
 | `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
-| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}`; the older `$XDG_CONFIG_HOME/agent-review/hosts.json` is read only when this one is missing | [Sync](#sync) |
-| `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model; the older `~/.config/agents/model-prices.json` is read only when this one is missing | [Sessions](#sessions) |
+| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}` | [Sync](#sync) |
+| `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model | [Sessions](#sessions) |
 
 Unknown keys and invalid values in the TOML files are errors that name the file and the key.
 
@@ -494,8 +492,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 
 ## Sync
 
-- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agt/hosts.json` (else the older
-  `$XDG_CONFIG_HOME/agent-review/hosts.json`), a JSON object of host to
+- Forge, in this order: an entry in `$XDG_CONFIG_HOME/agt/hosts.json`, a JSON object of host to
   `{"service": "github"}` or `{"service": "gitlab"}`, such as
   `{"git.example.com": {"service": "gitlab"}}`, with host names compared without regard to
   case and entries for other hosts ignored; the
@@ -1034,7 +1031,7 @@ Every command takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `
 session's cost so far from its transcript and its subagents' (it ignores the other options).
 A transcript last changed before the start date is not read. A root named with `--root` can hold either harness; a file whose
 first line is a Codex `session_meta` is read as Codex. Prices come from
-`$XDG_CONFIG_HOME/agt/model-prices.json` (else the older `~/.config/agents/model-prices.json`), or
+`$XDG_CONFIG_HOME/agt/model-prices.json`, or
 the file `AGT_PRICES` names; models it does not list are reported as unpriced.
 
 The prices file is a JSON object with a `models` object that maps a model name to its rates in

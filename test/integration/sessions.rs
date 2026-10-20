@@ -311,7 +311,9 @@ fn prices_come_from_the_agt_config_directory_else_the_older_agents_one() {
     let older = env.path("home/.config/agents");
     std::fs::create_dir_all(&older).unwrap();
     std::fs::write(older.join("model-prices.json"), &fixture).unwrap();
-    assert_eq!(default_prices(&env), wanted);
+    let (code, _, err) = default_prices(&env);
+    assert_eq!(code, Some(1), "the older location is no longer read");
+    assert!(err.contains("config/agt/model-prices.json"), "{err}");
 
     let current = env.path("config/agt");
     std::fs::create_dir_all(&current).unwrap();
