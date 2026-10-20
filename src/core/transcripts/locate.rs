@@ -44,30 +44,9 @@ pub struct Transcript {
     pub scripted: bool,
 }
 
-/// Claude Code profile directories in `home`: `.claude` and `.claude-<name>`, links followed,
-/// sorted by name.
-pub fn claude_profiles(home: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(home) else {
-        return Vec::new();
-    };
-    let mut profiles: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(harness::CLAUDE_DIR_PREFIX)
-        })
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
-    profiles.sort();
-    profiles
-}
-
 /// Every Claude Code profile's `projects` directory.
 pub fn claude_projects(home: &Path) -> Vec<PathBuf> {
-    claude_profiles(home)
+    harness::claude_profiles(home)
         .into_iter()
         .map(|profile| profile.join("projects"))
         .filter(|projects| projects.is_dir())
@@ -84,7 +63,7 @@ pub fn codex_roots(home: &Path) -> [PathBuf; 2] {
 /// `archive` and `archives`, and its `projects` when `projects` is set.
 pub fn all_roots(home: &Path, projects: bool) -> Vec<PathBuf> {
     let mut roots = codex_roots(home).to_vec();
-    for profile in claude_profiles(home) {
+    for profile in harness::claude_profiles(home) {
         if projects {
             roots.push(profile.join("projects"));
         }
@@ -97,7 +76,7 @@ pub fn all_roots(home: &Path, projects: bool) -> Vec<PathBuf> {
 pub fn history_files(home: &Path) -> Vec<PathBuf> {
     std::iter::once(home.join(harness::CODEX_DIR).join("history.jsonl"))
         .chain(
-            claude_profiles(home)
+            harness::claude_profiles(home)
                 .into_iter()
                 .map(|profile| profile.join("history.jsonl")),
         )

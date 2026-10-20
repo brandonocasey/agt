@@ -349,28 +349,14 @@ pub fn pids() -> Vec<i32> {
     os::pids()
 }
 /// The directories where Claude Code records live sessions as `<pid>.json`: `sessions` in
-/// `~/.claude`, in every other `~/.claude*` config directory, and in `$CLAUDE_CONFIG_DIR`.
+/// each Claude Code profile directory.
 pub fn session_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(config) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
-        dirs.push(PathBuf::from(config).join("sessions"));
-    }
-    if let Ok(home) = local::home()
-        && let Ok(entries) = std::fs::read_dir(&home)
-    {
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(harness::CLAUDE_DIR_PREFIX)
-            {
-                dirs.push(entry.path().join("sessions"));
-            }
-        }
-    }
-    dirs.sort();
-    dirs.dedup();
-    dirs
+    // Without a home only `$CLAUDE_CONFIG_DIR` can name a profile; an empty path lists nothing.
+    let home = local::home().unwrap_or_default();
+    harness::claude_profiles(&home)
+        .into_iter()
+        .map(|profile| profile.join("sessions"))
+        .collect()
 }
 
 /// `ps`'s `lstart` text, such as `Fri Oct 16 16:41:54 2026`, as Unix seconds read in local time

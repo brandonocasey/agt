@@ -144,6 +144,17 @@ fn default_roots_follow_linked_claude_profiles() {
 }
 
 #[test]
+fn default_roots_include_the_claude_config_dir() {
+    let env = Env::new();
+    let profile = env.path("relocated");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::os::unix::fs::symlink(fixtures().join("projects"), profile.join("projects")).unwrap();
+    let mut command = sessions(&env, &["cost", "--harness", "claude"]);
+    command.env("CLAUDE_CONFIG_DIR", &profile);
+    assert_eq!(stdout(command), expected("cost"));
+}
+
+#[test]
 fn codex_rollouts_read_as_calls_tools_and_messages() {
     let env = Env::new();
     assert_eq!(

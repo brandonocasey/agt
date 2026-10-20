@@ -1,6 +1,8 @@
 //! Names agt takes from the user's agent harness setup (Claude Code, Codex and the shared
 //! `agents` cache) rather than from agt itself, in one place.
 
+use std::path::{Path, PathBuf};
+
 /// Task scratch space, relative to `$HOME`; `agt doctor` wants it in the global git ignore.
 pub const SCRATCH_DIR: &str = ".cache/agents/scratch";
 
@@ -19,6 +21,9 @@ pub const CLAUDE_TMP_DIR: &str = ".cache/claude-tmp";
 /// Name prefix of Claude Code's per-profile config directories under `$HOME`: `.claude`,
 /// `.claude-<name>`.
 pub const CLAUDE_DIR_PREFIX: &str = ".claude";
+
+/// The environment variable that relocates Claude Code's config directory.
+pub const CLAUDE_CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
 
 /// Codex's config directory under `$HOME`.
 pub const CODEX_DIR: &str = ".codex";
@@ -39,3 +44,29 @@ pub const SKILLS_INSTRUCTIONS_TAG: &str = "<skills_instructions>";
 
 /// Path fragment of files under Codex's config directory.
 pub const CODEX_PATH: &str = "/.codex/";
+
+/// Claude Code profile directories: `.claude` and `.claude-<name>` in `home`, links followed,
+/// and `$CLAUDE_CONFIG_DIR` when set, sorted by path.
+pub fn claude_profiles(home: &Path) -> Vec<PathBuf> {
+    let mut profiles: Vec<PathBuf> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(CLAUDE_DIR_PREFIX)
+        })
+        .map(|entry| entry.path())
+        .chain(
+            std::env::var_os(CLAUDE_CONFIG_ENV)
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from),
+        )
+        .filter(|path| path.is_dir())
+        .collect();
+    profiles.sort();
+    profiles.dedup();
+    profiles
+}
