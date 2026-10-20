@@ -7,6 +7,7 @@ use super::super::scenario::{
     Setup, assert_never_posted, assert_summary, input_of, marked, sent, thread,
 };
 use super::super::{Env, args, fixture, strs};
+use super::argv::{glab_get, glab_is_get, glab_paginate, glab_write};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
 
 pub const MR: &str = "projects/me%2Fproj/merge_requests/3";
@@ -25,36 +26,21 @@ impl Gitlab {
 }
 
 pub fn write(method: &str, path: &str) -> Vec<String> {
-    args(&[
-        "api",
-        "-X",
-        method,
-        path,
-        "-H",
-        "Content-Type: application/json",
-        "--input",
-        "-",
-    ])
+    glab_write(method, path)
 }
 
 pub fn read(path: &str) -> Vec<String> {
-    args(&["api", "-X", "GET", path])
+    glab_get(path)
 }
 
 /// A paginated list of `path` of the merge request `mr`.
 pub fn list(mr: &str, path: &str) -> Vec<String> {
-    args(&[
-        "api",
-        "-X",
-        "GET",
-        "--paginate",
-        &format!("{mr}/{path}?per_page=100"),
-    ])
+    glab_paginate(&format!("{mr}/{path}?per_page=100"))
 }
 
 /// Answers `glab api user` as `me`.
 pub fn login(env: &Env) {
-    env.respond(&["api", "-X", "GET", "user"], r#"{"username":"me"}"#);
+    env.respond(&strs(&glab_get("user")), r#"{"username":"me"}"#);
 }
 
 pub fn note(id: u64, login: &str, body: &str) -> Value {
@@ -199,7 +185,7 @@ impl FakeService for Gitlab {
     }
 
     fn is_read(&self, args: &str) -> bool {
-        args.starts_with("api -X GET ")
+        glab_is_get(args)
     }
 
     fn call(&self, call: Call) -> Vec<String> {

@@ -11,6 +11,7 @@ use serde_json::Value;
 use super::scenario::{Setup, count_calls};
 use super::{Env, strs};
 
+pub mod argv;
 pub mod github;
 pub mod gitlab;
 

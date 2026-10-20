@@ -8,6 +8,9 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 
+use super::forge::argv::{
+    gh_get, gh_is_get, gh_paginate, gh_write, glab_get, glab_is_get, glab_paginate, glab_write,
+};
 use super::{Env, args, strs};
 
 /// `AGT_NOW` of every issue command: 2026-10-17T12:00:00Z.
@@ -360,65 +363,33 @@ impl IssueFake for Github {
     }
 
     fn is_read(&self, args: &str) -> bool {
-        args.contains("--method GET") || args.starts_with("api graphql")
+        gh_is_get(args) || args.starts_with("api graphql")
     }
 
     fn user_call(&self) -> Vec<String> {
-        args(&["api", "--method", "GET", "user"])
+        gh_get("user")
     }
 
     fn list_call(&self, since: &str) -> Vec<String> {
-        args(&[
-            "api",
-            "--method",
-            "GET",
-            "--paginate",
-            &format!(
-                "repos/o/r/issues?state=all&since={since}&sort=updated&direction=asc&per_page=100"
-            ),
-        ])
+        gh_paginate(&format!(
+            "repos/o/r/issues?state=all&since={since}&sort=updated&direction=asc&per_page=100"
+        ))
     }
 
     fn issue_call(&self, number: u64) -> Vec<String> {
-        args(&[
-            "api",
-            "--method",
-            "GET",
-            &format!("repos/o/r/issues/{number}"),
-        ])
+        gh_get(&format!("repos/o/r/issues/{number}"))
     }
 
     fn update_call(&self, number: u64) -> Vec<String> {
-        args(&[
-            "api",
-            "--method",
-            "PATCH",
-            &format!("repos/o/r/issues/{number}"),
-            "--input",
-            "-",
-        ])
+        gh_write("PATCH", &format!("repos/o/r/issues/{number}"))
     }
 
     fn comment_call(&self, number: u64) -> Vec<String> {
-        args(&[
-            "api",
-            "--method",
-            "POST",
-            &format!("repos/o/r/issues/{number}/comments"),
-            "--input",
-            "-",
-        ])
+        gh_write("POST", &format!("repos/o/r/issues/{number}/comments"))
     }
 
     fn create_call(&self) -> Vec<String> {
-        args(&[
-            "api",
-            "--method",
-            "POST",
-            "repos/o/r/issues",
-            "--input",
-            "-",
-        ])
+        gh_write("POST", "repos/o/r/issues")
     }
 
     fn fetch_rest(&self, spec: &Spec) -> Vec<(Vec<String>, String)> {
@@ -437,13 +408,10 @@ impl IssueFake for Github {
         }}}});
         vec![
             (
-                args(&[
-                    "api",
-                    "--method",
-                    "GET",
-                    "--paginate",
-                    &format!("repos/o/r/issues/{}/comments?per_page=100", spec.number),
-                ]),
+                gh_paginate(&format!(
+                    "repos/o/r/issues/{}/comments?per_page=100",
+                    spec.number
+                )),
                 Value::Array(comments).to_string(),
             ),
             (
@@ -553,71 +521,33 @@ impl IssueFake for Gitlab {
     }
 
     fn is_read(&self, args: &str) -> bool {
-        args.contains("-X GET")
+        glab_is_get(args)
     }
 
     fn user_call(&self) -> Vec<String> {
-        args(&["api", "-X", "GET", "user"])
+        glab_get("user")
     }
 
     fn list_call(&self, since: &str) -> Vec<String> {
-        args(&[
-            "api",
-            "-X",
-            "GET",
-            "--paginate",
-            &format!(
-                "projects/g%2Fp/issues?scope=all&state=all&updated_after={since}&order_by=updated_at&sort=asc&per_page=100"
-            ),
-        ])
+        glab_paginate(&format!(
+            "projects/g%2Fp/issues?scope=all&state=all&updated_after={since}&order_by=updated_at&sort=asc&per_page=100"
+        ))
     }
 
     fn issue_call(&self, number: u64) -> Vec<String> {
-        args(&[
-            "api",
-            "-X",
-            "GET",
-            &format!("projects/g%2Fp/issues/{number}"),
-        ])
+        glab_get(&format!("projects/g%2Fp/issues/{number}"))
     }
 
     fn update_call(&self, number: u64) -> Vec<String> {
-        args(&[
-            "api",
-            "-X",
-            "PUT",
-            &format!("projects/g%2Fp/issues/{number}"),
-            "-H",
-            "Content-Type: application/json",
-            "--input",
-            "-",
-        ])
+        glab_write("PUT", &format!("projects/g%2Fp/issues/{number}"))
     }
 
     fn comment_call(&self, number: u64) -> Vec<String> {
-        args(&[
-            "api",
-            "-X",
-            "POST",
-            &format!("projects/g%2Fp/issues/{number}/notes"),
-            "-H",
-            "Content-Type: application/json",
-            "--input",
-            "-",
-        ])
+        glab_write("POST", &format!("projects/g%2Fp/issues/{number}/notes"))
     }
 
     fn create_call(&self) -> Vec<String> {
-        args(&[
-            "api",
-            "-X",
-            "POST",
-            "projects/g%2Fp/issues",
-            "-H",
-            "Content-Type: application/json",
-            "--input",
-            "-",
-        ])
+        glab_write("POST", "projects/g%2Fp/issues")
     }
 
     fn fetch_rest(&self, spec: &Spec) -> Vec<(Vec<String>, String)> {
@@ -634,7 +564,7 @@ impl IssueFake for Gitlab {
                 "state": "opened", "source_branch": pr.branch, "references": {"full": format!("g/p!{}", pr.number)}})
         };
         let base = format!("projects/g%2Fp/issues/{}", spec.number);
-        let get = |path: String| args(&["api", "-X", "GET", "--paginate", &path]);
+        let get = |path: String| glab_paginate(&path);
         vec![
             (
                 get(format!("{base}/discussions?per_page=100")),

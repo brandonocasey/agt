@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::super::scenario::{Setup, ids, marked, sent, thread};
 use super::super::{Env, args, fixture, strs};
+use super::argv::{gh_get, gh_is_get, gh_write};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
 
 pub const REVIEWS: &str = "repos/me/repo/pulls/42/reviews";
@@ -25,7 +26,7 @@ impl Github {
 }
 
 pub fn post(path: &str) -> Vec<String> {
-    args(&["api", "--method", "POST", path, "--input", "-"])
+    gh_write("POST", path)
 }
 
 /// A GraphQL write on a review thread; `body` is whether it sends text.
@@ -40,7 +41,7 @@ pub fn mutation(thread: &str, query: &str, body: bool) -> Vec<String> {
 
 /// Answers `gh api user` as `me`.
 pub fn login(env: &Env) {
-    env.respond(&["api", "--method", "GET", "user"], r#"{"login":"me"}"#);
+    env.respond(&strs(&gh_get("user")), r#"{"login":"me"}"#);
 }
 
 /// Answers the lookup of the PRs of branch `feat` of `repo` with `body`.
@@ -229,8 +230,7 @@ impl FakeService for Github {
     }
 
     fn is_read(&self, args: &str) -> bool {
-        args.starts_with("api --method GET ")
-            || (args.starts_with("api graphql ") && args.contains("query="))
+        gh_is_get(args) || (args.starts_with("api graphql ") && args.contains("query="))
     }
 
     fn call(&self, call: Call) -> Vec<String> {
