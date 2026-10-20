@@ -905,22 +905,19 @@ write must name (record `version` 1). Commands that find or search sessions are
 
 ## Branch
 
-`agt branch check` combines push and merge checks in one JSON report.
-The separate `pushed` and `landable` commands retain their output and exit codes.
+`agt branch check` runs push and merge checks and prints one JSON report.
 
 ```sh
-agt branch check [BRANCH] [--checks pushed,landable] [--remote origin] [--target BRANCH]
-agt branch pushed [BRANCH] [--remote origin]
-agt branch landable [BRANCH] [--target BRANCH]
+agt branch check [BRANCH] [--checks pushed,landable] [--remote origin] [--base BRANCH]
 ```
 
 `check` runs both checks by default. `--checks pushed` or `--checks landable` selects one.
-Its `checks` object holds each check's `status` and `report`, or `error` when it fails.
-Both selected checks run even when one fails. The combined exit status prioritizes errors (1),
-then conflicts (5), then an unpushed branch (4), otherwise success (0).
-`--remote` applies to the pushed check; `--target` applies to the landable check.
+Its `checks` object holds each check's `status` and `report`, or `error` when it fails
+(for a single selected check too). Every selected check runs even when one fails. The exit status
+prioritizes errors (1), then conflicts (5), then an unpushed branch (4), otherwise success (0).
+`--remote` applies to the pushed check; `--base` applies to the landable check.
 
-`BRANCH` defaults to the current branch. `pushed` fetches `refs/heads/<branch>` from the remote,
+`BRANCH` defaults to the current branch. The `pushed` check fetches `refs/heads/<branch>` from the remote,
 pins the fetched commit and compares it with the local tip: `state` is `equal`, `ahead`, `behind`,
 `diverged` or `missing` (not on the remote), with `ahead` and `behind` counts. `uncommitted`
 counts the changed paths of the worktree that has the branch checked out (null when none does).
@@ -929,14 +926,14 @@ When an open PR/MR of the branch exists in the repository `origin` names, `pr` h
 check run, status or pipeline exists for the PR/MR head). When only the check or pipeline query
 fails, the PR/MR fields stay, `pipeline.exists` is null and a warning names the cause. When the
 forge lookup fails (`gh` or `glab` missing or not logged in), `pr` is null, a warning on stderr names the cause, and the exit
-code follows the git state alone. Exit 0 only when `state` is `equal` and
-any PR/MR head matches; exit 4 otherwise; exit 1 on an error.
+code follows the git state alone. Status 0 only when `state` is `equal` and
+any PR/MR head matches; 4 otherwise.
 
-`landable` compares the branch with the target, which defaults to the newest default base among
+The `landable` check compares the branch with `--base`, which defaults to the newest default base among
 every remote's live default branch and the local one (the choice `agt worktree create` makes).
 It reports `behind` and `ahead` counts, `conflicts` (the paths `git merge-tree --write-tree`
 cannot merge) and `already_in_target` (commits of the branch whose patch the target has, from
-`git cherry`). Exit 0 without conflicts, 5 with conflicts, 1 on an error.
+`git cherry`). Status 0 without conflicts, 5 with conflicts.
 
 ## CI
 

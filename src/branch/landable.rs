@@ -1,4 +1,4 @@
-//! `agt branch landable`.
+//! The `landable` check of `agt branch check`.
 
 use serde_json::{Value, json};
 
@@ -7,12 +7,12 @@ use crate::core::error::Result;
 use crate::git::Repo;
 use crate::git::base::{candidates, choose};
 
-pub fn run(repo: &Repo, branch: &str, target: Option<&str>) -> Result<(Value, u8)> {
+pub fn run(repo: &Repo, branch: &str, base: Option<&str>) -> Result<(Value, u8)> {
     let tip = tip(repo, branch)?;
-    let (name, base) = match target {
-        Some(target) => (target.to_owned(), repo.commit(target)?),
+    let (name, base) = match base {
+        Some(base) => (base.to_owned(), repo.commit(base)?),
         None => {
-            let found = candidates(repo, "--target")?;
+            let found = candidates(repo, "--base")?;
             let (chosen, _) = choose(repo, &found)?;
             let chosen = &found[chosen];
             let name = match &chosen.remote {
