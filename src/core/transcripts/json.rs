@@ -59,6 +59,14 @@ pub fn head(text: &str, n: usize) -> &str {
         .map_or(text, |(at, _)| &text[..at])
 }
 
+/// A string as it is, any other value as its JSON text.
+pub fn display(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// How many characters of a session id name a session in reports.
 pub const SHORT_ID: usize = 8;
 

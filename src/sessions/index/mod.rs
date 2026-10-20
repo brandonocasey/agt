@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::clock;
+use crate::core::env;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::{Lock, error_code, private_dir, tasks_dir, write_atomic};
 use crate::core::output::Output;
@@ -154,16 +155,7 @@ fn limit(option: Option<u64>, variable: &str) -> Result<u64> {
     if let Some(number) = option {
         return Ok(number);
     }
-    match std::env::var(variable)
-        .ok()
-        .filter(|value| !value.is_empty())
-    {
-        None => Ok(UNLIMITED),
-        Some(value) => match value.trim().parse::<u64>() {
-            Ok(number) if number >= 1 => Ok(number),
-            _ => fail(format!("{variable} must be a positive integer")),
-        },
-    }
+    Ok(env::positive(variable)?.unwrap_or(UNLIMITED))
 }
 
 fn timestamp_key(timestamp: &Value) -> String {

@@ -8,7 +8,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::core::transcripts::injected;
-use crate::core::transcripts::json::{get, head, key, text, truthy};
+use crate::core::transcripts::json::{display, get, head, key, text, truthy};
 use crate::sessions::fmt;
 use crate::sessions::source::Loaded;
 use crate::sessions::spend::short_project;
@@ -49,13 +49,6 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-fn shown(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
 pub(super) fn input_summary(block: &Value) -> String {
     let input = get(block, "input");
     let input = if truthy(input) {
@@ -67,7 +60,7 @@ pub(super) fn input_summary(block: &Value) -> String {
         .into_iter()
         .map(|name| get(&input, name))
         .find(|value| truthy(value))
-        .map_or_else(|| input.to_string(), shown);
+        .map_or_else(|| input.to_string(), display);
     head(&summary, 100).to_owned()
 }
 

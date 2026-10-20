@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use super::codex::Adapter;
-use super::json::{get, key, object, text, truthy};
+use super::json::{display, get, key, object, text, truthy};
 use super::locate::Transcript;
 use crate::core::harness::Harness;
 
@@ -95,11 +95,7 @@ impl Transcript {
                 anonymous += 1;
                 format!("a{anonymous}")
             };
-            let model = match message.get("model") {
-                Some(Value::String(model)) => model.clone(),
-                Some(other) => other.to_string(),
-                None => "?".into(),
-            };
+            let model = message.get("model").map_or_else(|| "?".into(), display);
             calls.insert(
                 name.clone(),
                 Call {

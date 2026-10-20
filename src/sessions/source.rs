@@ -152,7 +152,7 @@ fn compact(record: &serde_json::Value, needs: Needs) -> Option<serde_json::Value
                     summary["tool_key"] =
                         super::tools::tool_key(text(block, "name"), get(block, "input")).into();
                     summary["input_tokens"] =
-                        (get(block, "input").to_string().chars().count() as f64 / 4.0).into();
+                        super::tools::est_text_tokens(&get(block, "input").to_string()).into();
                 }
                 if needs.gaps {
                     summary["gap_tool"] = super::tools::gap_tool(block).into();
@@ -309,7 +309,10 @@ mod tests {
         .expect("tool result summary");
         let block = &summary["message"]["content"][0];
         assert_eq!(block["denial"], "safety check");
-        assert_eq!(block["result_tokens"], output.chars().count() as f64 / 4.0);
+        assert_eq!(
+            block["result_tokens"],
+            crate::sessions::tools::est_text_tokens(&output)
+        );
         assert!(summary["typed"].is_null());
         assert!(summary.to_string().len() < 500);
     }

@@ -96,10 +96,7 @@ mod os {
             .unwrap_or(100);
         let start = boot_time()? + i64::try_from(ticks / per_sec).ok()?;
         let environ = fs::read(format!("{dir}/environ")).unwrap_or_default();
-        let claude_pid = environ
-            .split(|byte| *byte == 0)
-            .find_map(|var| var.strip_prefix(b"CLAUDE_PID="))
-            .and_then(|value| std::str::from_utf8(value).ok()?.parse().ok());
+        let claude_pid = super::claude_pid(environ.split(|byte| *byte == 0));
         let cmd = fs::read(format!("{dir}/cmdline")).unwrap_or_default();
         Some(Proc {
             pid,
@@ -308,10 +305,7 @@ mod os {
             return None;
         }
         let (argv, env) = args(pid);
-        let claude_pid = env
-            .iter()
-            .find_map(|var| var.strip_prefix(b"CLAUDE_PID="))
-            .and_then(|value| std::str::from_utf8(value).ok()?.parse().ok());
+        let claude_pid = super::claude_pid(env.iter().map(Vec::as_slice));
         let comm = unsafe { CStr::from_ptr(info.pbi_comm.as_ptr()) }
             .to_string_lossy()
             .into_owned();
@@ -340,6 +334,20 @@ fn command_line<'a>(parts: impl Iterator<Item = &'a [u8]>) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     joined.chars().take(80).collect()
+}
+
+/// The `CLAUDE_PID` among a process's `NAME=value` environment entries.
+fn claude_pid<'a>(vars: impl IntoIterator<Item = &'a [u8]>) -> Option<i32> {
+    vars.into_iter()
+        .find_map(|var| var.strip_prefix(b"CLAUDE_PID="))
+        .and_then(|value| std::str::from_utf8(value).ok()?.parse().ok())
+}
+
+/// The `CLAUDE_PID` of this process's own environment.
+fn own_claude_pid() -> Option<i32> {
+    std::env::var("CLAUDE_PID")
+        .ok()
+        .and_then(|value| value.parse().ok())
 }
 
 pub fn read(pid: i32) -> Option<Proc> {
@@ -473,10 +481,7 @@ pub fn session_tree() -> Vec<i32> {
         .copied()
         .filter(|pid| live_pids.contains(pid))
         .collect();
-    let claude: Option<i32> = std::env::var("CLAUDE_PID")
-        .ok()
-        .and_then(|value| value.parse().ok());
-    found.extend(claude);
+    found.extend(own_claude_pid());
     if found.is_empty() {
         return found;
     }
@@ -501,10 +506,7 @@ pub fn session_tree() -> Vec<i32> {
 /// The pids of the calling session: this process, its ancestors and `CLAUDE_PID` when set.
 pub fn own_pids() -> Vec<i32> {
     let mut pids = lineage();
-    let claude: Option<i32> = std::env::var("CLAUDE_PID")
-        .ok()
-        .and_then(|value| value.parse().ok());
-    pids.extend(claude);
+    pids.extend(own_claude_pid());
     pids
 }
 

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::core::harness::{self, Harness};
-use crate::core::transcripts::json::{count, get, head, key, object, text, truthy};
+use crate::core::transcripts::json::{count, display, get, head, key, object, text, truthy};
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, grouped, tok};
 use crate::sessions::prices::{Prices, tokens};
@@ -55,10 +55,15 @@ const WRITE_WEIGHT: f64 = 2.0;
 const READ_WEIGHT: f64 = 0.1;
 const OUTPUT_WEIGHT: f64 = 5.0;
 
+/// About four characters per token.
+pub(super) fn est_text_tokens(text: &str) -> f64 {
+    text.chars().count() as f64 / 4.0
+}
+
 /// About four characters per token; an image counts 1,600.
 pub(super) fn est_tokens(content: &Value) -> f64 {
     match content {
-        Value::String(text) => text.chars().count() as f64 / 4.0,
+        Value::String(text) => est_text_tokens(text),
         Value::Array(blocks) => {
             blocks
                 .iter()
@@ -66,12 +71,12 @@ pub(super) fn est_tokens(content: &Value) -> f64 {
                 .fold(0.0, |sum, block| {
                     sum + match text(block, "type") {
                         "image" => 1600.0,
-                        "text" => text(block, "text").chars().count() as f64 / 4.0,
-                        _ => block.to_string().chars().count() as f64 / 4.0,
+                        "text" => est_text_tokens(text(block, "text")),
+                        _ => est_text_tokens(&block.to_string()),
                     }
                 })
         }
-        other if truthy(other) => other.to_string().chars().count() as f64 / 4.0,
+        other if truthy(other) => est_text_tokens(&other.to_string()),
         _ => 0.0,
     }
 }
@@ -194,10 +199,7 @@ pub(super) fn gap_tool(block: &Value) -> String {
     let detail = [get(input, "command"), get(input, "description")]
         .into_iter()
         .find(|value| truthy(value))
-        .map(|value| match value {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        })
+        .map(display)
         .unwrap_or_default();
     format!("{}: {}", text(block, "name"), head(&detail, 60)).replace('\n', " ")
 }
