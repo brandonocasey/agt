@@ -170,6 +170,7 @@ pub(super) fn publish_ended(ctx: &mut Ctx, run: &str, offline: Offline) {
                 dry_run: false,
                 not_own: false,
                 only: Vec::new(),
+                approval: None,
                 run: Some(run.to_owned()),
             },
         )?;

@@ -236,19 +236,17 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Publish {
             dry_run,
             not_own,
-            mut only,
+            only,
             pr,
             approval,
         } => {
+            let mut approval_id = None;
             if !approval.approve && (approval.author.is_set()) {
                 return fail("author flags on publish need --approve");
             }
             if approval.approve {
                 let approved = approve(&ctx, &approval)?;
-                // A foreign PR/MR posts only the threads named, so name the approval.
-                if not_own && let Some(id) = approved["thread"]["id"].as_str() {
-                    only.push(id.to_owned());
-                }
+                approval_id = approved["thread"]["id"].as_str().map(str::to_owned);
             }
             publish::publish(
                 &mut ctx,
@@ -257,6 +255,7 @@ pub fn run(cli: Cli) -> Result<Output> {
                     dry_run,
                     not_own,
                     only,
+                    approval: approval_id,
                     run: None,
                 },
             )?

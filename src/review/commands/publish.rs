@@ -22,6 +22,8 @@ pub(super) struct Options {
     pub dry_run: bool,
     pub not_own: bool,
     pub only: Vec<String>,
+    /// The approval thread `--approve` just recorded: always posted, whatever `only` names.
+    pub approval: Option<String>,
     pub run: Option<String>,
 }
 

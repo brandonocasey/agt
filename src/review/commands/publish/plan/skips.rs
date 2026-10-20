@@ -226,7 +226,12 @@ impl Planner<'_> {
     /// Why a thread of ours is held: not named by `--only`, or on someone else's PR/MR
     /// with no `--only` naming threads to post there.
     pub(super) fn held(&self, thread: &Thread) -> Option<Skip> {
-        self.unnamed(thread).or_else(|| self.foreign_threads())
+        self.unnamed(thread)
+            .or_else(|| self.foreign_threads().filter(|_| !self.is_approval(thread)))
+    }
+
+    fn is_approval(&self, thread: &Thread) -> bool {
+        self.approval == Some(thread.id.as_str())
     }
 
     pub(super) fn selected_thread(&self, thread: &Thread) -> bool {
@@ -243,7 +248,8 @@ impl Planner<'_> {
     }
 
     pub(super) fn unnamed(&self, thread: &Thread) -> Option<Skip> {
-        (!self.only.is_empty() && !self.only.contains(&thread.id)).then_some(Skip::NotNamed)
+        (!self.only.is_empty() && !self.only.contains(&thread.id) && !self.is_approval(thread))
+            .then_some(Skip::NotNamed)
     }
 
     /// Why our findings and local threads are held on someone else's PR/MR, unless `--only`

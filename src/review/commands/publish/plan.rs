@@ -147,6 +147,8 @@ pub(super) struct Planner<'a> {
     attempt: &'a str,
     /// `--only`: the thread ids to post; empty means all.
     only: &'a [String],
+    /// The approval thread `publish --approve` recorded; held by neither `only` nor a foreign PR/MR.
+    approval: Option<&'a str>,
     run: Option<&'a str>,
     repo: &'a Repo,
     connection: &'a Connection,
@@ -179,6 +181,7 @@ impl<'a> Planner<'a> {
             ctx,
             attempt,
             only: &options.only,
+            approval: options.approval.as_deref(),
             run: options.run.as_deref(),
             repo: &ctx.repo,
             connection,

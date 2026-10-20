@@ -41,6 +41,8 @@ matrix!(
     publish_refuses_a_pr_by_someone_else,
     not_own_publish_posts_only_replies_and_resolves_on_others_threads,
     own_published_general_thread_stays_open,
+    approve_with_only_still_posts_the_approval,
+    not_own_approve_keeps_what_not_own_posts,
     finding_kill_refuses_a_posting_finding,
     sync_never_reuses_a_killed_finding_id,
     comments_before_first_sync_are_mine,
@@ -205,6 +207,56 @@ fn not_own_publish_posts_only_replies_and_resolves_on_others_threads(svc: Svc) {
     for item in [setup.finding(1), "h1".to_owned(), "summary".to_owned()] {
         assert!(skipped.contains(&item), "{item}: {dry}");
     }
+}
+
+/// Every item id a dry run would write.
+fn written_items(dry: &Value) -> Vec<String> {
+    dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|write| write["items"].as_array().unwrap().iter())
+        .map(|item| item.as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn approve_with_only_still_posts_the_approval(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    svc.link(&setup);
+    env.run(&["comment", "--body", "My own note.", "--author", "me"]);
+    let dry = dry_run(env, svc, &["--approve", "--only", "h1"]);
+    let id = env.approval();
+    let items = written_items(&dry);
+    assert!(items.contains(&format!("{id}/c1")), "{dry}");
+    assert!(items.contains(&"h1/c1".to_owned()), "{dry}");
+    assert!(!skipped_items(&dry).contains(&id), "{dry}");
+}
+
+fn not_own_approve_keeps_what_not_own_posts(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
+    let mut remote = Remote::by("alice");
+    remote.thread(
+        "t-a",
+        false,
+        3,
+        vec![Comment::new(301, "alice", "Alice asks why.")],
+    );
+    svc.sync(&setup, &remote);
+    sync(env, svc);
+    let alice = svc.local_thread(301);
+    env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let dry = dry_run(env, svc, &["--not-own", "--approve"]);
+    let id = env.approval();
+    let items = written_items(&dry);
+    assert!(items.contains(&format!("{id}/c1")), "{dry}");
+    assert!(items.iter().any(|item| item.starts_with(&alice)), "{dry}");
+    assert!(!skipped_items(&dry).contains(&id), "{dry}");
 }
 
 fn own_published_general_thread_stays_open(svc: Svc) {
