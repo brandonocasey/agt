@@ -66,20 +66,18 @@ pub(super) fn prepare(dir: &Path, clone_deps: bool) -> Result<(Value, bool)> {
         || installs(&root)
             .iter()
             .any(|(file, _)| !clone_deps || !is_node_lockfile(file));
-    if downloads {
-        if let Err(refusal) = Offline::current().forbid("agt worktree prepare installs") {
-            // Reported as a failed step, as a failed install is, so that `create` still runs
-            // its hooks.
-            let value = json!({
-                "path": root,
-                "deps_from": if clone_deps { "clone" } else { "install" },
-                "cloned": [],
-                "steps": [{"command": "agt worktree prepare", "exit": null, "ok": false, "error": refusal.0}],
-                "clone_available": false,
-                "ok": false,
-            });
-            return Ok((value, false));
-        }
+    if downloads && let Err(refusal) = Offline::current().forbid("agt worktree prepare installs") {
+        // Reported as a failed step, as a failed install is, so that `create` still runs its
+        // hooks.
+        let value = json!({
+            "path": root,
+            "deps_from": if clone_deps { "clone" } else { "install" },
+            "cloned": [],
+            "steps": [{"command": "agt worktree prepare", "exit": null, "ok": false, "error": refusal.0}],
+            "clone_available": false,
+            "ok": false,
+        });
+        return Ok((value, false));
     }
     let mut steps = Vec::new();
     let mut commands: Vec<(Vec<String>, Option<&str>)> = Vec::new();

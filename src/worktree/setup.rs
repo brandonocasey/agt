@@ -18,8 +18,8 @@ use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::{read_json, write_json};
 use crate::core::output::{Output, TIMED_OUT};
 use crate::core::process::{self, Polled};
-use crate::forge::auto::Offline;
 use crate::core::{agents, clock};
+use crate::forge::auto::Offline;
 use crate::git::Repo;
 
 const STATUS_FILE: &str = "agt-setup.json";

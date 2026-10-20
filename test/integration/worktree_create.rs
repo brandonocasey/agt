@@ -1158,7 +1158,11 @@ fn offline_create_skips_network_submodules_with_a_warning_and_still_runs_the_hoo
     git(&env, &main, &["add", "-A"]);
     git(&env, &main, &["commit", "-q", "-m", "add submodule"]);
     // Without the main checkout's registration, the worktree falls back to the recorded URL.
-    git(&env, &main, &["config", "--remove-section", "submodule.vendor"]);
+    git(
+        &env,
+        &main,
+        &["config", "--remove-section", "submodule.vendor"],
+    );
     env.write_repo_config("[worktree.hooks]\ncreate = [\"touch hooked\"]\n");
     assert!(agt(&env, &env.repo, &["trust"]).status.success());
     let output = env
