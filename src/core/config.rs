@@ -206,7 +206,7 @@ fn merge_values(base: &mut toml::Value, overrides: toml::Value) {
 
 /// `$XDG_CONFIG_HOME/agt/config.toml`, falling back to `~/.config`.
 pub fn path() -> Result<PathBuf> {
-    Ok(local::config_home()?.join("agt").join("config.toml"))
+    local::agt_config_file("config.toml")
 }
 
 #[cfg(test)]

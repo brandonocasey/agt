@@ -253,6 +253,20 @@ pub fn config_home() -> Result<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// `name` in agt's config directory, `agt` under [`config_home`].
+pub fn agt_config_file(name: &str) -> Result<PathBuf> {
+    Ok(config_home()?.join("agt").join(name))
+}
+
+/// `current`, unless only the file `older` from an earlier name of agt exists.
+pub fn current_or_older(current: PathBuf, older: PathBuf) -> PathBuf {
+    if !current.exists() && older.exists() {
+        older
+    } else {
+        current
+    }
+}
+
 /// `$XDG_CACHE_HOME`, or `~/.cache` when it is unset or relative.
 pub fn cache_home() -> Result<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")

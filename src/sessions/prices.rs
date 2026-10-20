@@ -39,12 +39,10 @@ fn path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("AGT_PRICES").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    let current = local::config_home()?.join("agt").join("model-prices.json");
-    if current.exists() {
-        return Ok(current);
-    }
-    let older = local::home()?.join(".config/agents/model-prices.json");
-    Ok(if older.exists() { older } else { current })
+    Ok(local::current_or_older(
+        local::agt_config_file("model-prices.json")?,
+        local::home()?.join(".config/agents/model-prices.json"),
+    ))
 }
 
 fn rate(rates: &Value, key: &str) -> f64 {
