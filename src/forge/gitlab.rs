@@ -18,6 +18,8 @@ use serde_json::json;
 
 pub const KIND: Kind = Kind {
     forge: Forge::Gitlab,
+    name: "GitLab",
+    head_ref_prefix: "refs/merge-requests/",
     key_prefix: "gl",
     tool: "glab",
     url_marker: "/-/merge_requests/",
@@ -32,10 +34,14 @@ pub const KIND: Kind = Kind {
             .text(&["auth", "status", "--hostname", host])
             .is_some()
     },
-    connect: |host| Box::new(Gitlab::new(Box::new(CliTransport::glab(host)))),
+    connect: |host| Box::new(connect(host)),
     issue_caps: &issues::ISSUE_CAPS,
-    connect_issue: |host| Box::new(Gitlab::new(Box::new(CliTransport::glab(host)))),
+    connect_issue: |host| Box::new(connect(host)),
 };
+
+fn connect(host: &str) -> Gitlab {
+    Gitlab::new(Box::new(CliTransport::glab(host)))
+}
 
 const CAPS: Capabilities = Capabilities {
     pagination: Pagination::CliPaginate,
@@ -92,10 +98,15 @@ impl Gitlab {
     }
 }
 
+/// The API path of a project by its path with namespace.
+pub fn project_path(repo: &str) -> String {
+    format!("projects/{}", forge::encode(repo))
+}
+
 fn base(subject: ReviewSubject) -> String {
     format!(
-        "projects/{}/merge_requests/{}",
-        forge::encode(subject.repo),
+        "{}/merge_requests/{}",
+        project_path(subject.repo),
         subject.number
     )
 }
@@ -103,10 +114,6 @@ fn base(subject: ReviewSubject) -> String {
 impl Service for Gitlab {
     fn forge(&self) -> Forge {
         Forge::Gitlab
-    }
-
-    fn name(&self) -> &'static str {
-        "GitLab"
     }
 
     fn caps(&self) -> &Capabilities {
@@ -345,12 +352,12 @@ fn login(glab: &dyn Transport) -> Result<String> {
 /// forked from. MRs from other forks with the same branch name are skipped.
 fn find_mr(glab: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
     let branch = forge::encode(branch);
-    let project = glab.json(&Request::get(format!("projects/{}", forge::encode(origin))))?;
+    let project = glab.json(&Request::get(project_path(origin)))?;
     let own_id = project["id"].as_u64();
     let search = |target: &str| -> Result<Option<u64>> {
         let path = format!(
-            "projects/{}/merge_requests?source_branch={branch}&state=all&per_page=20",
-            forge::encode(target)
+            "{}/merge_requests?source_branch={branch}&state=all&per_page=20",
+            project_path(target)
         );
         let mrs: Vec<Value> = glab
             .json(&Request::get(path))?
@@ -456,7 +463,7 @@ fn discussions(glab: &dyn Transport, base: &str, url: &str) -> Result<Vec<Thread
 }
 
 fn fetch(glab: &dyn Transport, project: &str, iid: u64) -> Result<Fetched> {
-    let base = format!("projects/{}/merge_requests/{iid}", forge::encode(project));
+    let base = format!("{}/merge_requests/{iid}", project_path(project));
     let mr = glab.json(&Request::get(base.clone()))?;
     let url = forge::required(&mr, "/web_url", "GitLab MR")?;
     let closed_at = forge::text(&mr, "/merged_at")

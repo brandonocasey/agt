@@ -2,17 +2,12 @@
 
 use serde_json::Value;
 
-use super::Gitlab;
+use super::{Gitlab, project_path};
 use crate::forge;
 use crate::forge::service::{Pagination, Request};
 use crate::forge::transport::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
-
-/// The API path of a project by its path with namespace.
-pub fn base_of_path(path: &str) -> String {
-    format!("projects/{}", forge::encode(path))
-}
 
 /// The API path of a project by its id.
 pub fn base_of_id(id: i64) -> String {
@@ -34,7 +29,7 @@ impl Gitlab {
 
     /// The project at `path` with namespace, or the current repository's for `None`.
     pub fn project(&self, path: Option<&str>) -> Result<Value> {
-        self.read(path.map_or_else(|| "projects/:id".to_owned(), base_of_path))
+        self.read(path.map_or_else(|| "projects/:id".to_owned(), project_path))
     }
 
     pub fn merge_request(&self, base: &str, iid: u64) -> Result<Value> {

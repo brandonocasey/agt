@@ -45,6 +45,8 @@ pub fn default_host() -> String {
 
 pub const KIND: Kind = Kind {
     forge: Forge::Github,
+    name: "GitHub",
+    head_ref_prefix: "refs/pull/",
     key_prefix: "gh",
     tool: "gh",
     url_marker: "/pull/",
@@ -56,10 +58,14 @@ pub const KIND: Kind = Kind {
             .text(&["auth", "status", "--hostname", host])
             .is_some()
     },
-    connect: |host| Box::new(Github::new(Box::new(CliTransport::gh(host)))),
+    connect: |host| Box::new(connect(host)),
     issue_caps: &issues::ISSUE_CAPS,
-    connect_issue: |host| Box::new(Github::new(Box::new(CliTransport::gh(host)))),
+    connect_issue: |host| Box::new(connect(host)),
 };
+
+fn connect(host: &str) -> Github {
+    Github::new(Box::new(CliTransport::gh(host)))
+}
 
 const CAPS: Capabilities = Capabilities {
     pagination: Pagination::GraphqlCursor,
@@ -101,10 +107,6 @@ fn reviews_path(subject: ReviewSubject) -> String {
 impl Service for Github {
     fn forge(&self) -> Forge {
         Forge::Github
-    }
-
-    fn name(&self) -> &'static str {
-        "GitHub"
     }
 
     fn caps(&self) -> &Capabilities {

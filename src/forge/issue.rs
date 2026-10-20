@@ -88,6 +88,24 @@ pub fn names(value: &Value, pointer: &str, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// Strings of the array at `pointer`.
+pub fn strings(value: &Value, pointer: &str) -> Vec<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `issues` from one or several listings, once per number and in number order.
+pub fn merge_listing(mut issues: Vec<IssueData>) -> Vec<IssueData> {
+    issues.sort_by_key(|issue| issue.number);
+    issues.dedup_by_key(|issue| issue.number);
+    issues
+}
+
 /// A required, non-empty id or text field.
 pub fn field(value: &Value, pointer: &str, what: &str) -> Result<String> {
     forge::id(value, pointer).ok_or_else(|| Error(format!("{what} is missing {pointer}")))

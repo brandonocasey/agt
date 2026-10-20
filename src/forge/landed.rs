@@ -60,10 +60,10 @@ impl Origin {
 
     /// The ref on `origin` that holds the head of PR/MR `number`.
     pub fn head_ref(&self, number: u64) -> String {
-        match self.forge {
-            Forge::Github => format!("refs/pull/{number}/head"),
-            Forge::Gitlab => format!("refs/merge-requests/{number}/head"),
-        }
+        format!(
+            "{}{number}/head",
+            forge::service::kind(self.forge).head_ref_prefix
+        )
     }
 
     fn github(&self, transport: &dyn Transport, branch: &str) -> Result<Vec<Pull>> {
@@ -98,8 +98,8 @@ impl Origin {
 
     fn gitlab(&self, transport: &dyn Transport, branch: &str) -> Result<Vec<Pull>> {
         let path = format!(
-            "projects/{}/merge_requests?source_branch={}&state=all&per_page=100",
-            encode(&self.repo),
+            "{}/merge_requests?source_branch={}&state=all&per_page=100",
+            forge::gitlab::project_path(&self.repo),
             encode(branch)
         );
         transport

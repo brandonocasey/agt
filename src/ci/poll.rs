@@ -8,7 +8,7 @@ use super::classify::{
 use super::target::Resolved;
 use crate::forge::github::Github;
 use crate::forge::gitlab::Gitlab;
-use crate::forge::gitlab::ci::base_of_path;
+use crate::forge::gitlab::project_path;
 use crate::forge::transport::{CliTransport, TransportError};
 use crate::store::model::Forge;
 
@@ -93,7 +93,7 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
 
 fn pipeline(target: &Resolved) -> Result<State, TransportError> {
     let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
-    let base = base_of_path(&target.repo);
+    let base = project_path(&target.repo);
     let pipeline = gitlab.pipeline(&base, target.target.number)?;
     let jobs = gitlab.pipeline_jobs(&base, target.target.number, false)?;
     Ok(classify_pipeline(&pipeline, &jobs))
@@ -101,7 +101,7 @@ fn pipeline(target: &Resolved) -> Result<State, TransportError> {
 
 fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
     let gitlab = Gitlab::new(Box::new(CliTransport::glab(&target.host)));
-    let base = base_of_path(&target.repo);
+    let base = project_path(&target.repo);
     let mr = gitlab.merge_request(&base, target.target.number)?;
     let head = head.or_else(|| mr["sha"].as_str().map(str::to_owned));
     let expected = head.as_deref().unwrap_or("");

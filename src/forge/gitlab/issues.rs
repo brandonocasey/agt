@@ -3,12 +3,13 @@
 
 use serde_json::{Value, json};
 
-use super::{CAPS, Gitlab, discussions};
+use super::{CAPS, Gitlab, discussions, project_path};
 use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
 use crate::forge::issue::{
-    Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, names,
+    Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, merge_listing, names,
+    strings,
 };
 use crate::forge::service::{IssueService, IssueSubject, Method, Request, Service};
 use crate::forge::{self, CommentData};
@@ -22,12 +23,8 @@ pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     close_reasons: false,
 };
 
-fn project(repo: &str) -> String {
-    format!("projects/{}", forge::encode(repo))
-}
-
 fn base(subject: IssueSubject) -> String {
-    format!("{}/issues/{}", project(subject.repo), subject.number)
+    format!("{}/issues/{}", project_path(subject.repo), subject.number)
 }
 
 impl IssueService for Gitlab {
@@ -42,21 +39,17 @@ impl IssueService for Gitlab {
         for scope in scopes {
             let path = format!(
                 "{}/issues?scope={scope}&state=all&updated_after={}&order_by=updated_at&sort=asc&per_page=100",
-                project(query.repo),
+                project_path(query.repo),
                 forge::encode(query.since)
             );
             for item in self
                 .transport()
                 .items(&Request::get(path), &CAPS.pagination)?
             {
-                let issue = parse_issue(&item)?;
-                if !found.iter().any(|known| known.number == issue.number) {
-                    found.push(issue);
-                }
+                found.push(parse_issue(&item)?);
             }
         }
-        found.sort_by_key(|issue| issue.number);
-        Ok(found)
+        Ok(merge_listing(found))
     }
 
     fn fetch_issue(&self, subject: IssueSubject) -> Result<IssueFetched> {
@@ -81,13 +74,8 @@ impl IssueService for Gitlab {
                 Err(error) => return Err(error),
             };
             for item in &items {
-                let link = parse_mr(item, subject.repo);
-                if let Some(link) = link
-                    && !prs
-                        .iter()
-                        .any(|known| known.number == link.number && known.repo == link.repo)
-                {
-                    prs.push(link);
+                if let Some(link) = parse_mr(item, subject.repo) {
+                    link.push_unique(&mut prs);
                 }
             }
         }
@@ -140,7 +128,7 @@ impl IssueService for Gitlab {
         }
         Ok(Request::rest(
             Method::Post,
-            format!("{}/issues", project(repo)),
+            format!("{}/issues", project_path(repo)),
             Some(body),
         ))
     }
@@ -193,12 +181,7 @@ fn parse_issue(item: &Value) -> Result<IssueData> {
         },
         reason: None,
         native_state: forge::text(item, "/state").unwrap_or_default(),
-        labels: item["labels"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|label| label.as_str().map(str::to_owned))
-            .collect(),
+        labels: strings(item, "/labels"),
         assignees: names(item, "/assignees", "username"),
         author: forge::text(item, "/author/username"),
         milestone: forge::text(item, "/milestone/title"),

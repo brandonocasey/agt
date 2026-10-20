@@ -4,13 +4,14 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
+use crate::forge::gitlab::project_path;
 use crate::forge::service::{Method, Request};
 use crate::forge::transport::Transport;
 use crate::forge::{self, encode};
 use crate::store::model::ReviewState;
 
 fn base(repo: &str) -> String {
-    format!("projects/{}/merge_requests", encode(repo))
+    format!("{}/merge_requests", project_path(repo))
 }
 
 fn mr(node: &Value) -> Pr {
@@ -75,8 +76,8 @@ fn queue(t: &dyn Transport, repo: &str, found: &mut Pr) -> Result<()> {
         return Ok(());
     }
     let path = format!(
-        "projects/{}/merge_trains/merge_requests/{}",
-        encode(repo),
+        "{}/merge_trains/merge_requests/{}",
+        project_path(repo),
         found.number
     );
     match t.send(&Request::get(path)) {

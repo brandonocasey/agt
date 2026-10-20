@@ -370,18 +370,34 @@ fn graphql_args(vars: &[Var]) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// The `gh api` arguments of a request.
-pub fn gh_args(request: &Request) -> Vec<String> {
+/// How a CLI spells the flags of its `api` subcommand.
+struct ApiFlags {
+    method: &'static str,
+    /// What follows the path to send the request body from stdin.
+    json_input: &'static [&'static str],
+}
+
+const GH_FLAGS: ApiFlags = ApiFlags {
+    method: "--method",
+    json_input: &["--input", "-"],
+};
+
+const GLAB_FLAGS: ApiFlags = ApiFlags {
+    method: "-X",
+    json_input: &["-H", "Content-Type: application/json", "--input", "-"],
+};
+
+fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
     let mut args = vec!["api".to_owned()];
     match &request.endpoint {
         Endpoint::Rest(path) => {
-            args.extend(["--method".to_owned(), request.method.as_str().to_owned()]);
+            args.extend([flags.method.to_owned(), request.method.as_str().to_owned()]);
             if request.paginate {
                 args.push("--paginate".to_owned());
             }
             args.push(path.clone());
             if request.body.is_some() {
-                args.extend(["--input".to_owned(), "-".to_owned()]);
+                args.extend(flags.json_input.iter().map(|arg| (*arg).to_owned()));
             }
         }
         Endpoint::Graphql(vars) => {
@@ -392,28 +408,14 @@ pub fn gh_args(request: &Request) -> Vec<String> {
     args
 }
 
+/// The `gh api` arguments of a request.
+pub fn gh_args(request: &Request) -> Vec<String> {
+    api_args(request, &GH_FLAGS)
+}
+
 /// The `glab api` arguments of a request.
 pub fn glab_args(request: &Request) -> Vec<String> {
-    let mut args = vec!["api".to_owned()];
-    match &request.endpoint {
-        Endpoint::Rest(path) => {
-            args.extend(["-X".to_owned(), request.method.as_str().to_owned()]);
-            if request.paginate {
-                args.push("--paginate".to_owned());
-            }
-            args.push(path.clone());
-            if request.body.is_some() {
-                args.extend(
-                    ["-H", "Content-Type: application/json", "--input", "-"].map(str::to_owned),
-                );
-            }
-        }
-        Endpoint::Graphql(vars) => {
-            args.push("graphql".to_owned());
-            args.extend(graphql_args(vars));
-        }
-    }
-    args
+    api_args(request, &GLAB_FLAGS)
 }
 
 /// The HTTP status a CLI reports in its error text: the `(HTTP nnn)` suffix, as in

@@ -252,7 +252,9 @@ pub struct Posted {
 pub trait Service {
     fn forge(&self) -> Forge;
     /// For messages: `GitHub`, `GitLab`.
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &'static str {
+        kind(self.forge()).name
+    }
     fn caps(&self) -> &Capabilities;
 
     fn login(&self) -> Result<String>;
@@ -338,6 +340,10 @@ pub trait IssueService: Service {
 /// means adding its entry to [`SERVICES`].
 pub struct Kind {
     pub forge: Forge,
+    /// The service's name in messages: `GitHub`, `GitLab`.
+    pub name: &'static str,
+    /// Start of the ref on `origin` that holds the head of PR/MR `n`: `<prefix>n/head`.
+    pub head_ref_prefix: &'static str,
     /// Prefix of the keys and imported ids: `gh-42`, `gl-7`.
     pub key_prefix: &'static str,
     /// The command line tool that talks to the service: `gh`, `glab`.
@@ -377,10 +383,10 @@ pub fn detect(host: &str, named: Option<Forge>, cached: Option<Forge>) -> Option
 }
 
 pub fn kind(forge: Forge) -> &'static Kind {
-    match forge {
-        Forge::Github => &crate::forge::github::KIND,
-        Forge::Gitlab => &crate::forge::gitlab::KIND,
-    }
+    SERVICES
+        .iter()
+        .find(|kind| kind.forge == forge)
+        .unwrap_or_else(|| unreachable!("every forge is registered in SERVICES"))
 }
 
 #[cfg(test)]

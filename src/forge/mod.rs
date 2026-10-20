@@ -94,7 +94,7 @@ pub fn head_has_pipeline(
         }
         Forge::Gitlab => {
             let gitlab = Gitlab::new(Box::new(CliTransport::glab(host)));
-            gitlab.head_pipeline_runs(&gitlab::ci::base_of_path(repo), number, head_sha)
+            gitlab.head_pipeline_runs(&gitlab::project_path(repo), number, head_sha)
         }
     }
 }

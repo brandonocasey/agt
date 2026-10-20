@@ -82,6 +82,18 @@ pub struct PrLink {
     pub source: LinkSource,
 }
 
+impl PrLink {
+    /// Adds the link to `links` unless one for the same PR/MR is there.
+    pub fn push_unique(self, links: &mut Vec<Self>) {
+        if !links
+            .iter()
+            .any(|known| known.number == self.number && known.repo == self.repo)
+        {
+            links.push(self);
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Links {
     pub prs: Vec<PrLink>,

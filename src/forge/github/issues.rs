@@ -7,7 +7,7 @@ use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
 use crate::forge::issue::{
-    Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, names,
+    Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, merge_listing, names,
 };
 use crate::forge::service::{
     IssueService, IssueSubject, Method, Pagination, Request, Service, Var,
@@ -56,14 +56,10 @@ impl IssueService for Github {
                 if item.get("pull_request").is_some() {
                     continue;
                 }
-                let issue = parse_issue(&item)?;
-                if !found.iter().any(|known| known.number == issue.number) {
-                    found.push(issue);
-                }
+                found.push(parse_issue(&item)?);
             }
         }
-        found.sort_by_key(|issue| issue.number);
-        Ok(found)
+        Ok(merge_listing(found))
     }
 
     fn fetch_issue(&self, subject: IssueSubject) -> Result<IssueFetched> {
@@ -222,13 +218,7 @@ fn parse_links(response: &Value) -> Vec<PrLink> {
         ) else {
             continue;
         };
-        if links
-            .iter()
-            .any(|link| link.number == number && link.repo == repo)
-        {
-            continue;
-        }
-        links.push(PrLink {
+        PrLink {
             forge: Forge::Github,
             repo,
             number,
@@ -236,7 +226,8 @@ fn parse_links(response: &Value) -> Vec<PrLink> {
             branch: forge::text(node, "/headRefName"),
             state: forge::text(node, "/state").map(|state| state.to_ascii_lowercase()),
             source: LinkSource::Remote,
-        });
+        }
+        .push_unique(&mut links);
     }
     links
 }
