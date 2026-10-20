@@ -101,8 +101,7 @@ pub fn root() -> Result<PathBuf> {
 }
 
 pub fn write(dir: &Path, record: &Record) -> Result<()> {
-    let text = serde_json::to_string_pretty(record).map_err(ctx("serialize backup record"))?;
-    fs::write(dir.join(FILE), text).map_err(ctx(format!("write {}", dir.join(FILE).display())))
+    local::write_json(&dir.join(FILE), record, false)
 }
 
 /// Whether any repository's backups already use `id`: ids are looked up across all of them.
