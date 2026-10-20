@@ -9,8 +9,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::json::{lost_field, persist_json};
+use super::json::persist_json;
 use super::prune::{Removal, remove_with_lock};
+use super::schema::{lost_field_of, parse_versioned, refuse_lost_field};
 use super::{Store, create_dir, ctx, fail, lock_path, validate_key};
 use crate::core::error::Result;
 use crate::core::local::read_json;
@@ -51,7 +52,7 @@ impl Store {
         validate_key(name)?;
         let path = dir.join(format!("{name}.json"));
         read_json::<Value>(&path)?
-            .map(|document| self.parse_doc(&path, document))
+            .map(|document| self.parse_doc(&path, document).map(|(doc, _)| doc))
             .transpose()
     }
 
@@ -60,7 +61,7 @@ impl Store {
         let mut docs = Vec::new();
         for path in self.doc_paths(dir, skip)? {
             if let Some(document) = read_json::<Value>(&path)? {
-                docs.push(self.parse_doc(&path, document)?);
+                docs.push(self.parse_doc(&path, document)?.0);
             }
         }
         Ok(docs)
@@ -78,7 +79,7 @@ impl Store {
             let Some(document) = read_json::<Value>(&path)? else {
                 continue;
             };
-            let doc: T = self.parse_doc(&path, document.clone())?;
+            let (doc, document): (T, _) = self.parse_doc(&path, document)?;
             match lost_field_of(&path, &document, &doc)? {
                 Some(field) => unknown.push(format!(
                     "{} has field {field} that this agt does not know; kept",
@@ -129,14 +130,9 @@ impl Store {
         let path = dir.join(format!("{name}.json"));
         let mut doc = match read_json::<Value>(&path)? {
             Some(document) => {
-                let doc: T = self.parse_doc(&path, document.clone())?;
+                let (doc, document): (T, _) = self.parse_doc(&path, document)?;
                 // Writing a file with fields this build does not know would drop them.
-                if let Some(field) = lost_field_of(&path, &document, &doc)? {
-                    return fail(format!(
-                        "{} has field {field} that this agt does not know; it was probably written by a newer agt, so upgrade agt before changing it",
-                        path.display()
-                    ));
-                }
+                refuse_lost_field(&path, &document, &doc)?;
                 doc
             }
             None => init()?,
@@ -164,7 +160,7 @@ impl Store {
         let Some(document) = read_json::<Value>(&path)? else {
             return Ok(Removal::Kept);
         };
-        let doc: T = self.parse_doc(&path, document.clone())?;
+        let (doc, document): (T, _) = self.parse_doc(&path, document)?;
         // A document with fields this build does not know is not this build's to delete.
         if lost_field_of(&path, &document, &doc)?.is_some() || !remove(&doc) {
             return Ok(Removal::Kept);
@@ -195,20 +191,8 @@ impl Store {
         Ok(())
     }
 
-    fn parse_doc<T: DeserializeOwned>(&self, path: &Path, document: Value) -> Result<T> {
-        let version = document.get("version").and_then(Value::as_u64);
-        let Some(version) = version.and_then(|version| u32::try_from(version).ok()) else {
-            return fail(format!("{} has no valid schema version", path.display()));
-        };
-        if version > self.schema.version {
-            return fail(format!(
-                "{} uses schema version {version}, newer than the {} this agt (v{}) supports; upgrade agt to a release that supports schema version {version}",
-                path.display(),
-                self.schema.version,
-                env!("CARGO_PKG_VERSION"),
-            ));
-        }
-        serde_json::from_value(document).map_err(ctx(format!("parse {}", path.display())))
+    fn parse_doc<T: DeserializeOwned>(&self, path: &Path, document: Value) -> Result<(T, Value)> {
+        parse_versioned(path, document, self.schema)
     }
 }
 
@@ -229,16 +213,6 @@ impl Store {
         paths.sort();
         Ok(paths)
     }
-}
-
-/// The first field of `document` that `doc` would not write back.
-fn lost_field_of<T: Serialize>(
-    path: &Path,
-    document: &serde_json::Value,
-    doc: &T,
-) -> Result<Option<String>> {
-    let written = serde_json::to_value(doc).map_err(ctx(format!("encode {}", path.display())))?;
-    Ok(lost_field(document, &written, ""))
 }
 
 #[cfg(test)]
@@ -306,6 +280,30 @@ mod tests {
                 .update_doc(&dir, "1", || note("a"), |_| Ok(()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn documents_migrate_through_the_same_steps_as_targets() {
+        let base = tempfile::tempdir().unwrap();
+        let mut store = Store::at(base.path(), Namespace::Issues);
+        store.schema = super::super::schema::Schema {
+            version: 2,
+            migrations: &[|document| {
+                document["text"] = serde_json::Value::from("migrated");
+            }],
+        };
+        let dir = store.repo_dir("t").unwrap();
+        create_dir(&dir).unwrap();
+        fs::write(dir.join("1.json"), r#"{"version":1,"text":"x"}"#).unwrap();
+        fs::write(dir.join("0.json"), r#"{"version":0,"text":"x"}"#).unwrap();
+        let loaded = store
+            .load_doc::<serde_json::Value>(&dir, "1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded["text"], "migrated");
+        assert_eq!(loaded["version"], 2);
+        let error = store.load_doc::<Note>(&dir, "0").err().unwrap().0;
+        assert!(error.contains("unsupported version 0"), "{error}");
     }
 
     #[test]
