@@ -7,7 +7,7 @@ use crate::git::Repo;
 
 use super::backup::copy_tree;
 use super::{Namespace, Store, create_dir};
-use crate::core::local::{lock_file, sync_dir, write_atomic};
+use crate::core::local::{lock_file, sync_dir, write_atomic, write_new};
 
 impl Store {
     pub fn open_repo(namespace: Namespace, repo: &Repo, preview: bool) -> Result<Self> {
@@ -321,16 +321,7 @@ fn repository_identity(common: &Path, preview: bool) -> Result<String> {
     let identity = sha1_smol::Sha1::from(crate::core::random::token("repo-", 32))
         .digest()
         .to_string();
-    use std::io::Write;
-    let mut temp =
-        tempfile::NamedTempFile::new_in(common).map_err(ctx("stage repository identity"))?;
-    temp.write_all(identity.as_bytes())
-        .map_err(ctx("write repository identity"))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(ctx("sync repository identity"))?;
-    temp.persist_noclobber(&path)
-        .map_err(ctx("persist repository identity"))?;
+    write_new(&path, identity.as_bytes())?;
     sync_dir(common)?;
     Ok(identity)
 }

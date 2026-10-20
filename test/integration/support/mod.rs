@@ -59,7 +59,7 @@ impl Env {
         fs::write(
             root.join("gitconfig"),
             format!(
-                "[user]\n\tname = Tester\n\temail = tester@example.com\n[init]\n\tdefaultBranch = main\n[core]\n\texcludesFile = {}\n",
+                "[user]\n\tname = Tester\n\temail = tester@example.com\n[init]\n\tdefaultBranch = main\n[core]\n\texcludesFile = {}\n[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n",
                 root.join("gitignore").display()
             ),
         )

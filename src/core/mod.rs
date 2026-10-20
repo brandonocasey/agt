@@ -5,6 +5,7 @@ pub mod env;
 pub mod error;
 pub mod group;
 pub mod harness;
+pub mod hash;
 pub mod local;
 pub mod output;
 pub mod process;

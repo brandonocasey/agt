@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::files::measure;
-use crate::core::error::{Error, Result, ctx};
+use crate::core::error::{Result, ctx};
 use crate::core::harness;
 use crate::core::local;
 use crate::core::shell::quote;
@@ -244,10 +244,7 @@ pub fn save(candidates: &[Candidate], now: i64) -> Result<PathBuf> {
             text.push_str(&format!("- {}\n", candidate.item));
         }
     }
-    let mut file = tempfile::NamedTempFile::new_in(dir).map_err(ctx("create the report"))?;
-    std::io::Write::write_all(&mut file, text.as_bytes()).map_err(ctx("write the report"))?;
-    file.persist(&path)
-        .map_err(|error| Error(format!("save {}: {}", path.display(), error.error)))?;
+    local::write_atomic(&path, text.as_bytes(), false, || Ok(()))?;
     Ok(path)
 }
 

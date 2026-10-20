@@ -59,6 +59,21 @@ pub fn write_atomic(
     durable: bool,
     check: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    stage(path, data, durable, check, false)
+}
+
+/// Durably creates `path` with `data` the same way, failing when `path` already exists.
+pub fn write_new(path: &Path, data: &[u8]) -> Result<()> {
+    stage(path, data, true, || Ok(()), true)
+}
+
+fn stage(
+    path: &Path,
+    data: &[u8],
+    durable: bool,
+    check: impl FnOnce() -> Result<()>,
+    noclobber: bool,
+) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut temp = tempfile::Builder::new()
         .prefix(".tmp-")
@@ -75,8 +90,12 @@ pub fn write_atomic(
             .map_err(ctx(format!("sync {}", temp.path().display())))?;
     }
     check()?;
-    temp.persist(path)
-        .map_err(|error| Error(format!("replace {}: {}", path.display(), error.error)))?;
+    let persisted = if noclobber {
+        temp.persist_noclobber(path)
+    } else {
+        temp.persist(path)
+    };
+    persisted.map_err(|error| Error(format!("replace {}: {}", path.display(), error.error)))?;
     if durable {
         sync_dir(dir)?;
     }

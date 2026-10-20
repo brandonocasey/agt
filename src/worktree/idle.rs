@@ -25,7 +25,7 @@ impl Cwds {
         inside
             .iter()
             .find(|(pid, _)| !session.contains(pid))
-            .map(|(pid, cwd)| describe(*pid, cwd))
+            .map(|(pid, cwd)| describe(*pid, cwd, true))
     }
 
     /// The calling session's own processes inside `root`, which do not block it: stop them
@@ -38,7 +38,7 @@ impl Cwds {
         inside
             .iter()
             .filter(|(pid, _)| session.contains(pid))
-            .map(|(pid, cwd)| format!("{} (of the calling session)", describe(*pid, cwd)))
+            .map(|(pid, cwd)| format!("{} (of the calling session)", describe(*pid, cwd, false)))
             .collect()
     }
 
@@ -61,8 +61,15 @@ impl Cwds {
     }
 }
 
-fn describe(pid: i32, cwd: &Path) -> String {
-    let command = agents::read(pid).map_or_else(|| "?".to_owned(), |p| p.comm);
+/// `pid` and its program name; `full` adds the command line, which names what blocks a removal.
+fn describe(pid: i32, cwd: &Path, full: bool) -> String {
+    let command = agents::read(pid).map_or_else(
+        || "?".to_owned(),
+        |p| match p.cmd.as_str() {
+            cmd if full && !cmd.is_empty() => format!("{}: {cmd}", p.comm),
+            _ => p.comm,
+        },
+    );
     format!("process {pid} ({command}) runs in {}", cwd.display())
 }
 

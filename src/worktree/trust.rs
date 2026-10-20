@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::core::hash::sha256_hex;
 use clap::Args;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use super::info::{main_checkout, toplevel};
 use super::port;
@@ -60,7 +60,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         return fail(format!("{} has no [worktree.hooks]", file.display()));
     }
     let hooks = Config::load_from(&file)?.worktree.hooks;
-    let hash = digest(&bytes);
+    let hash = sha256_hex(&bytes);
     let key = key(&main);
     update(|trusted| trusted.insert(key.clone(), hash.clone()).as_deref() != Some(&hash))?;
     Ok(Output::Json(json!({
@@ -81,7 +81,7 @@ fn list() -> Result<Output> {
                 return json!({"file": file, "sha256": sha256, "current": false, "reason": reason});
             }
             let current = match fs::read(&file) {
-                Ok(bytes) => json!(digest(&bytes) == sha256),
+                Ok(bytes) => json!(sha256_hex(&bytes) == sha256),
                 Err(_) => json!("missing"),
             };
             json!({"file": file, "sha256": sha256, "current": current})
@@ -122,14 +122,7 @@ pub(super) fn has_hooks(bytes: &[u8]) -> bool {
 
 /// Whether the repository `main` is trusted with exactly the config content `bytes`.
 pub(super) fn is_trusted(main: &Path, bytes: &[u8]) -> Result<bool> {
-    Ok(load(&store()?)?.get(&key(main)) == Some(&digest(bytes)))
-}
-
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    Ok(load(&store()?)?.get(&key(main)) == Some(&sha256_hex(bytes)))
 }
 
 fn store() -> Result<PathBuf> {

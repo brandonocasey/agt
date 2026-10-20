@@ -3,11 +3,11 @@
 use std::fs::File;
 use std::os::unix::fs::{FileExt, MetadataExt};
 
+use crate::core::hash::sha256_hex;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::core::error::{Result, ctx};
 use crate::core::transcripts::{ScanState, Turn, parse_line};
@@ -79,21 +79,14 @@ fn read_at(file: &File, position: u64, length: usize) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn file_prefix(file: &File, size: u64) -> Result<String> {
     let length = usize::try_from(size.min(PREFIX_BYTES)).unwrap_or_default();
-    Ok(digest(&read_at(file, 0, length)?))
+    Ok(sha256_hex(&read_at(file, 0, length)?))
 }
 
 fn tail_hash(file: &File, end: u64) -> Result<String> {
     let length = end.min(READ_CHUNK as u64);
-    Ok(digest(&read_at(
+    Ok(sha256_hex(&read_at(
         file,
         end - length,
         usize::try_from(length).unwrap_or_default(),
