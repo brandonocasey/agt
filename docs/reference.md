@@ -336,7 +336,7 @@ Cleanup: `agt cleanup --only reviews` (plan) and `--yes` (delete), for every rep
 `agt cleanup` checks current and configured repository stores, legacy global stores,
 old cache files and orphan processes. Linked worktrees share one repository store. It also lists leftovers for you to remove
 by hand. By default it changes nothing and prints a JSON plan; `--yes` deletes. `--only`
-limits the pass to `reviews`, `issues`, `tasks`, `backups`, `locks`, `output`, `scratch`,
+limits the pass to `reviews`, `issues`, `tasks`, `backups`, `files`,
 `processes`, `manual` or `worktrees` (repeat it for several). `worktrees` runs only when named:
 it removes landed worktrees and deletes their branches ([Worktrees](#worktrees)), so a plain
 `--yes` never does. Before 0.8.0 it was `agt prune`; before 0.14.0 the `worktrees` kind was
@@ -354,7 +354,7 @@ agt cleanup --count                    # leftovers the last --yes run listed
 Store documents are kept 90 days (`retention_days`). The rules:
 
 - `reviews`: the review rule above, applied to every repository, and skipped for a
-  target whose `.<key>.publish.lock` is held. For legacy global stores, agt records the absolute git common
+  target whose `.<key>.publish.lock` is held. It also lists the `locks` of the review stores. For legacy global stores, agt records the absolute git common
   directory of a `local/<name>-<hash>` repository in `<dir>/.repo.json`, with `last_seen`
   (refreshed by commands that write, at most once a day; a record without it counts from the
   file's modification time). A repository is listed under `local_repos` at any age, with all its
@@ -371,11 +371,12 @@ Store documents are kept 90 days (`retention_days`). The rules:
   local-only comment, comment deleted on the host, or link to another issue, review,
   task or branch or local PR link. An unreadable timestamp keeps the issue, and so does
   a document with fields this agt does not know (with a warning). Open issues,
-  `tracker.json` and anything holding such data stay.
+  `tracker.json` and anything holding such data stay. It also lists the `locks` of the issue stores.
 - `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
   tasks stay, and so does the session index, a cache that `agt sessions index` rebuilds.
-- `locks`: `.<key>.lock` and `.<key>.publish.lock` files whose `<key>.json` is gone,
-  except an issue tracker's `.push.publish.lock` while `tracker.json` exists.
+- `locks` (a category of the `reviews` and `issues` kinds, not a kind of its own): `.<key>.lock`
+  and `.<key>.publish.lock` files whose `<key>.json` is gone, except an issue tracker's
+  `.push.publish.lock` while `tracker.json` exists.
 - `backups`: `<namespace>-v<n>-<stamp>` directories that agt made before a schema
   migration, 90 days after they were taken, except the newest of each namespace (a
   stamp in the future does not count as the newest), and
@@ -384,12 +385,12 @@ Store documents are kept 90 days (`retention_days`). The rules:
   Repository schema backups use `agents/backups/repositories/<clone-id>/`; newest-backup
   protection applies separately per clone and namespace. Legacy-import backups follow the same per-clone retention rules.
 
-Cache files go by age. Each top-level entry goes whole, and only once nothing in it changed
+The `files` kind covers cache files, which go by age (its categories are `output` and `scratch`). Each top-level entry goes whole, and only once nothing in it changed
 for the whole period, so a task that is still writing keeps all of its files:
 
-- `output`: entries of `$XDG_CACHE_HOME/agents/output` (default `~/.cache`) untouched for
+- `output` category: entries of `$XDG_CACHE_HOME/agents/output` (default `~/.cache`) untouched for
   7 days.
-- `scratch`: entries of `$XDG_CACHE_HOME/agents/scratch` (except `.keep`) and Claude Code
+- `scratch` category: entries of `$XDG_CACHE_HOME/agents/scratch` (except `.keep`) and Claude Code
   session directories, `<root>/claude-<uid>/<cwd-slug>/<session>` under `~/.cache/claude-tmp`
   and `/tmp`, untouched for 30 days. A `<cwd-slug>` directory goes once its last session
   has gone. Links are never followed: a `claude-<uid>` directory that is a link or another
@@ -408,13 +409,12 @@ still running 10 seconds later, each only while its pid still has the planned st
 Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such as
 `/bin/sleep`, so those are never found there.
 
-`manual` lists what cleanup never deletes, in `manual` by section: `worktrees` (linked worktrees
-whose HEAD is already in the default branch, clean, unlocked, untouched for 3 days (`--only worktrees` removes them) and with no live agent session, as
-`agt worktree remove <path> --yes`) and `branches` (local branches in the default branch, not
-protected and not checked out, as `git -C <repo> branch -d <name>`), for
-the repositories under the `agt worktree` roots; this uses local ancestry and native process checks,
-without network calls. `backups` (everything in the
-backups directory but agt's own, largest first); `codex_releases` (all but the current
+`manual` lists what cleanup never deletes, in `manual` by section: `branches` (local branches in
+the default branch, not protected and not checked out, as `git -C <repo> branch -d <name>`), for
+the repositories under the `agt worktree` roots; this uses local ancestry, without network calls.
+Merged worktrees are not listed: `agt cleanup --only worktrees --all-repos --offline` plans their
+removal. `backups` (worktree backups as `agt worktree backups rm <id> --yes`, then everything in
+the backups directory but agt's own, largest first); `codex_releases` (all but the current
 and the one before it); and `playwright` (superseded browser builds, in
 `$PLAYWRIGHT_BROWSERS_PATH`, else `~/Library/Caches/ms-playwright` and the cache root's
 `ms-playwright`). Commands quote any path or branch name the shell would read differently.

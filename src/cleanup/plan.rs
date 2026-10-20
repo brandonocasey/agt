@@ -143,6 +143,7 @@ impl Plan {
                     self.attempt(&dir, result);
                 }
             }
+            self.stray_locks(&store, Namespace::Reviews);
         }
         Ok(())
     }
@@ -282,6 +283,7 @@ impl Plan {
                 })();
                 self.attempt(&dir, result);
             }
+            self.stray_locks(&store, Namespace::Issues);
         }
         Ok(())
     }
@@ -304,39 +306,34 @@ impl Plan {
         Ok(())
     }
 
-    /// Lock files of reviews and issues whose document is gone. Task locks are directories that
-    /// exist only while held, so they are not looked at.
-    pub fn locks(&mut self) -> Result<()> {
-        for namespace in [Namespace::Reviews, Namespace::Issues] {
-            for store in stores(namespace)? {
-                let found = store.stray_locks();
-                for path in self.attempt(store.root(), found).unwrap_or_default() {
-                    // A local repository that is listed deletes its own stray locks.
-                    let inside = self.items.iter().any(|item| {
-                    matches!(&item.action, Action::LocalRepo { dir, .. } if path.parent() == Some(dir))
-                });
-                    if inside {
-                        continue;
-                    }
-                    self.add(
-                        "locks",
-                        path.clone(),
-                        path.file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        "lock file whose document no longer exists".into(),
-                        size(&path),
-                        Action::Lock {
-                            root: store.root().to_path_buf(),
-                            namespace,
-                            path,
-                        },
-                    );
-                }
+    /// Lock files in `store` whose document is gone. Task locks are directories that exist only
+    /// while held, so they are not looked at. Callers MUST plan the store's local repositories
+    /// first: a listed local repository deletes its own stray locks.
+    fn stray_locks(&mut self, store: &Store, namespace: Namespace) {
+        let found = store.stray_locks();
+        for path in self.attempt(store.root(), found).unwrap_or_default() {
+            let inside = self.items.iter().any(
+                |item| matches!(&item.action, Action::LocalRepo { dir, .. } if path.parent() == Some(dir)),
+            );
+            if inside {
+                continue;
             }
+            self.add(
+                "locks",
+                path.clone(),
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                "lock file whose document no longer exists".into(),
+                size(&path),
+                Action::Lock {
+                    root: store.root().to_path_buf(),
+                    namespace,
+                    path,
+                },
+            );
         }
-        Ok(())
     }
 
     /// agt's own backups: unfinished copies, and finished ones older than 90 days except the

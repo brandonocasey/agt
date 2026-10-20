@@ -37,18 +37,17 @@ pub struct Cli {
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Only {
-    /// Review targets, and `local/` repositories whose targets have all expired.
+    /// Review targets, `local/` repositories whose targets have all expired, and review lock
+    /// files whose document is gone.
     Reviews,
+    /// Closed issues, and issue lock files whose document is gone.
     Issues,
     Tasks,
     /// agt's own pre-migration backups and unfinished backup copies.
     Backups,
-    /// Lock files whose document is gone.
-    Locks,
-    /// Long-output copies in `agents/output` untouched for 7 days.
-    Output,
-    /// `agents/scratch` and Claude Code session scratchpads untouched for 30 days.
-    Scratch,
+    /// Long-output copies in `agents/output` untouched for 7 days, and `agents/scratch` and
+    /// Claude Code session scratchpads untouched for 30 days.
+    Files,
     /// Processes a gone Claude Code session started, a day or more old.
     Processes,
     /// Merged worktrees and branches, other backups, old Codex releases and Playwright
@@ -96,16 +95,11 @@ pub fn run(cli: Cli) -> Result<Output> {
     if only(Only::Tasks) {
         plan.tasks(now)?;
     }
-    if only(Only::Locks) {
-        plan.locks()?;
-    }
     if only(Only::Backups) {
         plan.backups(now)?;
     }
-    if only(Only::Output) {
+    if only(Only::Files) {
         plan.output(now)?;
-    }
-    if only(Only::Scratch) {
         plan.scratch(now)?;
     }
     if only(Only::Processes) {

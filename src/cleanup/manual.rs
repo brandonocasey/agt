@@ -1,6 +1,6 @@
 //! Leftovers that cleanup lists but never deletes, because they may hold work or another tool
-//! owns them: merged worktrees and branches, backups, old Codex releases and superseded
-//! Playwright browsers. `--yes` saves the list to a report, so a session can mention it
+//! owns them: merged branches, backups, old Codex releases and superseded Playwright
+//! browsers. `--yes` saves the list to a report, so a session can mention it
 //! without scanning every repository again.
 
 use std::fs;
@@ -18,16 +18,15 @@ use crate::worktree::prune;
 
 const COUNT_PREFIX: &str = "<!-- count: ";
 
-pub const SECTIONS: [(&str, &str); 5] = [
-    (
-        "worktrees",
-        "Merged, clean worktrees. Remove with the command shown. Never rm.",
-    ),
+pub const SECTIONS: [(&str, &str); 4] = [
     (
         "branches",
         "Merged local branches. Delete with the command shown.",
     ),
-    ("backups", "Backups. Never deleted automatically."),
+    (
+        "backups",
+        "Backups. Never deleted automatically. Delete a worktree backup with the command shown.",
+    ),
     (
         "codex_releases",
         "Old Codex releases. Keep current and the previous one.",
@@ -41,33 +40,24 @@ pub struct Candidate {
     pub item: String,
 }
 
-/// Merged worktrees and branches under the configured roots, each with the command that
-/// removes it.
+/// Merged branches under the configured roots no worktree holds, each with the command that
+/// deletes it. Merged worktrees are `agt cleanup --only worktrees`.
 fn merged(found: &mut Vec<Candidate>) -> Result<()> {
-    let mut branches = Vec::new();
     for work in prune::candidates()? {
-        let repo = quote(&work.repo.display().to_string());
-        match (work.worktree, work.branch) {
-            (Some(path), _) => found.push(Candidate {
-                section: "worktrees",
-                item: format!(
-                    "agt worktree remove {} --yes",
-                    quote(&path.display().to_string())
-                ),
-            }),
-            (None, Some(branch)) => branches.push(Candidate {
-                section: "branches",
-                item: format!("git -C {repo} branch -d {}", quote(&branch)),
-            }),
-            (None, None) => {}
-        }
+        found.push(Candidate {
+            section: "branches",
+            item: format!(
+                "git -C {} branch -d {}",
+                quote(&work.repo.display().to_string()),
+                quote(&work.branch)
+            ),
+        });
     }
-    found.append(&mut branches);
     Ok(())
 }
 
 /// Everything in the backups directory except agt's own backups, which the `backups` kind
-/// handles.
+/// handles. A worktree backup is listed with the command that deletes it.
 fn backups(found: &mut Vec<Candidate>) -> Result<()> {
     let store = Store::open(Namespace::Reviews)?;
     let own: Vec<PathBuf> = store
@@ -76,6 +66,13 @@ fn backups(found: &mut Vec<Candidate>) -> Result<()> {
         .into_iter()
         .map(|backup| backup.path)
         .collect();
+    let worktree_backups = prune::backups()?;
+    for backup in &worktree_backups {
+        found.push(Candidate {
+            section: "backups",
+            item: format!("agt worktree backups rm {} --yes", quote(&backup.id)),
+        });
+    }
     let Ok(entries) = fs::read_dir(store.backups_dir()) else {
         return Ok(());
     };
@@ -83,6 +80,11 @@ fn backups(found: &mut Vec<Candidate>) -> Result<()> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| !own.contains(path))
+        .filter(|path| {
+            !worktree_backups
+                .iter()
+                .any(|backup| backup.dir.parent() == Some(path.as_path()))
+        })
         .map(|path| (measure(&path).map_or(0, |(_, bytes)| bytes), path))
         .collect();
     sized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));

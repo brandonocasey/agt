@@ -15,7 +15,6 @@ use crate::forge::service;
 use crate::forge::transport::Cli;
 use crate::git::Repo;
 use crate::store::model::Forge;
-use crate::store::{Namespace, Store};
 
 use super::Row;
 
@@ -400,23 +399,6 @@ fn repository(repo: &Repo, origin: Option<&(String, String)>) -> Vec<Row> {
             "default branch",
             "cannot find the default branch",
             "git remote set-head origin --auto, or create main",
-        ),
-    });
-    let mut stray = 0;
-    let mut unreadable = None;
-    for namespace in [Namespace::Reviews, Namespace::Issues] {
-        match Store::inspect_repo(namespace, repo).and_then(|store| store.stray_locks()) {
-            Ok(found) => stray += found.len(),
-            Err(error) => unreadable = Some(error.0),
-        }
-    }
-    rows.push(match (stray, unreadable) {
-        (0, None) => Row::ok("agt locks", "no stray lock files"),
-        (0, Some(why)) => Row::warn("agt locks", why, "check .agt/ in the main checkout"),
-        (count, _) => Row::warn(
-            "agt locks",
-            format!("{count} stray lock file(s)"),
-            "agt cleanup",
         ),
     });
     rows

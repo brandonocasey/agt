@@ -20,7 +20,7 @@ const BUDGET: Duration = Duration::from_secs(30);
 ///
 /// Checks tools (git >= 2.38, gh, glab, mise), forge logins, the agt version pinned in mise,
 /// the global git ignore for `.worktrees/` and `/.cache/agents/scratch/`, agt state and config,
-/// and, inside a repository, origin, the default branch and stray agt locks. Each failed check
+/// and, inside a repository, origin, the default branch. Each failed check
 /// prints a fix hint. Exit status: 0 all ok, 1 any check failed, 2 only warnings.
 #[derive(Args)]
 pub struct Cli {
