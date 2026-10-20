@@ -12,4 +12,4 @@ pub use locate::{
     codex_sessions, history_files, is_scratch, session_files,
 };
 pub use records::Call;
-pub use turns::{ScanState, Turn, parse_line};
+pub use turns::{ScanState, Turn, injected, parse_line};

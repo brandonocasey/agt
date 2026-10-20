@@ -39,8 +39,20 @@ pub const SCRATCH_PROJECT_PATTERN: &str =
 /// Path fragment of the skill files an agent reads.
 pub const SKILLS_PATH: &str = "/skills/";
 
-/// Opening tag of the skill listing Codex injects as a user message.
-pub const SKILLS_INSTRUCTIONS_TAG: &str = "<skills_instructions>";
+/// What a user message the harness wrote, not the person, starts with: a tag (Codex's
+/// `<environment_context>` and `<skills_instructions>`, Claude Code's `<command-...>` and
+/// `<system-reminder>`), Codex's `# AGENTS.md instructions`, or Claude Code's `Caveat:`.
+pub const INJECTED_PREFIXES: [&str; 3] = ["<", "# AGENTS.md instructions", "Caveat:"];
+
+/// The user-message starts only a harness writes. The session index drops just these, so a
+/// prompt the person typed that starts with `<` stays searchable.
+pub const HARNESS_PREFIXES: [&str; 5] = [
+    "# AGENTS.md instructions",
+    "<environment_context>",
+    "<skills_instructions>",
+    "<system",
+    "<developer",
+];
 
 /// Path fragment of files under Codex's config directory.
 pub const CODEX_PATH: &str = "/.codex/";

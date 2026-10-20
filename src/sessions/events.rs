@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::core::transcripts::injected;
 use crate::core::transcripts::json::{get, head, key, text, truthy};
 use crate::sessions::fmt;
 use crate::sessions::source::Loaded;
@@ -326,7 +327,7 @@ pub(super) fn user_text(record: &Value) -> Option<String> {
     if let Some(bash) = BASH_INPUT.captures(content) {
         return Some(format!("! {}", bash[1].trim()));
     }
-    if content.starts_with('<') || content.starts_with("Caveat:") {
+    if injected(content) {
         return None;
     }
     Some(content.to_owned())

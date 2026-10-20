@@ -11,6 +11,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::json::{count, get, tail, text};
+use super::turns::injected;
 
 /// Who wrote a rollout file, from its first line.
 pub struct Meta {
@@ -21,19 +22,57 @@ pub struct Meta {
     pub scripted: bool,
 }
 
+/// The ids a `session_meta` payload names, read in one place. A fork is told apart two ways:
+/// [`Adapter`] replays a fork's records by event, from `forked_from_id` to its first
+/// `thread_settings_applied`; the index marks turns inherited by ordinal, those before
+/// `subagent_history_start_ordinal`.
+pub struct Ids<'a> {
+    pub id: Option<&'a str>,
+    /// The session this one was forked from.
+    pub forked_from: Option<&'a str>,
+    /// The parent thread of a built-in subagent.
+    pub parent: Option<&'a str>,
+    /// The parent thread of a spawned subagent.
+    pub spawn_parent: Option<&'a str>,
+    pub history_start: Option<i64>,
+}
+
+impl<'a> Ids<'a> {
+    pub fn of(payload: &'a Value) -> Self {
+        let named =
+            |value: &'a Value, key: &str| Some(text(value, key)).filter(|id| !id.is_empty());
+        let spawn = get(get(get(payload, "source"), "subagent"), "thread_spawn");
+        Self {
+            id: payload.get("id").and_then(Value::as_str),
+            forked_from: named(payload, "forked_from_id"),
+            parent: named(payload, "parent_thread_id"),
+            spawn_parent: named(spawn, "parent_thread_id"),
+            history_start: payload
+                .get("subagent_history_start_ordinal")
+                .and_then(Value::as_i64),
+        }
+    }
+
+    /// Whether `session` is one of the ids the rollout names as its own or its parent's.
+    pub fn name(&self, session: &str) -> bool {
+        [self.id, self.parent, self.spawn_parent].contains(&Some(session))
+    }
+}
+
 /// The `session_meta` line, or `None` when `first` is not one.
 pub fn meta(first: &Value) -> Option<Meta> {
     if text(first, "type") != "session_meta" {
         return None;
     }
     let payload = get(first, "payload");
+    let ids = Ids::of(payload);
     let subagent = get(get(payload, "source"), "subagent");
     let spawn = get(subagent, "thread_spawn");
     let (session, agent) = if spawn.is_object() {
         // A spawn without a role runs Codex's default agent.
         let role = text(spawn, "agent_role");
         (
-            text(spawn, "parent_thread_id"),
+            ids.spawn_parent.unwrap_or_default(),
             if role.is_empty() { "default" } else { role },
         )
     } else {
@@ -42,11 +81,9 @@ pub fn meta(first: &Value) -> Option<Meta> {
             .as_str()
             .or_else(|| get(subagent, "other").as_str());
         // A built-in one names its parent at the top level.
-        let parent = text(payload, "parent_thread_id");
-        let session = if kind.is_some() && !parent.is_empty() {
-            parent
-        } else {
-            text(payload, "id")
+        let session = match ids.parent {
+            Some(parent) if kind.is_some() => parent,
+            _ => ids.id.unwrap_or_default(),
         };
         (session, kind.unwrap_or("main"))
     };
@@ -204,7 +241,7 @@ fn user_text(payload: &Value) -> Option<String> {
         .as_array()?
         .iter()
         .map(|item| text(item, "text"))
-        .filter(|text| !text.starts_with('<') && !text.starts_with("# AGENTS.md instructions"))
+        .filter(|text| !injected(text))
         .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
@@ -265,7 +302,7 @@ impl Adapter {
         let payload = get(record, "payload");
         let timestamp = get(record, "timestamp").clone();
         let kind = text(record, "type");
-        if kind == "session_meta" && !text(payload, "forked_from_id").is_empty() {
+        if kind == "session_meta" && Ids::of(payload).forked_from.is_some() {
             self.replaying = true;
         }
         if self.replaying {

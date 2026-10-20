@@ -181,17 +181,10 @@ pub fn belongs_to(path: &Path, session: &str) -> bool {
         return false;
     };
     let own = |value: &Value| value.as_str() == Some(session);
-    let payload = get(&entry, "payload");
-    let spawn = get(get(get(payload, "source"), "subagent"), "thread_spawn");
-    [
-        get(payload, "id"),
-        get(payload, "parent_thread_id"),
-        get(spawn, "parent_thread_id"),
-        get(&entry, "sessionId"),
-        get(&entry, "session_id"),
-    ]
-    .into_iter()
-    .any(own)
+    codex::Ids::of(get(&entry, "payload")).name(session)
+        || [get(&entry, "sessionId"), get(&entry, "session_id")]
+            .into_iter()
+            .any(own)
 }
 
 fn stem(path: &Path) -> String {
