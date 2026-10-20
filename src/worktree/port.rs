@@ -2,7 +2,6 @@
 //! `$XDG_STATE_HOME/agents/worktrees/ports.json`, keyed by the worktree's absolute path.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +27,8 @@ pub struct Cli {
     env: bool,
 }
 
+const PORTS_FILE: &str = "ports.json";
+
 type Ports = BTreeMap<String, u16>;
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -52,8 +53,7 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
         .canonicalize()
         .map_err(ctx(format!("resolve {}", dir.display())))?;
     let key = path.to_string_lossy().into_owned();
-    let folder = folder()?;
-    let file = folder.join("ports.json");
+    let file = folder()?.join(PORTS_FILE);
     let mut port = 0;
     update_json::<Ports>(&file, |ports| {
         let before = ports.len();
@@ -73,10 +73,15 @@ pub(super) fn assign(dir: &Path) -> Result<(PathBuf, u16)> {
     Ok((path, port))
 }
 
-/// `$XDG_STATE_HOME/agents/worktrees`, created when missing.
+/// `$XDG_STATE_HOME/agents/worktrees`, without creating it.
+fn state_dir() -> Result<PathBuf> {
+    Ok(local::agents_state()?.join("worktrees"))
+}
+
+/// `$XDG_STATE_HOME/agents/worktrees`, created privately when missing.
 pub(super) fn folder() -> Result<PathBuf> {
-    let folder = local::agents_state()?.join("worktrees");
-    fs::create_dir_all(&folder).map_err(ctx(format!("create {}", folder.display())))?;
+    let folder = state_dir()?;
+    local::private_dir(&folder)?;
     Ok(folder)
 }
 
@@ -85,7 +90,7 @@ pub(super) fn recorded(dir: &Path) -> Result<Option<u16>> {
     let path = dir
         .canonicalize()
         .map_err(ctx(format!("resolve {}", dir.display())))?;
-    let file = local::agents_state()?.join("worktrees").join("ports.json");
+    let file = state_dir()?.join(PORTS_FILE);
     Ok(read_json::<Ports>(&file)?
         .unwrap_or_default()
         .get(path.to_string_lossy().as_ref())
