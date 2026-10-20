@@ -14,6 +14,31 @@ const BIN: &str = env!("CARGO_BIN_EXE_agt");
 pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
+/// Every variable agt or the git it runs reads from the caller's environment; `Env::command`
+/// clears them so a developer shell cannot change a test. Tests that need one set it after.
+const SCRUBBED_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GH_HOST",
+    "GITLAB_HOST",
+    "AGT_NOW",
+    "AGT_OFFLINE",
+    "AGT_SYNC_CAP_MS",
+    "AGT_PRICES",
+    "AGT_MISE_BIN",
+    "AGT_GIT_BIN",
+    "AGT_LS_REMOTE_TIMEOUT",
+    // A test run inside a Claude Code session would make every process it spawns
+    // that session's own, which `agt worktree` ignores.
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_PID",
+    "PLAYWRIGHT_BROWSERS_PATH",
+];
+
 /// A temporary HOME, XDG dirs, git config and repository; nothing reads the user's real state.
 pub struct Env {
     _temp: TempDir,
@@ -71,34 +96,25 @@ impl Env {
 
     pub fn command(&self, program: &str, dir: &Path) -> Command {
         let mut command = Command::new(program);
+        command.current_dir(dir);
+        for name in SCRUBBED_ENV {
+            command.env_remove(name);
+        }
         command
-            .current_dir(dir)
             .env("HOME", self.root.join("home"))
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_EDITOR", "true")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env("TZ", "UTC")
             .env("AGT_GH_BIN", FAKE_FORGE)
             .env("AGT_GLAB_BIN", FAKE_FORGE)
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
-            .env_remove("GITLAB_HOST")
-            .env_remove("AGT_NOW")
-            .env_remove("AGT_OFFLINE")
-            .env_remove("AGT_SYNC_CAP_MS")
             // `agt cleanup` must see only this environment: its cache, its tmp, no processes.
             .env("XDG_CACHE_HOME", self.root.join("cache"))
             .env("AGT_CLEANUP_TMP", self.root.join("tmp"))
-            .env("AGT_CLEANUP_PID", "0")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            // A test run inside a Claude Code session would make every process it spawns
-            // that session's own, which `agt worktree` ignores.
-            .env_remove("CLAUDE_PID")
-            .env_remove("PLAYWRIGHT_BROWSERS_PATH");
+            .env("AGT_CLEANUP_PID", "0");
         if self.offline {
             command.env("AGT_OFFLINE", "1");
         }
