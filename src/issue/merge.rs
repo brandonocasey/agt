@@ -246,6 +246,7 @@ mod tests {
     use super::*;
     use crate::forge::markers;
     use crate::store::issues::Category;
+    use crate::store::model::Author;
 
     fn data(title: &str, labels: &[&str]) -> IssueData {
         IssueData {

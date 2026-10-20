@@ -16,6 +16,22 @@ pub(super) struct Reviewed {
     pub(super) shas: HashSet<String>,
 }
 
+impl Reviewed {
+    /// Records what an ended `pass` reviewed; its tree only for the target's own passes, since a
+    /// tree match alone may sit on another base.
+    fn add_pass(&mut self, pass: &Pass, with_tree: bool) {
+        self.patch_ids.extend(pass_patch_ids(pass).cloned());
+        if with_tree {
+            self.trees.insert(pass.tree.clone());
+        }
+        if !pass.dirty {
+            self.shas.insert(pass.head.clone());
+        }
+        self.shas
+            .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
+    }
+}
+
 /// A pass covering a head, with its target and run.
 #[derive(Clone)]
 pub(super) struct Covered<'a> {
@@ -166,6 +182,129 @@ pub(super) fn count(covered: &[Covered]) -> usize {
         .count()
 }
 
+/// The target and the other targets of the repository, whose passes can cover a head.
+struct Targets<'a> {
+    target: Option<&'a Target>,
+    others: &'a [Target],
+}
+
+impl<'a> Targets<'a> {
+    /// Another target's pass (a `--range` review of the branch's end point) covers the head
+    /// when it reviewed the same diff; a tree match alone may sit on another base.
+    /// A run stored in two files (a rename to the PR/MR key cut short) counts once.
+    fn covered_at(
+        &self,
+        tree: &str,
+        range: Option<&str>,
+        head_id: Option<&str>,
+    ) -> Vec<Covered<'a>> {
+        let mut covered = coverage(self.target.as_slice(), tree, range, head_id);
+        let others: Vec<&Target> = self.others.iter().collect();
+        for mut other in coverage(&others, tree, range, head_id) {
+            other.matched.retain(|matched| *matched != "tree");
+            let seen = covered
+                .iter()
+                .any(|known| known.run == other.run && known.pass.id == other.pass.id);
+            if !other.matched.is_empty() && !seen {
+                covered.push(other);
+            }
+        }
+        covered
+    }
+
+    /// The commits ended passes reviewed, and the repaired ones (fixes after a run's last
+    /// pass), which count as reviewed but never add to reviews_at_head, also when another
+    /// target's run repaired them (a range review's fix).
+    fn reviewed(&self) -> (Reviewed, Reviewed) {
+        let mut reviewed = Reviewed::default();
+        for pass in self
+            .target
+            .iter()
+            .flat_map(|target| passes(target))
+            .filter(|pass| pass.ended_at.is_some())
+        {
+            reviewed.add_pass(pass, true);
+        }
+        // Commits a review of another target of this repository recorded (a `--range` review of
+        // the branch's end point, an earlier branch target) are reviewed here too.
+        for other in self.others {
+            for pass in passes(other).filter(|pass| pass.ended_at.is_some()) {
+                reviewed.add_pass(pass, false);
+            }
+        }
+        let mut repaired = Reviewed::default();
+        for commit in self
+            .target
+            .iter()
+            .flat_map(|target| &target.runs)
+            .chain(self.others.iter().flat_map(|other| &other.runs))
+            .flat_map(|run| &run.repair)
+        {
+            repaired.shas.insert(commit.sha.clone());
+            repaired.patch_ids.extend(commit.patch_id.clone());
+        }
+        (reviewed, repaired)
+    }
+}
+
+/// Each commit and changed merge since the base with whether a pass or a repair reviewed it,
+/// in history order.
+fn commit_views(
+    commits: &[CommitInfo],
+    merges: &[&LogEntry],
+    unreviewed_merges: &HashSet<&str>,
+    history: &[LogEntry],
+    sets: (&Reviewed, &Reviewed),
+) -> Vec<Value> {
+    let (reviewed, repaired) = sets;
+    let mut views: Vec<Value> = commits
+        .iter()
+        .map(|commit| {
+            let in_set = |set: &Reviewed| {
+                set.shas.contains(&commit.sha)
+                    || set.trees.contains(&commit.tree)
+                    || commit
+                        .patch_id
+                        .as_ref()
+                        .is_some_and(|id| set.patch_ids.contains(id))
+            };
+            let matched = if in_set(reviewed) {
+                Some("pass")
+            } else if in_set(repaired) {
+                Some("repair")
+            } else {
+                None
+            };
+            json!({
+                "sha": commit.sha,
+                "subject": commit.subject,
+                "patch_id": commit.patch_id,
+                "reviewed": matched.is_some(),
+                "match": matched,
+            })
+        })
+        .collect();
+    // A changed merge is reviewed once a whole-branch pass reviewed a head that contains it.
+    views.extend(merges.iter().map(|merge| {
+        let reviewed = !unreviewed_merges.contains(merge.sha.as_str());
+        json!({
+            "sha": merge.sha,
+            "subject": merge.subject,
+            "patch_id": null,
+            "reviewed": reviewed,
+            "match": reviewed.then_some("pass"),
+            "merge": true,
+        })
+    }));
+    let order: HashMap<&str, usize> = history
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.sha.as_str(), index))
+        .collect();
+    views.sort_by_key(|view| view["sha"].as_str().and_then(|sha| order.get(sha)).copied());
+    views
+}
+
 pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let mut scope = ctx.scope()?;
     if let Some(rev) = head_arg {
@@ -190,22 +329,9 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         .into_iter()
         .filter(|other| Some(&other.key) != target.map(|target| &target.key))
         .collect();
-    let others_ref: Vec<&Target> = others.iter().collect();
-    // Another target's pass (a `--range` review of the branch's end point) covers the head
-    // when it reviewed the same diff; a tree match alone may sit on another base.
-    // A run stored in two files (a rename to the PR/MR key cut short) counts once.
-    let covered_at = |tree: &str, range: Option<&str>, head_id: Option<&str>| {
-        let mut covered = coverage(target.as_slice(), tree, range, head_id);
-        for mut other in coverage(&others_ref, tree, range, head_id) {
-            other.matched.retain(|matched| *matched != "tree");
-            let seen = covered
-                .iter()
-                .any(|known| known.run == other.run && known.pass.id == other.pass.id);
-            if !other.matched.is_empty() && !seen {
-                covered.push(other);
-            }
-        }
-        covered
+    let targets = Targets {
+        target,
+        others: &others,
     };
     let covered = if merge_after {
         Vec::new()
@@ -215,94 +341,17 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             _ => None,
         };
         let range = ctx.repo.range_patch_id(scope.base.as_deref(), &head)?;
-        covered_at(&head_tree, range.as_deref(), head_patch_id.as_deref())
+        targets.covered_at(&head_tree, range.as_deref(), head_patch_id.as_deref())
     };
 
-    let mut reviewed = Reviewed::default();
-    for pass in target
-        .iter()
-        .flat_map(|target| passes(target))
-        .filter(|pass| pass.ended_at.is_some())
-    {
-        reviewed.patch_ids.extend(pass_patch_ids(pass).cloned());
-        reviewed.trees.insert(pass.tree.clone());
-        if !pass.dirty {
-            reviewed.shas.insert(pass.head.clone());
-        }
-        reviewed
-            .shas
-            .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
-    }
-    // Commits a review of another target of this repository recorded (a `--range` review of
-    // the branch's end point, an earlier branch target) are reviewed here too.
-    for other in &others {
-        for pass in passes(other).filter(|pass| pass.ended_at.is_some()) {
-            reviewed.patch_ids.extend(pass_patch_ids(pass).cloned());
-            if !pass.dirty {
-                reviewed.shas.insert(pass.head.clone());
-            }
-            reviewed
-                .shas
-                .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
-        }
-    }
-    // Repaired commits (fixes after a run's last pass) count as reviewed but never add to
-    // reviews_at_head, also when another target's run repaired them (a range review's fix).
-    let mut repaired = Reviewed::default();
-    for commit in target
-        .iter()
-        .flat_map(|target| &target.runs)
-        .chain(others.iter().flat_map(|other| &other.runs))
-        .flat_map(|run| &run.repair)
-    {
-        repaired.shas.insert(commit.sha.clone());
-        repaired.patch_ids.extend(commit.patch_id.clone());
-    }
-    let mut commit_views: Vec<Value> = commits
-        .iter()
-        .map(|commit| {
-            let in_set = |set: &Reviewed| {
-                set.shas.contains(&commit.sha)
-                    || set.trees.contains(&commit.tree)
-                    || commit
-                        .patch_id
-                        .as_ref()
-                        .is_some_and(|id| set.patch_ids.contains(id))
-            };
-            let matched = if in_set(&reviewed) {
-                Some("pass")
-            } else if in_set(&repaired) {
-                Some("repair")
-            } else {
-                None
-            };
-            json!({
-                "sha": commit.sha,
-                "subject": commit.subject,
-                "patch_id": commit.patch_id,
-                "reviewed": matched.is_some(),
-                "match": matched,
-            })
-        })
-        .collect();
-    // A changed merge is reviewed once a whole-branch pass reviewed a head that contains it.
-    commit_views.extend(merges.iter().map(|merge| {
-        let reviewed = !unreviewed_merges.contains(merge.sha.as_str());
-        json!({
-            "sha": merge.sha,
-            "subject": merge.subject,
-            "patch_id": null,
-            "reviewed": reviewed,
-            "match": reviewed.then_some("pass"),
-            "merge": true,
-        })
-    }));
-    let order: HashMap<&str, usize> = history
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| (entry.sha.as_str(), index))
-        .collect();
-    commit_views.sort_by_key(|view| view["sha"].as_str().and_then(|sha| order.get(sha)).copied());
+    let (reviewed, repaired) = targets.reviewed();
+    let commit_views = commit_views(
+        &commits,
+        &merges,
+        &unreviewed_merges,
+        &history,
+        (&reviewed, &repaired),
+    );
     let unreviewed: Vec<&Value> = commit_views
         .iter()
         .filter(|view| view["reviewed"] == false)
@@ -325,7 +374,7 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         let dirty = tree != head_tree;
         worktree_covered = if dirty && !merge_after {
             let range = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
-            covered_at(&tree, range.as_deref(), None)
+            targets.covered_at(&tree, range.as_deref(), None)
         } else {
             covered.clone()
         };

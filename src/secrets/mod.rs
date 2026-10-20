@@ -15,6 +15,9 @@ use crate::git::Repo;
 
 use rules::RULES;
 
+/// The distinct findings of a scan: file, line and the rule that matched.
+type Findings = BTreeSet<(String, usize, &'static str)>;
+
 const ALLOW: &str = "agt-secrets: allow";
 const FOUND: u8 = 1;
 const FAILED: u8 = 2;
@@ -38,7 +41,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
 }
 
-fn report(args: &Cli, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<Output> {
+fn report(args: &Cli, rows: &Findings) -> Result<Output> {
     let output = if args.json {
         Output::Json(
             rows.iter()
@@ -55,7 +58,7 @@ fn report(args: &Cli, rows: &BTreeSet<(String, usize, &'static str)>) -> Result<
     Ok(output.exiting(if rows.is_empty() { 0 } else { FOUND }))
 }
 
-fn scan(args: &Cli) -> Result<BTreeSet<(String, usize, &'static str)>> {
+fn scan(args: &Cli) -> Result<Findings> {
     let repo = Repo::discover()?;
     let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
     let paths: Vec<String> = args
@@ -143,7 +146,7 @@ fn read(repo: &Repo, name: &str, object: Option<&str>) -> Result<Option<Vec<u8>>
     Ok((!content.iter().take(8000).any(|&byte| byte == 0)).then_some(content))
 }
 
-fn scan_text(name: &str, content: &[u8], rows: &mut BTreeSet<(String, usize, &'static str)>) {
+fn scan_text(name: &str, content: &[u8], rows: &mut Findings) {
     for (index, line) in String::from_utf8_lossy(content).lines().enumerate() {
         if line.contains(ALLOW) {
             continue;

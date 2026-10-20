@@ -289,6 +289,17 @@ impl Push<'_> {
         self.writes.push(write);
     }
 
+    /// Gives the local issue the identity of the host's `data` and loads it under its number.
+    fn adopt_and_reload(&self, name: &mut String, doc: &mut Issue, data: &IssueData) -> Result<()> {
+        sync::adopt(self.store, self.tracker, &doc.key, data)?;
+        *name = data.number.to_string();
+        *doc = self
+            .store
+            .load_doc(&self.tracker.dir, name)?
+            .ok_or_else(|| Error(format!("issue {name} vanished")))?;
+        Ok(())
+    }
+
     fn create(&mut self, name: &mut String, doc: &mut Issue) -> Result<Step> {
         if doc
             .create
@@ -302,12 +313,7 @@ impl Push<'_> {
                 doc.number = Some(found.number);
                 return Ok(Step::Done);
             }
-            sync::adopt(self.store, self.tracker, &doc.key, &found)?;
-            *name = found.number.to_string();
-            *doc = self
-                .store
-                .load_doc(&self.tracker.dir, name)?
-                .ok_or_else(|| Error(format!("issue {name} vanished")))?;
+            self.adopt_and_reload(name, doc, &found)?;
             self.writes
                 .push(json!({"issue": doc.key, "kind": "claim", "number": found.number}));
             return Ok(Step::Done);
@@ -350,12 +356,7 @@ impl Push<'_> {
         match self.service().send(&request) {
             Ok(response) => {
                 let data = self.service().created(&response.body)?;
-                sync::adopt(self.store, self.tracker, &doc.key, &data)?;
-                *name = data.number.to_string();
-                *doc = self
-                    .store
-                    .load_doc(&self.tracker.dir, name)?
-                    .ok_or_else(|| Error(format!("issue {name} vanished")))?;
+                self.adopt_and_reload(name, doc, &data)?;
                 self.writes
                     .push(json!({"issue": doc.key, "kind": "create", "number": data.number}));
                 Ok(Step::Done)
