@@ -322,3 +322,71 @@ fn cleanup_drops_entries_older_than_the_output_logs_and_their_locks() {
     assert!(!dir.join(format!("{key}.json")).exists());
     assert!(!dir.join(format!(".{key}.lock")).exists());
 }
+
+fn key_file(env: &Env, key: &str) -> std::path::PathBuf {
+    env.repo
+        .join(".agt")
+        .join("checks")
+        .join(format!("{key}.json"))
+}
+
+#[test]
+fn a_corrupt_entry_is_a_miss_with_a_warning_and_a_failed_record_is_not_an_error() {
+    let env = setup();
+    let (_, first, _) = run_bump(&env, "test", &[]);
+    let file = key_file(&env, first["key"].as_str().unwrap());
+    for extra in [&[][..], &["--force"][..]] {
+        std::fs::write(&file, r#"{"version":2}"#).unwrap();
+        let before = runs(&env);
+        let (code, summary, _) = run_bump(&env, "test", extra);
+        assert_eq!((code, runs(&env)), (Some(0), before + 1), "{summary}");
+        assert_eq!(summary["cached"], false);
+        assert_eq!(summary["recorded"], false, "{summary}");
+        assert!(
+            !summary["warnings"].as_array().unwrap().is_empty(),
+            "{summary}"
+        );
+    }
+}
+
+#[test]
+fn a_hit_whose_log_is_gone_reruns() {
+    let env = setup();
+    let (_, first, _) = run_bump(&env, "test", &[]);
+    std::fs::remove_file(first["log"].as_str().unwrap()).unwrap();
+    let (code, second, _) = run_bump(&env, "test", &[]);
+    assert_eq!((code, runs(&env)), (Some(0), 2));
+    assert_eq!(second["cached"], false);
+    assert_eq!(second["recorded"], true);
+    assert!(std::path::Path::new(second["log"].as_str().unwrap()).exists());
+}
+
+#[test]
+fn a_modified_submodule_is_dirty_even_when_git_config_ignores_submodules() {
+    let env = setup();
+    let source = env.path("subsrc");
+    std::fs::create_dir_all(&source).unwrap();
+    let sub = |dir: &std::path::Path, args: &[&str]| {
+        let status = env
+            .command("git", dir)
+            .args(["-c", "protocol.file.allow=always"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    sub(&source, &["init", "-q", "-b", "main"]);
+    std::fs::write(source.join("lib.txt"), "lib\n").unwrap();
+    sub(&source, &["add", "-A"]);
+    sub(&source, &["commit", "-q", "-m", "lib"]);
+    sub(
+        &env.repo,
+        &["submodule", "add", "-q", &source.to_string_lossy(), "lib"],
+    );
+    env.git(&["commit", "-q", "-m", "add submodule"]);
+    env.git(&["config", "diff.ignoreSubmodules", "all"]);
+    std::fs::write(env.repo.join("lib/lib.txt"), "changed\n").unwrap();
+    let (_, summary, _) = run_bump(&env, "test", &[]);
+    assert_eq!(summary["dirty"], true, "{summary}");
+    assert_eq!(summary["recorded"], false);
+}

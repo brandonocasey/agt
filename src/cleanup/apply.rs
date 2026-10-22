@@ -125,7 +125,7 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         }
         Action::Check { root, name } => {
             Store::at_root(Namespace::Checks, root.clone())?
-                .try_remove_doc_if::<crate::check::Entry>(root, name, |entry| {
+                .try_remove_doc_if::<crate::check::prune::Entry>(root, name, |entry| {
                     expired_check(entry, now, OUTPUT_DAYS)
                 })
         }

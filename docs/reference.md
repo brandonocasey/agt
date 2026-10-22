@@ -1335,9 +1335,9 @@ work tree always runs and records nothing (`key` is null). `--force` runs even o
 records the new pass. The store opens only when there is a key; where it cannot open (a bare
 repository with worktrees has no main checkout) the command runs uncached and `warnings` says
 so. Once the command exits agt waits at most half a second for its remaining output, so a
-background process that keeps the pipes open cannot hang it; later output is dropped.
+background process that keeps the pipes open cannot hang it; after that agt stops reading, and a descendant that keeps writing may get EPIPE or SIGPIPE.
 `agt cleanup --only checks` removes entries, and their lock files, that ran 7 days or more ago,
-the retention of the output logs, so a hit never names a pruned log.
+the retention of the output logs. A hit whose log file no longer exists (for example after `agt cleanup --only files`) is a miss and the command reruns. A cache entry that cannot be read, or a store that cannot be written, never fails the command: the entry counts as a miss or `recorded` is false, and `warnings` says why.
 
 ## Wait
 
