@@ -231,7 +231,45 @@ impl TrackerDoc {
     }
 }
 
+/// What a user typed for an issue: `owner/repo#12`, `#12`, `12` or `local-xxxx`.
+pub struct IssueRef {
+    pub repo: Option<String>,
+    pub name: String,
+}
+
+pub fn parse_ref(text: &str) -> crate::core::error::Result<IssueRef> {
+    let invalid = || crate::core::error::Error(format!("not an issue key: {text}"));
+    if text.starts_with("local-") && text.len() > 6 {
+        return Ok(IssueRef {
+            repo: None,
+            name: text.to_owned(),
+        });
+    }
+    let (repo, number) = match text.rsplit_once('#') {
+        Some((repo, number)) => ((!repo.is_empty()).then(|| repo.to_owned()), number),
+        None => (None, text),
+    };
+    number.parse::<u64>().map_err(|_| invalid())?;
+    Ok(IssueRef {
+        repo,
+        name: number.to_owned(),
+    })
+}
+
 impl super::Store {
+    /// Every stored tracker: its directory and document.
+    pub fn issue_trackers(
+        &self,
+    ) -> crate::core::error::Result<Vec<(std::path::PathBuf, TrackerDoc)>> {
+        let mut found = Vec::new();
+        for dir in self.child_dirs()? {
+            if let Some(doc) = self.load_doc::<TrackerDoc>(&dir, TRACKER_FILE)? {
+                found.push((dir, doc));
+            }
+        }
+        Ok(found)
+    }
+
     pub fn attach_issue(
         &self,
         source: &std::path::Path,

@@ -298,9 +298,9 @@ impl FakeService for Github {
         Some(review(id, login, "COMMENTED", body))
     }
 
-    fn land_findings(&self, setup: &Setup) -> (Remote, String) {
+    fn land_inline(&self, setup: &Setup) -> Remote {
         let env = &setup.env;
-        let (f1, f2) = (setup.finding(1), setup.finding(2));
+        let f1 = setup.finding(1);
         self.link(setup);
         self.lose(env, Call::PostInline);
         env.fail(&["publish", "--pr", "42"], None);
@@ -313,47 +313,53 @@ impl FakeService for Github {
         );
         remote.reviews.push(own_review(&setup.head));
         self.sync(setup, &remote);
-        self.lose(env, Call::PostNote);
-        env.fail(&["publish", "--pr", "42"], None);
-        self.restore(env, Call::PostNote);
-        remote.general("601", Comment::new(601, "me", &sent(env, &f2)));
-        self.sync(setup, &remote);
         env.run(&["sync", "--pr", "42"]);
+        self.restore(env, Call::PostInline);
+        remote
+    }
+
+    fn land_findings(&self, setup: &Setup) -> (Remote, String) {
+        let mut remote = self.land_inline(setup);
+        // Publish does not post the general finding f2 here (a general comment cannot be
+        // resolved), so the general comment is one of mine that sync imports.
+        remote.general("601", Comment::new(601, "me", "A general remark of mine."));
+        self.sync(setup, &remote);
+        setup.env.run(&["sync", "--pr", "42"]);
         (remote, "601".to_owned())
     }
 
     fn stages(&self, setup: &Setup) -> [Remote; 3] {
         let f1 = setup.finding(1);
-        let f2 = setup.finding(2);
+        // The inline finding is already posted, so a fix to it is answered and resolved. The
+        // general finding is never posted here: a general comment cannot be resolved.
+        let posted_f1 = |resolved: bool, mut comments: Vec<Comment>| {
+            comments.insert(
+                0,
+                Comment::new(501, "me", &marked("f1", &format!("{f1}/c1"))),
+            );
+            (resolved, comments)
+        };
+        let mut start = self.before(setup);
+        let (resolved, comments) = posted_f1(false, Vec::new());
+        start.thread("PRRT_f1", resolved, 3, comments);
+        start.reviews.push(own_review(&setup.head));
         let mut posted = self.before(setup);
-        posted.thread(
-            "PRRT_f1",
-            false,
-            3,
-            vec![Comment::new(501, "me", &marked("f1", &format!("{f1}/c1")))],
-        );
+        let (resolved, comments) = posted_f1(false, Vec::new());
+        posted.thread("PRRT_f1", resolved, 3, comments);
         posted.reviews.push(own_review(&setup.head));
-        posted.general(
-            "601",
-            Comment::new(601, "me", &marked("f2", &format!("{f2}/c1"))),
-        );
         posted.general("602", Comment::new(602, "me", &marked("h1", "h1/c1")));
         let mut done = self.before(setup);
         done.set_resolved("PRRT_o", false);
-        done.thread(
-            "PRRT_f1",
+        let (resolved, comments) = posted_f1(
             true,
-            3,
-            vec![
-                Comment::new(501, "me", &marked("f1", &format!("{f1}/c1"))),
-                Comment::new(801, "me", &marked("Fixed.", &format!("{f1}/c2"))),
-            ],
+            vec![Comment::new(
+                801,
+                "me",
+                &marked("Fixed.", &format!("{f1}/c2")),
+            )],
         );
+        done.thread("PRRT_f1", resolved, 3, comments);
         done.reviews.push(own_review(&setup.head));
-        done.general(
-            "601",
-            Comment::new(601, "me", &marked("f2", &format!("{f2}/c1"))),
-        );
         done.general("602", Comment::new(602, "me", &marked("h1", "h1/c1")));
         done.general(
             "603",
@@ -369,7 +375,7 @@ impl FakeService for Github {
             head = setup.head
         );
         done.general("604", Comment::new(604, "me", &record));
-        [self.before(setup), posted, done]
+        [start, posted, done]
     }
 
     fn publish_writes(&self, env: &Env, setup: &Setup) {
@@ -387,7 +393,7 @@ impl FakeService for Github {
             &["api", "--method", "GET", &format!("{REVIEWS}/700/comments")],
             &listed.to_string(),
         );
-        for (call, id) in [(1, 601), (2, 602), (3, 603), (4, 604)] {
+        for (call, id) in [(1, 602), (2, 603), (3, 604)] {
             env.respond_nth(
                 &strs(&post(COMMENTS)),
                 call,
@@ -427,9 +433,35 @@ impl FakeService for Github {
     }
 
     fn assert_dry_run(&self, setup: &Setup, dry: &Value) {
-        let f1 = setup.finding(1);
         let writes = dry["writes"].as_array().unwrap();
-        let review = &writes[0]["input"];
+        // f1 is already posted and f2 is general, which GitHub cannot resolve: neither is posted.
+        assert_eq!(writes[0]["call"], json!(post(COMMENTS)));
+        assert!(writes[0]["input"]["body"].as_str().unwrap().starts_with(
+            "General note from me.\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
+        ));
+        assert_eq!(dry["skipped"][0]["item"], setup.finding(2));
+        assert_eq!(
+            dry["skipped"][0]["reason"],
+            "listed in the summary: a general comment here cannot be resolved"
+        );
+        assert_eq!(dry["skipped"][1]["item"], "h2");
+        // The general finding is in the summary; its one sentence is its whole text, so no
+        // quote repeats it.
+        let summary = writes.last().unwrap()["input"]["body"].as_str().unwrap();
+        assert!(
+            summary.contains("1. **✏️ nit** · General text of f2.\n"),
+            "{summary}"
+        );
+        assert!(!summary.contains("   > General text of f2."), "{summary}");
+        super::super::scenario::assert_summary(
+            setup,
+            writes.last().unwrap()["input"]["body"].as_str().unwrap(),
+        );
+    }
+
+    fn assert_inline_dry(&self, setup: &Setup, dry: &Value) {
+        let f1 = setup.finding(1);
+        let review = &dry["writes"][0]["input"];
         assert_eq!(review["commit_id"], setup.head);
         assert_eq!(review["event"], "COMMENT");
         let comment = &review["comments"][0];
@@ -438,35 +470,23 @@ impl FakeService for Github {
             (&json!("a.txt"), &json!(3), &json!("RIGHT"))
         );
         let body = comment["body"].as_str().unwrap();
-        assert!(body.starts_with(
-            "**🐛 bug (high):** In-diff text of f1.\n\n> <sub>m1 xhigh · Claude Code 2.1.296 · agent \
-             a0b5ad82</sub>\n"
-        ));
+        // The first comment of an agent carries the model alone.
+        assert!(
+            body.starts_with("**🐛 bug (high):** In-diff text of f1.\n\n> <sub>m1</sub>\n"),
+            "{body}"
+        );
         assert!(body.contains(&format!(
             "</sub>\n<!-- review-finding v1 id={f1} sha={} -->",
             setup.head
         )));
-        assert_eq!(
-            review["body"],
-            format!(
-                "**🔍 Agent review {}** of {}: 1 of 2 findings is inline here. The summary \
-                 comment lists both.\n<!-- agent-review id=review/{} -->",
-                setup.run,
-                &setup.head[..7],
-                setup.head
-            )
-        );
         assert!(body.ends_with(&format!(
             "<!-- agent-review id={f1}/c1 attempt=<attempt> -->"
         )));
-        let outside = writes[1]["input"]["body"].as_str().unwrap();
-        assert!(outside.starts_with("**✏️ nit:** General text of f2."));
-        assert_eq!(writes[1]["call"], json!(post(COMMENTS)));
-        assert!(writes[2]["input"]["body"].as_str().unwrap().starts_with(
-            "General note from me.\n<!-- agent-review id=h1/c1 attempt=<attempt> -->"
-        ));
-        assert_eq!(dry["skipped"][0]["item"], "h2");
-        super::super::scenario::assert_summary(setup, writes[8]["input"]["body"].as_str().unwrap());
+        // The review batch carries only its marker.
+        assert_eq!(
+            review["body"],
+            format!("<!-- agent-review id=review/{} -->", setup.head)
+        );
     }
 
     fn assert_posted(&self, setup: &Setup) {
@@ -478,10 +498,10 @@ impl FakeService for Github {
                 call.contains("query=AddReply") && input.contains("Fixed in the same commit.")
             })
             .unwrap();
-        assert!(reply.1.starts_with(
-            "> Fixed in the same commit. <sub>m2 high · Claude Code 2.1.300 · session \
-                 dcec84d5</sub>\n"
-        ));
+        // A reply carries no signature and is not quoted.
+        let reply = &reply.1;
+        assert!(reply.starts_with("Fixed in the same commit.\n"), "{reply}");
+        assert!(!reply.contains("<sub>"), "{reply}");
         let answer = inputs
             .iter()
             .find(|(_, input)| input.contains("Thanks, done."))
@@ -516,8 +536,9 @@ impl FakeService for Github {
     }
 
     fn assert_counts_once(&self, env: &Env) {
+        assert_eq!(self.count(env, Call::PostNote), 3);
+        // The one review is the lost write that landed f1; it is not posted again.
         assert_eq!(self.count(env, Call::PostInline), 1);
-        assert_eq!(self.count(env, Call::PostNote), 4);
         assert_eq!(self.count(env, Call::Resolve("PRRT_f1")), 1);
         assert_eq!(self.count(env, Call::Unresolve("PRRT_o")), 1);
     }

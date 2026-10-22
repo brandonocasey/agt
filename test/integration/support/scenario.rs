@@ -253,7 +253,7 @@ pub fn assert_never_posted(env: &Env) {
     }
 }
 
-/// Local work on top of the review: a general comment of mine and someone else's, a fix reply
+/// Local work on top of the review (a linked branch, its run ended): a general comment of mine and someone else's, a fix reply
 /// and resolve of f1, a reopened imported thread, an answer to an imported general comment.
 pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
     let env = &setup.env;
@@ -294,29 +294,21 @@ pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
     ]);
     env.run(&["resolve", reopen, "--not-fixed", "reopened"]);
     env.run(&["reply", answer, "--body", "Thanks, done.", "--author", "me"]);
-    env.run(&["run", "end", "--run", &setup.run]);
 }
 
 /// The summary text a publish of `setup` sends.
 pub fn assert_summary(setup: &Setup, summary: &str) {
     let short = &setup.head[..7];
     let expected = [
-        format!("**⚠️ Agent review: 1 open at {short}.** 2 findings: 1 fixed, 1 open."),
-        "<details><summary>📝 2 findings: 1 fixed, 1 open</summary>".to_owned(),
-        format!("| ✅ Fixed in {short} |"),
+        "1. **✏️ nit** · ".to_owned(),
+        "✓ 1 finding settled".to_owned(),
+        "<details><summary>Details</summary>".to_owned(),
+        "</details>".to_owned(),
         format!(
-            "1. 🔍 Reviewer agent a0b5ad82 read the whole branch at {short} and found 2 issues"
+            "> <sub>agt {} · 1 reviewer, m1 · ",
+            env!("CARGO_PKG_VERSION")
         ),
-        format!("2. 🛠️ Main session dcec84d5 fixed 1, in {short}."),
-        "3. ⚠️ 1 still open.".to_owned(),
-        format!(
-            "> | 🔍 Reviewer r1, {} | m1 xhigh | Claude Code 2.1.296 | agent a0b5ad828155531d2 |",
-            setup.run
-        ),
-        "> | 🛠️ Main session: fixes, replies | m2 high | Claude Code 2.1.300 | session \
-         dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f |"
-            .to_owned(),
-        format!("> <sub>Posted by agt {}.", env!("CARGO_PKG_VERSION")),
+        " · edited on each publish</sub>".to_owned(),
         format!(
             "<!-- review-record v2 id={} head={} reviews-at-head=1 open=1 -->",
             setup.run, setup.head
@@ -325,7 +317,10 @@ pub fn assert_summary(setup: &Setup, summary: &str) {
     for text in expected {
         assert!(summary.contains(&text), "{text} missing from {summary}");
     }
-    assert!(summary.starts_with("**⚠️ Agent review: "), "{summary}");
+    assert!(
+        summary.starts_with(&format!("**⚠️ 1 to fix** · agent review at `{short}`\n")),
+        "{summary}"
+    );
     assert!(
         summary
             .rsplit_once('\n')

@@ -1,82 +1,31 @@
 //! The living summary: one comment per PR/MR that `publish` posts once and then edits in place.
-//! It lists the findings, the commits and how each was reviewed, the review steps and the
-//! agents, and holds the record marker of every run it covers.
+//! It leads with what is left to fix and the findings moved to follow-up issues, collapses the
+//! QA checks and the settled findings, and holds the record marker of every run it covers.
 
 use std::fmt::Write as _;
 
-use super::render::{
-    duration, finding_pass, harness_label, kind_heading, location, model_label, outcome,
-    pass_label, session_role, short, short_id,
-};
-use crate::core::clock;
+use super::render::{duration, kind_heading, location, outcome, short};
 use crate::forge::markers;
 use crate::git::CommitInfo;
 use crate::review::commands::approve::is_open;
 use crate::review::commands::qa::{CheckState, environment};
 use crate::review::commands::usage::run_spend;
-use crate::store::model::{
-    Anchor, Author, CommitPatch, Outcome, Pass, PassKind, QaRun, Resolution, Reviewer, Run, Side,
-    Target, Thread,
-};
+use crate::store::model::{CommitPatch, Outcome, PassKind, QaRun, Resolution, Run, Target, Thread};
 
-/// Longest finding gist or commit subject in a table cell.
+/// Longest finding gist in a list item or table cell.
 const CELL: usize = 90;
-/// Most commits the commits table lists.
-const MAX_COMMITS: usize = 100;
-/// Longest text shown for a finding that was not posted inline.
+/// Longest text shown for an open finding that is not posted as its own thread.
 const MAX_NOTE: usize = 2000;
 /// Longest summary, markers included: GitHub takes at most 65,536 characters.
 const MAX_BODY: usize = 65_000;
+/// Most unreviewed commits the status line names.
+const MAX_NAMED: usize = 5;
 
 /// A run the summary covers, with the head and count its record marker names.
 pub(super) struct Covered<'a> {
     pub(super) run: &'a Run,
     pub(super) head: String,
     pub(super) at_head: usize,
-}
-
-/// The summary text. `commits` are the PR/MR's commits, oldest first, when git could list them.
-pub(super) fn summary_body(
-    target: &Target,
-    covered: &[Covered],
-    qa: &QaSummary,
-    commits: Option<&[CommitInfo]>,
-    attempt: &str,
-) -> String {
-    let findings: Vec<&Thread> = target
-        .threads
-        .iter()
-        .filter(|thread| {
-            covered
-                .iter()
-                .any(|covered| raised_in(thread, &covered.run.id, None))
-        })
-        .collect();
-    let reviews: Vec<(bool, String)> = commits
-        .unwrap_or_default()
-        .iter()
-        .map(|commit| commit_review(covered, commit))
-        .collect();
-    let commits = commits.filter(|commits| !commits.is_empty());
-    let mut text = String::new();
-    if !covered.is_empty() {
-        text = headline(covered, &findings, commits, &reviews);
-        if !findings.is_empty() {
-            findings_table(&mut text, target, &findings);
-        }
-        if let Some(commits) = commits {
-            commit_table(&mut text, commits, &reviews);
-        }
-        steps(&mut text, covered, commits.unwrap_or_default(), &findings);
-        agents(&mut text, covered, &findings);
-    }
-    if !qa.runs.is_empty() {
-        qa_section(&mut text, target, qa);
-    }
-    let marks = markers_block(covered, &findings, qa, attempt);
-    fit(&mut text, MAX_BODY.saturating_sub(marks.chars().count()));
-    text.push_str(&marks);
-    text
 }
 
 /// The QA runs a summary covers, with the latest check of each name at the PR/MR head.
@@ -87,71 +36,277 @@ pub(super) struct QaSummary<'a> {
     pub(super) approved: bool,
 }
 
-/// The QA verdict line, the checks table and the threads the checks found.
-fn qa_section(text: &mut String, target: &Target, qa: &QaSummary) {
-    let threads: Vec<&Thread> = target
+/// The summary text. `commits` are the PR/MR's commits, oldest first, when git could list them.
+pub(super) fn summary_body(
+    target: &Target,
+    covered: &[Covered],
+    qa: &QaSummary,
+    commits: Option<&[CommitInfo]>,
+    attempt: &str,
+) -> String {
+    let reported: Vec<&Thread> = target
         .threads
         .iter()
         .filter(|thread| {
-            thread.check.as_deref().is_some_and(|check| {
-                qa.runs.iter().any(|run| {
-                    check
-                        .strip_prefix(run.id.as_str())
-                        .is_some_and(|rest| rest.starts_with('.'))
-                })
-            })
+            covered
+                .iter()
+                .any(|covered| raised_in(thread, &covered.run.id))
+                || qa_check(qa, thread).is_some()
         })
         .collect();
-    // Unresolved, as the findings tally counts them: a posted general comment the host cannot
-    // resolve still needs an answer here.
-    let open = threads.iter().filter(|thread| !thread.resolved).count();
-    let stale = qa.checks.iter().filter(|state| !state.current).count();
-    let blocked = qa
+    let open: Vec<&Thread> = reported
+        .iter()
+        .copied()
+        .filter(|thread| is_open(thread))
+        .collect();
+    // A failed or stale check is left to fix unless an open thread already says why.
+    let failing: Vec<&CheckState> = qa
         .checks
         .iter()
-        .any(|state| state.check.outcome.blocks_approval());
-    let emoji = if blocked || stale > 0 || open > 0 {
-        "⚠️"
-    } else {
-        "✅"
+        .filter(|state| state.check.outcome.blocks_approval() || !state.current)
+        .filter(|state| {
+            !open
+                .iter()
+                .any(|thread| thread.check.as_deref() == Some(state.check.id.as_str()))
+        })
+        .collect();
+    let mut text = headline(covered, qa, open.len() + failing.len());
+    for (index, thread) in open.iter().enumerate() {
+        open_item(&mut text, index + 1, qa, thread);
+    }
+    for (index, state) in failing.iter().enumerate() {
+        check_item(&mut text, open.len() + index + 1, state);
+    }
+    status(&mut text, covered, qa, &reported, commits);
+    follow_ups(&mut text, qa, &reported);
+    details(&mut text, qa, &reported);
+    footer(&mut text, covered);
+    let marks = markers_block(covered, &reported, qa, attempt);
+    fit(&mut text, MAX_BODY.saturating_sub(marks.chars().count()));
+    text.push_str(&marks);
+    text
+}
+
+/// `**⚠️ 2 to fix** · agent review and QA at `f48de58``.
+fn headline(covered: &[Covered], qa: &QaSummary, todo: usize) -> String {
+    let what = match (covered.is_empty(), qa.runs.is_empty()) {
+        (false, false) => "agent review and QA",
+        (false, true) => "agent review",
+        _ => "agent QA",
     };
-    let mut results: Vec<String> = [
-        Outcome::Pass,
-        Outcome::Fail,
-        Outcome::Blocked,
-        Outcome::Skipped,
-    ]
-    .into_iter()
-    .filter_map(|wanted| {
-        let number = qa
-            .checks
-            .iter()
-            .filter(|state| state.check.outcome == wanted)
-            .count();
-        (number > 0).then(|| format!("{number} {}", wanted.as_str()))
-    })
-    .collect();
-    if stale > 0 {
-        results.push(format!("{stale} stale"));
+    let head = covered
+        .last()
+        .map_or(qa.head.as_str(), |covered| covered.head.as_str());
+    let verdict = match todo {
+        0 => "✅ Nothing to fix".to_owned(),
+        todo => format!("⚠️ {todo} to fix"),
+    };
+    let mut text = format!("**{verdict}** · {what} at `{}`", short(head));
+    if todo > 0 {
+        text.push('\n');
     }
-    if open > 0 {
-        results.push(format!("{} open", count(open, "finding")));
+    text
+}
+
+/// One open finding or QA thread: its kind, place and first sentence, linked to its thread.
+/// One that is not posted as its own thread shows its whole text here.
+fn open_item(text: &mut String, number: usize, qa: &QaSummary, thread: &Thread) {
+    let first = thread.comments.first();
+    let said = first.map_or("", |first| first.body.as_str());
+    let _ = write!(text, "\n{number}. **{}**", kind_heading(thread));
+    if let Some(anchor) = &thread.anchor {
+        let _ = write!(text, " · `{}`", location(anchor));
     }
-    if !text.is_empty() {
-        text.push_str("\n\n");
+    if let Some(name) = qa_check(qa, thread) {
+        let _ = write!(text, " · QA: {}", clip(name, CELL));
     }
+    let gist = gist(said);
+    let _ = write!(text, " · {gist}");
+    if thread.held {
+        text.push_str(" ⏸️ Waits for the author.");
+    }
+    if let Some(issue) = &thread.issue {
+        let _ = write!(text, " Related: {issue}.");
+    }
+    let remote = first.and_then(|first| first.remote.as_ref());
+    match remote.and_then(|remote| remote.url.as_deref()) {
+        Some(url) => {
+            let _ = write!(text, " [thread]({url})");
+        }
+        // Text the first sentence already says in full needs no quote.
+        None if remote.is_none() && gist != said.trim() => {
+            let mut full = clip(said.trim(), MAX_NOTE);
+            close_fence(&mut full);
+            text.push('\n');
+            for line in full.lines() {
+                let _ = write!(text, "\n   > {line}");
+            }
+            text.push('\n');
+        }
+        None => {}
+    }
+}
+
+/// A failed, blocked or stale check, with its first evidence link.
+fn check_item(text: &mut String, number: usize, state: &CheckState) {
+    let check = state.check;
+    let result = if state.current {
+        check.outcome.as_str()
+    } else {
+        "stale"
+    };
     let _ = write!(
         text,
-        "**{emoji} Agent QA at {}: {}: {}.**",
-        short(&qa.head),
-        count(qa.checks.len(), "check"),
-        results.join(", ")
+        "\n{number}. **🧪 QA {result}: {}**",
+        clip(&check.name, CELL)
     );
-    if qa.approved {
-        text.push_str(" Approved.");
+    let environment = environment(state.run, check);
+    if !environment.is_empty() {
+        let _ = write!(text, " · {}", clip(&environment.join(", "), CELL));
     }
-    open_section(text, &format!("🧪 {}", count(qa.checks.len(), "check")));
-    text.push_str("| Check | Result | Environment | Evidence |\n|---|---|---|---|\n");
+    if !state.current {
+        text.push_str(" · tested an older head");
+    }
+    if let Some(url) = check.evidence.iter().find(|item| is_url(item)) {
+        let _ = write!(text, " [evidence]({url})");
+    }
+}
+
+/// The one line of what is fine and what else needs a look: QA, settled findings and commits
+/// no review read.
+fn status(
+    text: &mut String,
+    covered: &[Covered],
+    qa: &QaSummary,
+    reported: &[&Thread],
+    commits: Option<&[CommitInfo]>,
+) {
+    let mut parts = Vec::new();
+    if !qa.checks.is_empty() {
+        let passed = qa
+            .checks
+            .iter()
+            .filter(|state| state.current && state.check.outcome == Outcome::Pass)
+            .count();
+        let mark = if passed == qa.checks.len() {
+            "✓"
+        } else {
+            "⚠"
+        };
+        parts.push(format!("{mark} QA {passed} of {} pass", qa.checks.len()));
+    }
+    if qa.approved {
+        parts.push("✓ QA approved".to_owned());
+    }
+    let settled = reported
+        .iter()
+        .filter(|thread| thread.resolved && moved_to(thread).is_none())
+        .count();
+    if settled > 0 {
+        parts.push(format!("✓ {} settled", count(settled, "finding")));
+    }
+    if !covered.is_empty() {
+        let missing: Vec<String> = commits
+            .unwrap_or_default()
+            .iter()
+            .filter(|commit| !reviewed(covered, commit))
+            .map(|commit| format!("`{}`", short(&commit.sha)))
+            .collect();
+        match missing.len() {
+            0 => {}
+            1..=MAX_NAMED => parts.push(format!("⚠ {} not reviewed", missing.join(", "))),
+            more => parts.push(format!(
+                "⚠ {} and {} more not reviewed",
+                missing[..MAX_NAMED].join(", "),
+                more - MAX_NAMED
+            )),
+        }
+    }
+    if !parts.is_empty() {
+        let _ = write!(text, "\n\n{}", parts.join(" · "));
+    }
+}
+
+/// The findings left for follow-up issues: work that remains, so never collapsed.
+fn follow_ups(text: &mut String, qa: &QaSummary, reported: &[&Thread]) {
+    let moved: Vec<(&Thread, &str)> = reported
+        .iter()
+        .filter_map(|thread| moved_to(thread).map(|issue| (*thread, issue)))
+        .collect();
+    if moved.is_empty() {
+        return;
+    }
+    text.push_str("\n\n**📋 Follow-up issues**\n");
+    for (index, (thread, issue)) in moved.iter().enumerate() {
+        let said = thread
+            .comments
+            .first()
+            .map_or("", |first| first.body.as_str());
+        let from = match (&thread.anchor, qa_check(qa, thread)) {
+            (Some(anchor), _) => format!(" (from `{}`)", location(anchor)),
+            (None, Some(name)) => format!(" (from QA: {})", clip(name, CELL)),
+            (None, None) => String::new(),
+        };
+        let _ = write!(text, "\n{}. {issue} · {}{from}", index + 1, gist(said));
+    }
+}
+
+/// The collapsed QA checks and settled findings.
+fn details(text: &mut String, qa: &QaSummary, reported: &[&Thread]) {
+    let settled: Vec<&Thread> = reported
+        .iter()
+        .copied()
+        .filter(|thread| thread.resolved && moved_to(thread).is_none())
+        .collect();
+    let (posted, unposted): (Vec<&Thread>, Vec<&Thread>) = settled.iter().partition(|thread| {
+        thread
+            .comments
+            .first()
+            .is_some_and(|first| first.remote.is_some())
+    });
+    if qa.checks.is_empty() && settled.is_empty() {
+        return;
+    }
+    text.push_str("\n\n<details><summary>Details</summary>\n\n");
+    if !qa.checks.is_empty() {
+        qa_table(text, qa);
+    }
+    if !posted.is_empty() {
+        if !qa.checks.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("| Settled finding | Outcome |\n|---|---|\n");
+        for thread in &posted {
+            let first = thread.comments.first();
+            let said = gist(first.map_or("", |first| first.body.as_str()));
+            let finding = match first
+                .and_then(|first| first.remote.as_ref())
+                .and_then(|remote| remote.url.as_deref())
+            {
+                Some(url) => format!("[{}]({url})", cell(&said)),
+                None => cell(&said),
+            };
+            let _ = writeln!(
+                text,
+                "| {}: {finding} | {} |",
+                kind_heading(thread),
+                cell(&outcome(thread))
+            );
+        }
+    }
+    if !unposted.is_empty() {
+        let _ = writeln!(
+            text,
+            "\n{} fixed or dismissed before posting, so not posted.",
+            count(unposted.len(), "more finding")
+        );
+    }
+    text.push_str("\n</details>");
+}
+
+/// The table of the latest check of each name.
+fn qa_table(text: &mut String, qa: &QaSummary) {
+    text.push_str("| QA check | Result | Environment | Evidence |\n|---|---|---|---|\n");
     for state in &qa.checks {
         let check = state.check;
         let emoji = match check.outcome {
@@ -164,7 +319,7 @@ fn qa_section(text: &mut String, target: &Target, qa: &QaSummary) {
         let links: Vec<String> = check
             .evidence
             .iter()
-            .filter(|item| item.starts_with("https://") || item.starts_with("http://"))
+            .filter(|item| is_url(item))
             .enumerate()
             .map(|(index, url)| format!("[{}]({url})", index + 1))
             .collect();
@@ -184,140 +339,63 @@ fn qa_section(text: &mut String, target: &Target, qa: &QaSummary) {
             cell(&clip(&environment(state.run, check).join(", "), CELL)),
         );
     }
-    close_section(text);
-    if threads.is_empty() {
-        return;
-    }
-    open_section(
-        text,
-        &format!(
-            "🔎 {}: {}",
-            count(threads.len(), "QA finding"),
-            tally(&threads)
-        ),
-    );
-    text.push_str("| Finding | Check | Outcome |\n|---|---|---|\n");
-    for thread in &threads {
-        let check = thread.check.as_deref().unwrap_or_default();
-        let name = qa
-            .runs
-            .iter()
-            .flat_map(|run| &run.checks)
-            .find(|known| known.id == check)
-            .map_or(check, |known| known.name.as_str());
-        let said = thread
-            .comments
-            .first()
-            .map(|first| first.body.as_str())
-            .unwrap_or_default();
-        let _ = writeln!(
-            text,
-            "| **{}:** {} | {} | {} |",
-            kind_heading(thread),
-            cell(&gist(said)),
-            cell(&clip(name, CELL)),
-            cell(&outcome(thread)),
-        );
-    }
-    close_section(text);
 }
 
-/// Whether `thread` is a finding of `run` (of pass `pass` when given).
-fn raised_in(thread: &Thread, run: &str, pass: Option<&str>) -> bool {
-    thread
-        .finding
-        .as_ref()
-        .is_some_and(|finding| finding.run == run && pass.is_none_or(|pass| finding.pass == pass))
-}
-
-/// The opening of a collapsed section, up to the start of its content.
-fn open_section(text: &mut String, title: &str) {
-    let _ = write!(text, "\n\n<details><summary>{title}</summary>\n\n");
-}
-
-fn close_section(text: &mut String) {
-    text.push_str("\n</details>");
-}
-
-/// The verdict line: open findings at the head, the findings tally, and how many commits were
-/// reviewed.
-fn headline(
-    covered: &[Covered],
-    findings: &[&Thread],
-    commits: Option<&[CommitInfo]>,
-    reviews: &[(bool, String)],
-) -> String {
-    let open = findings.iter().filter(|thread| is_open(thread)).count();
-    let head = covered.last().map_or("", |covered| covered.head.as_str());
-    let emoji = if open == 0 { "✅" } else { "⚠️" };
-    let mut text = format!("**{emoji} Agent review: {open} open at {}.** ", short(head));
-    if findings.is_empty() {
-        text.push_str("No findings.");
-    } else {
-        let _ = write!(
-            text,
-            "{}: {}.",
-            count(findings.len(), "finding"),
-            tally(findings)
-        );
-    }
-    if let Some(commits) = commits {
-        let missing: Vec<&str> = commits
-            .iter()
-            .zip(reviews)
-            .filter(|(_, (reviewed, _))| !reviewed)
-            .map(|(commit, _)| short(&commit.sha))
-            .collect();
-        let _ = write!(
-            text,
-            " {} of {} reviewed",
-            commits.len() - missing.len(),
-            count(commits.len(), "commit")
-        );
-        match missing.len() {
-            0 => text.push('.'),
-            1..=5 => {
-                let _ = write!(text, "; {} had no review.", and_list(&missing));
+/// `agt 0.19.0 · 2 reviewers, claude-opus-5-5 · 14m`.
+fn footer(text: &mut String, covered: &[Covered]) {
+    let mut reviewers: Vec<(&str, &str)> = Vec::new();
+    let mut models: Vec<&str> = Vec::new();
+    let mut total: Option<i64> = None;
+    for covered in covered {
+        let run = covered.run;
+        for reviewer in run.passes.iter().flat_map(|pass| &pass.reviewers) {
+            if reviewer.id == "fix" {
+                continue;
             }
-            more => {
-                let _ = write!(
-                    text,
-                    "; {} and {} more had no review.",
-                    missing[..5].join(", "),
-                    more - 5
-                );
+            if !reviewers.contains(&(run.id.as_str(), reviewer.id.as_str())) {
+                reviewers.push((run.id.as_str(), reviewer.id.as_str()));
+            }
+            if !models.contains(&reviewer.model.as_str()) {
+                models.push(reviewer.model.as_str());
             }
         }
+        if let Some(secs) = run_spend(run)["total_secs"].as_i64() {
+            *total.get_or_insert(0) += secs;
+        }
     }
-    text
+    let mut parts = vec![format!("agt {}", env!("CARGO_PKG_VERSION"))];
+    if !reviewers.is_empty() {
+        parts.push(format!(
+            "{}, {}",
+            count(reviewers.len(), "reviewer"),
+            models.join(", ")
+        ));
+    }
+    if let Some(secs) = total {
+        parts.push(duration(secs));
+    }
+    parts.push("edited on each publish".to_owned());
+    let _ = write!(text, "\n\n> <sub>{}</sub>", parts.join(" · "));
 }
 
-/// The collapsed commits table, each commit with how it was reviewed.
-fn commit_table(text: &mut String, commits: &[CommitInfo], reviews: &[(bool, String)]) {
-    let reviewed = reviews.iter().filter(|(reviewed, _)| *reviewed).count();
-    open_section(
-        text,
-        &format!("📦 {}: {reviewed} reviewed", count(commits.len(), "commit")),
-    );
-    text.push_str("| Commit | Subject | Review |\n|---|---|---|\n");
-    for (commit, (_, review)) in commits.iter().zip(reviews).take(MAX_COMMITS) {
-        let _ = writeln!(
-            text,
-            "| {} | {} | {review} |",
-            short(&commit.sha),
-            cell(&clip(&commit.subject, CELL))
-        );
-    }
-    if commits.len() > MAX_COMMITS {
-        let _ = writeln!(text, "\n{} more not listed.", commits.len() - MAX_COMMITS);
-    }
-    close_section(text);
+/// Whether a pass of a covered run read `commit`, by its id or the same patch.
+fn reviewed(covered: &[Covered], commit: &CommitInfo) -> bool {
+    let same = |patch: &CommitPatch| {
+        patch.sha == commit.sha || (patch.patch_id.is_some() && patch.patch_id == commit.patch_id)
+    };
+    covered.iter().any(|covered| {
+        covered
+            .run
+            .passes
+            .iter()
+            .any(|pass| pass.kind != PassKind::Reveal && pass.commits.iter().any(same))
+    })
 }
 
 /// The record marker of every covered run, newest first, then the marker of this summary.
 fn markers_block(
     covered: &[Covered],
-    findings: &[&Thread],
+    reported: &[&Thread],
     qa: &QaSummary,
     attempt: &str,
 ) -> String {
@@ -326,9 +404,9 @@ fn markers_block(
         let _ = write!(marks, "\n{}", markers::qa_record(&run.id, &qa.head));
     }
     for covered in covered.iter().rev() {
-        let open = findings
+        let open = reported
             .iter()
-            .filter(|thread| raised_in(thread, &covered.run.id, None) && is_open(thread))
+            .filter(|thread| raised_in(thread, &covered.run.id) && is_open(thread))
             .count();
         let _ = write!(
             marks,
@@ -342,6 +420,36 @@ fn markers_block(
         markers::agent(markers::SUMMARY_ID, Some(attempt))
     );
     marks
+}
+
+/// Whether `thread` is a finding of `run`.
+fn raised_in(thread: &Thread, run: &str) -> bool {
+    thread
+        .finding
+        .as_ref()
+        .is_some_and(|finding| finding.run == run)
+}
+
+/// The name of the covered QA check that found `thread`.
+fn qa_check<'a>(qa: &QaSummary<'a>, thread: &Thread) -> Option<&'a str> {
+    let check = thread.check.as_deref()?;
+    qa.runs
+        .iter()
+        .flat_map(|run| &run.checks)
+        .find(|known| known.id == check)
+        .map(|known| known.name.as_str())
+}
+
+/// The issue a settled thread was moved to.
+fn moved_to(thread: &Thread) -> Option<&str> {
+    match &thread.resolution {
+        Some(Resolution::Moved { issue }) if thread.resolved => Some(issue),
+        _ => None,
+    }
+}
+
+fn is_url(text: &str) -> bool {
+    text.starts_with("https://") || text.starts_with("http://")
 }
 
 /// Cuts `text` at a line to at most `max` characters, closing the code block and sections the
@@ -385,444 +493,6 @@ fn close_fence(text: &mut String) {
             text.push('\n');
         }
         text.push_str("```\n");
-    }
-}
-
-/// The collapsed findings table, then the text of each finding that was not posted inline.
-fn findings_table(text: &mut String, target: &Target, findings: &[&Thread]) {
-    open_section(
-        text,
-        &format!(
-            "📝 {}: {}",
-            count(findings.len(), "finding"),
-            tally(findings)
-        ),
-    );
-    text.push_str("| Finding | Where | Raised in | Outcome |\n|---|---|---|---|\n");
-    let mut notes = String::new();
-    let mut unposted = 0;
-    for thread in findings {
-        let first = thread.comments.first();
-        let place = thread
-            .anchor
-            .as_ref()
-            .map_or_else(|| "general".to_owned(), short_location);
-        let url = first
-            .and_then(|first| first.remote.as_ref())
-            .and_then(|remote| remote.url.as_deref());
-        let posted = first.is_some_and(|first| first.remote.is_some());
-        let place = match url {
-            Some(url) => format!("[{}]({url})", cell(&place)),
-            None if posted => cell(&place),
-            // A held question waits for its answer; a finding withdrawn before it was posted
-            // has nothing to tell the host.
-            None if thread.held
-                || thread
-                    .resolution
-                    .as_ref()
-                    .is_some_and(Resolution::withdrawn) =>
-            {
-                format!("{}, not posted", cell(&place))
-            }
-            None => {
-                unposted += 1;
-                let mark = superscript(unposted);
-                let full = thread
-                    .anchor
-                    .as_ref()
-                    .map_or_else(|| "general".to_owned(), location);
-                let mut said = clip(first.map_or("", |first| first.body.trim()), MAX_NOTE);
-                close_fence(&mut said);
-                let _ = write!(
-                    notes,
-                    "\n{mark} **{}** at `{full}`, not posted inline:\n\n{said}\n",
-                    kind_heading(thread)
-                );
-                format!("{}, not posted {mark}", cell(&place))
-            }
-        };
-        let raised = thread
-            .finding
-            .as_ref()
-            .map(|finding| match finding_pass(target, finding) {
-                Some(pass) => format!("{} {}", finding.run, pass_label(pass).1),
-                None => finding.run.clone(),
-            })
-            .unwrap_or_default();
-        let gist = gist(first.map_or("", |first| first.body.as_str()));
-        let _ = writeln!(
-            text,
-            "| {} | {place} | {raised} | {} |",
-            cell(&format!("{}: {gist}", kind_heading(thread))),
-            cell(&outcome(thread))
-        );
-    }
-    text.push_str(&notes);
-    close_section(text);
-}
-
-/// The collapsed, numbered steps of every run, and the time each run took.
-fn steps(text: &mut String, covered: &[Covered], commits: &[CommitInfo], findings: &[&Thread]) {
-    let mut steps = Vec::new();
-    let mut spent = Vec::new();
-    let mut total: Option<i64> = None;
-    for covered in covered {
-        let run = covered.run;
-        for pass in &run.passes {
-            let raised: Vec<&Thread> = findings
-                .iter()
-                .copied()
-                .filter(|thread| raised_in(thread, &run.id, Some(&pass.id)))
-                .collect();
-            steps.push(pass_step(run, pass, raised.len()));
-            outcome_steps(&mut steps, commits, &raised);
-        }
-        let spend = run_spend(run);
-        if let Some(secs) = spend["total_secs"].as_i64() {
-            *total.get_or_insert(0) += secs;
-            let reviewing = spend["reviewing_secs"]
-                .as_i64()
-                .map(|secs| format!(" ({} reviewing)", duration(secs)))
-                .unwrap_or_default();
-            spent.push(format!("Run {}: {}{reviewing}.", run.id, duration(secs)));
-        }
-    }
-    let total = total
-        .map(|secs| format!(", {}", duration(secs)))
-        .unwrap_or_default();
-    open_section(
-        text,
-        &format!(
-            "🧭 How it was reviewed: {}{total}",
-            count(steps.len(), "step")
-        ),
-    );
-    for (index, step) in steps.iter().enumerate() {
-        let _ = writeln!(text, "{}. {step}", index + 1);
-    }
-    if !spent.is_empty() {
-        let _ = writeln!(text, "\n{}", spent.join(" "));
-    }
-    close_section(text);
-}
-
-/// One pass as a sentence: who read what, and what it found.
-fn pass_step(run: &Run, pass: &Pass, found: usize) -> String {
-    let names: Vec<String> = pass
-        .reviewers
-        .iter()
-        .filter(|reviewer| reviewer.id != "fix")
-        .map(reviewer_name)
-        .collect();
-    let who = if names.is_empty() {
-        "A reviewer".to_owned()
-    } else {
-        capitalize(&and_list(&names))
-    };
-    let found = match found {
-        0 => "found nothing".to_owned(),
-        1 => "found 1 issue".to_owned(),
-        found => format!("found {found} issues"),
-    };
-    let range = match &pass.base {
-        Some(base) => format!("{}..{}", short(base), short(&pass.head)),
-        None => short(&pass.head).to_owned(),
-    };
-    let head = short(&pass.head);
-    let action = match pass.kind {
-        PassKind::Full if pass.locked => {
-            format!("read the whole branch at {head} without earlier findings and {found}")
-        }
-        PassKind::Full if pass.partial => format!("read only {range} and {found}"),
-        PassKind::Full => format!("read the whole branch at {head} and {found}"),
-        PassKind::FixCheck => format!("checked the fixes in {range} and {found}"),
-        PassKind::Reveal => match run.reveal {
-            Some(reveal) => format!(
-                "compared its findings with the earlier ones: {} agree, {} disagree",
-                reveal.agree, reveal.disagree
-            ),
-            None => "compared its findings with the earlier ones".to_owned(),
-        },
-    };
-    let secs = |time: &str| clock::parse(time).ok();
-    let time = match (
-        secs(&pass.started_at),
-        pass.ended_at.as_deref().and_then(secs),
-    ) {
-        (Some(start), Some(end)) => format!(" ({})", duration((end - start).max(0))),
-        _ => String::new(),
-    };
-    format!("{} {who} {action}{time}.", pass_label(pass).0)
-}
-
-/// `reviewer agent a0b5ad82`, `main session dcec84d5`, or the model when the id is unknown.
-fn reviewer_name(reviewer: &Reviewer) -> String {
-    let agent = session_role(Some(&reviewer.id)) == "agent";
-    match (&reviewer.session, agent) {
-        (Some(session), true) => format!("reviewer agent {}", short_id(session)),
-        (Some(session), false) => format!("main session {}", short_id(session)),
-        (None, true) => format!("reviewer {} ({})", reviewer.id, reviewer.model),
-        (None, false) => "the main session".to_owned(),
-    }
-}
-
-/// What became of the findings a pass raised: fixes by who made them, with their commits in
-/// PR/MR order, then the rest by outcome.
-fn outcome_steps(steps: &mut Vec<String>, commits: &[CommitInfo], raised: &[&Thread]) {
-    let mut fixes: Vec<(Option<String>, Vec<&str>)> = Vec::new();
-    for thread in raised {
-        if let (Some(Resolution::Fixed { sha }), true) = (&thread.resolution, thread.resolved) {
-            let who = actor(thread);
-            match fixes.iter_mut().find(|(known, _)| *known == who) {
-                Some((_, shas)) => shas.push(short(sha)),
-                None => fixes.push((who, vec![short(sha)])),
-            }
-        }
-    }
-    for (who, shas) in fixes {
-        let mut fixes_in: Vec<&str> = Vec::new();
-        for sha in &shas {
-            if !fixes_in.contains(sha) {
-                fixes_in.push(sha);
-            }
-        }
-        fixes_in.sort_by_key(|sha| {
-            commits
-                .iter()
-                .position(|commit| commit.sha.starts_with(*sha))
-                .unwrap_or(usize::MAX)
-        });
-        let fixes_in = and_list(&fixes_in);
-        steps.push(match who {
-            Some(who) => format!("🛠️ {who} fixed {}, in {fixes_in}.", shas.len()),
-            None => format!("🛠️ Fixed {}, in {fixes_in}.", shas.len()),
-        });
-    }
-    let rejected: Vec<&&Thread> = raised
-        .iter()
-        .filter(|thread| {
-            thread.resolved && matches!(thread.resolution, Some(Resolution::Rejected { .. }))
-        })
-        .collect();
-    if let Some(first) = rejected.first() {
-        steps.push(match actor(first) {
-            Some(who) => format!("🚫 {who} rejected {}.", rejected.len()),
-            None => format!("🚫 {} rejected.", rejected.len()),
-        });
-    }
-    let tallied = |wanted: &str| {
-        raised
-            .iter()
-            .filter(|thread| category(thread) == wanted)
-            .count()
-    };
-    for (wanted, emoji, phrase) in [
-        ("answered", "💬", "answered by the author"),
-        ("stale", "➖", "went stale"),
-        ("resolved", "✅", "resolved"),
-        ("not fixed", "❌", "not fixed yet"),
-        ("held", "⏸️", "held for the author"),
-        ("open", "⚠️", "still open"),
-    ] {
-        match tallied(wanted) {
-            0 => {}
-            number => steps.push(format!("{emoji} {number} {phrase}.")),
-        }
-    }
-}
-
-/// The main session that settled `thread`: the author of its last reply from the main
-/// session, as the steps name it.
-fn actor(thread: &Thread) -> Option<String> {
-    thread
-        .comments
-        .iter()
-        .skip(1)
-        .rev()
-        .find_map(|comment| match &comment.author {
-            Author::Agent {
-                session, reviewer, ..
-            } if session_role(reviewer.as_deref()) == "session" => Some(match session {
-                Some(session) => format!("Main session {}", short_id(session)),
-                None => "The main session".to_owned(),
-            }),
-            _ => None,
-        })
-}
-
-/// The grey quoted table of the agents that took part, and the footer.
-fn agents(text: &mut String, covered: &[Covered], findings: &[&Thread]) {
-    let mut rows: Vec<[String; 4]> = Vec::new();
-    let mut main: Vec<[String; 4]> = Vec::new();
-    let mut add_main = |row: [String; 4]| {
-        if !main.iter().any(|known| known[1..] == row[1..]) {
-            main.push(row);
-        }
-    };
-    let main_label = || "🛠️ Main session: fixes, replies".to_owned();
-    let id = |role: &str, session: Option<&String>| {
-        session.map_or_else(|| "—".to_owned(), |session| format!("{role} {session}"))
-    };
-    for covered in covered {
-        let run = covered.run;
-        let mut seen: Vec<&str> = Vec::new();
-        for reviewer in run.passes.iter().flat_map(|pass| &pass.reviewers) {
-            let model = model_label(&reviewer.model, &reviewer.effort);
-            let harness = harness_label(&reviewer.harness, reviewer.harness_version.as_deref());
-            if reviewer.id == "fix" {
-                add_main([
-                    main_label(),
-                    model,
-                    harness,
-                    id("session", reviewer.session.as_ref()),
-                ]);
-                continue;
-            }
-            if seen.contains(&reviewer.id.as_str()) {
-                continue;
-            }
-            seen.push(&reviewer.id);
-            let blind = run.passes.iter().any(|pass| {
-                pass.locked
-                    && pass
-                        .reviewers
-                        .iter()
-                        .any(|candidate| candidate.id == reviewer.id)
-            });
-            let who = match reviewer.id.as_str() {
-                "manual" => format!("🧑 Main session, own review, {}", run.id),
-                id if blind => format!("🙈 Blind reviewer {id}, {}", run.id),
-                id => format!("🔍 Reviewer {id}, {}", run.id),
-            };
-            let role = session_role(Some(&reviewer.id));
-            rows.push([who, model, harness, id(role, reviewer.session.as_ref())]);
-        }
-    }
-    for comment in findings
-        .iter()
-        .flat_map(|thread| thread.comments.iter().skip(1))
-    {
-        if let Author::Agent {
-            model,
-            effort,
-            harness,
-            harness_version,
-            reviewer,
-            session,
-            ..
-        } = &comment.author
-            && session_role(reviewer.as_deref()) == "session"
-        {
-            add_main([
-                main_label(),
-                model_label(model, effort),
-                harness_label(harness, harness_version.as_deref()),
-                id("session", session.as_ref()),
-            ]);
-        }
-    }
-    rows.append(&mut main);
-    text.push_str("\n\n");
-    if !rows.is_empty() {
-        text.push_str("> | Agent | Model | Harness | ID |\n> |---|---|---|---|\n");
-        for [who, model, harness, id] in &rows {
-            let _ = writeln!(text, "> | {who} | {model} | {harness} | {id} |");
-        }
-        text.push_str(">\n");
-    }
-    let last = covered.last().map_or("", |covered| covered.run.id.as_str());
-    let _ = write!(
-        text,
-        "> <sub>Posted by agt {}. Edited on each publish; last run {last}.</sub>",
-        env!("CARGO_PKG_VERSION")
-    );
-}
-
-/// How a commit was reviewed, with whether it was: the strongest pass that read it, or none,
-/// naming the run it fixed findings for.
-fn commit_review(covered: &[Covered], commit: &CommitInfo) -> (bool, String) {
-    let same = |patch: &CommitPatch| {
-        patch.sha == commit.sha || (patch.patch_id.is_some() && patch.patch_id == commit.patch_id)
-    };
-    let mut best: Option<(u8, String)> = None;
-    for covered in covered {
-        for pass in &covered.run.passes {
-            if pass.kind == PassKind::Reveal || !pass.commits.iter().any(same) {
-                continue;
-            }
-            let rank = match pass.kind {
-                PassKind::Full if !pass.locked && !pass.partial => 3,
-                PassKind::Full if pass.locked => 2,
-                PassKind::Full => 1,
-                PassKind::FixCheck | PassKind::Reveal => 0,
-            };
-            if best.as_ref().is_none_or(|(known, _)| rank >= *known) {
-                let (emoji, label) = pass_label(pass);
-                best = Some((rank, format!("{emoji} {label}, {}", covered.run.id)));
-            }
-        }
-    }
-    if let Some((_, label)) = best {
-        return (true, label);
-    }
-    match covered
-        .iter()
-        .rev()
-        .find(|covered| covered.run.repair.iter().any(same))
-    {
-        Some(covered) => (false, format!("⚠️ none; a fix from {}", covered.run.id)),
-        None => (false, "⚠️ none".to_owned()),
-    }
-}
-
-/// A finding's outcome as the counts name it.
-fn category(thread: &Thread) -> &'static str {
-    match (&thread.resolution, thread.resolved) {
-        (Some(Resolution::Fixed { .. }), true) => "fixed",
-        (Some(Resolution::Answered), true) => "answered",
-        (Some(Resolution::Rejected { .. }), true) => "rejected",
-        (Some(Resolution::Stale), true) => "stale",
-        (_, true) => "resolved",
-        (Some(Resolution::NotFixed { .. }), false) => "not fixed",
-        (_, false) if thread.held => "held",
-        (_, false) => "open",
-    }
-}
-
-/// `1 fixed, 1 open`, in a fixed order.
-fn tally(findings: &[&Thread]) -> String {
-    [
-        "fixed",
-        "answered",
-        "rejected",
-        "stale",
-        "resolved",
-        "not fixed",
-        "held",
-        "open",
-    ]
-    .iter()
-    .filter_map(|wanted| {
-        let number = findings
-            .iter()
-            .filter(|thread| category(thread) == *wanted)
-            .count();
-        (number > 0).then(|| format!("{number} {wanted}"))
-    })
-    .collect::<Vec<_>>()
-    .join(", ")
-}
-
-/// `release.yml:156-164`: the file name and lines, short enough for a table.
-fn short_location(anchor: &Anchor) -> String {
-    let file = anchor.path.rsplit('/').next().unwrap_or(&anchor.path);
-    match (anchor.side, anchor.start_line, anchor.line, anchor.old_line) {
-        (Side::New, Some(start), Some(line), _) if start < line => {
-            format!("{file}:{start}-{line}")
-        }
-        (Side::New, _, Some(line), _) => format!("{file}:{line}"),
-        (Side::Old, _, _, Some(line)) => format!("{file} (old):{line}"),
-        _ => file.to_owned(),
     }
 }
 
@@ -870,58 +540,12 @@ fn count(number: usize, noun: &str) -> String {
     }
 }
 
-/// `a`, `a and b`, `a, b and c`.
-fn and_list<T: AsRef<str>>(items: &[T]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.as_ref().to_owned(),
-        [rest @ .., last] => format!(
-            "{} and {}",
-            rest.iter()
-                .map(AsRef::as_ref)
-                .collect::<Vec<_>>()
-                .join(", "),
-            last.as_ref()
-        ),
-    }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
-}
-
-/// `¹`, `²`, ... `¹⁰`: footnote marks.
-fn superscript(number: usize) -> String {
-    number
-        .to_string()
-        .chars()
-        .map(|digit| match digit {
-            '0' => '⁰',
-            '1' => '¹',
-            '2' => '²',
-            '3' => '³',
-            '4' => '⁴',
-            '5' => '⁵',
-            '6' => '⁶',
-            '7' => '⁷',
-            '8' => '⁸',
-            _ => '⁹',
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn lists_and_cells_read_as_text() {
-        assert_eq!(and_list(&["a"]), "a");
-        assert_eq!(and_list(&["a", "b"]), "a and b");
-        assert_eq!(and_list(&["a", "b", "c"]), "a, b and c");
+    fn gists_and_cells_read_as_text() {
         assert_eq!(cell("a | b\nc"), "a \\| b c");
         assert_eq!(clip("abcdef", 4), "abc…");
         assert_eq!(gist("\nFirst one. Second one.\nMore."), "First one.");
@@ -930,10 +554,8 @@ mod tests {
             "Why so?"
         );
         assert_eq!(gist("**question:** Old heading."), "Old heading.");
-        assert_eq!(superscript(12), "¹²");
         assert_eq!(count(1, "commit"), "1 commit");
         assert_eq!(count(3, "commit"), "3 commits");
-        assert_eq!(capitalize("reviewer agent x"), "Reviewer agent x");
     }
 
     #[test]

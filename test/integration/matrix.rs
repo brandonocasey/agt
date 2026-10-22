@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use crate::support::forge::{Call, Comment, FakeService, Remote, assert_read_only};
 use crate::support::scenario::{
-    Setup, ids, kinds, local_changes, marked, open_ids, skipped_items, thread, write_starting,
-    write_text, writes_for,
+    Review, Setup, ids, kinds, local_changes, marked, open_ids, skipped_items, thread,
+    write_starting, write_text, writes_for,
 };
 use crate::support::{Env, numbered, snapshot, unix_now};
 
@@ -72,7 +72,41 @@ matrix!(
     rejected_findings_resolve_with_a_reason_and_count_in_the_record,
     a_remote_unresolve_clears_the_fixed_outcome,
     status_and_list_can_sync_first,
+    a_qa_finding_resolved_before_it_is_posted_is_never_posted,
+    qa_findings_of_runs_ended_before_the_pr_are_never_published,
+    the_summary_of_one_open_finding_leads_with_what_to_fix,
+    inline_finding_and_review_batch_carry_only_the_model_and_a_marker,
 );
+
+/// The kinds of the write of the general finding f2, where the service posts one. A general
+/// comment cannot be resolved on GitHub, so f2 stays in the summary there.
+fn general_finding(svc: Svc) -> Vec<&'static str> {
+    if svc.expect().posts_general_findings() {
+        vec!["thread"]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `rest` after the write of f2, where the service posts it.
+fn general_then(svc: Svc, rest: &[&'static str]) -> Vec<&'static str> {
+    general_finding(svc)
+        .into_iter()
+        .chain(rest.iter().copied())
+        .collect()
+}
+
+/// The skip a general finding gets where the service does not post it.
+fn in_summary(svc: Svc, item: &str) -> Value {
+    if svc.expect().posts_general_findings() {
+        json!([])
+    } else {
+        json!([{
+            "item": item,
+            "reason": "listed in the summary: a general comment here cannot be resolved",
+        }])
+    }
+}
 
 /// The kinds of the writes of a publish that posts one in-diff comment, then `rest`.
 fn inline_then(svc: Svc, rest: &[&str]) -> Vec<String> {
@@ -130,6 +164,8 @@ fn publish_posts_every_payload_once(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let [before, posted, done] = svc.stages(&setup);
+    // f1 stands as posted before its fix: a finding fixed before it is posted never is.
+    svc.land_inline(&setup);
     svc.sync(&setup, &before);
     sync(env, svc);
     local_changes(
@@ -143,10 +179,10 @@ fn publish_posts_every_payload_once(svc: Svc) {
     let dry = dry_run(env, svc, &[]);
     assert_eq!(snapshot(&env.state()), state, "a dry run writes nothing");
     svc.assert_dry_reads(env, calls);
-    let every_write = inline_then(
+    // f1 is already posted: the fix to it is a reply and a resolve. f2 is a general finding.
+    let every_write = general_then(
         svc,
         &[
-            "thread",
             "thread",
             "reply",
             "reply",
@@ -323,7 +359,7 @@ fn comments_before_first_sync_are_mine(svc: Svc) {
     env.run(&["comment", "--body", "Written before sync."]);
     svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
-    assert_eq!(dry["skipped"], json!([]), "{dry}");
+    assert_eq!(dry["skipped"], in_summary(svc, &setup.finding(2)), "{dry}");
     assert_eq!(writes_for(&dry, "h1/c1"), ["thread"]);
     sync(env, svc);
     let list = env.run(&["list"]);
@@ -350,7 +386,7 @@ fn publish_target_on_detached_head(svc: Svc) {
     let dry = env.run(&["--target", svc.target(), "publish", "--dry-run"]);
     assert_eq!(
         kinds(&dry, "writes"),
-        inline_then(svc, &["thread", "summary"])
+        inline_then(svc, &general_then(svc, &["summary"]))
     );
 }
 
@@ -359,8 +395,18 @@ fn publish_target_on_detached_head(svc: Svc) {
 fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    let f2 = setup.finding(2);
-    // Both findings land with lost responses, so sync knows them by their markers.
+    // Where a general comment is not a finding (GitHub cannot resolve one), it is a general
+    // comment of mine that sync imported.
+    let finding = svc.expect().posts_general_findings();
+    let f2 = if finding {
+        setup.finding(2)
+    } else {
+        svc.local_general(601)
+    };
+    // The reply is the second comment of a finding, and of an imported thread the first one
+    // this store writes.
+    let reply = format!("{f2}/c{}", if finding { 2 } else { 1 });
+    // Both land with lost responses, so sync knows them by their markers.
     let (mut remote, general) = svc.land_findings(&setup);
     env.run(&[
         "reply",
@@ -375,7 +421,7 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     env.reset_calls();
     svc.sync_with(&setup, Some(1), &remote);
     svc.sync_with(&setup, Some(2), &remote);
-    let text = marked("Not fixed: needs a design change.", &format!("{f2}/c2"));
+    let text = marked("Not fixed: needs a design change.", &reply);
     let answer = if native {
         text
     } else {
@@ -401,7 +447,7 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let posted = posted["body"].as_str().unwrap();
     assert!(
         posted.starts_with(&format!(
-            "Not fixed: needs a design change.\n<!-- agent-review id={f2}/c2 attempt=at-"
+            "Not fixed: needs a design change.\n<!-- agent-review id={reply} attempt=at-"
         )),
         "{posted}"
     );
@@ -486,7 +532,7 @@ fn run_end_releases_locked_findings(svc: Svc) {
     let dry = dry_run(env, svc, &[]);
     assert_eq!(
         kinds(&dry, "writes"),
-        inline_then(svc, &["thread", "summary"])
+        inline_then(svc, &general_then(svc, &["summary"]))
     );
 }
 
@@ -574,14 +620,14 @@ fn record_counts_reviews_like_status(svc: Svc) {
     svc.link(&setup);
     assert_eq!(setup.env.run(&["status"])["reviews_at_head"], 1);
     let dry = dry_run(&setup.env, svc, &[]);
-    let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
+    let summary = write_starting(&dry, "body", "**⚠️ 2 to fix**");
     assert!(
         !summary.contains("not posted"),
         "the threads this publish posts show as posted: {summary}"
     );
     assert!(
         summary.starts_with(&format!(
-            "**⚠️ Agent review: 2 open at {}.** 2 findings: 2 open.",
+            "**⚠️ 2 to fix** · agent review at `{}`\n",
             &setup.head[..7]
         )),
         "{summary}"
@@ -675,8 +721,9 @@ fn runs_ended_before_the_pr_are_never_published(svc: Svc) {
     );
     let dry = dry_run(env, svc, &[]);
     assert_eq!(dry["writes"], json!([]), "{dry}");
+    // f1 was settled before it was ever posted, so it is never posted and not worth a word.
     let skipped = skipped_items(&dry);
-    assert!(skipped.contains(&f1) && skipped.contains(&f2), "{dry}");
+    assert!(skipped.contains(&f2) && !skipped.contains(&f1), "{dry}");
 }
 
 fn local_reply_is_never_published(svc: Svc) {
@@ -801,22 +848,62 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
     env.run(&["run", "end", "--run", run]);
     let dry = dry_run(env, svc, &[]);
     let skipped = dry["skipped"].as_array().unwrap();
-    assert!(
-        skipped.iter().any(|item| &item["item"] == outside
-            && item["reason"]
-                .as_str()
-                .unwrap()
-                .contains("not in the PR/MR diff")),
-        "{dry}"
-    );
+    let outside_skip = skipped.iter().find(|item| &item["item"] == outside);
     assert!(svc.expect().ranges());
     svc.assert_range(&dry, 1, 3, "Range in one hunk.");
-    // A file the PR does not change gets a general comment naming the location.
-    let general = write_text(&dry, "body", "A file the PR leaves alone.");
-    assert!(
-        general.starts_with("`lib/b.txt:2`\n\n**✏️ nit:**"),
-        "{general}"
-    );
+    let other = ended["added"][2].as_str().unwrap();
+    let other_skip = skipped.iter().find(|item| item["item"] == other);
+    if svc.expect().posts_general_findings() {
+        // Lines outside the diff are not commentable here.
+        let reason = outside_skip.unwrap_or_else(|| panic!("{dry}"))["reason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains("not in the PR/MR diff"), "{dry}");
+        // A file the PR does not change gets a general comment naming the location.
+        assert!(other_skip.is_none(), "{dry}");
+        let general = write_text(&dry, "body", "A file the PR leaves alone.");
+        assert!(
+            general.starts_with("`lib/b.txt:2`\n\n**✏️ nit:**"),
+            "{general}"
+        );
+    } else {
+        // A changed file takes a comment on the file, with the line named in its text.
+        assert!(outside_skip.is_none(), "{dry}");
+        let file = dry["writes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|write| write["items"] == json!([format!("{}/c1", outside.as_str().unwrap())]))
+            .unwrap_or_else(|| panic!("{dry}"));
+        assert_eq!(file["kind"], "thread", "{dry}");
+        assert_eq!(
+            file["call"],
+            json!([
+                "api",
+                "--method",
+                "POST",
+                "repos/me/repo/pulls/42/comments",
+                "--input",
+                "-"
+            ])
+        );
+        let input = &file["input"];
+        assert_eq!(input["subject_type"], "file", "{dry}");
+        assert_eq!(input["path"], "a.txt");
+        assert_eq!(input["commit_id"], setup.head.as_str());
+        assert!(
+            input["body"].as_str().unwrap().starts_with("`a.txt:9`\n\n"),
+            "{dry}"
+        );
+        // A file the PR does not change cannot take a resolvable comment: the summary has it.
+        assert_eq!(
+            other_skip.unwrap_or_else(|| panic!("{dry}"))["reason"],
+            "listed in the summary: a general comment here cannot be resolved"
+        );
+        let summary = write_starting(&dry, "body", "**⚠️ ");
+        assert!(summary.contains("A file the PR leaves alone."), "{summary}");
+        assert!(summary.contains("`lib/b.txt:2`"), "{summary}");
+    }
 }
 
 fn status_and_list_can_sync_first(svc: Svc) {
@@ -981,6 +1068,8 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let f1 = setup.finding(1);
+    // f1 is already posted: a finding rejected before it was posted never is.
+    svc.land_inline(&setup);
     assert!(
         env.fail(&["resolve", &f1, "--rejected", ""], None)
             .contains("rejected reason must not be empty")
@@ -995,13 +1084,9 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record(svc: Svc) {
     );
     let open = env.run(&["status"])["open_threads"].to_string();
     assert!(!open.contains(&f1), "{open}");
-    svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
-    let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
-    assert!(
-        summary.contains("2 findings: 1 rejected, 1 open."),
-        "{summary}"
-    );
+    let summary = write_starting(&dry, "body", "**⚠️ 1 to fix**");
+    assert!(summary.contains("✓ 1 finding settled"), "{summary}");
     assert!(
         summary.contains("| 🚫 Rejected: Intended behavior |"),
         "{summary}"
@@ -1050,6 +1135,154 @@ fn a_remote_unresolve_clears_the_fixed_outcome(svc: Svc) {
     assert_eq!(synced["resolved"], false, "{synced}");
     assert_eq!(synced["resolution"], Value::Null, "{synced}");
     let dry = dry_run(env, svc, &[]);
-    let summary = write_starting(&dry, "body", "**⚠️ Agent review: ");
-    assert!(summary.contains("2 findings: 2 open."), "{summary}");
+    let summary = write_starting(&dry, "body", "**⚠️ 2 to fix**");
+    assert!(!summary.contains("settled"), "{summary}");
+}
+
+/// `agt qa <args>` of the branch.
+fn qa(env: &Env, args: &[&str]) -> Value {
+    let output = env.bin(&env.repo).arg("qa").args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "agt qa {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// A branch with a review run that found nothing, and a QA run whose one failing check found a
+/// bug. Returns the setup, the QA run and the id of the QA finding.
+fn qa_finding_setup(svc: Svc) -> (Setup, String, String) {
+    let review = Review {
+        reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+        findings: "[]",
+    };
+    let setup = Setup::branch(svc.origin(), &review, false, false);
+    let env = &setup.env;
+    let run = qa(env, &["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let check = qa(
+        env,
+        &["check", "--run", &run, "--name", "pay", "--outcome", "fail"],
+    )["check"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let found = qa(
+        env,
+        &[
+            "finding",
+            "--check",
+            &check,
+            "--type",
+            "bug",
+            "--severity",
+            "high",
+            "--body",
+            "Payment hangs.",
+        ],
+    );
+    let id = found["thread"]["id"].as_str().unwrap().to_owned();
+    (setup, run, id)
+}
+
+/// A QA finding that is fixed before it was ever posted is never posted, and the summary says
+/// no more about it than that something was settled.
+fn a_qa_finding_resolved_before_it_is_posted_is_never_posted(svc: Svc) {
+    let (setup, run, id) = qa_finding_setup(svc);
+    let env = &setup.env;
+    env.run(&["resolve", &id, "--fixed", &setup.head]);
+    svc.link(&setup);
+    qa(env, &["run", "end", "--run", &run]);
+    let dry = dry_run(env, svc, &[]);
+    assert!(
+        writes_for(&dry, &format!("{id}/c1")).is_empty(),
+        "never posted: {dry}"
+    );
+    assert!(
+        writes_for(&dry, &format!("{id}/c2")).is_empty(),
+        "nor its fix reply: {dry}"
+    );
+    assert!(!skipped_items(&dry).contains(&id), "silent: {dry}");
+    let summary = write_text(&dry, "body", "qa-record");
+    assert!(!summary.contains("Payment hangs."), "{summary}");
+    assert!(
+        summary.contains("1 more finding fixed or dismissed before posting"),
+        "{summary}"
+    );
+    // The failing check is still something to fix: no thread says why it failed.
+    assert!(
+        summary.starts_with("**⚠️ 1 to fix** · agent review and QA at `"),
+        "{summary}"
+    );
+    assert!(summary.contains("1. **🧪 QA fail: pay**"), "{summary}");
+}
+
+/// A QA run that ended before the PR was linked is no more published than a review run.
+fn qa_findings_of_runs_ended_before_the_pr_are_never_published(svc: Svc) {
+    let (setup, run, id) = qa_finding_setup(svc);
+    let env = &setup.env;
+    qa(env, &["run", "end", "--run", &run]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let later = unix_now() + 3600;
+    svc.sync(&setup, &Remote::new());
+    env.run_with(
+        &["sync", "--pr", svc.number()],
+        None,
+        &[("AGT_NOW", &later.to_string())],
+    );
+    let dry = dry_run(env, svc, &[]);
+    assert_eq!(dry["writes"], json!([]), "{dry}");
+    let skip = dry["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|skip| skip["item"] == id.as_str())
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert!(
+        skip["reason"]
+            .as_str()
+            .unwrap()
+            .contains("ended before the target was linked"),
+        "{dry}"
+    );
+}
+
+fn the_summary_of_one_open_finding_leads_with_what_to_fix(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(2), "--stale"]);
+    svc.link(&setup);
+    let dry = dry_run(env, svc, &[]);
+    let summary = write_starting(&dry, "body", "**⚠️ 1 to fix**");
+    assert!(
+        summary.starts_with(&format!(
+            "**⚠️ 1 to fix** · agent review at `{}`\n",
+            &setup.head[..7]
+        )),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("1. **🐛 bug (high)** · `a.txt:3` · In-diff text of f1."),
+        "{summary}"
+    );
+    assert!(
+        summary.contains(&format!(
+            "<!-- review-record v2 id={} head={} reviews-at-head=1 open=1 -->",
+            setup.run, setup.head
+        )),
+        "{summary}"
+    );
+}
+
+/// Only the first comment of an agent is signed, with the model alone; the review batch that
+/// carries an inline comment names nothing but its marker.
+fn inline_finding_and_review_batch_carry_only_the_model_and_a_marker(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    let dry = dry_run(env, svc, &[]);
+    svc.assert_inline_dry(&setup, &dry);
 }

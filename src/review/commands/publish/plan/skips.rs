@@ -35,6 +35,8 @@ pub(super) enum Skip {
         url: String,
     },
     OutsideDiff,
+    /// The host cannot resolve a general comment, so the summary lists the finding.
+    InSummary,
     HeadMoved {
         approved: String,
         head: String,
@@ -90,6 +92,10 @@ impl std::fmt::Display for Skip {
             Self::OutsideDiff => write!(
                 f,
                 "its lines are not in the PR/MR diff of the reviewed range"
+            ),
+            Self::InSummary => write!(
+                f,
+                "listed in the summary: a general comment here cannot be resolved"
             ),
             Self::HeadMoved { approved, head } => {
                 write!(
@@ -201,10 +207,14 @@ impl Planner<'_> {
         None
     }
 
-    /// Why a finding is not the PR/MR's business: its run ended before the target was linked
-    /// to it, so it reviewed history from before the PR/MR.
+    /// Why a finding or QA thread is not the PR/MR's business: its run ended before the target
+    /// was linked to it, so it checked history from before the PR/MR.
     pub(super) fn pre_pr(&self, target: &Target, thread: &Thread) -> Option<Skip> {
-        let run = &thread.finding.as_ref()?.run;
+        let run = match (&thread.finding, &thread.check) {
+            (Some(finding), _) => finding.run.as_str(),
+            (None, Some(check)) => check.split_once('.')?.0,
+            (None, None) => return None,
+        };
         self.run_before_pr(target, run)
     }
 

@@ -4,10 +4,12 @@ use serde_json::{Value, json};
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::forge;
 use crate::review::cli::{AuthorArgs, CommentArgs, ReplyArgs, ResolveArgs};
+use crate::store::issues::{Issue, parse_ref};
 use crate::store::model::{
     Anchor, Author, Comment, FindingInfo, KilledFinding, PostState, Resolution, Review, Severity,
     Side, Target, Thread, ThreadType, Triage, last_number,
 };
+use crate::store::{Namespace, Store};
 
 use super::input::{AnchorInput, build_anchor, limited, read_body};
 use super::{Ctx, find_pass, find_pass_mut, find_thread_mut, major_found, passes};
@@ -401,10 +403,15 @@ pub(super) fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
     } else {
         build_anchor(&anchor_input, None, String::new())?
     };
+    let issue = args
+        .issue
+        .as_deref()
+        .map(|text| issue_key(ctx, text))
+        .transpose()?;
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
         let author = author(&args.author, target, default)?;
-        let thread = local_thread(
+        let mut thread = local_thread(
             NewThread {
                 id: target.next_thread_id(),
                 kind: args.kind,
@@ -416,10 +423,64 @@ pub(super) fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
             body,
             now,
         );
+        thread.issue = issue;
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
     Ok(json!({ "target": scope.key, "thread": thread }))
+}
+
+/// The host key (`owner/repo#12`) of the stored issue `text` names. An issue only stored here is
+/// refused: its key changes when it is pushed, and the PR/MR must not name a private record.
+pub(super) fn issue_key(ctx: &Ctx, text: &str) -> Result<String> {
+    let reference = parse_ref(text)?;
+    let store = Store::open_repo(Namespace::Issues, &ctx.repo, false)?;
+    let mut hits = Vec::new();
+    for (dir, doc) in store.issue_trackers()? {
+        if reference
+            .repo
+            .as_deref()
+            .is_some_and(|repo| !repo.eq_ignore_ascii_case(&doc.repo))
+        {
+            continue;
+        }
+        if let Some(issue) = store.load_doc::<Issue>(&dir, &reference.name)? {
+            hits.push(issue);
+        }
+    }
+    match hits.as_slice() {
+        [] => fail(format!("no issue {text}; run `agt issue sync` first")),
+        [issue] if issue.remote.is_none() => fail(format!(
+            "issue {text} is not on the host yet; run `agt issue push` first"
+        )),
+        [issue] => Ok(issue.key.clone()),
+        _ => fail(format!(
+            "{text} is in several trackers; pass owner/repo#<number>"
+        )),
+    }
+}
+
+/// Records review target `key` in the links of issue `issue`, so the issue points back.
+fn link_review(ctx: &Ctx, issue: &str, key: &str) -> Result<()> {
+    let reference = parse_ref(issue)?;
+    let store = Store::open_repo(Namespace::Issues, &ctx.repo, false)?;
+    for (dir, doc) in store.issue_trackers()? {
+        if reference
+            .repo
+            .as_deref()
+            .is_some_and(|repo| !repo.eq_ignore_ascii_case(&doc.repo))
+            || store.load_doc::<Issue>(&dir, &reference.name)?.is_none()
+        {
+            continue;
+        }
+        return store.update_existing_doc(&dir, &reference.name, |issue: &mut Issue| {
+            if !issue.links.reviews.iter().any(|known| known == key) {
+                issue.links.reviews.push(key.to_owned());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
@@ -468,6 +529,11 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
         .existing
         .as_ref()
         .and_then(|target| target.review.as_ref());
+    let moved = args
+        .issue
+        .as_deref()
+        .map(|text| issue_key(ctx, text))
+        .transpose()?;
     let (triage, resolution, reopen, default_reply) = if let Some(sha) = &args.fixed {
         let sha = ctx.repo.commit(sha)?;
         let reply = fixed_reply(&sha, &ctx.repo.subject(&sha)?, review);
@@ -496,6 +562,15 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
             }),
             false,
             Some(format!("🚫 Rejected: {reason}.")),
+        )
+    } else if let Some(issue) = &moved {
+        (
+            None,
+            Some(Resolution::Moved {
+                issue: issue.clone(),
+            }),
+            false,
+            Some(format!("📋 Moved to {issue}.")),
         )
     } else if args.stale {
         (Some(Triage::Stale), Some(Resolution::Stale), false, None)
@@ -558,6 +633,9 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
         }
         Ok(changed)
     })?;
+    if let Some(issue) = &moved {
+        link_review(ctx, issue, &scope.key)?;
+    }
     if let [thread] = threads.as_slice() {
         return Ok(json!({ "target": scope.key, "thread": thread }));
     }

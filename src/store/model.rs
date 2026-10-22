@@ -474,6 +474,9 @@ pub struct Thread {
     /// The QA check (`qa-xxxx.k1`) this thread was found by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
+    /// A related issue (`owner/repo#12`) the posted text names; the thread stays open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
 }
 
 impl Thread {
@@ -522,6 +525,7 @@ impl Thread {
             updated_at,
             approval: None,
             check: None,
+            issue: None,
         }
     }
 
@@ -536,15 +540,25 @@ impl Thread {
 }
 
 /// How a thread was resolved or answered. Stored as the free text older versions wrote, so
-/// files stay compatible: `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, `stale`
-/// and `answered`. Any other text is kept as it is.
+/// files stay compatible: `fixed <sha>`, `not fixed: <reason>`, `rejected: <reason>`, `stale`,
+/// `answered` and `moved to <issue>`. Any other text is kept as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
-    Fixed { sha: String },
-    NotFixed { reason: String },
-    Rejected { reason: String },
+    Fixed {
+        sha: String,
+    },
+    NotFixed {
+        reason: String,
+    },
+    Rejected {
+        reason: String,
+    },
     Stale,
     Answered,
+    /// Left for a follow-up issue, `owner/repo#12`, which the hosts link.
+    Moved {
+        issue: String,
+    },
     Other(String),
 }
 
@@ -571,17 +585,17 @@ impl Resolution {
                 sha: sha.to_owned(),
             };
         }
+        if let Some(issue) = text.strip_prefix("moved to ") {
+            return Self::Moved {
+                issue: issue.to_owned(),
+            };
+        }
         Self::Other(text.to_owned())
     }
 
     /// The outcome of a resolve, as opposed to a note left on a reopened thread.
     pub fn resolves(&self) -> bool {
         !matches!(self, Self::NotFixed { .. })
-    }
-
-    /// A finding that will never be posted: judged stale or rejected.
-    pub fn withdrawn(&self) -> bool {
-        matches!(self, Self::Stale | Self::Rejected { .. })
     }
 }
 
@@ -593,6 +607,7 @@ impl std::fmt::Display for Resolution {
             Self::Rejected { reason } => write!(f, "rejected: {reason}"),
             Self::Stale => f.write_str("stale"),
             Self::Answered => f.write_str("answered"),
+            Self::Moved { issue } => write!(f, "moved to {issue}"),
             Self::Other(text) => f.write_str(text),
         }
     }
@@ -944,6 +959,7 @@ mod tests {
             "rejected: ",
             "stale",
             "answered",
+            "moved to o/r#12",
             "something older",
         ] {
             let resolution: Resolution = serde_json::from_value(serde_json::json!(text)).unwrap();

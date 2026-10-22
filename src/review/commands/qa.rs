@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::approve::is_open;
-use super::findings::{NewThread, author, local_thread};
+use super::findings::{NewThread, author, issue_key, local_thread};
 use super::input::{limited, read_body};
 use super::{Ctx, Selection, auto, publish, usage, view};
 use crate::core::error::{Error, Result, fail};
@@ -425,6 +425,11 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
         return fail("a bug needs --severity");
     }
     let body = read_body(&args.body)?;
+    let issue = args
+        .issue
+        .as_deref()
+        .map(|text| issue_key(ctx, text))
+        .transpose()?;
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
         let run = target
@@ -455,6 +460,7 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
             now,
         );
         thread.check = Some(args.check.clone());
+        thread.issue = issue;
         target.threads.push(thread.clone());
         Ok(thread)
     })?;

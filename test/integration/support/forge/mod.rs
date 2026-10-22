@@ -246,6 +246,12 @@ impl Expect {
         }
     }
 
+    /// A finding or QA thread with no place in the diff is posted as a general comment; where
+    /// general comments cannot be resolved it is listed in the summary instead.
+    pub fn posts_general_findings(&self) -> bool {
+        self.general_resolvable
+    }
+
     pub fn ranges(&self) -> bool {
         self.ranges
     }
@@ -319,6 +325,10 @@ pub trait FakeService {
     fn plain_review(&self, _id: u64, _login: &str, _body: &str) -> Option<Value> {
         None
     }
+    /// Publishes the in-diff finding f1 of the reviewed branch with the host losing the
+    /// response, then syncs it back by its marker, so it stands as posted. Returns the PR as
+    /// last synced.
+    fn land_inline(&self, setup: &Setup) -> Remote;
     /// Publishes both findings of the reviewed branch with the host losing every response,
     /// then syncs them back by their markers. Returns the PR as last synced and the id of
     /// the general comments holding the second finding.
@@ -333,6 +343,8 @@ pub trait FakeService {
     fn assert_dry_reads(&self, env: &Env, before: usize);
     /// The payloads of the dry run of that publish, in the host's own shape.
     fn assert_dry_run(&self, setup: &Setup, dry: &Value);
+    /// The dry run of a linked branch posts the inline finding f1 in the host's own shape.
+    fn assert_inline_dry(&self, setup: &Setup, dry: &Value);
     /// The payloads that publish sent and what a sync read back.
     fn assert_posted(&self, setup: &Setup);
     /// A second publish of that PR wrote nothing again.

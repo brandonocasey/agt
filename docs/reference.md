@@ -214,6 +214,8 @@ agt review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
   --reviewer rv-7k2m.c1p0.fix --model claude-opus-5-5 --harness claude-code \
   --session dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f
 agt review resolve h1 --answered
+agt review resolve rv-7k2m.c1p0.r1.f3 --issue '#57'          # left for a follow-up issue
+agt review comment --body "Same race as #12." --issue '#12'  # names a related issue
 agt review resolve rv-7k2m.c1p0.r1.f2 --triage question     # held, stays open
 # Fixed: triage, resolution and a "✅ Fixed in <sha> <subject>." reply for each, in one write
 agt review resolve rv-7k2m.c1p0.r1.f1 rv-7k2m.c1p0.r2.f1 --fixed 9e8d7c6 \
@@ -244,10 +246,16 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   and a reply `❌ Not fixed: <reason>.`); `--rejected <reason>` (resolves a finding
   that will not be fixed with `rejected: <reason>` and a reply `🚫 Rejected: <reason>.`;
   the summary counts it as `<n> rejected`); `--stale` (triage and resolution `stale`);
-  `--answered` (resolution `answered`); `--triage valid|question` (only records the triage and
-  leaves the thread open; `question` marks it held). A finding rejected or stale before it
-  was ever posted is not posted, and the summary lists a rejected one by its first sentence
-  only; another store that syncs the reply reads the rejection back. `--reply <text>`
+  `--answered` (resolution `answered`); `--issue <issue>` (resolves a finding left for a
+  follow-up issue with `moved to <owner/repo#n>` and a reply `📋 Moved to <owner/repo#n>.`,
+  which the host links; the issue must already be on the host, and its `links.reviews` gets the
+  target key); `--triage valid|question` (only records the triage and leaves the thread open;
+  `question` marks it held). A finding or QA thread resolved in any way before it was ever
+  posted is not posted; the summary counts it, and lists one moved to an issue under
+  follow-up issues. Another store that syncs a reply to a general comment reads a fix or
+  rejection back.
+- `comment --issue <issue>` and `agt qa finding --issue <issue>` record a related issue; the
+  posted text and the summary end with `Related: <owner/repo#n>` and the thread stays open. `--reply <text>`
   replaces the default reply, or adds a reply to any `resolve`; the author flags sign it.
   `resolve` takes several ids and changes them all in one write, or none when one is
   missing. With one id the output is the `thread`; with more, `threads` lists each id with
@@ -361,11 +369,13 @@ agt qa publish --dry-run            # as agt review publish
 - `agt review status` carries the same QA state under `qa` (`null` before the first QA run).
   QA runs never count as reviews.
 - `show` takes a QA run (`qa-4f2a`) or check (`qa-4f2a.k1`) id, as does `agt review show`.
-- `publish` adds a QA section to the PR/MR summary: a verdict line, a checks table, and the QA
-  findings. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
+- `publish` adds QA to the PR/MR summary: open QA findings and failed, blocked or stale checks
+  join the list of what is left to fix, the status line counts passing checks, and the checks
+  table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
   a `<!-- qa-record v1 id=<run> head=<sha> -->` marker, distinct from review records, which
-  `sync` reads to mark the run's record posted. A QA finding posts as a general comment headed
-  `**🐛 bug (high) · 🧪 QA: <check name>:**`. With `sync.auto_push = true`, `run end`
+  `sync` reads to mark the run's record posted. A QA finding is headed
+  `**🐛 bug (high) · 🧪 QA: <check name>:**`; it follows the same posting rules as a review
+  finding, so on GitHub, where a general comment cannot be resolved, only the summary lists it. With `sync.auto_push = true`, `run end`
   publishes the ended QA run, as `agt review run end` does.
 
 ## Cleanup
@@ -668,33 +678,34 @@ local reads continue.
   until a later `reveal` pass of the same cycle, or the run, has ended) and
   local comment threads, new replies, resolve and reopen changes, and the
   summary when a run ended since it was posted or its text changed. Never posted: killed findings,
-  findings resolved `stale` before they were posted (the summary lists them by
-  their first sentence only), imported comments, local
+  findings and QA threads resolved before they were posted (the summary counts them), QA
+  threads of runs that ended before the target's `attached_at`, imported comments, local
   comments by another human author, and runs that ended before the target's
   `attached_at` (history from before the PR/MR) with their findings, replies,
   resolves and records (listed under `skipped`).
 - A finding opens with its kind and an emoji: `**🐛 bug (high):**`,
-  `**❓ question:**`, `**📋 requirement:**`, `**✏️ nit:**`. An agent signs in a
-  grey quote under its text, `> <sub><model> <effort> · <harness> <version> ·
-  agent <id></sub>` (`session <id>` for the main session, plus ` · 🙈 blind
-  review` or ` · post-reveal`; a default effort is left out); a one-line agent
-  reply is all quote, `> ✅ Fixed in ... <sub>signature</sub>`. People sign
-  nothing. Every body ends with
+  `**❓ question:**`, `**📋 requirement:**`, `**✏️ nit:**`. An agent's first
+  comment ends with its model in a grey quote, `> <sub><model></sub>`; replies
+  and people sign nothing. Every body ends with
   `<!-- agent-review id=<local id> attempt=<attempt> -->`, with one attempt id
   per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
-- A thread anchored to lines of a file the PR/MR changes posts only where those
-  lines sit in its diff; otherwise it is listed under `skipped`. A thread on a
-  file the PR/MR does not change, or on a whole file, posts as a general comment
-  whose first line names its location. A
+- A thread anchored to lines of a file the PR/MR changes posts where those
+  lines sit in its diff. Otherwise, on GitHub it posts as a file-level review
+  comment (`subject_type: file`) whose first line names its lines, so it can be
+  resolved; on GitLab it is listed under `skipped`. A thread on a file the PR/MR
+  does not change posts as a general comment whose first line names its
+  location; on GitHub, where a general comment cannot be resolved, a finding or
+  QA thread there, or without an anchor, is not posted and the summary lists it
+  with its whole text (`skipped` says so). A
   line range (`start_line`..`line`) posts only as one multi-line comment, with
-  both ends on the new side of one hunk. Threads without an anchor post as
+  both ends on the new side of one hunk. Other threads without an anchor post as
   general comments. On GitLab, lines a later commit changed (such as a fix)
   are not in the latest MR diff, so they too post as a general comment with
   their location.
 - GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
   (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
-  review), with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
+  review), whose body is only its marker, with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
   `addPullRequestReviewThreadReply`, `resolveReviewThread` and
   `unresolveReviewThread` mutations; a reply to a general comment is a new
   issue comment ending in `Re: <thread id>`.
@@ -710,14 +721,16 @@ local reads continue.
 - The summary is one general comment per PR/MR: posted with the first ended
   run, then edited in place (`PATCH .../issues/comments/<id>` on GitHub,
   `PUT .../notes/<id>` on GitLab), and posted anew when the host no longer has
-  it. It opens with `**✅ Agent review: <O> open at <head>.**`, the outcome
-  counts and how many PR/MR commits a pass reviewed, then collapsed sections:
-  the findings (kind, first sentence, where, raised in, outcome, and the text
-  of each one not posted inline, except one withdrawn before it was posted,
-  which shows only its first sentence), the commits and
-  how each was reviewed, and the numbered steps of every run with its time. A
-  grey quoted table names each agent's model, harness and id, above
-  `Posted by agt <version>`. A summary longer than GitHub's 65,536 characters
+  it. It opens with `**⚠️ <N> to fix** · agent review and QA at `<head>``
+  (`**✅ Nothing to fix**` when none) and a numbered list of each open finding
+  or QA thread (kind, location, first sentence, and a link to its thread, or its
+  whole text when it has none) and each failed, blocked or stale QA check. One
+  status line follows: QA checks passing, settled findings, and PR/MR commits
+  no pass read. Findings moved to issues are listed under **📋 Follow-up
+  issues**. A collapsed Details section holds the QA checks table, the settled
+  posted findings with their outcome, and a count of those settled before they
+  were posted. A grey footer names the agt version, the reviewers and their
+  models, and the review time. A summary longer than GitHub's 65,536 characters
   is cut at a line and says so. It ends with one
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`
   per run it covers and `<!-- agent-review id=summary attempt=<attempt> -->`.

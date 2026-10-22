@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::Options;
 
-use super::render::{body, record_head, review_body};
+use super::render::{body, location, record_head};
 use super::summary::{Covered, QaSummary, summary_body};
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
@@ -22,8 +22,7 @@ use crate::review::commands::status::run_reviews_at;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::view::author_label;
 use crate::store::model::{
-    Author, Comment, PostState, QaRun, RemoteKind, RemoteThread, Resolution, Review, Run, Target,
-    Thread,
+    Author, Comment, PostState, QaRun, RemoteKind, RemoteThread, Review, Run, Side, Target, Thread,
 };
 
 /// Stands for the id of the draft a dry run has not created yet.
@@ -244,14 +243,9 @@ impl<'a> Planner<'a> {
                 }
                 continue;
             }
-            // A finding judged stale or rejected before it was ever posted has nothing to tell
-            // the host.
-            if thread.finding.is_some()
-                && thread
-                    .resolution
-                    .as_ref()
-                    .is_some_and(Resolution::withdrawn)
-            {
+            // A finding or QA thread settled before it was ever posted asks nothing of the
+            // host; the summary counts it.
+            if found(thread) && thread.resolved {
                 continue;
             }
             if let Some(reason) = self.blocked(target, thread, first) {
@@ -282,6 +276,22 @@ impl<'a> Planner<'a> {
                 .anchor
                 .as_ref()
                 .map_or(Spot::General, |anchor| self.spot(anchor));
+            if matches!(spot, Spot::Outside | Spot::OtherFile(_))
+                && let Some(write) = self.file_thread(target, thread, first)
+            {
+                writes.push(write);
+                expected.push((thread.id.clone(), RemoteKind::ReviewThread));
+                continue;
+            }
+            // A general comment the host cannot resolve would stay on the PR/MR after the fix;
+            // the summary lists the open finding instead.
+            if matches!(spot, Spot::General | Spot::OtherFile(_))
+                && found(thread)
+                && !self.caps().general_resolvable
+            {
+                skipped.push(Skipped::new(&thread.id, Skip::InSummary));
+                continue;
+            }
             match spot {
                 Spot::InDiff(position) => {
                     let text = body(target, thread, first, None, self.attempt);
@@ -346,16 +356,8 @@ impl<'a> Planner<'a> {
                 let Inline::ReviewBatch(batches) = self.service().inline() else {
                     return None;
                 };
-                let threads: Vec<&Thread> = ids
-                    .iter()
-                    .filter_map(|id| {
-                        target.threads.iter().find(|thread| {
-                            thread.comments.first().is_some_and(|first| first.id == *id)
-                        })
-                    })
-                    .collect();
-                // The summary is never posted on someone else's PR/MR.
-                let summary = review_body(target, &commit, &threads, self.foreign().is_none());
+                // Only the marker: the summary comment says what the review found.
+                let summary = markers::agent(&markers::review_id(&commit), None);
                 let request =
                     batches.review_batch(self.connection.subject(), &commit, &summary, &comments);
                 Some(Write {
@@ -651,6 +653,33 @@ impl<'a> Planner<'a> {
         let base = self.repo.merge_base(base, head).ok().flatten()?;
         self.repo.commits(Some(&base), head).ok()
     }
+
+    /// A thread on a changed file that the diff cannot place on a line, as a resolvable thread
+    /// on the whole file where the host has one. Its text names the lines.
+    fn file_thread(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<Write> {
+        let anchor = thread.anchor.as_ref()?;
+        // A file the PR/MR deletes has nothing at its head to comment on.
+        if anchor.side == Side::Old || !self.in_pr_diff(&anchor.path) {
+            return None;
+        }
+        let lines = anchor.line.map(|_| location(anchor));
+        let text = body(target, thread, first, lines.as_deref(), self.attempt);
+        let request = self.service().file_thread(
+            self.connection.subject(),
+            &self.review.head_sha,
+            &anchor.path,
+            &text,
+        )?;
+        let item = Item::Thread {
+            comment: first.id.clone(),
+        };
+        Some(self.write(item, request, &text))
+    }
+}
+
+/// A review finding or a QA thread: what the summary reports.
+pub(super) fn found(thread: &Thread) -> bool {
+    thread.finding.is_some() || thread.check.is_some()
 }
 
 /// A thread imported from the host, started by someone else or outside this store.

@@ -244,6 +244,32 @@ impl FakeService for Gitlab {
         remote
     }
 
+    fn land_inline(&self, setup: &Setup) -> Remote {
+        let env = &setup.env;
+        let f1 = setup.finding(1);
+        self.link(setup);
+        self.lose(env, Call::PostInline);
+        env.fail(&["publish", "--pr", "3"], None);
+        let mut remote = Remote::new();
+        remote
+            .drafts
+            .push(json!({ "id": 77, "note": sent(env, &f1) }));
+        self.sync(setup, &remote);
+        env.respond(&strs(&self.call(Call::PublishDraft)), "");
+        self.restore(env, Call::PostInline);
+        env.run(&["publish", "--pr", "3", "--only", &f1]);
+        let mut remote = Remote::new();
+        remote.thread(
+            "d-f1",
+            false,
+            3,
+            vec![Comment::new(5001, "me", "{{LAST_NOTE}}")],
+        );
+        self.sync(setup, &remote);
+        env.run(&["sync", "--pr", "3"]);
+        remote
+    }
+
     fn land_findings(&self, setup: &Setup) -> (Remote, String) {
         let env = &setup.env;
         let (f1, f2) = (setup.finding(1), setup.finding(2));
@@ -288,8 +314,15 @@ impl FakeService for Gitlab {
         };
         let d_f2 = Comment::new(5002, "me", &marked("f2", &format!("{f2}/c1")));
         let d_h1 = Comment::new(5003, "me", &marked("h1", "h1/c1"));
+        // The inline finding is already posted, so a fix to it is answered and resolved.
+        let mut start = self.before(setup);
+        start.thread(
+            "d-f1",
+            false,
+            3,
+            vec![Comment::new(5001, "me", "{{LAST_NOTE}}")],
+        );
         let mut posted = self.before(setup);
-        // A published draft returns no id; sync knows it by the text this store sent.
         posted.thread(
             "d-f1",
             false,
@@ -335,7 +368,7 @@ impl FakeService for Gitlab {
         );
         // GitLab shows no edits, so the record must read as this store sent it.
         done.general("d-rec", Comment::new(5020, "me", "{{LAST_BODY}}"));
-        [self.before(setup), posted, done]
+        [start, posted, done]
     }
 
     fn publish_writes(&self, env: &Env, _setup: &Setup) {
@@ -361,18 +394,16 @@ impl FakeService for Gitlab {
         self.accept(env, Call::PostNote, 5020);
     }
 
-    fn assert_dry_reads(&self, env: &Env, _before: usize) {
-        for call in env.forge_calls() {
+    fn assert_dry_reads(&self, env: &Env, before: usize) {
+        for call in &env.forge_calls()[before..] {
             assert!(call.contains(" GET "), "{call}");
         }
     }
 
     fn assert_dry_run(&self, _setup: &Setup, _dry: &Value) {}
 
-    fn assert_posted(&self, setup: &Setup) {
-        let env = &setup.env;
-        let inputs = env.forge_inputs();
-        let draft = &input_of(&inputs, &self.call(Call::PostInline))[0];
+    fn assert_inline_dry(&self, setup: &Setup, dry: &Value) {
+        let draft = &dry["writes"][0]["input"];
         assert_eq!(
             draft["position"],
             json!({
@@ -385,12 +416,17 @@ impl FakeService for Gitlab {
                 "new_line": 3,
             })
         );
+        let note = draft["note"].as_str().unwrap();
+        // The first comment of an agent carries the model alone.
         assert!(
-            draft["note"]
-                .as_str()
-                .unwrap()
-                .starts_with("**🐛 bug (high):** In-diff text of f1.")
+            note.starts_with("**🐛 bug (high):** In-diff text of f1.\n\n> <sub>m1</sub>\n"),
+            "{note}"
         );
+    }
+
+    fn assert_posted(&self, setup: &Setup) {
+        let env = &setup.env;
+        let inputs = env.forge_inputs();
         let general = input_of(&inputs, &self.call(Call::PostThread));
         assert!(
             general[0]["body"]
@@ -420,6 +456,7 @@ impl FakeService for Gitlab {
     }
 
     fn assert_counts_once(&self, env: &Env) {
+        // The one draft is the lost write that landed f1; it is not posted again.
         assert_eq!(self.count(env, Call::PostInline), 1);
         assert_eq!(self.count(env, Call::PublishDraft), 1);
         assert_eq!(self.count(env, Call::PostThread), 2);

@@ -215,7 +215,7 @@ fn published_setup(svc: &Github, finding: bool, before_end: impl FnOnce(&Env)) -
                 "--severity",
                 "high",
                 "--body",
-                "Payment hangs.",
+                "Payment hangs. The spinner never stops.",
             ],
         );
     }
@@ -236,15 +236,38 @@ fn publish_adds_a_qa_section_to_the_summary() {
         )["writes"],
         dry["writes"]
     );
-    let finding = write_text(&dry, "body", "Payment hangs.");
+    // A QA finding has no place in the diff; GitHub cannot resolve a general comment, so the
+    // summary lists it with its whole text.
+    let skipped = dry["skipped"].as_array().unwrap();
     assert!(
-        finding.starts_with("**🐛 bug (high) · 🧪 QA: pay with a card:** Payment hangs."),
-        "{finding}"
+        skipped.iter().any(|skip| skip["reason"]
+            == "listed in the summary: a general comment here cannot be resolved"),
+        "{dry}"
     );
-    let summary = write_text(&dry, "body", "Agent QA");
-    assert!(summary.contains("Agent review: 0 open"), "{summary}");
     assert!(
-        summary.contains("Agent QA at") && summary.contains("1 check: 1 fail, 1 finding open"),
+        !dry["writes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|write| write["kind"] == "thread"),
+        "{dry}"
+    );
+    let summary = write_text(&dry, "body", "qa-record");
+    assert!(
+        summary.starts_with("**⚠️ 1 to fix** · agent review and QA at `"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("1. **🐛 bug (high)** · QA: pay with a card · Payment hangs."),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("\n   > Payment hangs. The spinner never stops."),
+        "{summary}"
+    );
+    assert!(summary.contains("⚠ QA 0 of 1 pass"), "{summary}");
+    assert!(
+        summary.contains("| QA check | Result | Environment | Evidence |"),
         "{summary}"
     );
     assert!(
@@ -300,7 +323,6 @@ fn auto_publish_of_a_qa_run_carries_its_human_findings() {
     let (setup, run) = published_setup(&svc, true, |env| {
         env.write_config("[sync]\nauto_push = true\n");
         github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
-        svc.accept(env, Call::PostThread, 801);
         svc.accept(env, Call::PostNote, 802);
     });
     let env = &setup.env;
@@ -317,11 +339,11 @@ fn auto_publish_of_a_qa_run_carries_its_human_findings() {
     );
     let record = inputs
         .iter()
-        .find(|input| input.contains("Agent QA"))
+        .find(|input| input.contains("qa-record v1"))
         .unwrap_or_else(|| panic!("no QA record posted: {inputs:?}"));
-    assert!(record.contains("1 finding open"), "{record}");
+    assert!(record.contains("⚠️ 1 to fix"), "{record}");
     assert!(record.contains("Payment hangs."), "{record}");
-    assert!(!record.contains("✅ Agent QA"), "{record}");
+    assert!(!record.contains("✅ Nothing to fix"), "{record}");
 }
 
 /// A target whose branch is gone has no head; both statuses still show its QA state.

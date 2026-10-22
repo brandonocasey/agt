@@ -52,7 +52,9 @@ fn github_crash_after_write_does_not_duplicate() {
     let svc = Github::new();
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
-    let (f1, f2) = (setup.finding(1), setup.finding(2));
+    let f1 = setup.finding(1);
+    // A general finding is not posted to GitHub, so the lost general comment is a note.
+    env.run(&["comment", "--body", "A note of mine.", "--author", "me"]);
     svc.link(&setup);
     svc.lose(env, Call::PostInline);
     env.fail(&["publish", "--pr", "42"], None);
@@ -73,9 +75,9 @@ fn github_crash_after_write_does_not_duplicate() {
     env.fail(&["publish", "--pr", "42"], None);
     let list = env.run(&["list"]);
     assert_eq!(thread(&list, &f1)["comments"][0]["remote"]["id"], "501");
-    assert_eq!(thread(&list, &f2)["comments"][0]["post"], "posting");
+    assert_eq!(thread(&list, "h1")["comments"][0]["post"], "posting");
 
-    remote.general("601", Comment::new(601, "me", &sent(env, &f2)));
+    remote.general("601", Comment::new(601, "me", &sent(env, "h1")));
     svc.sync(&setup, &remote);
     svc.restore(env, Call::PostNote);
     svc.accept(env, Call::PostNote, 604);
@@ -85,10 +87,10 @@ fn github_crash_after_write_does_not_duplicate() {
     assert_eq!(
         svc.count(env, Call::PostNote),
         2,
-        "f2 once, the summary once"
+        "the note once, the summary once"
     );
     let list = env.run(&["list"]);
-    assert_eq!(thread(&list, &f2)["comments"][0]["remote"]["id"], "601");
+    assert_eq!(thread(&list, "h1")["comments"][0]["remote"]["id"], "601");
     assert_never_posted(env);
 }
 
@@ -124,6 +126,7 @@ fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
         !sent.contains("not posted inline"),
         "a finding withdrawn before it was posted gets no note with its text: {sent}"
     );
+    assert!(!sent.contains("General text of f2"), "{sent}");
     let remote_ids = |env: &Env| -> Vec<Value> {
         env.run(&["status", "--full"])["runs"]
             .as_array()
@@ -166,7 +169,7 @@ fn the_summary_is_edited_in_place_and_posted_anew_when_deleted() {
             "{edit}"
         );
     }
-    assert!(edit.contains("last run "), "{edit}");
+    assert!(edit.contains("2 reviewers, m1"), "{edit}");
     assert_eq!(remote_ids(env), [json!("604"), json!("604")]);
     let again = env.run(&["publish", "--pr", "42"]);
     assert_eq!(
@@ -247,7 +250,7 @@ fn a_marker_quoted_in_a_finding_is_not_the_summary_s() {
     let svc = Github::new();
     let setup = Setup::branch(svc.origin(), &QUOTING, false, false);
     let env = &setup.env;
-    env.run(&["resolve", &setup.finding(1), "--rejected", "not worth it"]);
+    // The finding has no place in the diff, so GitHub lists its whole text in the summary.
     svc.link(&setup);
     svc.accept(env, Call::PostNote, 604);
     env.run(&["publish", "--pr", "42"]);
@@ -263,6 +266,177 @@ fn a_marker_quoted_in_a_finding_is_not_the_summary_s() {
         json!([]),
         "an unchanged summary is not posted again"
     );
+}
+
+/// A general comment on GitHub cannot be resolved, so a finding without a place in the diff is
+/// listed in the summary with its whole text instead of being posted.
+#[test]
+fn github_a_general_finding_is_skipped_and_listed_in_the_summary() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let f2 = setup.finding(2);
+    svc.link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(
+        dry["skipped"],
+        json!([{
+            "item": f2,
+            "reason": "listed in the summary: a general comment here cannot be resolved",
+        }])
+    );
+    assert_eq!(kinds(&dry, "writes"), ["review", "summary"], "{dry}");
+    let summary = dry["writes"][1]["input"]["body"].as_str().unwrap();
+    assert!(
+        summary.starts_with("**⚠️ 2 to fix** · agent review at `"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("2. **✏️ nit** · General text of f2.\n"),
+        "{summary}"
+    );
+    assert!(!summary.contains("   > General text of f2."), "{summary}");
+    for write in dry["writes"].as_array().unwrap() {
+        assert!(!write["items"].to_string().contains(&f2), "{dry}");
+    }
+
+    // Published, the finding stays off the PR and out of the posted threads.
+    svc.accept(env, Call::PostInline, 700);
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "GET",
+            "repos/me/repo/pulls/42/reviews/700/comments",
+        ],
+        &json!([{
+            "id": 501,
+            "body": crate::support::scenario::marked("f1", &format!("{}/c1", setup.finding(1))),
+            "html_url": "https://github.com/me/repo/pull/42#discussion_r501",
+        }])
+        .to_string(),
+    );
+    svc.accept(env, Call::PostNote, 604);
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["review", "summary"]);
+    assert_eq!(
+        svc.count(env, Call::PostThread),
+        svc.count(env, Call::PostNote)
+    );
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &f2)["comments"][0]["post"], "pending");
+}
+
+const FILE_LEVEL: crate::support::scenario::Review = crate::support::scenario::Review {
+    reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+    findings: r#"[
+  {"type":"nit","path":"a.txt","line":9,"scenario":"Outside the hunks."},
+  {"type":"nit","path":"a.txt","scenario":"About the whole file."}
+]"#,
+};
+
+/// A finding on a file the PR changes whose lines are not in the diff, or on the whole file, is a
+/// comment on the file, which a review thread can resolve.
+#[test]
+fn github_a_finding_on_a_changed_file_outside_the_hunks_posts_a_file_comment() {
+    let svc = Github::new();
+    let setup = Setup::branch(svc.origin(), &FILE_LEVEL, false, false);
+    let env = &setup.env;
+    let (line, whole) = (setup.finding(1), setup.finding(2));
+    svc.link(&setup);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(dry["skipped"], json!([]), "{dry}");
+    assert_eq!(
+        kinds(&dry, "writes"),
+        ["thread", "thread", "summary"],
+        "{dry}"
+    );
+    let comments = json!([
+        "api",
+        "--method",
+        "POST",
+        "repos/me/repo/pulls/42/comments",
+        "--input",
+        "-"
+    ]);
+    let posts = &dry["writes"][0];
+    assert_eq!(posts["items"], json!([format!("{line}/c1")]));
+    assert_eq!(posts["call"], comments);
+    let input = &posts["input"];
+    assert_eq!(input["subject_type"], "file");
+    assert_eq!(input["path"], "a.txt");
+    assert_eq!(input["commit_id"], setup.head.as_str());
+    let body = input["body"].as_str().unwrap();
+    assert!(
+        body.starts_with("`a.txt:9`\n\n**✏️ nit:** Outside the hunks."),
+        "{body}"
+    );
+
+    let whole_post = &dry["writes"][1];
+    assert_eq!(whole_post["items"], json!([format!("{whole}/c1")]));
+    assert_eq!(whole_post["call"], comments);
+    assert_eq!(whole_post["input"]["subject_type"], "file");
+    let body = whole_post["input"]["body"].as_str().unwrap();
+    assert!(
+        body.starts_with("**✏️ nit:** About the whole file."),
+        "a whole-file anchor has no line to name: {body}"
+    );
+    assert!(
+        dry["writes"][2]["input"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("Outside the hunks.")
+    );
+
+    // Published, each is a comment of a review thread once the host lists it.
+    let call = [
+        "api",
+        "--method",
+        "POST",
+        "repos/me/repo/pulls/42/comments",
+        "--input",
+        "-",
+    ];
+    env.respond_nth(
+        &call,
+        1,
+        r#"{"id":701,"html_url":"https://github.com/me/repo/pull/42#discussion_r701"}"#,
+    );
+    env.respond_nth(
+        &call,
+        2,
+        r#"{"id":702,"html_url":"https://github.com/me/repo/pull/42#discussion_r702"}"#,
+    );
+    svc.accept(env, Call::PostNote, 604);
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["thread", "thread", "summary"]);
+    let list = env.run(&["list"]);
+    let first = &thread(&list, &line)["comments"][0];
+    assert_eq!(first["post"], "posted", "{first}");
+    assert_eq!(first["remote"]["id"], "701");
+    // The host lists each as a thread of a review; sync claims it by its marker and knows it as
+    // a review-thread (the expected remote kind ReviewThread), to which replies and resolves go natively.
+    let mut remote = Remote::new();
+    remote.thread(
+        "PRRT_line",
+        false,
+        9,
+        vec![Comment::new(701, "me", &sent(env, &line))],
+    );
+    remote.thread(
+        "PRRT_whole",
+        false,
+        1,
+        vec![Comment::new(702, "me", &sent(env, &whole))],
+    );
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    for (id, remote_id) in [(&line, "PRRT_line"), (&whole, "PRRT_whole")] {
+        let remote = &thread(&list, id)["remote"];
+        assert_eq!(remote["id"], remote_id, "{remote}");
+        assert_eq!(remote["kind"], "review-thread", "{remote}");
+    }
 }
 
 #[test]

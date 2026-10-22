@@ -177,6 +177,25 @@ impl ReviewService for Github {
         self.note(subject, text)
     }
 
+    fn file_thread(
+        &self,
+        subject: ReviewSubject,
+        commit: &str,
+        path: &str,
+        text: &str,
+    ) -> Option<Request> {
+        Some(Request::rest(
+            Method::Post,
+            format!("{}/pulls/{}/comments", base(subject), subject.number),
+            Some(json!({
+                "body": text,
+                "commit_id": commit,
+                "path": path,
+                "subject_type": "file",
+            })),
+        ))
+    }
+
     fn note(&self, subject: ReviewSubject, text: &str) -> Request {
         Request::rest(
             Method::Post,

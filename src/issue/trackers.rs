@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use crate::core::config::{self, Config};
-use crate::core::error::{Error, Result, fail};
+use crate::core::error::{Result, fail};
 use crate::forge::service;
 use crate::store::Store;
-use crate::store::issues::{Issue, TRACKER_FILE, TrackerDoc};
+use crate::store::issues::{Issue, TRACKER_FILE, TrackerDoc, parse_ref};
 use crate::store::model::Forge;
 
 /// A tracker's directory and document.
@@ -110,46 +110,18 @@ pub(super) fn check_identity(doc: &TrackerDoc, tracker: &config::Tracker) -> Res
 
 /// The stored trackers `filter` names, or all of them.
 pub fn stored(store: &Store, filter: Option<&str>) -> Result<Vec<Tracker>> {
-    let mut found = Vec::new();
-    for dir in store.child_dirs()? {
-        let Some(doc) = store.load_doc::<TrackerDoc>(&dir, TRACKER_FILE)? else {
-            continue;
-        };
-        if filter.is_none_or(|filter| matches(filter, &doc.key, &doc.repo)) {
-            found.push(Tracker { dir, doc });
-        }
-    }
+    let found: Vec<Tracker> = store
+        .issue_trackers()?
+        .into_iter()
+        .filter(|(_, doc)| filter.is_none_or(|filter| matches(filter, &doc.key, &doc.repo)))
+        .map(|(dir, doc)| Tracker { dir, doc })
+        .collect();
     if found.is_empty()
         && let Some(filter) = filter
     {
         return fail(format!("no synced tracker matches {filter}"));
     }
     Ok(found)
-}
-
-/// What a user typed for an issue: `owner/repo#12`, `#12`, `12` or `local-xxxx`.
-pub struct IssueRef {
-    pub repo: Option<String>,
-    pub name: String,
-}
-
-pub fn parse_ref(text: &str) -> Result<IssueRef> {
-    let invalid = || Error(format!("not an issue key: {text}"));
-    if text.starts_with("local-") && text.len() > 6 {
-        return Ok(IssueRef {
-            repo: None,
-            name: text.to_owned(),
-        });
-    }
-    let (repo, number) = match text.rsplit_once('#') {
-        Some((repo, number)) => ((!repo.is_empty()).then(|| repo.to_owned()), number),
-        None => (None, text),
-    };
-    number.parse::<u64>().map_err(|_| invalid())?;
-    Ok(IssueRef {
-        repo,
-        name: number.to_owned(),
-    })
 }
 
 /// The issue document `text` names and the tracker it is in.

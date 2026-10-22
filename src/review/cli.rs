@@ -228,6 +228,9 @@ pub struct CommentArgs {
     /// Commit the line numbers refer to [default: HEAD, or the work tree when dirty].
     #[arg(long)]
     pub commit: Option<String>,
+    /// A related issue on the host (`owner/repo#12`, `#12` or `12`) the posted text names.
+    #[arg(long, value_name = "ISSUE")]
+    pub issue: Option<String>,
     #[command(flatten)]
     pub author: AuthorArgs,
 }
@@ -264,6 +267,10 @@ pub struct ResolveArgs {
     /// reply "🚫 Rejected: <reason>." unless `--reply` gives other text.
     #[arg(long, value_name = "REASON")]
     pub rejected: Option<String>,
+    /// Left for a follow-up issue on the host (`owner/repo#12`, `#12` or `12`): resolve with
+    /// `moved to <issue>` and a reply "📋 Moved to <issue>." unless `--reply` gives other text.
+    #[arg(long, value_name = "ISSUE")]
+    pub issue: Option<String>,
     /// The code the thread names is gone: triage `stale` and resolve.
     #[arg(long)]
     pub stale: bool,
@@ -462,6 +469,9 @@ pub struct QaFindingArgs {
     /// What happened, or `-` for stdin.
     #[arg(long)]
     pub body: String,
+    /// A related issue on the host (`owner/repo#12`, `#12` or `12`) the posted text names.
+    #[arg(long, value_name = "ISSUE")]
+    pub issue: Option<String>,
     /// Who found it [default: the run's tester].
     #[command(flatten)]
     pub author: AuthorArgs,
