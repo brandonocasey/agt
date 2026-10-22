@@ -722,26 +722,36 @@ fn a_failed_backup_leaves_no_ref_and_no_directory() {
 }
 
 #[test]
-fn an_unreadable_directory_refuses_removal_and_says_how_to_fix_it() {
+fn a_directory_git_cannot_empty_refuses_removal_and_says_how_to_fix_it() {
     let f = Fixture::new();
-    let locked = f.wt.join("out/locked");
-    fs::create_dir_all(locked.join("inner")).unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     let path = f.wt.to_string_lossy().into_owned();
-    let plan = f.agt(&f.env.repo, &["remove", &path]);
-    let output = f.agt(&f.env.repo, &["remove", &path, "--yes"]);
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-    for output in [plan, output] {
-        assert_eq!(output.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(&format!("cannot read {}", locked.display()))
-                && stderr.contains("chmod -R u+rwX"),
-            "{stderr}"
-        );
+    // Unreadable, read-only and unsearchable: git would stop partway through each.
+    for (mode, cause) in [
+        (0o000, "Permission denied"),
+        (0o555, "it is not writable"),
+        (0o444, "it is not writable"),
+    ] {
+        let locked = f.wt.join("out/locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("file"), "x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+        let plan = f.agt(&f.env.repo, &["remove", &path]);
+        let output = f.agt(&f.env.repo, &["remove", &path, "--yes"]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        for output in [plan, output] {
+            assert_eq!(output.status.code(), Some(1), "{mode:o}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!(
+                    "cannot delete what is in {}: {cause}",
+                    locked.display()
+                )) && stderr.contains("chmod -R u+rwX"),
+                "{mode:o}: {stderr}"
+            );
+        }
+        assert!(f.wt.join("feature.txt").exists());
+        assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
     }
-    assert!(f.wt.join("feature.txt").exists());
-    assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
 #[test]

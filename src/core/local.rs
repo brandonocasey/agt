@@ -1,5 +1,6 @@
 //! The local machine and the private files under the user's state directory.
 
+use std::ffi::CString;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -146,6 +147,14 @@ pub fn update_json<T: DeserializeOwned + Default + Serialize>(
         write_json(path, &document, false)?;
     }
     Ok(changed)
+}
+
+/// Whether this process may create and delete entries in the directory `path`.
+pub fn writable(path: &Path) -> bool {
+    CString::new(path.as_os_str().as_encoded_bytes()).is_ok_and(|path| {
+        // SAFETY: `access` reads the NUL-terminated path, which `path` keeps alive for the call.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+    })
 }
 
 /// The errno name of a failed read, such as `EACCES`, or the error text for other failures.

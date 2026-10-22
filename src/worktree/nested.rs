@@ -1,12 +1,15 @@
 //! Nested repositories: a directory with a `.git` of its own that the worktree's repository
 //! does not track as a submodule. A snapshot stores one only as a gitlink and removing the
-//! worktree deletes its history, so none may be removed.
+//! worktree deletes its history, so none may be removed. The same walk finds directories git
+//! could not empty.
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::core::error::{Error, Result, ctx};
+use crate::core::local;
 use crate::git::Repo;
 
 /// A directory with a `.git` of its own somewhere under a worktree.
@@ -67,17 +70,30 @@ fn descend(
     cache: &mut HashMap<PathBuf, Vec<String>>,
     found: &mut Vec<Found>,
 ) -> Result<()> {
-    // Git deletes the rest of the worktree before it fails on a directory it cannot read, so
-    // one that hides its contents refuses removal, with what to do about it.
-    let unreadable = |error: std::io::Error| {
+    // Git stops at the first directory it cannot empty, after it deleted part of the worktree
+    // and its registration, so such a directory refuses removal, with what to do about it.
+    let stuck = |cause: String| {
         Error(format!(
-            "cannot read {}: {error}; git could not delete it either, so fix its permissions \
-             (chmod -R u+rwX) or delete it, then retry",
+            "cannot delete what is in {}: {cause}; git would stop partway through removing the \
+             worktree, so run chmod -R u+rwX on it (or chown it back when another user owns \
+             it) or delete it, then retry",
             dir.display()
         ))
     };
-    for child in fs::read_dir(dir).map_err(unreadable)? {
-        let child = child.map_err(unreadable)?;
+    let children = match fs::read_dir(dir) {
+        Ok(children) => children,
+        // Gone since its parent was listed: nothing in it to delete.
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            return Err(stuck(error.to_string()));
+        }
+        Err(error) => return Err(ctx(format!("read {}", dir.display()))(error)),
+    };
+    if !local::writable(dir) {
+        return Err(stuck("it is not writable".into()));
+    }
+    for child in children {
+        let child = child.map_err(ctx(format!("read {}", dir.display())))?;
         let name = child.file_name().to_string_lossy().into_owned();
         let is_dir = child
             .file_type()

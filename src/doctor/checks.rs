@@ -1,6 +1,5 @@
 //! The checks behind `agt doctor`. Each returns rows; none writes anything.
 
-use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -310,18 +309,11 @@ fn git_ignore(repo: Option<&Repo>) -> Row {
     )
 }
 
-fn writable(path: &Path) -> bool {
-    CString::new(path.as_os_str().as_encoded_bytes()).is_ok_and(|path| {
-        // SAFETY: `access` reads the NUL-terminated path, which `path` keeps alive for the call.
-        unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
-    })
-}
-
 /// A directory agt writes to: ok when it is writable, or absent with a writable parent that
 /// agt creates it in on first use.
 fn directory(name: &str, path: &Path) -> Row {
     if path.is_dir() {
-        return if writable(path) {
+        return if local::writable(path) {
             Row::ok(name, path.display().to_string())
         } else {
             Row::fail(
@@ -332,7 +324,7 @@ fn directory(name: &str, path: &Path) -> Row {
         };
     }
     match path.ancestors().skip(1).find(|parent| parent.is_dir()) {
-        Some(parent) if writable(parent) => {
+        Some(parent) if local::writable(parent) => {
             Row::ok(name, format!("{} (created on first use)", path.display()))
         }
         _ => Row::fail(
