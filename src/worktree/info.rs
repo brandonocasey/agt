@@ -25,15 +25,10 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf> {
         .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))
 }
 
-/// Ignored files, split into those a backup copies and the disposable paths it skips.
-pub struct Ignored {
-    pub copy: Vec<String>,
-    pub skipped: Vec<String>,
-}
-
-pub fn ignored(root: &Path) -> Result<Ignored> {
-    let repo = Repo::at(root);
-    let listing = repo.checked(
+/// The ignored paths in the work tree at `root`, sorted, with a directory (ending in `/`)
+/// standing for everything in it. A backup keeps none of them.
+pub fn ignored(root: &Path) -> Result<Vec<String>> {
+    let listing = Repo::at(root).checked(
         &[
             "ls-files",
             "-z",
@@ -45,46 +40,27 @@ pub fn ignored(root: &Path) -> Result<Ignored> {
         None,
         &[],
     )?;
-    let mut found = Ignored {
-        copy: Vec::new(),
-        skipped: Vec::new(),
-    };
-    for entry in nul_fields(&listing) {
-        let entry = String::from_utf8_lossy(entry).into_owned();
-        walk(root, &entry, &mut found)?;
-    }
-    found.copy.sort();
-    found.copy.dedup();
-    found.skipped.sort();
-    found.skipped.dedup();
+    let mut found: Vec<String> = nul_fields(&listing)
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect();
+    found.sort();
+    found.dedup();
+    // For an untracked directory holding only ignored files git lists its children too.
+    let dirs: Vec<String> = found.iter().filter(|p| p.ends_with('/')).cloned().collect();
+    found.retain(|path| {
+        !dirs
+            .iter()
+            .any(|dir| path != dir && path.starts_with(dir.as_str()))
+    });
     Ok(found)
 }
 
-/// Adds `rel` (a file, or a directory ending in `/`) to `found`, descending into directories
-/// that are not disposable.
-fn walk(root: &Path, rel: &str, found: &mut Ignored) -> Result<()> {
-    if is_disposable(rel) {
-        found.skipped.push(rel.to_owned());
-        return Ok(());
-    }
-    if !rel.ends_with('/') {
-        found.copy.push(rel.to_owned());
-        return Ok(());
-    }
-    let dir = root.join(rel);
-    for child in fs::read_dir(&dir).map_err(ctx(format!("read {}", dir.display())))? {
-        let child = child.map_err(ctx(format!("read {}", dir.display())))?;
-        let kind = child
-            .file_type()
-            .map_err(ctx(format!("stat {}", child.path().display())))?;
-        let name = child.file_name().to_string_lossy().into_owned();
-        if kind.is_dir() {
-            walk(root, &format!("{rel}{name}/"), found)?;
-        } else if kind.is_file() || kind.is_symlink() {
-            walk(root, &format!("{rel}{name}"), found)?;
-        }
-    }
-    Ok(())
+/// The ignored paths that removing the worktree at `root` deletes for good: those no build or
+/// install recreates.
+pub fn lost(root: &Path) -> Result<Vec<String>> {
+    let mut found = ignored(root)?;
+    found.retain(|path| !is_disposable(path));
+    Ok(found)
 }
 
 /// What `git status` lists: whether each path is untracked, and the path.
@@ -132,7 +108,7 @@ pub fn describe(
         }));
     }
     let (modified, untracked) = dirty(&entry.path)?;
-    let ignored = ignored(&entry.path)?.copy.len();
+    let ignored = lost(&entry.path)?.len();
     let (mut ahead, mut behind, mut merged) = (Value::Null, Value::Null, Value::Null);
     // A branch with no commit yet has no HEAD to compare.
     let unborn = entry.unborn();

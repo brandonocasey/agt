@@ -300,6 +300,7 @@ fn remove_worktree(
             "verdict": subject.finding.verdict.as_str(),
             "evidence": subject.finding.evidence,
             "action": action,
+            "ignored_lost": info::lost(&real)?,
         });
         match super::hooks::resolve(main) {
             Ok(resolved) => {
@@ -321,6 +322,7 @@ fn remove_worktree(
                 "ref": done["ref"],
                 "verdict": subject.finding.verdict.as_str(),
                 "evidence": subject.finding.evidence,
+                "ignored_lost": done["ignored_lost"],
             });
             if done.get("hooks").is_some() {
                 row["hooks"] = done["hooks"].clone();

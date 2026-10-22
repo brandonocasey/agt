@@ -51,15 +51,13 @@ pub fn run(cli: Cli) -> Result<Output> {
                 resolved.untrusted,
             )
         };
-        let ignored = info::ignored(&path)?;
         let mut plan = json!({
             "plan": true,
             "path": path,
             "branch": entry.branch,
             "head": entry.head,
             "snapshot_files": modified + untracked,
-            "copied_ignored": ignored.copy,
-            "skipped_disposable": ignored.skipped,
+            "ignored_lost": info::lost(&path)?,
             "hooks": {"remove": planned},
             "warnings": warnings,
             "next": "pass --yes to back up and remove",
@@ -103,6 +101,7 @@ pub(super) fn removal(
         // The hooks ran arbitrary commands; check again for work they may have left.
         gate::check(path, main)?;
     }
+    let lost = info::lost(path)?;
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
@@ -124,7 +123,7 @@ pub(super) fn removal(
         "ref": taken.record.reference,
         "backup_dir": taken.dir,
         "snapshot_files": taken.changed,
-        "copied_ignored": taken.record.copied.len(),
+        "ignored_lost": lost,
         "head_on_local_branch": !local.is_empty(),
         "head_on_remote_branch": !remote.is_empty(),
         "local_branches": local,

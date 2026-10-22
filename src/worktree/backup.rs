@@ -1,4 +1,4 @@
-//! Worktree backups: `agents/backups/<repo>/<id>/backup.json` and `files/`, plus the ref
+//! Worktree backups: `agents/backups/<repo>/<id>/backup.json`, plus the ref
 //! `refs/agt/backups/<id>` that keeps the snapshot commit alive. Backups are never pruned
 //! automatically.
 
@@ -28,7 +28,10 @@ pub struct Record {
     #[serde(rename = "ref")]
     pub reference: String,
     pub created: String,
+    /// Ignored files copied under `files/`. Only backups from agt 0.20.0 and older have any;
+    /// restore still puts them back.
     pub copied: Vec<String>,
+    /// The ignored paths the backup left out.
     pub skipped: Vec<String>,
     #[serde(default)]
     pub file_modes: Vec<FileMode>,

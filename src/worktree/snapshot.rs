@@ -1,5 +1,5 @@
-//! Backing a worktree up: a commit of its whole working tree pinned by a ref, and a copy of
-//! its ignored files that are not disposable.
+//! Backing a worktree up: a commit of its whole working tree pinned by a ref, plus its
+//! sparse-checkout files. Ignored files stay out of it.
 
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -67,7 +67,7 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
                     .is_ok_and(|found| found.is_none())
         })
         .unwrap_or_default();
-    create_dirs(&dir.join("files"), 0o700)?;
+    create_dirs(&dir, 0o700)?;
     let reference = format!("{REF_PREFIX}{id}");
     let made = build(main, entry, &shared, &dir, id, &reference, created);
     if made.is_err() {
@@ -118,7 +118,6 @@ fn build(
     let changed = nul_fields(&changed).count();
 
     let ignored = info::ignored(&entry.path)?;
-    copy_files(&entry.path, &dir.join("files"), &ignored.copy, 0o700)?;
     save_git_files(&entry.path, &dir.join(SAVED_GIT_DIR))?;
     let paths = shared.checked(&["ls-tree", "-r", "--name-only", "-z", &tree], None, &[])?;
     let mut file_modes = Vec::new();
@@ -145,8 +144,8 @@ fn build(
         snapshot,
         reference: reference.to_owned(),
         created: clock::format(created),
-        copied: ignored.copy,
-        skipped: ignored.skipped,
+        copied: Vec::new(),
+        skipped: ignored,
         file_modes,
     };
     backup::write(dir, &record)?;

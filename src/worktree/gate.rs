@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::disposable::is_os_junk;
-use super::{info, nested};
+use super::nested;
 use crate::core::env;
 use crate::core::error::{Result, fail};
 use crate::forge::auto::Offline;
@@ -501,13 +501,6 @@ fn holds_nothing_unique(
     });
     if real {
         return fail(format!("{name} has uncommitted changes"));
-    }
-    let ignored = info::ignored(workdir)?.copy;
-    if !ignored.is_empty() {
-        return fail(format!(
-            "{name} has ignored files that no backup keeps: {}; move them first",
-            ignored.join(", ")
-        ));
     }
     Ok(())
 }

@@ -121,7 +121,7 @@ fn assert_backup(f: &Fixture, removed: &Value, feature: &str) {
     assert!(!f.wt.exists());
     let id = removed["id"].as_str().unwrap();
     assert_eq!(removed["ref"], format!("refs/agt/backups/{id}"));
-    assert_eq!(removed["copied_ignored"], 1);
+    assert_eq!(removed["ignored_lost"], json!([".env"]));
     assert_eq!(removed["snapshot_files"], 4);
     assert_eq!(removed["head_on_local_branch"], true);
     assert_eq!(removed["head_on_remote_branch"], false);
@@ -130,25 +130,17 @@ fn assert_backup(f: &Fixture, removed: &Value, feature: &str) {
     assert!(id.ends_with("-worktree-feat"), "{id}");
     let record: Value =
         serde_json::from_slice(&fs::read(dir.join("backup.json")).unwrap()).unwrap();
-    assert_eq!(record["copied"], json!([".env"]));
-    let skipped = record["skipped"].as_array().unwrap();
-    assert!(skipped.contains(&json!("node_modules/")), "{skipped:?}");
-    assert!(skipped.contains(&json!("build/")), "{skipped:?}");
+    assert_eq!(record["copied"], json!([]));
+    assert_eq!(
+        record["skipped"],
+        json!([".env", "build/", "node_modules/"])
+    );
     assert_eq!(record["branch"], "feat");
     assert_eq!(record["head"], feature);
-    let copy = dir.join("files/.env");
-    assert_eq!(fs::read_to_string(&copy).unwrap(), "SECRET=1\n");
+    // Ignored files stay out of the backup, secrets included.
+    assert!(!dir.join("files").exists());
     assert_eq!(
-        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    assert!(!dir.join("files/node_modules").exists());
-    assert_eq!(
-        fs::metadata(dir.join("files"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
         0o700
     );
 }
@@ -170,11 +162,7 @@ fn assert_restored(f: &Fixture, feature: &str) {
             & 0o777,
         0o755
     );
-    assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1\n");
-    assert_eq!(
-        fs::metadata(wt.join(".env")).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert!(!wt.join(".env").exists());
     assert!(!wt.join("node_modules").exists());
     assert_eq!(
         wgit(&f.env, wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -269,7 +257,7 @@ fn plan_mode_changes_nothing() {
     f.dirty();
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
     assert_eq!(plan["plan"], true);
-    assert_eq!(plan["copied_ignored"], json!([".env"]));
+    assert_eq!(plan["ignored_lost"], json!([".env"]));
     assert!(f.wt.join("a.txt").exists());
     assert_eq!(
         fs::read_to_string(f.wt.join("a.txt")).unwrap(),
@@ -711,11 +699,14 @@ fn list_all_warns_about_an_unreadable_repository_and_lists_the_rest() {
 fn a_failed_backup_leaves_no_ref_and_no_directory() {
     let f = Fixture::new();
     f.dirty();
-    let secret = f.wt.join(".env");
-    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    // The backup copies this file after it made the ref; an unreadable one fails it there.
+    let config = PathBuf::from(wgit(&f.env, &f.wt, &["rev-parse", "--absolute-git-dir"]))
+        .join("config.worktree");
+    fs::write(&config, "").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o000)).unwrap();
     let path = f.wt.to_string_lossy().into_owned();
     let output = f.agt(&f.env.repo, &["remove", &path, "--yes"]);
-    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(f.wt.join("feature.txt").exists());
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
@@ -1017,19 +1008,16 @@ fn a_submodule_branch_that_nothing_else_holds_blocks_removal() {
 }
 
 #[test]
-fn ignored_files_in_a_submodule_block_removal_unless_disposable() {
+fn ignored_files_in_a_submodule_do_not_block_removal() {
     let (f, sub) = with_submodule();
     ignore_in(&f, &sub, ".env\nnode_modules/\nbuild/");
     fs::create_dir_all(sub.join("node_modules/pkg")).unwrap();
     fs::write(sub.join("node_modules/pkg/index.js"), "x").unwrap();
-    fs::create_dir_all(sub.join("build")).unwrap();
-    fs::write(sub.join("build/out.o"), "o").unwrap();
-    let wt = f.wt.to_string_lossy().into_owned();
-    // Dependencies and build output are recreated, so they do not block.
-    assert_eq!(f.json(&["remove", &wt])["plan"], true);
-
     fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
-    refuses_both_ways(&f, ".env");
+    let wt = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &wt])["plan"], true);
+    f.remove();
+    assert!(!f.wt.exists());
 }
 
 #[test]
@@ -1431,13 +1419,7 @@ fn regenerable_caches_never_block_removal_in_the_worktree_or_a_submodule() {
         fs::write(f.wt.join(dir).join("x"), "x").unwrap();
     }
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
-    assert_eq!(plan["copied_ignored"], json!([]), "{plan}");
-    let skipped = plan["skipped_disposable"].as_array().unwrap();
-    assert!(skipped.iter().any(|s| s == ".tox/"), "{plan}");
-    // A secret next to the caches still blocks.
-    ignore_in(&f, &sub, ".env\n.pytest_cache/\n__pycache__/");
-    fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
-    refuses_both_ways(&f, ".env");
+    assert_eq!(plan["ignored_lost"], json!([]), "{plan}");
 }
 
 #[test]
@@ -1458,22 +1440,7 @@ fn ignored_paths_are_listed_once() {
     fs::write(f.wt.join("cfg/a.local"), "a").unwrap();
     fs::write(f.wt.join("cfg/deep/b.local"), "b").unwrap();
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
-    for key in ["copied_ignored", "skipped_disposable"] {
-        let mut listed: Vec<&str> = plan[key]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        let count = listed.len();
-        listed.sort_unstable();
-        listed.dedup();
-        assert_eq!(listed.len(), count, "{key}: {plan}");
-    }
-    assert!(
-        !plan["copied_ignored"].as_array().unwrap().is_empty(),
-        "{plan}"
-    );
+    assert_eq!(plan["ignored_lost"], json!(["cfg/"]), "{plan}");
 }
 
 #[test]
@@ -2225,12 +2192,18 @@ fn a_sparse_worktree_keeps_its_own_patterns_when_main_is_sparse() {
 }
 
 #[test]
-fn an_ignored_file_in_an_out_of_cone_directory_survives_restore() {
+fn an_old_backups_ignored_file_in_an_out_of_cone_directory_survives_restore() {
     let f = sparse_fixture();
     wgit(&f.env, &f.wt, &["sparse-checkout", "set", "--cone", "d1"]);
-    fs::create_dir_all(f.wt.join("d2")).unwrap();
-    fs::write(f.wt.join("d2/.env"), "SECRET=1\n").unwrap();
     let removed = f.remove();
+    // Backups from agt 0.20.0 and older copied ignored files under `files/`.
+    let dir = PathBuf::from(removed["backup_dir"].as_str().unwrap());
+    fs::create_dir_all(dir.join("files/d2")).unwrap();
+    fs::write(dir.join("files/d2/.env"), "SECRET=1\n").unwrap();
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(dir.join("backup.json")).unwrap()).unwrap();
+    record["copied"] = json!(["d2/.env"]);
+    fs::write(dir.join("backup.json"), record.to_string()).unwrap();
     let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
     assert_eq!(restored["sparse_checkout"], true, "{restored}");
     assert_eq!(
