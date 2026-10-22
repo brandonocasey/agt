@@ -383,7 +383,7 @@ agt qa publish --dry-run            # as agt review publish
 `agt cleanup` checks current and configured repository stores, legacy global stores,
 old cache files and orphan processes. Linked worktrees share one repository store. It also lists leftovers for you to remove
 by hand. By default it changes nothing and prints a JSON plan; `--yes` deletes. `--only`
-limits the pass to `reviews`, `issues`, `tasks`, `backups`, `files`,
+limits the pass to `reviews`, `issues`, `checks`, `tasks`, `backups`, `files`,
 `processes`, `manual` or `worktrees` (repeat it for several). `worktrees` runs only when named:
 it removes landed worktrees and deletes their branches ([Worktrees](#worktrees)), so a plain
 `--yes` never does. Before 0.8.0 it was `agt prune`; before 0.14.0 the `worktrees` kind was
@@ -419,6 +419,9 @@ Store documents are kept 90 days (`retention_days`). The rules:
   task or branch or local PR link. An unreadable timestamp keeps the issue, and so does
   a document with fields this agt does not know (with a warning). Open issues,
   `tracker.json` and anything holding such data stay. It also lists the `locks` of the issue stores.
+- `checks`: an `agt check run` pass (`.agt/checks/<key>.json`) 7 days after its `ran_at`,
+  the age at which its output log goes. An unreadable timestamp keeps the entry. It also lists
+  the `locks` of the check stores.
 - `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
   tasks stay, and so does the session index, a cache that `agt sessions search` rebuilds.
 - `locks` (a category of the `reviews` and `issues` kinds, not a kind of its own): `.<key>.lock`
@@ -1316,18 +1319,25 @@ fail the scan with exit status 2 and identify the path.
 
 `agt check run --name NAME [--force] -- COMMAND [ARGS...]` never reruns a test or lint command on
 code it already passed on. With a clean work tree (untracked files that are not git-ignored count
-as dirty) the key is the `HEAD` tree (`git rev-parse HEAD^{tree}`), `NAME`, the directory below
+as dirty whatever `status.showUntrackedFiles` says, and so do submodule changes) the key is the `HEAD` tree (`git rev-parse HEAD^{tree}`), `NAME`, the directory below
 the repository root and the exact argv, so an empty commit or a rebase that changes no content
 hits and a rebase onto a moved base misses. A recorded pass prints `{"cached": true, "name", "key",
 "tree", "command", "ran_at", "log"}` and exits 0 without running anything. Otherwise the command
 runs with inherited stdin, its stdout and stderr go to agt's stderr and to
 `$XDG_CACHE_HOME/agents/output/check-NAME-*.log` (pruned by `agt cleanup`'s `output` rule), and
 stdout holds only the JSON summary, printed last: `cached` (false), `name`, `key`, `dirty`,
-`recorded`, `command`, `exit`, `ran_at`, `duration_ms`, `log`. The exit status is the command's
+`recorded`, `reason`, `warnings`, `command`, `exit`, `ran_at`, `duration_ms`, `log`. The exit status is the command's
 (128 plus the signal when it was killed). Only exit 0 is recorded, as one document per key in the
-main checkout's `.agt/checks/`, shared by linked worktrees; failures are never cached. A dirty
+main checkout's `.agt/checks/`, shared by linked worktrees; failures are never cached. The pass
+is recorded only if the work tree is still clean and `HEAD` still has the same tree after the
+run; otherwise `recorded` is false and `reason` says why (else `reason` is null). A dirty
 work tree always runs and records nothing (`key` is null). `--force` runs even on a hit and
-records the new pass. Entries are not pruned by `agt cleanup`.
+records the new pass. The store opens only when there is a key; where it cannot open (a bare
+repository with worktrees has no main checkout) the command runs uncached and `warnings` says
+so. Once the command exits agt waits at most half a second for its remaining output, so a
+background process that keeps the pipes open cannot hang it; later output is dropped.
+`agt cleanup --only checks` removes entries, and their lock files, that ran 7 days or more ago,
+the retention of the output logs, so a hit never names a pruned log.
 
 ## Wait
 
@@ -1349,7 +1359,7 @@ login for the origin forge (a fail when missing) and for the other installed for
 warning); the running agt version against the one `mise ls --current` pins for
 `github:brandonocasey/agt` (older: warn, `mise install`; when `mise ls` fails, the detail is its first stderr line containing `ERROR`, else its last line and the fix is
 `mise trust` or "fix the mise error above"); the global git ignore covering
-`.worktrees/` and `/.cache/agents/scratch/`; the state and config directories and both config
+`.worktrees/`, `/.agt/` and `/.cache/agents/scratch/`; the state and config directories and both config
 files parsing; and, inside a repository, the origin, the default branch and stray agt lock
 files. The scratch-ignore and mise-pin checks are agt conventions, not requirements of git or
 mise: a missing `/.cache/agents/scratch/` ignore is a warning, and the version is compared only

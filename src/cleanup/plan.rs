@@ -7,6 +7,8 @@ use serde_json::{Map, Value, json};
 
 use super::files::{self, OUTPUT_DAYS, SCRATCH_DAYS};
 use super::procs;
+use crate::check::Entry;
+use crate::check::prune::expired as expired_check;
 use crate::core::agents::Proc;
 use crate::core::clock;
 use crate::core::error::Result;
@@ -19,10 +21,11 @@ use crate::store::prune::backups::Backup;
 use crate::store::{Namespace, Store};
 use crate::task::prune::{Expired, expired as expired_tasks, orphan_locks};
 
-pub const CATEGORIES: [&str; 10] = [
+pub const CATEGORIES: [&str; 11] = [
     "reviews",
     "local_repos",
     "issues",
+    "checks",
     "tasks",
     "locks",
     "partial_backups",
@@ -48,6 +51,11 @@ pub enum Action {
     Issue {
         root: PathBuf,
         dir: PathBuf,
+        name: String,
+    },
+    /// A recorded `agt check run` pass.
+    Check {
+        root: PathBuf,
         name: String,
     },
     Task(Expired),
@@ -286,6 +294,41 @@ impl Plan {
                 self.attempt(&dir, result);
             }
             self.stray_locks(&store, Namespace::Issues);
+        }
+        Ok(())
+    }
+
+    /// Recorded `agt check run` passes older than the output logs they point at.
+    pub fn checks(&mut self, now: i64) -> Result<()> {
+        for store in stores(Namespace::Checks)? {
+            let result = (|| {
+                let (entries, unknown) = store.docs_intact::<Entry>(store.root(), &[])?;
+                self.warnings.extend(unknown);
+                for entry in entries {
+                    if !expired_check(&entry, now, OUTPUT_DAYS) {
+                        continue;
+                    }
+                    let name = entry.key.clone();
+                    let path = store.root().join(format!("{name}.json"));
+                    self.add(
+                        "checks",
+                        path.clone(),
+                        name.clone(),
+                        format!(
+                            "ran {}, older than the {OUTPUT_DAYS}-day output logs",
+                            entry.ran_at
+                        ),
+                        size(&path),
+                        Action::Check {
+                            root: store.root().to_path_buf(),
+                            name,
+                        },
+                    );
+                }
+                Ok(())
+            })();
+            self.attempt(store.root(), result);
+            self.stray_locks(&store, Namespace::Checks);
         }
         Ok(())
     }

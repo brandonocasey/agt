@@ -138,7 +138,19 @@ impl Repo {
     /// How many changes the work tree has: the paths `git status` lists, a rename counting
     /// once, and the edits it hides.
     pub fn uncommitted_count(&self) -> Result<usize> {
-        let listed = self.checked(&["status", "--porcelain=v1", "-z"], None, &[])?;
+        self.count_changes(&[])
+    }
+
+    /// Like `uncommitted_count`, but ignores the user's `status.showUntrackedFiles` and
+    /// `diff.ignoreSubmodules` settings: untracked files and submodule changes always count.
+    pub fn strict_uncommitted_count(&self) -> Result<usize> {
+        self.count_changes(&["--untracked-files=normal", "--ignore-submodules=none"])
+    }
+
+    fn count_changes(&self, options: &[&str]) -> Result<usize> {
+        let mut args = vec!["status", "--porcelain=v1", "-z"];
+        args.extend(options);
+        let listed = self.checked(&args, None, &[])?;
         let mut entries = nul_fields(&listed);
         let mut paths: HashSet<_> = self.hidden_edits()?.into_iter().collect();
         while let Some(entry) = entries.next() {

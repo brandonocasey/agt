@@ -2,7 +2,9 @@
 
 use serde_json::{Map, Value, json};
 
+use super::files::OUTPUT_DAYS;
 use super::plan::{Action, Item, Plan};
+use crate::check::prune::expired as expired_check;
 use crate::core::error::Result;
 use crate::issue::prune::prunable;
 use crate::review::commands::prune::expired;
@@ -119,6 +121,12 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
             Store::at_root(Namespace::Issues, root.clone())?
                 .try_remove_doc_if::<crate::store::issues::Issue>(dir, name, |issue| {
                     prunable(issue, now)
+                })
+        }
+        Action::Check { root, name } => {
+            Store::at_root(Namespace::Checks, root.clone())?
+                .try_remove_doc_if::<crate::check::Entry>(root, name, |entry| {
+                    expired_check(entry, now, OUTPUT_DAYS)
                 })
         }
         Action::Task(task) => crate::task::prune::remove(task, now),

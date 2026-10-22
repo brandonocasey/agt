@@ -67,6 +67,23 @@ fn a_logged_in_repo_with_only_warnings_exits_2() {
 }
 
 #[test]
+fn an_unignored_agt_directory_is_a_warning() {
+    let env = setup("0.0.1");
+    let global = env.path("gitignore");
+    std::fs::write(&global, ".worktrees/\n/.cache/agents/scratch/\n").unwrap();
+    let (_, report) = doctor(&env);
+    let ignore = row(&report, "git ignore");
+    assert_eq!(ignore["status"], "warn", "{report}");
+    assert_eq!(ignore["detail"], "not ignored: /.agt/");
+    env.write(
+        ".gitignore",
+        ".worktrees/\n/.agt/\n/.cache/agents/scratch/\n",
+    );
+    let (_, report) = doctor(&env);
+    assert_eq!(row(&report, "git ignore")["status"], "ok", "{report}");
+}
+
+#[test]
 fn missing_auth_for_the_origin_forge_fails_with_exit_1() {
     let env = setup("0.0.1");
     let (code, report) = doctor(&env);

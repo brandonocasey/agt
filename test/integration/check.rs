@@ -196,3 +196,129 @@ fn a_linked_worktree_shares_the_cache() {
     assert_eq!(json["cached"], true);
     assert_eq!(runs(&env), 1);
 }
+
+#[test]
+fn a_command_that_edits_a_tracked_file_is_not_recorded() {
+    let env = setup();
+    let edit = format!("echo edit >> {}/a.txt", env.repo.display());
+    let (code, first, _) = check(&env, "test", &[], &["sh", "-c", &edit]);
+    assert_eq!(code, Some(0));
+    assert_eq!(first["recorded"], false);
+    assert_eq!(
+        first["reason"],
+        "the work tree or HEAD changed during the run"
+    );
+    env.git(&["checkout", "--", "a.txt"]);
+    let (_, second, _) = run_bump(&env, "test", &[]);
+    assert_eq!(second["cached"], false, "no entry was recorded");
+}
+
+#[test]
+fn a_command_that_commits_is_not_recorded() {
+    let env = setup();
+    let git = format!(
+        "git -C {} commit -q --allow-empty -m moved && echo y > {}/b.txt && git -C {} add b.txt && git -C {} commit -q -m b",
+        env.repo.display(),
+        env.repo.display(),
+        env.repo.display(),
+        env.repo.display()
+    );
+    let (code, summary, _) = check(&env, "test", &[], &["sh", "-c", &git]);
+    assert_eq!(code, Some(0));
+    assert_eq!(summary["recorded"], false);
+    assert!(summary["reason"].is_string());
+}
+
+#[test]
+fn a_background_process_holding_the_pipes_does_not_hang_the_run() {
+    let env = setup();
+    let started = std::time::Instant::now();
+    let (code, summary, _) = check(&env, "test", &[], &["sh", "-c", "sleep 30 & exit 0"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(summary["recorded"], true);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn untracked_files_are_dirty_even_when_git_config_hides_them() {
+    let env = setup();
+    env.git(&["config", "status.showUntrackedFiles", "no"]);
+    env.write("new.txt", "n\n");
+    let (_, summary, _) = run_bump(&env, "test", &[]);
+    assert_eq!(summary["dirty"], true);
+    assert_eq!(summary["recorded"], false);
+}
+
+#[test]
+fn a_store_that_cannot_open_runs_uncached_with_a_warning() {
+    let env = setup();
+    let bare = env.path("bare.git");
+    env.git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+    let linked = env.path("bare-linked");
+    let added = env
+        .command("git", &bare)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat",
+            linked.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(added.success());
+    let command = bump(&env);
+    let output = env
+        .bin(&linked)
+        .args(["check", "run", "--name", "test", "--"])
+        .args(&command)
+        .output()
+        .unwrap();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{json}");
+    assert_eq!(
+        (json["cached"].clone(), json["recorded"].clone()),
+        (false.into(), false.into())
+    );
+    assert!(
+        json["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("running uncached"),
+        "{json}"
+    );
+    assert_eq!(runs(&env), 1);
+}
+
+#[test]
+fn cleanup_drops_entries_older_than_the_output_logs_and_their_locks() {
+    let env = setup();
+    let (_, first, _) = run_bump(&env, "test", &[]);
+    let key = first["key"].as_str().unwrap();
+    let dir = env.repo.join(".agt").join("checks");
+    assert!(dir.join(format!("{key}.json")).exists());
+    let cleanup = |now: u64, args: &[&str]| {
+        let output = env
+            .bin(&env.repo)
+            .env("AGT_NOW", now.to_string())
+            .arg("cleanup")
+            .args(["--only", "checks"])
+            .args(args)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let day = 86_400;
+    let young = cleanup(crate::support::unix_now() + 6 * day, &["--yes"]);
+    assert_eq!(young["totals"]["items"], 0, "{young}");
+    assert!(dir.join(format!("{key}.json")).exists());
+    let old = cleanup(crate::support::unix_now() + 8 * day, &["--yes"]);
+    assert_eq!(old["totals"]["items"], 1, "{old}");
+    assert!(!dir.join(format!("{key}.json")).exists());
+    assert!(!dir.join(format!(".{key}.lock")).exists());
+}

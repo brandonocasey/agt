@@ -43,6 +43,8 @@ enum Only {
     /// Closed issues, and issue lock files whose document is gone.
     Issues,
     Tasks,
+    /// `agt check run` passes older than the 7-day output logs they point at.
+    Checks,
     /// agt's own pre-migration backups and unfinished backup copies.
     Backups,
     /// Long-output copies in `agents/output` untouched for 7 days, and `agents/scratch` and
@@ -91,6 +93,9 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     if only(Only::Issues) {
         plan.issues(now)?;
+    }
+    if only(Only::Checks) {
+        plan.checks(now)?;
     }
     if only(Only::Tasks) {
         plan.tasks(now)?;
