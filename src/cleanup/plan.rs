@@ -57,6 +57,11 @@ pub enum Action {
         root: PathBuf,
         name: String,
     },
+    /// A check entry this agt cannot read and no newer agt wrote.
+    UnreadableCheck {
+        root: PathBuf,
+        name: String,
+    },
     Task(Expired),
     /// A task lock file whose record is gone.
     TaskLock(PathBuf),
@@ -301,8 +306,26 @@ impl Plan {
     pub fn checks(&mut self, now: i64) -> Result<()> {
         for store in stores(Namespace::Checks)? {
             let result = (|| {
-                let (entries, unknown) = store.docs_intact::<Entry>(store.root(), &[])?;
-                self.warnings.extend(unknown);
+                let (entries, left_out) = store.docs_intact_by_name::<Entry>(store.root(), &[])?;
+                for left in left_out {
+                    if !left.unreadable {
+                        self.warnings.push(format!("{}; kept", left.reason));
+                        continue;
+                    }
+                    // A cache entry nothing can read is only ever replaced by a run of its exact key.
+                    let path = store.root().join(format!("{}.json", left.name));
+                    self.add(
+                        "checks",
+                        path.clone(),
+                        left.name.clone(),
+                        format!("cannot be read: {}", left.reason),
+                        size(&path),
+                        Action::UnreadableCheck {
+                            root: store.root().to_path_buf(),
+                            name: left.name,
+                        },
+                    );
+                }
                 for entry in entries {
                     if !expired_check(&entry, now, OUTPUT_DAYS) {
                         continue;

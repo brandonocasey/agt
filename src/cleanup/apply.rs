@@ -129,6 +129,10 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
                     expired_check(entry, now, OUTPUT_DAYS)
                 })
         }
+        Action::UnreadableCheck { root, name } => {
+            Store::at_root(Namespace::Checks, root.clone())?
+                .remove_unreadable_doc::<crate::check::prune::Entry>(root, name)
+        }
         Action::Task(task) => crate::task::prune::remove(task, now),
         Action::TaskLock(path) => crate::task::prune::remove_orphan_lock(path),
         Action::Lock {

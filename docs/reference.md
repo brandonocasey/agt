@@ -420,7 +420,7 @@ Store documents are kept 90 days (`retention_days`). The rules:
   a document with fields this agt does not know or cannot read (with a warning). Open issues,
   `tracker.json` and anything holding such data stay. It also lists the `locks` of the issue stores.
 - `checks`: an `agt check run` pass (`.agt/checks/<key>.json`) 7 days after its `ran_at`,
-  the age at which its output log goes. An unreadable timestamp keeps the entry, and an entry agt cannot read is kept with a warning while the rest are still listed. It also lists
+  the age at which its output log goes. An unreadable timestamp keeps the entry. An entry agt cannot read is listed at any age, since only a run of its exact key would replace it; one written by a newer agt is kept with a warning. It also lists
   the `locks` of the check stores.
 - `tasks`: a `complete` task 90 days after its `updatedAt`. Active, paused and blocked
   tasks stay, and so does the session index, a cache that `agt sessions search` rebuilds.

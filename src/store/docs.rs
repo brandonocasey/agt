@@ -17,6 +17,15 @@ use crate::core::error::Result;
 use crate::core::local::read_json;
 use crate::core::local::{lock_file, try_lock_file};
 
+/// A document [`Store::docs_intact_by_name`] left out.
+pub struct DocLeftOut {
+    /// The file name without `.json`.
+    pub name: String,
+    pub reason: String,
+    /// It cannot be read and no newer agt wrote it, so nothing can lose by deleting it.
+    pub unreadable: bool,
+}
+
 /// The entries of `dir` in name order; a missing directory has none.
 pub(super) fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
     let found = match std::fs::read_dir(dir) {
@@ -75,26 +84,67 @@ impl Store {
         dir: &Path,
         skip: &[&str],
     ) -> Result<(Vec<T>, Vec<String>)> {
+        let (docs, left_out) = self.docs_intact_by_name(dir, skip)?;
+        let warnings = left_out
+            .into_iter()
+            .map(|left| format!("{}; kept", left.reason))
+            .collect();
+        Ok((docs, warnings))
+    }
+
+    /// Like [`Store::docs_intact`], with each document left out as a [`DocLeftOut`].
+    pub fn docs_intact_by_name<T: Serialize + DeserializeOwned>(
+        &self,
+        dir: &Path,
+        skip: &[&str],
+    ) -> Result<(Vec<T>, Vec<DocLeftOut>)> {
         let (mut docs, mut left_out) = (Vec::new(), Vec::new());
         for path in self.doc_paths(dir, skip)? {
-            let read = (|| -> Result<_> {
-                let Some(document) = read_json::<Value>(&path)? else {
-                    return Ok(None);
-                };
-                let (doc, document): (T, _) = self.parse_doc(&path, document)?;
-                Ok(Some((lost_field_of(&path, &document, &doc)?, doc)))
-            })();
-            match read {
+            let name = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match self.read_doc_intact::<T>(&path) {
                 Ok(Some((None, doc))) => docs.push(doc),
-                Ok(Some((Some(field), _))) => left_out.push(format!(
-                    "{} has field {field} that this agt does not know; kept",
-                    path.display()
-                )),
+                Ok(Some((Some(field), _))) => left_out.push(DocLeftOut {
+                    name,
+                    reason: format!(
+                        "{} has field {field} that this agt does not know",
+                        path.display()
+                    ),
+                    unreadable: false,
+                }),
                 Ok(None) => {}
-                Err(error) => left_out.push(format!("{error}; kept")),
+                Err(error) => left_out.push(DocLeftOut {
+                    name,
+                    reason: error.to_string(),
+                    unreadable: !self.is_newer(&path),
+                }),
             }
         }
         Ok((docs, left_out))
+    }
+
+    /// The document and the first field this build does not know, if any; `None` when the file
+    /// is gone.
+    fn read_doc_intact<T: Serialize + DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> Result<Option<(Option<String>, T)>> {
+        let Some(document) = read_json::<Value>(path)? else {
+            return Ok(None);
+        };
+        let (doc, document): (T, _) = self.parse_doc(path, document)?;
+        Ok(Some((lost_field_of(path, &document, &doc)?, doc)))
+    }
+
+    /// Whether the file is JSON with a `version` newer than this build's schema.
+    fn is_newer(&self, path: &Path) -> bool {
+        fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|document| document.get("version").and_then(Value::as_u64))
+            .is_some_and(|version| version > u64::from(self.schema.version))
     }
 
     /// Runs `change` on the document under its lock and writes the result atomically. A missing
@@ -149,22 +199,21 @@ impl Store {
         Ok(result)
     }
 
-    /// Deletes a document this build cannot read, under its lock. One a newer agt wrote stays:
-    /// it is not this build's to delete.
-    pub fn remove_unreadable_doc(&self, dir: &Path, name: &str) -> Result<Removal> {
+    /// Deletes a document this build cannot read, re-reading it under its lock first. One that
+    /// became readable since, or that a newer agt wrote, stays: it is not this build's to delete.
+    pub fn remove_unreadable_doc<T: Serialize + DeserializeOwned>(
+        &self,
+        dir: &Path,
+        name: &str,
+    ) -> Result<Removal> {
         validate_key(name)?;
         let lock = lock_path(dir, name);
         let _lock = lock_file(&lock)?;
         let path = dir.join(format!("{name}.json"));
-        if fs::symlink_metadata(&path).is_err() {
-            return Ok(Removal::Kept);
-        }
-        let newer = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|document| document.get("version").and_then(Value::as_u64))
-            .is_some_and(|version| version > u64::from(self.schema.version));
-        if newer {
+        if fs::symlink_metadata(&path).is_err()
+            || self.read_doc_intact::<T>(&path).is_ok()
+            || self.is_newer(&path)
+        {
             return Ok(Removal::Kept);
         }
         remove_with_lock(&path, &lock).map(Removal::Removed)

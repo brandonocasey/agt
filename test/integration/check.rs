@@ -317,16 +317,35 @@ fn cleanup_drops_entries_older_than_the_output_logs_and_their_locks() {
     let young = cleanup(crate::support::unix_now() + 6 * day, &["--yes"]);
     assert_eq!(young["totals"]["items"], 0, "{young}");
     assert!(dir.join(format!("{key}.json")).exists());
-    let corrupt = dir.join(format!("{}.json", "0".repeat(64)));
-    std::fs::write(&corrupt, "{ nope").unwrap();
     let old = cleanup(crate::support::unix_now() + 8 * day, &["--yes"]);
     assert_eq!(old["totals"]["items"], 1, "{old}");
     assert!(!dir.join(format!("{key}.json")).exists());
     assert!(!dir.join(format!(".{key}.lock")).exists());
-    assert!(corrupt.exists());
+}
+
+#[test]
+fn cleanup_drops_an_unreadable_entry_at_any_age_and_keeps_a_newer_one() {
+    let env = setup();
+    let (_, first, _) = run_bump(&env, "test", &[]);
+    let valid = key_file(&env, first["key"].as_str().unwrap());
+    let dir = valid.parent().unwrap().to_path_buf();
+    let corrupt = dir.join(format!("{}.json", "0".repeat(64)));
+    let newer = dir.join(format!("{}.json", "1".repeat(64)));
+    std::fs::write(&corrupt, "{ nope").unwrap();
+    std::fs::write(&newer, r#"{"version":9}"#).unwrap();
+    let output = env
+        .bin(&env.repo)
+        .args(["cleanup", "--only", "checks", "--yes"])
+        .output()
+        .unwrap();
+    let report = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+    assert_eq!(report["totals"]["items"], 1, "{report}");
+    assert!(!corrupt.exists() && newer.exists() && valid.exists());
+    let warnings = report["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{report}");
     assert!(
-        old["warnings"][0].as_str().unwrap().ends_with("; kept"),
-        "{old}"
+        warnings[0].as_str().unwrap().contains("schema version 9"),
+        "{report}"
     );
 }
 
