@@ -143,6 +143,18 @@ impl Store {
         Ok(result)
     }
 
+    /// Deletes the document under its lock without reading it, so an unreadable one goes too.
+    pub fn remove_doc(&self, dir: &Path, name: &str) -> Result<Removal> {
+        validate_key(name)?;
+        let lock = lock_path(dir, name);
+        let _lock = lock_file(&lock)?;
+        let path = dir.join(format!("{name}.json"));
+        if !path.exists() {
+            return Ok(Removal::Kept);
+        }
+        remove_with_lock(&path, &lock).map(Removal::Removed)
+    }
+
     /// Deletes the document when `remove` approves it, re-reading it under its lock first. Gives
     /// up with [`Removal::Busy`] when another process holds the lock.
     pub fn try_remove_doc_if<T: Serialize + DeserializeOwned>(

@@ -331,7 +331,7 @@ fn key_file(env: &Env, key: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn a_corrupt_entry_is_a_miss_with_a_warning_and_a_failed_record_is_not_an_error() {
+fn a_corrupt_entry_is_removed_and_replaced_by_the_new_pass() {
     let env = setup();
     let (_, first, _) = run_bump(&env, "test", &[]);
     let file = key_file(&env, first["key"].as_str().unwrap());
@@ -341,12 +341,38 @@ fn a_corrupt_entry_is_a_miss_with_a_warning_and_a_failed_record_is_not_an_error(
         let (code, summary, _) = run_bump(&env, "test", extra);
         assert_eq!((code, runs(&env)), (Some(0), before + 1), "{summary}");
         assert_eq!(summary["cached"], false);
-        assert_eq!(summary["recorded"], false, "{summary}");
+        assert_eq!(summary["recorded"], true, "{summary}");
         assert!(
-            !summary["warnings"].as_array().unwrap().is_empty(),
+            summary["warnings"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("removed the unreadable cached pass"),
             "{summary}"
         );
+        let (_, hit, _) = run_bump(&env, "test", &[]);
+        assert_eq!(
+            (hit["cached"].clone(), runs(&env)),
+            (true.into(), before + 1)
+        );
     }
+}
+
+#[test]
+fn an_entry_that_cannot_be_removed_or_written_is_not_an_error() {
+    let env = setup();
+    let (_, first, _) = run_bump(&env, "test", &[]);
+    let file = key_file(&env, first["key"].as_str().unwrap());
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let (code, summary, _) = run_bump(&env, "test", &[]);
+    assert_eq!((code, runs(&env)), (Some(0), 2), "{summary}");
+    assert_eq!(summary["recorded"], false, "{summary}");
+    let warnings = summary["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2, "{summary}");
+    assert!(
+        warnings[0].as_str().unwrap().contains("removing it failed"),
+        "{summary}"
+    );
 }
 
 #[test]
