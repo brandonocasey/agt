@@ -1,4 +1,5 @@
 mod branch;
+mod check;
 mod ci;
 mod cleanup;
 mod cli;
