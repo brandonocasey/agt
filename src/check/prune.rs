@@ -1,6 +1,6 @@
 //! Which recorded passes `agt cleanup` may drop.
 
-use super::Entry;
+pub(crate) use super::Entry;
 use crate::core::clock;
 
 /// Whether the pass ran `days` or more before `now`. `days` MUST be the retention of the output

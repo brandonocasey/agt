@@ -59,8 +59,9 @@ pub(super) fn execute(name: &str, argv: &[String]) -> Result<Outcome> {
     ];
     drop(done);
     let status = child.wait().map_err(ctx(format!("wait for {}", argv[0])))?;
-    // A descendant that outlives the command keeps the pipes open; its output after the grace
-    // period is dropped rather than waited for.
+    // A descendant that outlives the command keeps the pipes open; after the grace
+    // period agt stops reading rather than waiting, so a descendant that keeps writing may get
+    // EPIPE or SIGPIPE.
     let deadline = Instant::now() + DRAIN_GRACE;
     for _ in streams.iter().flatten() {
         let left = deadline.saturating_duration_since(Instant::now());

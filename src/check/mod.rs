@@ -99,9 +99,17 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         None
     };
-    if let (Some((_, _, digest)), Some(store), false) = (&key, &store, force)
-        && let Some(entry) = store.load_doc::<Entry>(store.root(), digest)?
-    {
+    let hit = match (&key, &store, force) {
+        (Some((_, _, digest)), Some(store), false) => store
+            .load_doc::<Entry>(store.root(), digest)
+            .unwrap_or_else(|error| {
+                warnings.push(format!("ignoring the cached pass: {error}"));
+                None
+            })
+            .filter(|entry| entry.log.exists()),
+        _ => None,
+    };
+    if let (Some((_, _, digest)), Some(entry)) = (&key, hit) {
         return Ok(Output::Json(json!({
             "cached": true,
             "name": name,
@@ -128,7 +136,7 @@ pub fn run(cli: Cli) -> Result<Output> {
                 duration_ms: outcome.duration_ms,
                 log: outcome.log.clone(),
             };
-            store.update_doc(
+            let written = store.update_doc(
                 store.root(),
                 digest,
                 || entry.clone(),
@@ -136,8 +144,11 @@ pub fn run(cli: Cli) -> Result<Output> {
                     *slot = entry.clone();
                     Ok(())
                 },
-            )?;
-            recorded = true;
+            );
+            match written {
+                Ok(_) => recorded = true,
+                Err(error) => warnings.push(format!("the pass was not recorded: {error}")),
+            }
         } else {
             reason = Some("the work tree or HEAD changed during the run");
         }
