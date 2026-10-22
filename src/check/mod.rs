@@ -99,14 +99,20 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         None
     };
-    let hit = match (&key, &store, force) {
-        (Some((_, _, digest)), Some(store), false) => store
+    // Read even with --force: an unreadable entry is deleted so the new pass can be recorded.
+    let hit = match (&key, &store) {
+        (Some((_, _, digest)), Some(store)) => store
             .load_doc::<Entry>(store.root(), digest)
             .unwrap_or_else(|error| {
-                warnings.push(format!("ignoring the cached pass: {error}"));
+                warnings.push(match store.remove_doc(store.root(), digest) {
+                    Ok(_) => format!("removed the unreadable cached pass: {error}"),
+                    Err(removal) => {
+                        format!("ignoring the cached pass: {error}; removing it failed: {removal}")
+                    }
+                });
                 None
             })
-            .filter(|entry| entry.log.exists()),
+            .filter(|entry| !force && entry.log.exists()),
         _ => None,
     };
     if let (Some((_, _, digest)), Some(entry)) = (&key, hit) {
