@@ -22,8 +22,9 @@ use super::Row;
 /// `git merge-tree --write-tree` arrived in this git version.
 const MIN_GIT: [u64; 2] = [2, 38];
 const MISE_PIN: &str = "github:brandonocasey/agt";
-const IGNORED: [(&str, &str); 2] = [
+const IGNORED: [(&str, &str); 3] = [
     (".worktrees/", ".worktrees/probe"),
+    ("/.agt/", ".agt/probe"),
     (harness::SCRATCH_IGNORE, harness::SCRATCH_PROBE),
 ];
 
@@ -293,7 +294,10 @@ fn git_ignore(repo: Option<&Repo>) -> Row {
     if missing.is_empty() {
         return Row::ok(
             "git ignore",
-            format!(".worktrees/ and {} are ignored", harness::SCRATCH_IGNORE),
+            format!(
+                ".worktrees/, /.agt/ and {} are ignored",
+                harness::SCRATCH_IGNORE
+            ),
         );
     }
     let target = file.map_or("your global git ignore".into(), |path| {

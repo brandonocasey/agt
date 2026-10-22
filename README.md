@@ -87,7 +87,7 @@ These reports help you find earlier decisions and understand where agent time an
 - `agt ci` waits for checks; its GitLab failure report compares failures against default-branch history.
 - `agt secrets` scans repository files for credential patterns without printing matched values.
 - `agt doctor` checks host tools and repository setup, with hints for problems it finds.
-- `agt check run` skips a test or lint command that already passed on the same git tree.
+- `agt check run` skips a test or lint command that already passed on the same git tree, recording a pass only if the code did not change during the run.
 - `agt wait` reruns a check until it succeeds or reaches a timeout.
 
 [Pull and merge requests](docs/reference.md#pr) · [CI](docs/reference.md#ci) · [Secrets](docs/reference.md#secrets) · [Doctor](docs/reference.md#doctor) · [Check](docs/reference.md#check) · [Wait](docs/reference.md#wait)

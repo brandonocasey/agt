@@ -4,6 +4,7 @@
 //! moves nothing) hits. Only a pass is recorded; a dirty work tree always runs and records
 //! nothing. Entries live in the main checkout's `.agt/checks/`, shared by linked worktrees.
 
+pub mod prune;
 mod run;
 
 use std::ffi::OsString;
@@ -54,11 +55,12 @@ enum Command {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Entry {
     version: u32,
+    pub(crate) key: String,
     name: String,
     tree: String,
     dir: String,
     command: Vec<String>,
-    ran_at: String,
+    pub(crate) ran_at: String,
     duration_ms: u64,
     log: PathBuf,
 }
@@ -81,7 +83,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         })
         .collect::<Result<Vec<_>>>()?;
     let repo = Repo::discover()?;
-    let clean = repo.uncommitted_count()? == 0;
+    let clean = repo.strict_uncommitted_count()? == 0;
     let mut key = None;
     if clean {
         let tree = repo.tree_of("HEAD")?;
@@ -89,8 +91,15 @@ pub fn run(cli: Cli) -> Result<Output> {
         let digest = sha256_hex(json!([tree, name, dir, argv]).to_string().as_bytes());
         key = Some((tree, dir, digest));
     }
-    let store = Store::open_repo(Namespace::Checks, &repo, false)?;
-    if let (Some((_, _, digest)), false) = (&key, force)
+    let mut warnings = Vec::new();
+    let store = if key.is_some() {
+        Store::open_repo(Namespace::Checks, &repo, false)
+            .map_err(|error| warnings.push(format!("running uncached, no check store: {error}")))
+            .ok()
+    } else {
+        None
+    };
+    if let (Some((_, _, digest)), Some(store), false) = (&key, &store, force)
         && let Some(entry) = store.load_doc::<Entry>(store.root(), digest)?
     {
         return Ok(Output::Json(json!({
@@ -104,10 +113,13 @@ pub fn run(cli: Cli) -> Result<Output> {
         })));
     }
     let outcome = run::execute(&name, &argv)?;
-    let recorded = match (&key, outcome.code) {
-        (Some((tree, dir, digest)), 0) => {
+    let mut recorded = false;
+    let mut reason = None;
+    if let (Some((tree, dir, digest)), Some(store), 0) = (&key, &store, outcome.code) {
+        if repo.strict_uncommitted_count()? == 0 && repo.tree_of("HEAD")? == *tree {
             let entry = Entry {
                 version: 1,
+                key: digest.clone(),
                 name: name.clone(),
                 tree: tree.clone(),
                 dir: dir.clone(),
@@ -125,16 +137,19 @@ pub fn run(cli: Cli) -> Result<Output> {
                     Ok(())
                 },
             )?;
-            true
+            recorded = true;
+        } else {
+            reason = Some("the work tree or HEAD changed during the run");
         }
-        _ => false,
-    };
+    }
     let summary = json!({
         "cached": false,
         "name": name,
         "key": key.as_ref().map(|(_, _, digest)| digest),
         "dirty": !clean,
         "recorded": recorded,
+        "reason": reason,
+        "warnings": warnings,
         "command": argv,
         "exit": outcome.code,
         "ran_at": outcome.ran_at,

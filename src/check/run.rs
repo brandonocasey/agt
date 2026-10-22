@@ -5,11 +5,14 @@ use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use crate::core::error::{Result, ctx, fail};
 use crate::core::{clock, local};
+
+/// How long after the command exits its remaining output is still copied.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 pub(super) struct Outcome {
     pub code: i32,
@@ -49,14 +52,22 @@ pub(super) fn execute(name: &str, argv: &[String]) -> Result<Outcome> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(ctx(format!("run {}", argv[0])))?;
+    let (done, finished) = mpsc::channel();
     let streams = [
-        child.stdout.take().map(|out| tee(out, &sink)),
-        child.stderr.take().map(|err| tee(err, &sink)),
+        child.stdout.take().map(|out| tee(out, &sink, &done)),
+        child.stderr.take().map(|err| tee(err, &sink, &done)),
     ];
+    drop(done);
     let status = child.wait().map_err(ctx(format!("wait for {}", argv[0])))?;
-    for stream in streams.into_iter().flatten() {
-        if stream.join().is_err() {
-            return fail("copying the command output failed");
+    // A descendant that outlives the command keeps the pipes open; its output after the grace
+    // period is dropped rather than waited for.
+    let deadline = Instant::now() + DRAIN_GRACE;
+    for _ in streams.iter().flatten() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match finished.recv_timeout(left) {
+            Ok(true) => {}
+            Ok(false) => return fail("copying the command output failed"),
+            Err(_) => break,
         }
     }
     let code = status
@@ -71,22 +82,29 @@ pub(super) fn execute(name: &str, argv: &[String]) -> Result<Outcome> {
     })
 }
 
+/// Copies `from` until it closes, then reports on `done` whether it ended without a read error.
 fn tee(
     mut from: impl Read + Send + 'static,
     sink: &Arc<Mutex<File>>,
+    done: &mpsc::Sender<bool>,
 ) -> std::thread::JoinHandle<()> {
     let sink = Arc::clone(sink);
+    let done = done.clone();
     std::thread::spawn(move || {
         let mut buffer = [0u8; 8192];
-        while let Ok(read) = from.read(&mut buffer) {
-            if read == 0 {
-                break;
+        let ok = loop {
+            match from.read(&mut buffer) {
+                Ok(0) => break true,
+                Ok(read) => {
+                    let chunk = &buffer[..read];
+                    let _ = std::io::stderr().lock().write_all(chunk);
+                    if let Ok(mut file) = sink.lock() {
+                        let _ = file.write_all(chunk);
+                    }
+                }
+                Err(_) => break false,
             }
-            let chunk = &buffer[..read];
-            let _ = std::io::stderr().lock().write_all(chunk);
-            if let Ok(mut file) = sink.lock() {
-                let _ = file.write_all(chunk);
-            }
-        }
+        };
+        let _ = done.send(ok);
     })
 }
