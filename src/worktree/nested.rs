@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::core::error::{Result, ctx};
+use crate::core::error::{Error, Result, ctx};
 use crate::git::Repo;
 
 /// A directory with a `.git` of its own somewhere under a worktree.
@@ -67,8 +67,17 @@ fn descend(
     cache: &mut HashMap<PathBuf, Vec<String>>,
     found: &mut Vec<Found>,
 ) -> Result<()> {
-    for child in fs::read_dir(dir).map_err(ctx(format!("read {}", dir.display())))? {
-        let child = child.map_err(ctx(format!("read {}", dir.display())))?;
+    // Git deletes the rest of the worktree before it fails on a directory it cannot read, so
+    // one that hides its contents refuses removal, with what to do about it.
+    let unreadable = |error: std::io::Error| {
+        Error(format!(
+            "cannot read {}: {error}; git could not delete it either, so fix its permissions \
+             (chmod -R u+rwX) or delete it, then retry",
+            dir.display()
+        ))
+    };
+    for child in fs::read_dir(dir).map_err(unreadable)? {
+        let child = child.map_err(unreadable)?;
         let name = child.file_name().to_string_lossy().into_owned();
         let is_dir = child
             .file_type()

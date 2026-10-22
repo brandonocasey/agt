@@ -722,6 +722,29 @@ fn a_failed_backup_leaves_no_ref_and_no_directory() {
 }
 
 #[test]
+fn an_unreadable_directory_refuses_removal_and_says_how_to_fix_it() {
+    let f = Fixture::new();
+    let locked = f.wt.join("out/locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let path = f.wt.to_string_lossy().into_owned();
+    let plan = f.agt(&f.env.repo, &["remove", &path]);
+    let output = f.agt(&f.env.repo, &["remove", &path, "--yes"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    for output in [plan, output] {
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("cannot read {}", locked.display()))
+                && stderr.contains("chmod -R u+rwX"),
+            "{stderr}"
+        );
+    }
+    assert!(f.wt.join("feature.txt").exists());
+    assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+}
+
+#[test]
 fn remove_and_restore_leave_other_missing_worktrees_registered() {
     let f = Fixture::new();
     let other = f.env.path("trees/other");
