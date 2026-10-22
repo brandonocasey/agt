@@ -336,7 +336,7 @@ fn a_corrupt_entry_is_removed_and_replaced_by_the_new_pass() {
     let (_, first, _) = run_bump(&env, "test", &[]);
     let file = key_file(&env, first["key"].as_str().unwrap());
     for extra in [&[][..], &["--force"][..]] {
-        std::fs::write(&file, r#"{"version":2}"#).unwrap();
+        std::fs::write(&file, "{ nope").unwrap();
         let before = runs(&env);
         let (code, summary, _) = run_bump(&env, "test", extra);
         assert_eq!((code, runs(&env)), (Some(0), before + 1), "{summary}");
@@ -355,6 +355,28 @@ fn a_corrupt_entry_is_removed_and_replaced_by_the_new_pass() {
             (true.into(), before + 1)
         );
     }
+}
+
+#[test]
+fn an_entry_from_a_newer_agt_is_kept_and_runs_uncached() {
+    let env = setup();
+    let (_, first, _) = run_bump(&env, "test", &[]);
+    let file = key_file(&env, first["key"].as_str().unwrap());
+    std::fs::write(&file, r#"{"version":2}"#).unwrap();
+    for extra in [&[][..], &["--force"][..]] {
+        let (code, summary, _) = run_bump(&env, "test", extra);
+        assert_eq!(code, Some(0), "{summary}");
+        assert_eq!(summary["recorded"], false, "{summary}");
+        assert!(
+            summary["warnings"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("ignoring the cached pass"),
+            "{summary}"
+        );
+    }
+    assert_eq!(runs(&env), 3);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"version":2}"#);
 }
 
 #[test]
