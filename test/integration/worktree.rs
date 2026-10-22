@@ -1436,11 +1436,33 @@ fn ignored_directories_count_as_lost_only_for_what_no_tool_recreates() {
     fs::write(f.wt.join(".cache/agents/scratch/t/n.md"), "n").unwrap();
     // A cache directory under any name is marked by its `CACHEDIR.TAG`.
     fs::create_dir_all(f.wt.join("out/target-base/debug")).unwrap();
-    fs::write(f.wt.join("out/target-base/CACHEDIR.TAG"), "Signature").unwrap();
+    fs::write(
+        f.wt.join("out/target-base/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n",
+    )
+    .unwrap();
     fs::write(f.wt.join("out/target-base/debug/a"), "a").unwrap();
     fs::write(f.wt.join("out/notes.md"), "n").unwrap();
+    // A tag without the signature marks nothing.
+    fs::create_dir_all(f.wt.join("out/keys")).unwrap();
+    fs::write(f.wt.join("out/keys/CACHEDIR.TAG"), "").unwrap();
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
-    assert_eq!(plan["ignored_lost"], json!(["out/notes.md"]), "{plan}");
+    assert_eq!(
+        plan["ignored_lost"],
+        json!(["out/keys/", "out/notes.md"]),
+        "{plan}"
+    );
+}
+
+#[test]
+fn a_submodule_under_a_disposable_name_still_reports_its_secrets() {
+    let f = Fixture::new();
+    add_submodule(&f, "lib", "vendor/lib");
+    let sub = f.wt.join("vendor/lib");
+    ignore_in(&f, &sub, ".env");
+    fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["ignored_lost"], json!(["vendor/lib/.env"]), "{plan}");
 }
 
 #[test]

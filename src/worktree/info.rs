@@ -49,9 +49,7 @@ pub fn ignored(root: &Path) -> Result<Vec<String>> {
 pub fn lost(root: &Path) -> Result<Vec<String>> {
     let found = listing(root, true)?;
     let disposable = |path: &str| {
-        is_disposable(path)
-            || found.caches.contains(path)
-            || parents(path).any(|dir| found.caches.contains(dir))
+        found.spare.contains(path) || parents(path).any(|dir| found.spare.contains(dir))
     };
     let mut mixed = HashSet::new();
     for path in found.paths.iter().filter(|path| disposable(path)) {
@@ -75,12 +73,23 @@ pub fn lost(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Ignored paths relative to a worktree root, sorted, and the directories among them that a
-/// tool marked as its cache with a `CACHEDIR.TAG` (<https://bford.info/cachedir/>).
+/// Ignored paths relative to a worktree root, sorted, and those among them a build or install
+/// recreates, judged inside their own repository so a submodule at `vendor/lib` keeps its
+/// `.env`; everything under a spare directory is spare too.
 #[derive(Default)]
 struct Listing {
     paths: Vec<String>,
-    caches: HashSet<String>,
+    spare: HashSet<String>,
+}
+
+impl Listing {
+    fn push(&mut self, prefix: &str, rel: &str, spare: bool) {
+        let path = format!("{prefix}{rel}");
+        if spare {
+            self.spare.insert(path.clone());
+        }
+        self.paths.push(path);
+    }
 }
 
 /// Every ignored path under `root`, in registered submodules too. Git lists a directory whose
@@ -112,7 +121,7 @@ fn collect(dir: &Path, prefix: &str, expand: bool, found: &mut Listing) -> Resul
         .collect();
     listed.sort();
     for (at, rel) in listed.iter().enumerate() {
-        found.paths.push(format!("{prefix}{rel}"));
+        found.push(prefix, rel, is_disposable(rel) || is_cache(&dir.join(rel)));
         let has_child = listed
             .get(at + 1)
             .is_some_and(|next| next.starts_with(rel.as_str()));
@@ -121,8 +130,6 @@ fn collect(dir: &Path, prefix: &str, expand: bool, found: &mut Listing) -> Resul
         }
         if !has_child {
             descend(dir, rel, prefix, found);
-        } else if dir.join(rel).join("CACHEDIR.TAG").is_file() {
-            found.caches.insert(format!("{prefix}{rel}"));
         }
     }
     for submodule in nested::submodule_paths(dir)? {
@@ -137,11 +144,7 @@ fn collect(dir: &Path, prefix: &str, expand: bool, found: &mut Listing) -> Resul
 /// Adds the paths under the directory `rel` of `dir`. A directory it cannot read stands for
 /// itself: the listing only informs, so it never fails on a tree that changes under it.
 fn descend(dir: &Path, rel: &str, prefix: &str, found: &mut Listing) {
-    if is_disposable(rel) {
-        return;
-    }
-    if dir.join(rel).join("CACHEDIR.TAG").is_file() {
-        found.caches.insert(format!("{prefix}{rel}"));
+    if is_disposable(rel) || is_cache(&dir.join(rel)) {
         return;
     }
     let Ok(children) = fs::read_dir(dir.join(rel)) else {
@@ -152,14 +155,30 @@ fn descend(dir: &Path, rel: &str, prefix: &str, found: &mut Listing) {
             continue;
         };
         let name = child.file_name().to_string_lossy().into_owned();
-        if kind.is_dir() {
-            let path = format!("{rel}{name}/");
-            found.paths.push(format!("{prefix}{path}"));
-            descend(dir, &path, prefix, found);
+        let path = if kind.is_dir() {
+            format!("{rel}{name}/")
         } else {
-            found.paths.push(format!("{prefix}{rel}{name}"));
+            format!("{rel}{name}")
+        };
+        found.push(
+            prefix,
+            &path,
+            is_disposable(&path) || is_cache(&dir.join(&path)),
+        );
+        if kind.is_dir() {
+            descend(dir, &path, prefix, found);
         }
     }
+}
+
+/// Whether `dir` is a cache a tool marked with a `CACHEDIR.TAG`, as Cargo marks `target`
+/// under any name (<https://bford.info/cachedir/>).
+fn is_cache(dir: &Path) -> bool {
+    const SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+    let mut head = [0; SIGNATURE.len()];
+    fs::File::open(dir.join("CACHEDIR.TAG"))
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+        .is_ok_and(|()| head == SIGNATURE)
 }
 
 /// The directories above `path`, each ending in `/`.
