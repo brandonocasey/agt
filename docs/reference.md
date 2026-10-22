@@ -1312,6 +1312,23 @@ containing `agt-secrets: allow` is skipped. Exit status: 0 clean, 1 on any match
 Files that disappear after listing are skipped. Other filesystem inspection or read errors
 fail the scan with exit status 2 and identify the path.
 
+## Check
+
+`agt check run --name NAME [--force] -- COMMAND [ARGS...]` never reruns a test or lint command on
+code it already passed on. With a clean work tree (untracked files that are not git-ignored count
+as dirty) the key is the `HEAD` tree (`git rev-parse HEAD^{tree}`), `NAME`, the directory below
+the repository root and the exact argv, so an empty commit or a rebase that changes no content
+hits and a rebase onto a moved base misses. A recorded pass prints `{"cached": true, "name", "key",
+"tree", "command", "ran_at", "log"}` and exits 0 without running anything. Otherwise the command
+runs with inherited stdin, its stdout and stderr go to agt's stderr and to
+`$XDG_CACHE_HOME/agents/output/check-NAME-*.log` (pruned by `agt cleanup`'s `output` rule), and
+stdout holds only the JSON summary, printed last: `cached` (false), `name`, `key`, `dirty`,
+`recorded`, `command`, `exit`, `ran_at`, `duration_ms`, `log`. The exit status is the command's
+(128 plus the signal when it was killed). Only exit 0 is recorded, as one document per key in the
+main checkout's `.agt/checks/`, shared by linked worktrees; failures are never cached. A dirty
+work tree always runs and records nothing (`key` is null). `--force` runs even on a hit and
+records the new pass. Entries are not pruned by `agt cleanup`.
+
 ## Wait
 
 `agt wait [--timeout S] [--interval S] -- CHECK [ARGS...]` reruns `CHECK`, output discarded, every

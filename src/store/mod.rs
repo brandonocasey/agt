@@ -36,16 +36,18 @@ pub enum Namespace {
     Reviews,
     Issues,
     Tasks,
+    Checks,
 }
 
 impl Namespace {
-    pub const ALL: [Self; 3] = [Self::Reviews, Self::Issues, Self::Tasks];
+    pub const ALL: [Self; 4] = [Self::Reviews, Self::Issues, Self::Tasks, Self::Checks];
 
     pub fn dir_name(self) -> &'static str {
         match self {
             Self::Reviews => "reviews",
             Self::Issues => "issues",
             Self::Tasks => "tasks",
+            Self::Checks => "checks",
         }
     }
 
@@ -55,7 +57,7 @@ impl Namespace {
                 version: VERSION,
                 migrations: REVIEW_MIGRATIONS,
             },
-            Self::Issues | Self::Tasks => Schema {
+            Self::Issues | Self::Tasks | Self::Checks => Schema {
                 version: 1,
                 migrations: &[],
             },

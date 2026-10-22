@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::branch;
+use crate::check;
 use crate::ci;
 use crate::cleanup;
 use crate::core::error::Result;
@@ -35,6 +36,8 @@ enum Command {
     Task(task::cli::Cli),
     /// Pushed and landable checks for a branch (`check`).
     Branch(branch::Cli),
+    /// Cached test and lint runs: skip a command that already passed on the same git tree.
+    Check(check::Cli),
     /// Wait for PR/MR checks and pipelines; GitLab failing specs versus the default branch.
     Ci(ci::Cli),
     /// Local issues with optional GitHub and GitLab sync.
@@ -68,6 +71,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Qa(args) => review::commands::run_qa(*args),
         Command::Task(args) => task::cli::run(args),
         Command::Branch(args) => branch::run(args),
+        Command::Check(args) => check::run(args),
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
         Command::Pr(args) => pr::run(args),
