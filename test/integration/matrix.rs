@@ -63,6 +63,7 @@ matrix!(
     runs_ended_before_the_pr_are_never_published,
     local_reply_is_never_published,
     not_own_findings_posts_findings_and_my_threads_but_no_record,
+    not_own_posts_a_general_finding_as_a_comment,
     only_limits_publish_to_named_threads,
     comments_outside_the_pr_diff_are_never_posted_unless_on_another_file,
     approvals_post_a_comment_unless_formal,
@@ -777,6 +778,27 @@ fn not_own_findings_posts_findings_and_my_threads_but_no_record(svc: Svc) {
     assert!(skipped.contains("\"summary\""), "{dry}");
     assert!(
         !dry.to_string().contains("The summary comment lists"),
+        "{dry}"
+    );
+}
+
+/// Someone else's PR/MR gets no summary, so a general finding named there is posted as a
+/// comment rather than left for a summary that never comes.
+fn not_own_posts_a_general_finding_as_a_comment(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.sync(&setup, &Remote::by("alice"));
+    sync(env, svc);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let general = setup.finding(2);
+    let dry = dry_run(env, svc, &["--not-own", "--only", &general]);
+    assert_eq!(
+        writes_for(&dry, &format!("{general}/c1")),
+        ["thread"],
+        "{dry}"
+    );
+    assert!(
+        !dry["skipped"].to_string().contains("listed in the summary"),
         "{dry}"
     );
 }

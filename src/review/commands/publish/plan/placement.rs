@@ -13,7 +13,8 @@ pub(super) enum Spot {
     General,
     /// A file the PR/MR does not change: a general comment naming the location.
     OtherFile(String),
-    /// Lines of a changed file that are not placeable in the PR/MR diff; never posted.
+    /// Lines of a changed file that are not placeable in the PR/MR diff: a file-level thread
+    /// where the host has one, else never posted.
     Outside,
 }
 
@@ -54,9 +55,19 @@ impl Planner<'_> {
     }
 
     /// Whether the PR/MR diff changes this file; unknown counts as changed, so nothing
-    /// unplaceable is posted.
+    /// unplaceable is posted as a general comment.
     pub(super) fn in_pr_diff(&self, path: &str) -> bool {
-        let files = self.pr_files.get_or_init(|| {
+        let files = self.pr_files();
+        files.is_empty() || files.iter().any(|file| file.touches(path))
+    }
+
+    /// Whether the PR/MR diff is known and changes this file.
+    pub(super) fn known_in_pr_diff(&self, path: &str) -> bool {
+        self.pr_files().iter().any(|file| file.touches(path))
+    }
+
+    fn pr_files(&self) -> &[anchors::FileDiff] {
+        self.pr_files.get_or_init(|| {
             let head = &self.review.head_sha;
             let diff = self
                 .review
@@ -65,7 +76,6 @@ impl Planner<'_> {
                 .and_then(|base| self.repo.merge_base(base, head).ok().flatten())
                 .and_then(|base| self.repo.diff_u0(&base, head).ok());
             diff.map(|diff| anchors::parse(&diff)).unwrap_or_default()
-        });
-        files.is_empty() || files.iter().any(|file| file.touches(path))
+        })
     }
 }

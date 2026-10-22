@@ -695,9 +695,9 @@ local reads continue.
   comment (`subject_type: file`) whose first line names its lines, so it can be
   resolved; on GitLab it is listed under `skipped`. A thread on a file the PR/MR
   does not change posts as a general comment whose first line names its
-  location; on GitHub, where a general comment cannot be resolved, a finding or
-  QA thread there, or without an anchor, is not posted and the summary lists it
-  with its whole text (`skipped` says so). A
+  location; on your own GitHub PR, where a general comment cannot be resolved, a
+  finding or QA thread there, or without an anchor, is not posted and the summary
+  lists it with its whole text (`skipped` says so). A
   line range (`start_line`..`line`) posts only as one multi-line comment, with
   both ends on the new side of one hunk. Other threads without an anchor post as
   general comments. On GitLab, lines a later commit changed (such as a fix)
@@ -835,7 +835,7 @@ Target file:
       "repaired_head": "9e8d7c...",
       "repair": [{ "sha": "9e8d7c...", "patch_id": "bb22..." }],
       "reveal": null,
-      "record": { "post": "posted", "attempt": "at-x1y2", "sent": "**✅ Agent review: ...",
+      "record": { "post": "posted", "attempt": "at-x1y2", "sent": "**✅ Nothing to fix** · ...",
                   "head": "9e8d7c...", "remote_id": "2002",
                   "url": "https://github.com/...#issuecomment-2002" }
     }

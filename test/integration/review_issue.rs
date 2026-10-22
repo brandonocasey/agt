@@ -88,6 +88,15 @@ fn resolve_issue_refuses_an_issue_that_is_not_on_the_host() {
     assert!(error.contains(&key), "{error}");
     let list = env.run(&["list"]);
     assert_eq!(thread(&list, &f1)["resolved"], false, "{list}");
+    // One outcome per resolve: a usage error, not a silently dropped flag.
+    let output = env.exec(
+        &["resolve", &f1, "--fixed", "HEAD", "--issue", "o/r#1"],
+        None,
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("cannot be used with"), "{error}");
     let error = env.fail(&["resolve", &f1, "--issue", "o/r#99"], None);
     assert!(error.contains("no issue o/r#99"), "{error}");
 }

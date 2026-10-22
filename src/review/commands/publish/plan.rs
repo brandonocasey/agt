@@ -284,10 +284,12 @@ impl<'a> Planner<'a> {
                 continue;
             }
             // A general comment the host cannot resolve would stay on the PR/MR after the fix;
-            // the summary lists the open finding instead.
+            // the summary lists the open finding instead. Someone else's PR/MR gets no summary,
+            // so there the comment is the only place the finding can go.
             if matches!(spot, Spot::General | Spot::OtherFile(_))
                 && found(thread)
                 && !self.caps().general_resolvable
+                && self.foreign().is_none()
             {
                 skipped.push(Skipped::new(&thread.id, Skip::InSummary));
                 continue;
@@ -658,8 +660,9 @@ impl<'a> Planner<'a> {
     /// on the whole file where the host has one. Its text names the lines.
     fn file_thread(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<Write> {
         let anchor = thread.anchor.as_ref()?;
-        // A file the PR/MR deletes has nothing at its head to comment on.
-        if anchor.side == Side::Old || !self.in_pr_diff(&anchor.path) {
+        // A file the PR/MR deletes has nothing at its head to comment on, and the host
+        // rejects a file the PR/MR does not change.
+        if anchor.side == Side::Old || !self.known_in_pr_diff(&anchor.path) {
             return None;
         }
         let lines = anchor.line.map(|_| location(anchor));

@@ -212,8 +212,9 @@ impl Planner<'_> {
     pub(super) fn pre_pr(&self, target: &Target, thread: &Thread) -> Option<Skip> {
         let run = match (&thread.finding, &thread.check) {
             (Some(finding), _) => finding.run.as_str(),
-            (None, Some(check)) => check.split_once('.')?.0,
-            (None, None) => return None,
+            // A QA thread an older agt already posted keeps getting its replies and resolves.
+            (None, Some(check)) if thread.remote.is_none() => check.split_once('.')?.0,
+            (None, _) => return None,
         };
         self.run_before_pr(target, run)
     }

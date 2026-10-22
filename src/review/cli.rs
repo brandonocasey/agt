@@ -250,7 +250,7 @@ pub struct ReplyArgs {
 
 #[derive(Args)]
 #[command(group = ArgGroup::new("outcome")
-    .args(["fixed", "not_fixed", "rejected", "stale", "answered", "triage"]))]
+    .args(["fixed", "not_fixed", "rejected", "stale", "answered", "issue", "triage"]))]
 pub struct ResolveArgs {
     /// Threads to change, all in one write.
     #[arg(required = true)]
