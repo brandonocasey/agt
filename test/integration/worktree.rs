@@ -1426,6 +1426,24 @@ fn regenerable_caches_never_block_removal_in_the_worktree_or_a_submodule() {
 }
 
 #[test]
+fn ignored_directories_count_as_lost_only_for_what_no_tool_recreates() {
+    let f = Fixture::new();
+    // Git lists a directory these patterns ignore whole, and nothing in it.
+    fs::write(f.wt.join(".gitignore"), ".cache/\nout/\n").unwrap();
+    wgit(&f.env, &f.wt, &["add", ".gitignore"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "ignore"]);
+    fs::create_dir_all(f.wt.join(".cache/agents/scratch/t")).unwrap();
+    fs::write(f.wt.join(".cache/agents/scratch/t/n.md"), "n").unwrap();
+    // A cache directory under any name is marked by its `CACHEDIR.TAG`.
+    fs::create_dir_all(f.wt.join("out/target-base/debug")).unwrap();
+    fs::write(f.wt.join("out/target-base/CACHEDIR.TAG"), "Signature").unwrap();
+    fs::write(f.wt.join("out/target-base/debug/a"), "a").unwrap();
+    fs::write(f.wt.join("out/notes.md"), "n").unwrap();
+    let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
+    assert_eq!(plan["ignored_lost"], json!(["out/notes.md"]), "{plan}");
+}
+
+#[test]
 fn ignored_paths_are_listed_once() {
     let f = Fixture::new();
     fs::write(

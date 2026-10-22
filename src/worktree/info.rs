@@ -30,7 +30,7 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf> {
 /// The ignored paths in the work tree at `root` and its submodules, sorted, with a directory
 /// (ending in `/`) standing for everything in it. A backup keeps none of them.
 pub fn ignored(root: &Path) -> Result<Vec<String>> {
-    let found = listing(root)?;
+    let found = listing(root, false)?.paths;
     let dirs: HashSet<&str> = found
         .iter()
         .filter(|path| path.ends_with('/'))
@@ -47,20 +47,27 @@ pub fn ignored(root: &Path) -> Result<Vec<String>> {
 /// install recreates. A directory stands for everything in it only when none of it is
 /// disposable.
 pub fn lost(root: &Path) -> Result<Vec<String>> {
-    let found = listing(root)?;
+    let found = listing(root, true)?;
+    let disposable = |path: &str| {
+        is_disposable(path)
+            || found.caches.contains(path)
+            || parents(path).any(|dir| found.caches.contains(dir))
+    };
     let mut mixed = HashSet::new();
-    for path in found.iter().filter(|path| is_disposable(path)) {
+    for path in found.paths.iter().filter(|path| disposable(path)) {
         mixed.extend(parents(path));
     }
     let whole: HashSet<&str> = found
+        .paths
         .iter()
         .filter(|path| path.ends_with('/') && !mixed.contains(path.as_str()))
         .map(String::as_str)
         .collect();
     Ok(found
+        .paths
         .iter()
         .filter(|path| {
-            !is_disposable(path)
+            !disposable(path)
                 && !mixed.contains(path.as_str())
                 && !parents(path).any(|dir| whole.contains(dir))
         })
@@ -68,22 +75,26 @@ pub fn lost(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Every ignored path under `root`, its submodules included, relative to `root` and sorted.
-/// Git lists a directory whose files are all ignored and also every path in it.
-fn listing(root: &Path) -> Result<Vec<String>> {
-    let mut found = listed_in(root, "")?;
-    for submodule in nested::repositories(root)?
-        .into_iter()
-        .filter(|found| found.registered)
-    {
-        found.extend(listed_in(&submodule.dir, &format!("{}/", submodule.rel))?);
-    }
-    found.sort();
-    found.dedup();
+/// Ignored paths relative to a worktree root, sorted, and the directories among them that a
+/// tool marked as its cache with a `CACHEDIR.TAG` (<https://bford.info/cachedir/>).
+#[derive(Default)]
+struct Listing {
+    paths: Vec<String>,
+    caches: HashSet<String>,
+}
+
+/// Every ignored path under `root`, in registered submodules too. Git lists a directory whose
+/// files are all ignored, and only sometimes the paths in it; `expand` adds those it left
+/// out, except inside disposable directories and caches.
+fn listing(root: &Path, expand: bool) -> Result<Listing> {
+    let mut found = Listing::default();
+    collect(root, "", expand, &mut found)?;
+    found.paths.sort();
+    found.paths.dedup();
     Ok(found)
 }
 
-fn listed_in(dir: &Path, prefix: &str) -> Result<Vec<String>> {
+fn collect(dir: &Path, prefix: &str, expand: bool, found: &mut Listing) -> Result<()> {
     let listing = Repo::at(dir).checked(
         &[
             "ls-files",
@@ -96,9 +107,59 @@ fn listed_in(dir: &Path, prefix: &str) -> Result<Vec<String>> {
         None,
         &[],
     )?;
-    Ok(nul_fields(&listing)
-        .map(|entry| format!("{prefix}{}", String::from_utf8_lossy(entry)))
-        .collect())
+    let mut listed: Vec<String> = nul_fields(&listing)
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect();
+    listed.sort();
+    for (at, rel) in listed.iter().enumerate() {
+        found.paths.push(format!("{prefix}{rel}"));
+        let has_child = listed
+            .get(at + 1)
+            .is_some_and(|next| next.starts_with(rel.as_str()));
+        if !expand || !rel.ends_with('/') {
+            continue;
+        }
+        if !has_child {
+            descend(dir, rel, prefix, found);
+        } else if dir.join(rel).join("CACHEDIR.TAG").is_file() {
+            found.caches.insert(format!("{prefix}{rel}"));
+        }
+    }
+    for submodule in nested::submodule_paths(dir)? {
+        let inner = dir.join(&submodule);
+        if inner.join(".git").exists() {
+            collect(&inner, &format!("{prefix}{submodule}/"), expand, found)?;
+        }
+    }
+    Ok(())
+}
+
+/// Adds the paths under the directory `rel` of `dir`. A directory it cannot read stands for
+/// itself: the listing only informs, so it never fails on a tree that changes under it.
+fn descend(dir: &Path, rel: &str, prefix: &str, found: &mut Listing) {
+    if is_disposable(rel) {
+        return;
+    }
+    if dir.join(rel).join("CACHEDIR.TAG").is_file() {
+        found.caches.insert(format!("{prefix}{rel}"));
+        return;
+    }
+    let Ok(children) = fs::read_dir(dir.join(rel)) else {
+        return;
+    };
+    for child in children.flatten() {
+        let Ok(kind) = child.file_type() else {
+            continue;
+        };
+        let name = child.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            let path = format!("{rel}{name}/");
+            found.paths.push(format!("{prefix}{path}"));
+            descend(dir, &path, prefix, found);
+        } else {
+            found.paths.push(format!("{prefix}{rel}{name}"));
+        }
+    }
 }
 
 /// The directories above `path`, each ending in `/`.
