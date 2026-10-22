@@ -470,6 +470,32 @@ fn a_dirty_worktree_stays_unless_dirty_is_passed() {
 }
 
 #[test]
+fn an_ignored_secret_keeps_the_worktree_unless_dirty_is_passed() {
+    let site = Site::new();
+    let wt = site.branch("env");
+    site.env.git(&["merge", "-q", "env"]);
+    fs::write(site.env.repo.join(".git/info/exclude"), ".env\ntarget/\n").unwrap();
+    fs::write(wt.join(".env"), "TOKEN=1").unwrap();
+    fs::create_dir_all(wt.join("target")).unwrap();
+    fs::write(wt.join("target/out"), "built").unwrap();
+
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "env");
+    assert_eq!(row["verdict"], "merged");
+    assert_eq!(
+        row["reason"],
+        "dirty: 1 ignored paths no backup keeps (.env); pass --dirty to delete them with it"
+    );
+    assert!(wt.join(".env").exists());
+    assert_eq!(site.branches(), ["env", "main"]);
+
+    let report = site.run(&["--yes", "--dirty"]);
+    assert!(!wt.exists());
+    assert_eq!(report["removed"][0]["ignored_lost"], json!([".env"]));
+    assert_eq!(site.branches(), ["main"]);
+}
+
+#[test]
 fn a_live_agent_session_keeps_the_worktree() {
     let site = Site::new();
     let wt = site.branch("busy");

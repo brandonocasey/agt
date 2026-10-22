@@ -27,7 +27,8 @@ pub struct Options {
     /// Set from `agt cleanup --yes`.
     #[arg(skip)]
     pub yes: bool,
-    /// Also remove worktrees with uncommitted work; the snapshot backup keeps it.
+    /// Also remove worktrees with uncommitted work, which the snapshot backup keeps, or with
+    /// ignored files no build recreates, such as `.env`, which are lost.
     #[arg(long)]
     dirty: bool,
     /// Also remove worktrees where something changed in the last 3 days.

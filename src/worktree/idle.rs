@@ -20,7 +20,8 @@ pub struct Allow {
     pub offline: bool,
     /// Pass a worktree where something changed in the last 3 days.
     pub recent: bool,
-    /// Pass a worktree with uncommitted work, which a snapshot backup keeps.
+    /// Pass a worktree with uncommitted work, which a snapshot backup keeps, or with ignored
+    /// files that are lost.
     pub dirty: bool,
 }
 
@@ -75,6 +76,15 @@ pub fn blocker(
     if unsaved > 0 && !allow.dirty {
         return blocked(format!(
             "dirty: {unsaved} modified or untracked files; pass --dirty to remove it after a snapshot backup"
+        ));
+    }
+    // No backup keeps ignored files, so a `.env` or notes go with the worktree.
+    let lost = info::lost(&real)?;
+    if !lost.is_empty() && !allow.dirty {
+        return blocked(format!(
+            "dirty: {} ignored paths no backup keeps ({}); pass --dirty to delete them with it",
+            lost.len(),
+            lost.join(", ")
         ));
     }
     Ok(None)
