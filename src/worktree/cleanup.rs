@@ -313,6 +313,12 @@ fn remove_worktree(
         report.remove.push(row);
         return Ok(true);
     }
+    // A sweep can take minutes; stderr shows each step while stdout keeps the JSON report.
+    eprintln!(
+        "agt: removing {} ({})",
+        real.display(),
+        subject.finding.verdict.as_str()
+    );
     match removal(main, &real, entry, true) {
         Ok(done) => {
             let mut row = json!({
@@ -367,6 +373,7 @@ fn delete_branch(repo: &Repo, subject: &Subject, yes: bool, report: &mut Report)
             .push(kept(subject, None, "the branch moved since it was judged"));
         return Ok(());
     }
+    eprintln!("agt: deleting branch {branch}");
     match repo.git(&["branch", flag, "--", branch]) {
         Ok(_) => {
             row["restore"] = json!(format!("git branch {branch} {}", subject.tip));
