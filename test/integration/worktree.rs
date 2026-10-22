@@ -1015,8 +1015,11 @@ fn ignored_files_in_a_submodule_do_not_block_removal() {
     fs::write(sub.join("node_modules/pkg/index.js"), "x").unwrap();
     fs::write(sub.join(".env"), "SECRET=1\n").unwrap();
     let wt = f.wt.to_string_lossy().into_owned();
-    assert_eq!(f.json(&["remove", &wt])["plan"], true);
-    f.remove();
+    assert_eq!(
+        f.json(&["remove", &wt])["ignored_lost"],
+        json!(["mod/.env"])
+    );
+    assert_eq!(f.remove()["ignored_lost"], json!(["mod/.env"]));
     assert!(!f.wt.exists());
 }
 
@@ -1425,7 +1428,11 @@ fn regenerable_caches_never_block_removal_in_the_worktree_or_a_submodule() {
 #[test]
 fn ignored_paths_are_listed_once() {
     let f = Fixture::new();
-    fs::write(f.wt.join(".gitignore"), ".env\n__pycache__/\n*.local\n").unwrap();
+    fs::write(
+        f.wt.join(".gitignore"),
+        ".env\n__pycache__/\n*.local\n/.cache/agents/scratch/\n",
+    )
+    .unwrap();
     wgit(&f.env, &f.wt, &["add", ".gitignore"]);
     wgit(&f.env, &f.wt, &["commit", "-q", "-m", "ignore"]);
     // Untracked directories holding only ignored files: git lists the directory and its children.
@@ -1439,8 +1446,23 @@ fn ignored_paths_are_listed_once() {
     wgit(&f.env, &f.wt, &["add", "pkg/mod.py"]);
     fs::write(f.wt.join("cfg/a.local"), "a").unwrap();
     fs::write(f.wt.join("cfg/deep/b.local"), "b").unwrap();
+    // Agent scratch alone under an untracked directory is disposable, as is `__pycache__`.
+    fs::create_dir_all(f.wt.join(".cache/agents/scratch/t")).unwrap();
+    fs::write(f.wt.join(".cache/agents/scratch/t/n.md"), "n").unwrap();
     let plan = f.json(&["remove", &f.wt.to_string_lossy()]);
-    assert_eq!(plan["ignored_lost"], json!(["cfg/"]), "{plan}");
+    assert_eq!(
+        plan["ignored_lost"],
+        json!(["cfg/a.local", "cfg/deep/"]),
+        "{plan}"
+    );
+    let listed = f.json(&["list"]);
+    let feat = listed["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["branch"] == "feat")
+        .unwrap();
+    assert_eq!(feat["ignored"], 2, "{listed}");
 }
 
 #[test]

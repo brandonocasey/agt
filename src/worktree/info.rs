@@ -1,11 +1,13 @@
 //! What git says about a repository's worktrees.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use super::disposable::is_disposable;
+use super::nested;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
 use crate::git::{Repo, Worktree, nul_fields};
@@ -25,10 +27,64 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf> {
         .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))
 }
 
-/// The ignored paths in the work tree at `root`, sorted, with a directory (ending in `/`)
-/// standing for everything in it. A backup keeps none of them.
+/// The ignored paths in the work tree at `root` and its submodules, sorted, with a directory
+/// (ending in `/`) standing for everything in it. A backup keeps none of them.
 pub fn ignored(root: &Path) -> Result<Vec<String>> {
-    let listing = Repo::at(root).checked(
+    let found = listing(root)?;
+    let dirs: HashSet<&str> = found
+        .iter()
+        .filter(|path| path.ends_with('/'))
+        .map(String::as_str)
+        .collect();
+    Ok(found
+        .iter()
+        .filter(|path| !parents(path).any(|dir| dirs.contains(dir)))
+        .cloned()
+        .collect())
+}
+
+/// The ignored paths that removing the worktree at `root` deletes for good: those no build or
+/// install recreates. A directory stands for everything in it only when none of it is
+/// disposable.
+pub fn lost(root: &Path) -> Result<Vec<String>> {
+    let found = listing(root)?;
+    let mut mixed = HashSet::new();
+    for path in found.iter().filter(|path| is_disposable(path)) {
+        mixed.extend(parents(path));
+    }
+    let whole: HashSet<&str> = found
+        .iter()
+        .filter(|path| path.ends_with('/') && !mixed.contains(path.as_str()))
+        .map(String::as_str)
+        .collect();
+    Ok(found
+        .iter()
+        .filter(|path| {
+            !is_disposable(path)
+                && !mixed.contains(path.as_str())
+                && !parents(path).any(|dir| whole.contains(dir))
+        })
+        .cloned()
+        .collect())
+}
+
+/// Every ignored path under `root`, its submodules included, relative to `root` and sorted.
+/// Git lists a directory whose files are all ignored and also every path in it.
+fn listing(root: &Path) -> Result<Vec<String>> {
+    let mut found = listed_in(root, "")?;
+    for submodule in nested::repositories(root)?
+        .into_iter()
+        .filter(|found| found.registered)
+    {
+        found.extend(listed_in(&submodule.dir, &format!("{}/", submodule.rel))?);
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+fn listed_in(dir: &Path, prefix: &str) -> Result<Vec<String>> {
+    let listing = Repo::at(dir).checked(
         &[
             "ls-files",
             "-z",
@@ -40,27 +96,16 @@ pub fn ignored(root: &Path) -> Result<Vec<String>> {
         None,
         &[],
     )?;
-    let mut found: Vec<String> = nul_fields(&listing)
-        .map(|entry| String::from_utf8_lossy(entry).into_owned())
-        .collect();
-    found.sort();
-    found.dedup();
-    // For an untracked directory holding only ignored files git lists its children too.
-    let dirs: Vec<String> = found.iter().filter(|p| p.ends_with('/')).cloned().collect();
-    found.retain(|path| {
-        !dirs
-            .iter()
-            .any(|dir| path != dir && path.starts_with(dir.as_str()))
-    });
-    Ok(found)
+    Ok(nul_fields(&listing)
+        .map(|entry| format!("{prefix}{}", String::from_utf8_lossy(entry)))
+        .collect())
 }
 
-/// The ignored paths that removing the worktree at `root` deletes for good: those no build or
-/// install recreates.
-pub fn lost(root: &Path) -> Result<Vec<String>> {
-    let mut found = ignored(root)?;
-    found.retain(|path| !is_disposable(path));
-    Ok(found)
+/// The directories above `path`, each ending in `/`.
+fn parents(path: &str) -> impl Iterator<Item = &str> {
+    path.trim_end_matches('/')
+        .match_indices('/')
+        .map(move |(at, _)| &path[..=at])
 }
 
 /// What `git status` lists: whether each path is untracked, and the path.
