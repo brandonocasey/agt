@@ -68,27 +68,33 @@ impl Store {
     }
 
     /// Like [`Store::docs`], but leaves out documents with fields this build does not know,
-    /// because acting on them would lose those fields. Each is named in the second list.
+    /// because acting on them would lose those fields, and documents it cannot read, so one bad
+    /// file does not hide the rest. Each is named in the second list.
     pub fn docs_intact<T: Serialize + DeserializeOwned>(
         &self,
         dir: &Path,
         skip: &[&str],
     ) -> Result<(Vec<T>, Vec<String>)> {
-        let (mut docs, mut unknown) = (Vec::new(), Vec::new());
+        let (mut docs, mut left_out) = (Vec::new(), Vec::new());
         for path in self.doc_paths(dir, skip)? {
-            let Some(document) = read_json::<Value>(&path)? else {
-                continue;
-            };
-            let (doc, document): (T, _) = self.parse_doc(&path, document)?;
-            match lost_field_of(&path, &document, &doc)? {
-                Some(field) => unknown.push(format!(
+            let read = (|| -> Result<_> {
+                let Some(document) = read_json::<Value>(&path)? else {
+                    return Ok(None);
+                };
+                let (doc, document): (T, _) = self.parse_doc(&path, document)?;
+                Ok(Some((lost_field_of(&path, &document, &doc)?, doc)))
+            })();
+            match read {
+                Ok(Some((None, doc))) => docs.push(doc),
+                Ok(Some((Some(field), _))) => left_out.push(format!(
                     "{} has field {field} that this agt does not know; kept",
                     path.display()
                 )),
-                None => docs.push(doc),
+                Ok(None) => {}
+                Err(error) => left_out.push(format!("{error}; kept")),
             }
         }
-        Ok((docs, unknown))
+        Ok((docs, left_out))
     }
 
     /// Runs `change` on the document under its lock and writes the result atomically. A missing
@@ -350,10 +356,14 @@ mod tests {
         create_dir(&dir).unwrap();
         fs::write(dir.join("1.json"), r#"{"version":1,"text":"x","extra":1}"#).unwrap();
         fs::write(dir.join("2.json"), r#"{"version":1,"text":"y"}"#).unwrap();
+        fs::write(dir.join("3.json"), "{ nope").unwrap();
+        fs::write(dir.join("4.json"), r#"{"version":9,"text":"z"}"#).unwrap();
         let (docs, unknown) = store.docs_intact::<Note>(&dir, &[]).unwrap();
         assert_eq!(docs, [note("y")]);
-        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown.len(), 3, "{unknown:?}");
         assert!(unknown[0].contains("field extra"), "{unknown:?}");
+        assert!(unknown[1].contains("3.json"), "{unknown:?}");
+        assert!(unknown[2].contains("schema version 9"), "{unknown:?}");
         let kept = store
             .try_remove_doc_if::<Note>(&dir, "1", |_| true)
             .unwrap();

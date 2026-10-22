@@ -317,10 +317,17 @@ fn cleanup_drops_entries_older_than_the_output_logs_and_their_locks() {
     let young = cleanup(crate::support::unix_now() + 6 * day, &["--yes"]);
     assert_eq!(young["totals"]["items"], 0, "{young}");
     assert!(dir.join(format!("{key}.json")).exists());
+    let corrupt = dir.join(format!("{}.json", "0".repeat(64)));
+    std::fs::write(&corrupt, "{ nope").unwrap();
     let old = cleanup(crate::support::unix_now() + 8 * day, &["--yes"]);
     assert_eq!(old["totals"]["items"], 1, "{old}");
     assert!(!dir.join(format!("{key}.json")).exists());
     assert!(!dir.join(format!(".{key}.lock")).exists());
+    assert!(corrupt.exists());
+    assert!(
+        old["warnings"][0].as_str().unwrap().ends_with("; kept"),
+        "{old}"
+    );
 }
 
 fn key_file(env: &Env, key: &str) -> std::path::PathBuf {
