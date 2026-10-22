@@ -68,18 +68,20 @@ pub fn run(cli: Cli) -> Result<Output> {
         return Ok(Output::Json(plan));
     }
 
-    let mut done = removal(&main, &path, entry, !cli.no_hooks)?;
+    let mut done = removal(&main, &path, entry, !cli.no_hooks, true)?;
     done["warnings"] = json!(warnings);
     Ok(Output::Json(done))
 }
 
 /// Runs the remove hooks when `run_hooks`, backs `entry` up, then removes its worktree; the
-/// caller has checked that it may go. A failing hook is an error before anything is touched.
+/// caller has checked that it may go. A failing hook is an error before anything is touched,
+/// and so, unless `allow_lost`, is an ignored file no backup keeps.
 pub(super) fn removal(
     main: &Path,
     path: &Path,
     entry: &Worktree,
     run_hooks: bool,
+    allow_lost: bool,
 ) -> Result<Value> {
     gate::check(path, main)?;
     let mut hooks_report = None;
@@ -102,6 +104,14 @@ pub(super) fn removal(
         gate::check(path, main)?;
     }
     let lost = info::lost(path)?;
+    // A hook may have written one since the caller checked.
+    if !allow_lost && !lost.is_empty() {
+        return fail(format!(
+            "dirty: {} ignored paths no backup keeps ({}); nothing was backed up or removed",
+            lost.len(),
+            lost.join(", ")
+        ));
+    }
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;

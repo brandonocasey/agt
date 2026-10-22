@@ -496,6 +496,26 @@ fn an_ignored_secret_keeps_the_worktree_unless_dirty_is_passed() {
 }
 
 #[test]
+fn an_ignored_secret_a_remove_hook_writes_keeps_the_worktree() {
+    let site = Site::new();
+    let wt = site.branch("hooked");
+    site.env.git(&["merge", "-q", "hooked"]);
+    fs::write(site.env.repo.join(".git/info/exclude"), ".env\n").unwrap();
+    site.env
+        .write_config("[worktree.hooks]\nremove = [\"touch .env\"]\n");
+
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "hooked");
+    assert_eq!(
+        row["reason"],
+        "removal failed: dirty: 1 ignored paths no backup keeps (.env); nothing was backed up or removed"
+    );
+    assert!(wt.join(".env").exists());
+    assert_eq!(site.branches(), ["hooked", "main"]);
+    assert_eq!(site.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+}
+
+#[test]
 fn a_live_agent_session_keeps_the_worktree() {
     let site = Site::new();
     let wt = site.branch("busy");

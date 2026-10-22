@@ -2,7 +2,7 @@
 
 use crate::core::harness;
 
-const DIRS: [&str; 16] = [
+const DIRS: [&str; 20] = [
     "node_modules",
     ".venv",
     "vendor",
@@ -20,6 +20,10 @@ const DIRS: [&str; 16] = [
     ".turbo",
     ".parcel-cache",
     ".tox",
+    ".hypothesis",
+    ".svelte-kit",
+    ".terraform",
+    "htmlcov",
 ];
 
 /// Whether `name`, a file name, is a file the operating system writes and recreates.
@@ -37,7 +41,10 @@ pub fn is_disposable(path: &str) -> bool {
     } else {
         parts[parts.len() - 1]
     };
-    if dirs.iter().any(|dir| DIRS.contains(dir)) {
+    if dirs
+        .iter()
+        .any(|dir| DIRS.contains(dir) || dir.ends_with(".egg-info"))
+    {
         return true;
     }
     let scratch: Vec<&str> = harness::SCRATCH_DIR.split('/').collect();
@@ -50,6 +57,9 @@ pub fn is_disposable(path: &str) -> bool {
     is_os_junk(name)
         || name.ends_with(".log")
         || name.ends_with(".tsbuildinfo")
+        || name == ".coverage"
+        || name.starts_with(".coverage.")
+        || name == ".eslintcache"
         || name.ends_with(".swp")
         || name.ends_with(".swo")
         || name.ends_with('~')
@@ -91,6 +101,14 @@ mod tests {
             "#draft#",
             ".cache/agents/scratch/t/file",
             ".cache/agents/scratch/",
+            ".hypothesis/",
+            "web/.svelte-kit/output/x",
+            "infra/.terraform/",
+            "htmlcov/index.html",
+            "src/pkg.egg-info/",
+            ".coverage",
+            ".coverage.host.1234",
+            "web/.eslintcache",
         ] {
             assert!(is_disposable(path), "{path}");
         }
@@ -112,6 +130,8 @@ mod tests {
             ".cache/other/file",
             ".cache/agents/keep.txt",
             "secrets/",
+            ".coveragerc",
+            "terraform.tfstate",
         ] {
             assert!(!is_disposable(path), "{path}");
         }
