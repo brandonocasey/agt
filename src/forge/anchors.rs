@@ -11,6 +11,11 @@ impl FileDiff {
     pub fn touches(&self, path: &str) -> bool {
         self.old.as_deref() == Some(path) || self.new.as_deref() == Some(path)
     }
+
+    /// Whether the diff changes this path and leaves a file there.
+    pub fn changes_into(&self, path: &str) -> bool {
+        self.new.as_deref() == Some(path)
+    }
 }
 
 struct Hunk {

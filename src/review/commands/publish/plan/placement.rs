@@ -61,9 +61,9 @@ impl Planner<'_> {
         files.is_empty() || files.iter().any(|file| file.touches(path))
     }
 
-    /// Whether the PR/MR diff is known and changes this file.
+    /// Whether the PR/MR diff is known and changes this file, which still exists at its head.
     pub(super) fn known_in_pr_diff(&self, path: &str) -> bool {
-        self.pr_files().iter().any(|file| file.touches(path))
+        self.pr_files().iter().any(|file| file.changes_into(path))
     }
 
     fn pr_files(&self) -> &[anchors::FileDiff] {
