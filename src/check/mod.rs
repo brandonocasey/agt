@@ -18,6 +18,7 @@ use crate::core::error::{Result, fail};
 use crate::core::hash::sha256_hex;
 use crate::core::output::Output;
 use crate::git::Repo;
+use crate::store::prune::Removal;
 use crate::store::{Namespace, Store};
 
 /// Run a command and cache its pass per git tree.
@@ -104,8 +105,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         (Some((_, _, digest)), Some(store)) => store
             .load_doc::<Entry>(store.root(), digest)
             .unwrap_or_else(|error| {
-                warnings.push(match store.remove_doc(store.root(), digest) {
-                    Ok(_) => format!("removed the unreadable cached pass: {error}"),
+                warnings.push(match store.remove_unreadable_doc(store.root(), digest) {
+                    Ok(Removal::Removed(_)) => {
+                        format!("removed the unreadable cached pass: {error}")
+                    }
+                    Ok(_) => format!("ignoring the cached pass: {error}"),
                     Err(removal) => {
                         format!("ignoring the cached pass: {error}; removing it failed: {removal}")
                     }

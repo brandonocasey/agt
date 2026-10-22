@@ -143,13 +143,22 @@ impl Store {
         Ok(result)
     }
 
-    /// Deletes the document under its lock without reading it, so an unreadable one goes too.
-    pub fn remove_doc(&self, dir: &Path, name: &str) -> Result<Removal> {
+    /// Deletes a document this build cannot read, under its lock. One a newer agt wrote stays:
+    /// it is not this build's to delete.
+    pub fn remove_unreadable_doc(&self, dir: &Path, name: &str) -> Result<Removal> {
         validate_key(name)?;
         let lock = lock_path(dir, name);
         let _lock = lock_file(&lock)?;
         let path = dir.join(format!("{name}.json"));
-        if !path.exists() {
+        if fs::symlink_metadata(&path).is_err() {
+            return Ok(Removal::Kept);
+        }
+        let newer = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|document| document.get("version").and_then(Value::as_u64))
+            .is_some_and(|version| version > u64::from(self.schema.version));
+        if newer {
             return Ok(Removal::Kept);
         }
         remove_with_lock(&path, &lock).map(Removal::Removed)
