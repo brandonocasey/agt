@@ -67,26 +67,7 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
             .ok_or_else(|| Error("synced target has no PR/MR".into()))?
             .url
             .clone();
-        exec::change(ctx, &target, |target| {
-            let missing = || Error(format!("completed run {selected} not found"));
-            let publication = match target
-                .runs
-                .iter_mut()
-                .find(|run| &run.id == selected && run.ended_at.is_some())
-            {
-                Some(run) => &mut run.publication_target,
-                None => {
-                    &mut target
-                        .qa_runs
-                        .iter_mut()
-                        .find(|run| &run.id == selected && run.ended_at.is_some())
-                        .ok_or_else(missing)?
-                        .publication_target
-                }
-            };
-            *publication = Some(url);
-            Ok(())
-        })?;
+        exec::change(ctx, &target, |target| select_run(target, selected, url))?;
     }
     // One attempt id per publish: sync claims a marked note only for a write of that attempt.
     let attempt = random_id().replacen("rv-", "at-", 1);
@@ -117,6 +98,28 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
     }))
 }
 
+/// Marks the completed run `selected` as published to the PR/MR at `url`.
+fn select_run(target: &mut Target, selected: &str, url: String) -> Result<()> {
+    let missing = || Error(format!("completed run {selected} not found"));
+    let publication = match target
+        .runs
+        .iter_mut()
+        .find(|run| run.id == selected && run.ended_at.is_some())
+    {
+        Some(run) => &mut run.publication_target,
+        None => {
+            &mut target
+                .qa_runs
+                .iter_mut()
+                .find(|run| run.id == selected && run.ended_at.is_some())
+                .ok_or_else(missing)?
+                .publication_target
+        }
+    };
+    *publication = Some(url);
+    Ok(())
+}
+
 fn load(ctx: &Ctx, connection: &Connection) -> Result<Target> {
     ctx.store
         .load(&ctx.dir, &connection.key)?
@@ -137,6 +140,11 @@ fn planner<'a>(
 fn dry(ctx: &Ctx, connection: &Connection, mut target: Target, options: &Options) -> Result<Value> {
     // A dry run sends nothing, so its markers name no real attempt.
     let attempt = "<attempt>";
+    // The real publish marks the selected run first, so the summary shows it.
+    if let (Some(selected), Some(review)) = (&options.run, &target.review) {
+        let url = review.url.clone();
+        select_run(&mut target, selected, url)?;
+    }
     let (threads, skipped, expected) =
         planner(ctx, connection, &target, attempt, options)?.threads(&target);
     // Treat the threads above as posted so their replies and resolves show too.
@@ -183,4 +191,29 @@ fn placeholder(id: &str, kind: RemoteKind, caps: &Capabilities) -> RemoteThread 
         format!("<remote id of {id}>"),
         kind != RemoteKind::General || caps.general_resolvable,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_selected_run_is_marked_as_published_here() {
+        let mut target: Target = serde_json::from_value(json!({
+            "version": 1, "revision": 1, "key": "k", "repo": "r", "kind": "branch",
+            "branch": null, "branch_birth": null, "base": null, "head": null,
+            "created_at": "t", "updated_at": "t", "review": null, "records": [], "threads": [],
+            "runs": [{
+                "id": "rv-1", "started_at": "t", "ended_at": "t", "passes": [],
+                "repaired_head": null, "repair": [], "reveal": null, "record": null,
+            }],
+        }))
+        .unwrap();
+        select_run(&mut target, "rv-1", "https://h/pr/1".into()).unwrap();
+        assert_eq!(
+            target.runs[0].publication_target.as_deref(),
+            Some("https://h/pr/1")
+        );
+        assert!(select_run(&mut target, "rv-2", "https://h/pr/1".into()).is_err());
+    }
 }
