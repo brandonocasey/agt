@@ -15,6 +15,7 @@ mod offline;
 mod pr;
 mod ps;
 mod publish;
+mod publish_gitlab_outside;
 mod qa;
 mod review_auto_sync;
 mod review_issue;

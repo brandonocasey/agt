@@ -180,7 +180,7 @@ impl ReviewService for Github {
     fn file_thread(
         &self,
         subject: ReviewSubject,
-        commit: &str,
+        review: &Review,
         path: &str,
         text: &str,
     ) -> Option<Request> {
@@ -189,7 +189,7 @@ impl ReviewService for Github {
             format!("{}/pulls/{}/comments", base(subject), subject.number),
             Some(json!({
                 "body": text,
-                "commit_id": commit,
+                "commit_id": review.head_sha,
                 "path": path,
                 "subject_type": "file",
             })),

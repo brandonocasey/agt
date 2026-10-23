@@ -292,12 +292,12 @@ pub trait ReviewService: Service {
     fn inline(&self) -> Inline<'_>;
     /// A new general thread.
     fn thread(&self, subject: ReviewSubject, text: &str) -> Request;
-    /// A resolvable thread on the whole of `path` at `commit`, for a finding the diff cannot
-    /// place on a line; `None` when the host has no such thread.
+    /// A resolvable thread on the whole of `path` at the head of `review`, for a finding the
+    /// diff cannot place on a line; `None` when the host has no such thread.
     fn file_thread(
         &self,
         _subject: ReviewSubject,
-        _commit: &str,
+        _review: &Review,
         _path: &str,
         _text: &str,
     ) -> Option<Request> {

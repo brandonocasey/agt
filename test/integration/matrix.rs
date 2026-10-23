@@ -880,11 +880,17 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
     let other = ended["added"][2].as_str().unwrap();
     let other_skip = skipped.iter().find(|item| item["item"] == other);
     if svc.expect().posts_general_findings() {
-        // Lines outside the diff are not commentable here.
-        let reason = outside_skip.unwrap_or_else(|| panic!("{dry}"))["reason"]
-            .as_str()
-            .unwrap();
-        assert!(reason.contains("not in the PR/MR diff"), "{dry}");
+        // A changed file's unchanged line takes a diff discussion with both line numbers.
+        assert!(outside_skip.is_none(), "{dry}");
+        let draft = dry["writes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|write| write["items"] == json!([format!("{}/c1", outside.as_str().unwrap())]))
+            .unwrap_or_else(|| panic!("{dry}"));
+        let position = &draft["input"]["position"];
+        assert_eq!(position["new_line"], 9, "{dry}");
+        assert_eq!(position["old_line"], 9, "{dry}");
         // A file the PR does not change gets a general comment naming the location.
         assert!(other_skip.is_none(), "{dry}");
         let general = write_text(&dry, "body", "A file the PR leaves alone.");

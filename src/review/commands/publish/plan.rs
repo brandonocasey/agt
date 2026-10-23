@@ -75,6 +75,9 @@ pub(super) struct Write {
     pub(super) request: Option<Request>,
     /// The text each item of the write sends, in the order of its ids.
     pub(super) sent: Vec<Option<String>>,
+    /// The text of a general thread to post instead when the host refuses this write, so a
+    /// finding it cannot place is not lost.
+    pub(super) fallback: Option<String>,
 }
 
 impl Write {
@@ -128,6 +131,7 @@ impl Write {
                 },
                 request: Some(publish),
                 sent: vec![None],
+                fallback: None,
             };
             views.extend(write.views(connection));
         }
@@ -204,6 +208,7 @@ impl<'a> Planner<'a> {
             item,
             request: Some(request),
             sent: vec![Some(text.to_owned())],
+            fallback: None,
         }
     }
 
@@ -316,13 +321,20 @@ impl<'a> Planner<'a> {
                         }
                         Inline::DraftThenPublish(drafts) => {
                             let request = drafts.draft(self.connection.subject(), &text, &position);
-                            writes.push(self.write(
+                            let mut write = self.write(
                                 Item::Draft {
                                     comment: first.id.clone(),
                                 },
                                 request,
                                 &text,
-                            ));
+                            );
+                            // The host may refuse the position: the finding then posts as a
+                            // general thread that names its lines.
+                            write.fallback = thread.anchor.as_ref().map(|anchor| {
+                                let lines = location(anchor);
+                                body(target, thread, first, Some(&lines), self.attempt)
+                            });
+                            writes.push(write);
                             expected.push((thread.id.clone(), RemoteKind::Discussion));
                         }
                     }
@@ -366,6 +378,7 @@ impl<'a> Planner<'a> {
                     item: Item::Review { comments: ids },
                     request: Some(request),
                     sent: comments.into_iter().map(|(_, text)| Some(text)).collect(),
+                    fallback: None,
                 })
             },
         );
@@ -381,6 +394,7 @@ impl<'a> Planner<'a> {
             },
             request: Some(drafts.publish_draft(self.connection.subject(), draft)),
             sent: vec![None],
+            fallback: None,
         }
     }
 
@@ -501,6 +515,7 @@ impl<'a> Planner<'a> {
                     .resolve(self.connection.subject(), remote, resolved)
             }),
             sent: vec![None],
+            fallback: None,
         }
     }
 
@@ -669,14 +684,17 @@ impl<'a> Planner<'a> {
         let text = body(target, thread, first, lines.as_deref(), self.attempt);
         let request = self.service().file_thread(
             self.connection.subject(),
-            &self.review.head_sha,
+            self.review,
             &anchor.path,
             &text,
         )?;
         let item = Item::Thread {
             comment: first.id.clone(),
         };
-        Some(self.write(item, request, &text))
+        let mut write = self.write(item, request, &text);
+        // A host without file threads refuses the position; the text already names the lines.
+        write.fallback = Some(text);
+        Some(write)
     }
 }
 

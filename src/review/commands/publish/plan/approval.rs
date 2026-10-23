@@ -63,6 +63,7 @@ impl Planner<'_> {
                     },
                     request: Some(self.service().approve(subject, head, None)),
                     sent: vec![None],
+                    fallback: None,
                 };
                 Ok((vec![approve, note()], RemoteKind::General, None))
             }
@@ -128,6 +129,7 @@ impl Planner<'_> {
                 None,
             )),
             sent: vec![None],
+            fallback: None,
         }))
     }
 

@@ -189,6 +189,32 @@ impl ReviewService for Gitlab {
         )
     }
 
+    // A discussion on the whole file; GitLab before the `file` position type refuses it.
+    fn file_thread(
+        &self,
+        subject: ReviewSubject,
+        review: &Review,
+        path: &str,
+        text: &str,
+    ) -> Option<Request> {
+        let base_sha = review.base_sha.as_deref()?;
+        Some(Request::rest(
+            Method::Post,
+            format!("{}/discussions", base(subject)),
+            Some(json!({
+                "body": text,
+                "position": {
+                    "position_type": "file",
+                    "base_sha": base_sha,
+                    "start_sha": review.start_sha.as_deref().unwrap_or(base_sha),
+                    "head_sha": review.head_sha,
+                    "old_path": path,
+                    "new_path": path,
+                },
+            })),
+        ))
+    }
+
     // A note, not a discussion: discussions are resolvable and can block merging.
     fn note(&self, subject: ReviewSubject, text: &str) -> Request {
         Request::rest(
@@ -330,33 +356,46 @@ fn place(
         (location.path, location.line?, first)
     };
     let diff = repo.diff_context(base, head).ok()?;
-    let found = anchors::diff_line(&diff, &path, anchor.side, line)?;
-    let range = match first {
-        Some(first) => {
-            let start = anchors::diff_line(&diff, &path, Side::New, first)?;
-            if start.hunk != found.hunk {
-                return None;
-            }
-            Some(json!({ "start": line_point(&start), "end": line_point(&found) }))
-        }
-        None => None,
-    };
     let mut position = json!({
         "position_type": "text",
         "base_sha": base,
         "start_sha": start,
         "head_sha": head,
-        "old_path": found.old_path,
-        "new_path": found.new_path,
     });
-    if let Some(new) = found.new_line {
-        position["new_line"] = json!(new);
-    }
-    if let Some(old) = found.old_line {
-        position["old_line"] = json!(old);
-    }
-    if let Some(range) = range {
-        position["line_range"] = range;
+    if let Some(found) = anchors::diff_line(&diff, &path, anchor.side, line) {
+        let range = match first {
+            Some(first) => {
+                let start = anchors::diff_line(&diff, &path, Side::New, first)?;
+                if start.hunk != found.hunk {
+                    return None;
+                }
+                Some(json!({ "start": line_point(&start), "end": line_point(&found) }))
+            }
+            None => None,
+        };
+        position["old_path"] = json!(found.old_path);
+        position["new_path"] = json!(found.new_path);
+        if let Some(new) = found.new_line {
+            position["new_line"] = json!(new);
+        }
+        if let Some(old) = found.old_line {
+            position["old_line"] = json!(old);
+        }
+        if let Some(range) = range {
+            position["line_range"] = range;
+        }
+    } else {
+        // An unchanged line outside every hunk of a changed file: GitLab takes it with both
+        // numbers, and the host rejects it where it does not expand the diff that far.
+        if anchor.side == Side::Old {
+            return None;
+        }
+        let files = anchors::parse(&repo.diff_u0(base, head).ok()?);
+        let (old_path, old_line) = anchors::old_of_unchanged(&files, &path, line)?;
+        position["old_path"] = json!(old_path);
+        position["new_path"] = json!(path);
+        position["old_line"] = json!(old_line);
+        position["new_line"] = json!(line);
     }
     Some(Placement::InDiff(Position {
         commit: head.clone(),

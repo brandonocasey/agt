@@ -21,6 +21,7 @@ impl FileDiff {
 struct Hunk {
     old_start: u32,
     old_len: u32,
+    new_start: u32,
     new_len: u32,
 }
 
@@ -89,10 +90,11 @@ fn header_path(rest: &str) -> Option<String> {
 fn parse_hunk(rest: &str) -> Option<Hunk> {
     let mut parts = rest.split_whitespace();
     let (old_start, old_len) = range(parts.next()?.strip_prefix('-')?)?;
-    let (_, new_len) = range(parts.next()?.strip_prefix('+')?)?;
+    let (new_start, new_len) = range(parts.next()?.strip_prefix('+')?)?;
     Some(Hunk {
         old_start,
         old_len,
+        new_start,
         new_len,
     })
 }
@@ -162,6 +164,31 @@ pub fn locate(files: &[FileDiff], anchor: &Anchor) -> Location {
         line: u32::try_from(i64::from(line) + shift).ok(),
         outdated,
     }
+}
+
+/// The old path and line of the line `line` of `path` at the head of a `-U0` diff, when the
+/// diff changes the file but leaves that line as it was; `None` when the line is added or the
+/// file is new, renamed from nothing or deleted.
+pub fn old_of_unchanged(files: &[FileDiff], path: &str, line: u32) -> Option<(String, u32)> {
+    let file = files
+        .iter()
+        .find(|file| file.new.as_deref() == Some(path))?;
+    let old = file.old.clone()?;
+    let mut shift = 0_i64;
+    for hunk in &file.hunks {
+        if hunk.new_len == 0 {
+            // A pure deletion sits after line `new_start`.
+            if line <= hunk.new_start {
+                break;
+            }
+        } else if line < hunk.new_start {
+            break;
+        } else if line < hunk.new_start + hunk.new_len {
+            return None;
+        }
+        shift += i64::from(hunk.old_len) - i64::from(hunk.new_len);
+    }
+    Some((old, u32::try_from(i64::from(line) + shift).ok()?))
 }
 
 /// A line of a unified diff: its old and new numbers (one is `None` for a removed or added
@@ -285,6 +312,27 @@ rename to b.txt\n\
 @@ -5 +7 @@\n\
 -old\n\
 +changed\n";
+
+    #[test]
+    fn maps_an_unchanged_line_to_its_old_number() {
+        let files = parse(DIFF);
+        assert_eq!(
+            old_of_unchanged(&files, "b.txt", 1),
+            Some(("a.txt".into(), 1))
+        );
+        assert_eq!(
+            old_of_unchanged(&files, "b.txt", 5),
+            Some(("a.txt".into(), 3))
+        );
+        assert_eq!(
+            old_of_unchanged(&files, "b.txt", 8),
+            Some(("a.txt".into(), 6))
+        );
+        // Added or changed lines are not unchanged, and other files are not in the diff.
+        assert_eq!(old_of_unchanged(&files, "b.txt", 4), None);
+        assert_eq!(old_of_unchanged(&files, "b.txt", 7), None);
+        assert_eq!(old_of_unchanged(&files, "c.txt", 1), None);
+    }
 
     #[test]
     fn shifts_lines_across_rename() {

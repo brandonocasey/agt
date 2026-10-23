@@ -70,6 +70,26 @@ pub(super) fn run_writes(
                     },
                     request: Some(connection.service.note(connection.subject(), &text)),
                     sent: write.sent.clone(),
+                    fallback: None,
+                };
+                run_writes(ctx, connection, target, vec![again], attempt, posted)?;
+                continue;
+            }
+            // The host refused where the finding goes: post it as a general thread instead.
+            Err(error) if error.refused() && write.fallback.is_some() => {
+                let text = write.fallback.clone().unwrap_or_default();
+                let comment = write.ids().remove(0);
+                posted.push(json!({
+                    "kind": write.kind(),
+                    "items": write.ids(),
+                    "error": error.to_string(),
+                    "fallback": "thread",
+                }));
+                let again = Write {
+                    item: Item::Thread { comment },
+                    request: Some(connection.service.thread(connection.subject(), &text)),
+                    sent: vec![Some(text)],
+                    fallback: None,
                 };
                 run_writes(ctx, connection, target, vec![again], attempt, posted)?;
                 continue;
@@ -95,6 +115,7 @@ pub(super) fn run_writes(
                 },
                 request: Some(drafts.publish_draft(connection.subject(), &draft)),
                 sent: vec![None],
+                fallback: None,
             };
             run_writes(ctx, connection, target, vec![publish], attempt, posted)?;
         }
