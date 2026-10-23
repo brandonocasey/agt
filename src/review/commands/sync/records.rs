@@ -28,12 +28,33 @@ pub(super) fn answered_id(body: &str, marked: bool) -> Option<String> {
     ((marked || before.contains("Fixed in")) && !id.is_empty()).then(|| id.to_owned())
 }
 
-/// The first line of an outcome reply without the quote mark and emoji that lead it:
-/// `> ✅ Fixed in ...` reads `Fixed in ...`.
+/// The line of an outcome reply without the quote mark and emoji that lead it: `> ✅ Fixed in ...`
+/// reads `Fixed in ...`. Earlier versions quoted the outcome on the first line; a quote reply
+/// opens with a quote block, and the outcome is the first line after it.
 fn outcome_line(body: &str) -> &str {
-    let line = body.lines().next().unwrap_or_default().trim_start();
-    let line = line.strip_prefix('>').unwrap_or(line);
+    let first = body.lines().next().unwrap_or_default().trim_start();
+    let line = match first.strip_prefix('>') {
+        Some(quoted) if is_outcome(quoted) => quoted,
+        Some(_) => body
+            .lines()
+            .map(str::trim_start)
+            .find(|line| !line.is_empty() && !line.starts_with('>'))
+            .unwrap_or_default(),
+        None => first,
+    };
+    strip_lead(line)
+}
+
+fn strip_lead(line: &str) -> &str {
     line.trim_start_matches(|char: char| !char.is_ascii_alphanumeric())
+}
+
+/// Whether `line` reads as the outcome of a rejection or a fix.
+fn is_outcome(line: &str) -> bool {
+    let line = strip_lead(line);
+    ["Won't fix: ", "Rejected: ", "Fixed in "]
+        .iter()
+        .any(|lead| line.starts_with(lead))
 }
 
 /// The reason of a marked `🚫 Won't fix: <reason>.` reply, of the `> 🚫 Rejected: <reason>.
@@ -220,5 +241,8 @@ mod tests {
                 .as_deref(),
             Some("not worth it")
         );
+        let quoted = "> A finding.\n> — @me, [comment](https://h/c/1)\n\n\
+                      🚫 Won't fix: by design.\n<!-- agent-review id=h1/c2 -->";
+        assert_eq!(rejected_reason(quoted).as_deref(), Some("by design"));
     }
 }
