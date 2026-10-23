@@ -180,8 +180,9 @@ tokens; the summary's steps show each run's time.
 refused while a `bug`, `requirement` or `question` is open; approving the same
 head again reuses the same thread, and `--formal` upgrades a comment approval.
 `publish` posts no comment for it (the text, default `Approved at <sha>.` or
-`--body`, stays in the store). The summary headline shows ` · 🔍 approved` while
-the PR/MR head is the approved head. The author flags (`--author`,
+`--body`, stays in the store, also after `sync` reads back the formal approval's review).
+The summary headline shows ` · 🔍 approved` while the PR/MR head is the approved head and
+no open finding blocks approval. The author flags (`--author`,
 `--reviewer`, `--model`, ...) sign the approval as for `comment`. With `--dry-run`
 the approval is still recorded locally, and nothing is posted.
 `--approve --formal` submits the host's approval: a GitHub `APPROVE` review whose body is
@@ -374,9 +375,9 @@ agt qa publish --dry-run            # as agt review publish
 - `agt review status` carries the same QA state under `qa` (`null` before the first QA run).
   QA runs never count as reviews.
 - `show` takes a QA run (`qa-4f2a`) or check (`qa-4f2a.k1`) id, as does `agt review show`.
-- `publish` adds QA to the PR/MR summary: open QA findings and failed, blocked or stale checks
-  join the list of what is left to fix (an out-of-date check does not), and the checks
-  table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
+- `publish` adds QA to the PR/MR summary: open QA findings and current failed or blocked checks
+  no open thread explains join the list of what is left to fix (a check that ran against an
+  older head does not; the table says `(out of date)`), and the checks table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
   a `<!-- qa-record v1 id=<run> head=<sha> -->` marker, distinct from review records, which
   `sync` reads to mark the run's record posted. A QA finding is headed
   `**🐛 bug (high)**` on its own line, with the check in the footer
@@ -593,7 +594,8 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   `outdated` is `null` (unknown). `sync` never fetches commits or writes to the
   repository.
 - Merge: remote wins for posted text and resolved state, except a local resolve
-  or reopen that `publish` has not sent yet (`resolve_pending`). Local fields
+  or reopen that `publish` has not sent yet (`resolve_pending`). A formal approval's review, whose body is only a marker, keeps the
+  approval text stored. Local fields
   (type, severity, triage, held, killed findings, anchors of our findings) and
   comments not yet posted stay. Remote threads match local ones by remote id,
   then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first
@@ -625,8 +627,8 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`
   marker), or marked `<thread id>/c<n>` for `n` above 1 (a quote reply), answers that thread: it is added as a reply and, when the thread is
   not resolvable, resolves it as `fixed <sha>` (a `Fixed in` answer, also with
-  the sha as a link) or `rejected: <reason>` (a `Rejected:` answer), or reopens
-  it (any other answer).
+  the sha as a link) or `rejected: <reason>` (a `Won't fix:` or `Rejected:` answer; a quote
+  reply's outcome line follows its quote block), or reopens it (any other answer).
 - A draft note with a marker for a local comment and its attempt id marks it
   `posting` with its `draft_id`, so a later publish publishes it; a `draft_id` whose draft is gone
   is cleared.
@@ -701,24 +703,32 @@ local reads continue.
   per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
 - A thread anchored to lines of a file the PR/MR changes posts where those
-  lines sit in its diff. Otherwise, on GitHub it posts as a file-level review
-  comment (`subject_type: file`) whose first line names its lines, so it can be
-  resolved; on GitLab it is listed under `skipped`. A thread on a file the PR/MR
-  does not change posts as a general comment whose first line names its
-  location. On GitHub an agent never posts a general comment: on someone else's PR a
-  finding or comment there, or without an anchor, goes in the body of a review (one
-  paragraph each, with its title and footer; a review of only a body when no in-diff
-  comment goes out), where it cannot be resolved or answered in place. On your own PR a
-  finding is listed in the summary with its whole text and an agent's plain comment is
-  not posted (`skipped` says so). A
+  lines sit in its diff. Lines the diff does not show (an unchanged line outside the
+  hunks, or lines a later commit changed, such as a fix) post as a thread on the whole file
+  where the host has one, so it can be resolved: on GitHub a file-level review comment
+  (`subject_type: file`), on GitLab a file discussion (`position_type: file`, or a diff
+  discussion on the unchanged line with both line numbers); its first line names the lines.
+  A GitLab position the host refuses posts as a general thread that names its lines; the
+  draft note is deleted, and a draft left by an earlier attempt gets the same fallback. A
+  file thread the host refuses is shown as an `error` under `posted`, and its finding stays
+  unposted (an agent's finding on GitHub has no general comment to fall back to); that and
+  the host's approval (above) are the only refusals `publish` reports and goes on from; any
+  other refused write fails the publish. A thread on a file the PR/MR does not change posts as a general comment whose
+  first line names its location. On GitHub an agent never posts a general comment: on someone
+  else's PR a finding or comment there, or without an anchor, goes in the body of a review
+  (one paragraph each, with its title and footer and its own
+  `<!-- agent-review id=<local id> attempt=<attempt> -->` marker, so `sync` claims it after a
+  lost response; a review of only a body when no in-diff comment goes out, and more such reviews
+  when the paragraphs pass one body's 65,000 characters), where it cannot be resolved or
+  answered in place. On your own PR a finding is listed in the summary with its whole text and
+  an agent's plain comment is not posted (`skipped` says so). A
   line range (`start_line`..`line`) posts only as one multi-line comment, with
   both ends on the new side of one hunk. Other threads without an anchor post as
-  general comments. On GitLab, lines a later commit changed (such as a fix)
-  are not in the latest MR diff, so they too post as a general comment with
-  their location.
+  general comments.
 - GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
   (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
-  review), whose body is its marker after the comments that have no diff line, with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
+  review), whose body is its marker after the comments that have no diff line (each with its
+  own marker), with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
   `addPullRequestReviewThreadReply`, `resolveReviewThread` and
   `unresolveReviewThread` mutations; your reply to a general comment is a new
   issue comment in GitHub's quote form (`> <first line>`, `> — @<author>, [comment](<url>)`,
@@ -738,8 +748,10 @@ local reads continue.
   it. The whole PR/MR, whatever `--run` selects to post. Its headline is the only status:
   `**⚠️ <N> to fix** at `<head>`` (plus ` · <n> commits not reviewed`),
   `**⏳ <n> new commits not reviewed** at `<head>`` when nothing is open but a PR/MR
-  commit no run read, or `**✅ Nothing to fix** at `<head>``, then ` · 🔍 approved` and
-  ` · 🧪 QA approved` for approvals of that head. "To fix" counts open findings and current
+  commit no run read, or `**✅ Nothing to fix** at `<head>``, then ` · 🔍 approved` (only while no open finding blocks
+  approval) and ` · 🧪 QA approved` for approvals of that head. When the PR/MR head is not
+  in the local repository, `<head>` is the newest head a run read and the head is listed under
+  `Not reviewed` as not in the local repository. "To fix" counts open findings and current
   failed or blocked QA checks no open thread explains; out-of-date checks never count. Each
   item has two lines: the emoji and the first sentence in bold, then severity, `Waiting on
   the PR author`, `QA: <check>`, the place (`path:line` or `whole PR`), `Related: <issue>`
@@ -748,7 +760,8 @@ local reads continue.
   **📋 Follow-up issues**. A collapsed Details section holds the QA checks table (a result
   that tested an older head says `(out of date)`) and the closed findings with their outcome,
   with a count of those closed before they were posted. After approval, the follow-ups and
-  closed findings drop; only the QA table stays. A grey footer names the agt version, what
+  closed findings drop (a finding closed before the approval stays dropped after a later
+  push, by the time it was closed, and a blocking finding opened since shows them again); only the QA table stays. A grey footer names the agt version, what
   ran (🔍 review, 🧪 QA), the reviewers and their models, and the review time. A summary
   longer than 65,000 characters continues in part comments, split at item boundaries and
   edited in place: `<!-- agent-review id=summary/p<N> attempt=<attempt> -->`, each starting
@@ -871,6 +884,7 @@ Target file:
                   "side": "new", "start_line": null,
                   "commit": "5d6e7f...", "tree": "9f8e7d..." },
       "resolved": true,
+      "closed_at": "2026-10-16T12:45:00Z",
       "resolution": "fixed 9e8d7c...",
       "triage": "fixed",
       "held": false,
