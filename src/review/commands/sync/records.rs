@@ -36,11 +36,14 @@ fn outcome_line(body: &str) -> &str {
     line.trim_start_matches(|char: char| !char.is_ascii_alphanumeric())
 }
 
-/// The reason of a marked `> 🚫 Rejected: <reason>. <sub>signature</sub>` reply, or of the
-/// plain `Rejected: <reason>.` earlier versions posted.
+/// The reason of a marked `🚫 Won't fix: <reason>.` reply, of the `> 🚫 Rejected: <reason>.
+/// <sub>signature</sub>` earlier versions posted, or of their plain `Rejected: <reason>.`.
 pub(super) fn rejected_reason(body: &str) -> Option<String> {
     agent_id(body)?;
-    let rest = outcome_line(body).strip_prefix("Rejected: ")?;
+    let line = outcome_line(body);
+    let rest = line
+        .strip_prefix("Won't fix: ")
+        .or_else(|| line.strip_prefix("Rejected: "))?;
     let reason = rest
         .split_once(" <sub>")
         .map_or(rest, |(reason, _)| reason)
@@ -173,6 +176,11 @@ mod tests {
         assert_eq!(
             rejected_reason("Rejected: by design.\n<!-- agent-review id=h1/c2 -->").as_deref(),
             Some("by design")
+        );
+        assert_eq!(
+            rejected_reason("🚫 Won't fix: not worth it.\n<!-- agent-review id=h1/c2 -->")
+                .as_deref(),
+            Some("not worth it")
         );
     }
 }
