@@ -239,7 +239,11 @@ fn not_own_publish_posts_only_replies_and_resolves_on_others_threads(svc: Svc) {
     env.run(&["resolve", &alice, "--answered"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let dry = dry_run(env, svc, &["--not-own"]);
-    assert_eq!(kinds(&dry, "writes"), ["reply", "reply", "resolve"], "{dry}");
+    assert_eq!(
+        kinds(&dry, "writes"),
+        ["reply", "reply", "resolve"],
+        "{dry}"
+    );
     let skipped = skipped_items(&dry);
     for item in [setup.finding(1), "h1".to_owned(), "summary".to_owned()] {
         assert!(skipped.contains(&item), "{item}: {dry}");
