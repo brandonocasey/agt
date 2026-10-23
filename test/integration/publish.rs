@@ -812,6 +812,15 @@ fn github_approve_review_claimed_by_sync_is_not_sent_again() {
         .reviews
         .push(github::review(701, "me", "APPROVED", &sent(env, &id)));
     svc.sync(&setup, &remote);
+    // The posted review holds only the marker; the approval text stays in the store.
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let approval = &thread(&list, &id)["comments"][0];
+    assert_eq!(approval["remote"]["id"], "701", "{approval}");
+    assert!(
+        approval["body"].as_str().unwrap().contains("Approved at"),
+        "{approval}"
+    );
     svc.restore(env, Call::Approve);
     let out = env.run(&["publish", "--pr", "42", "--not-own", "--only", &id]);
     assert_eq!(svc.count(env, Call::Approve), 1, "{out}");

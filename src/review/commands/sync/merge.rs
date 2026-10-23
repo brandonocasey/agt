@@ -444,7 +444,13 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
                 used[found] = true;
                 let mut comment = thread.comments[found].clone();
                 comment.remote = Some(incoming.remote(login));
-                comment.body = incoming.body;
+                // The review that carries an approval holds only its marker; the approval text
+                // stays in the store.
+                let marker_only =
+                    thread.approval.is_some() && markers::strip_agent(&incoming.body).is_empty();
+                if !marker_only {
+                    comment.body = incoming.body;
+                }
                 comment.delivery.post = PostState::Posted;
                 comment.draft_id = None;
                 merged.push(comment);
