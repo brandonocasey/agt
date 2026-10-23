@@ -820,7 +820,9 @@ fn not_own_posts_a_general_finding_as_a_comment(svc: Svc) {
         let body = review["input"]["body"].as_str().unwrap();
         assert!(body.starts_with("**"), "{body}");
         assert!(
-            body.contains("\n\n> <sub>🔍 agt review · m1</sub>\n\n"),
+            body.contains(&format!(
+                "\n\n> <sub>🔍 agt review · m1</sub>\n<!-- agent-review id={item} attempt=<attempt> -->\n\n"
+            )),
             "{body}"
         );
         assert!(body.contains("<!-- agent-review id=review/"), "{body}");
