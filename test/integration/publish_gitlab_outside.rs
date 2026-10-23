@@ -5,8 +5,8 @@
 use serde_json::{Value, json};
 
 use crate::support::forge::gitlab::{Gitlab, MR, write};
-use crate::support::forge::{Call, FakeService};
-use crate::support::scenario::{Review, Setup, kinds, thread};
+use crate::support::forge::{Call, FakeService, Remote};
+use crate::support::scenario::{Review, Setup, kinds, sent, thread};
 use crate::support::strs;
 
 const OUTSIDE: Review = Review {
@@ -173,6 +173,12 @@ fn a_draft_left_by_an_earlier_attempt_falls_back_when_the_host_refuses_it() {
     let list = env.run(&["list"]);
     assert_eq!(thread(&list, &line)["comments"][0]["draft_id"], "77");
 
+    // The host still holds the draft.
+    let mut remote = Remote::new();
+    remote
+        .drafts
+        .push(json!({ "id": 77, "note": sent(env, &line) }));
+    svc.sync(&setup, &remote);
     env.fail_call_with(
         &strs(&svc.call(Call::PublishDraft)),
         "glab: 400 Bad Request (HTTP 400)",
