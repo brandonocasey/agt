@@ -1154,6 +1154,37 @@ fn gitlab_crash_after_write_does_not_duplicate() {
     assert_never_posted(env);
 }
 
+/// The host refusing a general comment of mine fails the publish; only file threads and the
+/// fallbacks of findings are reported and left unposted.
+#[test]
+fn gitlab_a_refused_general_comment_fails_the_publish() {
+    let svc = Gitlab::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    env.run(&[
+        "comment",
+        "--body",
+        "General note from me.",
+        "--author",
+        "me",
+    ]);
+    let list = env.run(&["list"]);
+    let note = list["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|thread| thread["comments"][0]["body"] == "General note from me.")
+        .map(|thread| thread["id"].as_str().unwrap().to_owned())
+        .unwrap();
+    env.fail_call_with(
+        &strs(&svc.call(Call::PostThread)),
+        "glab: 403 Forbidden (HTTP 403)",
+    );
+    let failed = env.fail(&["publish", "--pr", "3", "--only", &note], None);
+    assert!(failed.contains("403"), "{failed}");
+}
+
 #[test]
 fn gitlab_reply_on_general_note_keeps_one_thread() {
     let svc = Gitlab::new();

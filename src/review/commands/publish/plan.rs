@@ -42,6 +42,11 @@ pub(super) enum Item {
     Thread {
         comment: String,
     },
+    /// A finding's thread placed on a file, or the general thread that stands in for a place
+    /// the host refuses. The host refusing it leaves the finding unposted and fails nothing.
+    Placed {
+        comment: String,
+    },
     /// An approval posted as a review that carries its comment, which approves the head.
     ApprovalReview {
         comment: String,
@@ -94,7 +99,7 @@ impl Write {
     pub(super) fn kind(&self) -> &'static str {
         match &self.item {
             Item::Review { .. } => "review",
-            Item::Thread { .. } | Item::ApprovalReview { .. } => "thread",
+            Item::Thread { .. } | Item::Placed { .. } | Item::ApprovalReview { .. } => "thread",
             Item::Draft { .. } => "draft",
             Item::PublishDraft { .. } => "publish-draft",
             Item::Reply { .. } => "reply",
@@ -109,6 +114,7 @@ impl Write {
         match &self.item {
             Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
             Item::Thread { comment }
+            | Item::Placed { comment }
             | Item::ApprovalReview { comment }
             | Item::Draft { comment }
             | Item::PublishDraft { comment, .. }
@@ -819,7 +825,7 @@ impl<'a> Planner<'a> {
             &anchor.path,
             &text,
         )?;
-        let item = Item::Thread {
+        let item = Item::Placed {
             comment: first.id.clone(),
         };
         let mut write = self.write(item, request, &text);

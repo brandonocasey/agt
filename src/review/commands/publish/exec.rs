@@ -102,7 +102,7 @@ pub(super) fn run_writes(
                     })?;
                 }
                 let again = Write {
-                    item: Item::Thread { comment },
+                    item: Item::Placed { comment },
                     request: Some(connection.service.thread(connection.subject(), &text)),
                     sent: vec![Some(text)],
                     fallback: None,
@@ -112,7 +112,7 @@ pub(super) fn run_writes(
             }
             // A file thread the host refuses where a general comment may not stand in for it:
             // the finding stays unposted, the failure is reported and the rest goes on.
-            Err(error) if error.refused() && matches!(write.item, Item::Thread { .. }) => {
+            Err(error) if error.refused() && matches!(write.item, Item::Placed { .. }) => {
                 posted.push(json!({
                     "kind": write.kind(),
                     "items": write.ids(),
@@ -202,6 +202,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let ids = match &write.item {
         Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
         Item::Thread { comment }
+        | Item::Placed { comment }
         | Item::ApprovalReview { comment }
         | Item::Draft { comment }
         | Item::Reply { comment } => vec![comment.clone()],
@@ -358,7 +359,10 @@ pub(super) fn save(
             })?;
             Ok(Some(review))
         }
-        Item::Thread { comment } | Item::ApprovalReview { comment } | Item::Reply { comment } => {
+        Item::Thread { comment }
+        | Item::Placed { comment }
+        | Item::ApprovalReview { comment }
+        | Item::Reply { comment } => {
             let (id, url) = service
                 .comment_created(review_url, response)
                 .ok_or_else(|| Error(format!("no comment id returned for {comment}")))?;
