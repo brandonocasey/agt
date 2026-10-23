@@ -872,6 +872,39 @@ fn github_unreviewed_commits_head_the_summary_when_nothing_is_open() {
     );
 }
 
+/// A PR head the local repository lacks is not claimed as reviewed: the headline names the
+/// newest head a run read, and the head is listed as not reviewed.
+#[test]
+fn github_a_head_missing_locally_is_not_claimed_as_reviewed() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--stale"]);
+    }
+    svc.link(&setup);
+    let reviewed = setup.head.clone();
+    // A commit made on the host only, such as a committed suggestion.
+    let host = "f".repeat(40);
+    let pushed = Setup {
+        head: host.clone(),
+        ..setup
+    };
+    svc.sync(&pushed, &Remote::new());
+    let env = &pushed.env;
+    env.run(&["sync", "--pr", "42"]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let summary = write_text(&dry, "body", "review-record");
+    assert!(
+        summary.starts_with(&format!(
+            "**⏳ 1 new commit not reviewed** at `{}`\n\nNot reviewed: `{}` (not in the local repository)\n",
+            &reviewed[..7],
+            &host[..7]
+        )),
+        "{summary}"
+    );
+}
+
 /// A summary past the size limit continues in part comments, each posted once and then edited
 /// in place, and the summary points at them once their urls are known.
 #[test]

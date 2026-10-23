@@ -724,6 +724,7 @@ impl<'a> Planner<'a> {
             &covered,
             &qa,
             commits.as_deref(),
+            head_tree.is_some(),
             &links,
             self.attempt,
         );

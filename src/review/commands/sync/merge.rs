@@ -405,7 +405,7 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
             Some(pending) if pending == data.resolved => thread.resolve_pending = None,
             Some(_) => {}
             None => {
-                thread.set_remote_resolved(data.resolved);
+                thread.set_remote_resolved(data.resolved, now);
                 if data.resolved {
                     thread.held = false;
                 }
@@ -494,7 +494,7 @@ fn answer(thread: &mut Thread, data: ThreadData, trust: &Trust, now: &str) {
         if !resolvable && thread.resolve_pending.is_none() {
             let fixed = fixed_sha(&comment.body);
             let rejected = rejected_reason(&comment.body);
-            thread.set_remote_resolved(fixed.is_some() || rejected.is_some());
+            thread.set_remote_resolved(fixed.is_some() || rejected.is_some(), now);
             if thread.resolved {
                 thread.held = false;
             }

@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use super::render::{duration, kind_emoji, location, outcome, short};
 use crate::forge::markers;
 use crate::git::CommitInfo;
-use crate::review::commands::approve::is_open;
+use crate::review::commands::approve::{blocking_threads, is_open};
 use crate::review::commands::qa::{CheckState, environment};
 use crate::review::commands::usage::run_spend;
 use crate::store::model::{CommitPatch, Outcome, PassKind, QaRun, Resolution, Run, Target, Thread};
@@ -63,21 +63,26 @@ impl Approvals<'_> {
     /// Whether closed or moved `thread` is no longer shown: the head is approved, or the thread
     /// settled by the time everything was.
     fn drops(&self, thread: &Thread) -> bool {
-        self.all
-            || self
-                .since
-                .is_some_and(|since| thread.updated_at.as_str() <= since)
+        self.all || self.since.is_some_and(|since| closed_at(thread) <= since)
     }
 }
 
+/// When `thread` was closed. A thread closed before the time was recorded falls back to its last
+/// change.
+fn closed_at(thread: &Thread) -> &str {
+    thread.closed_at.as_deref().unwrap_or(&thread.updated_at)
+}
+
 /// The summary text, then the text of each part. `commits` are the PR/MR's commits, oldest
-/// first, when git could list them. A part the host still holds from an earlier, longer summary
+/// first, when git could list them; `head_local` is whether the PR/MR head is in the local
+/// repository. A part the host still holds from an earlier, longer summary
 /// is blanked.
 pub(super) fn summary_texts(
     target: &Target,
     covered: &[Covered],
     qa: &QaSummary,
     commits: Option<&[CommitInfo]>,
+    head_local: bool,
     links: &Links,
     attempt: &str,
 ) -> Vec<String> {
@@ -108,7 +113,14 @@ pub(super) fn summary_texts(
                 .any(|thread| thread.check.as_deref() == Some(state.check.id.as_str()))
         })
         .collect();
-    let missing = unreviewed(covered, commits);
+    // A head the repository lacks cannot be listed or read: the headline names the newest head
+    // a run read, and the PR/MR head is not reviewed.
+    let unlisted =
+        !head_local && !covered.is_empty() && !covered.iter().any(|run| run.head == qa.head);
+    let (missing, shown) = match covered.last() {
+        Some(newest) if unlisted => (vec![short(&qa.head).to_owned()], newest.head.as_str()),
+        _ => (unreviewed(covered, commits), qa.head.as_str()),
+    };
     let approvals = approvals(target, covered, qa);
     let mut items: Vec<String> = open
         .iter()
@@ -121,9 +133,12 @@ pub(super) fn summary_texts(
             .enumerate()
             .map(|(index, state)| check_item(open.len() + index + 1, state)),
     );
-    let head = headline(&qa.head, items.len(), missing.len(), &approvals);
+    let head = headline(shown, items.len(), missing.len(), &approvals);
     let mut tail = String::new();
     not_reviewed(&mut tail, &missing);
+    if unlisted {
+        tail.push_str(" (not in the local repository)");
+    }
     follow_ups(&mut tail, &reported, &approvals);
     details(&mut tail, qa, &reported, &approvals);
     footer(&mut tail, covered, qa);
@@ -270,7 +285,8 @@ fn headline(sha: &str, todo: usize, missing: usize, approvals: &Approvals) -> St
     text
 }
 
-/// The approvals of the PR/MR head: a review approval thread's, and a QA run's.
+/// The approvals of the PR/MR head: a review approval thread's, and a QA run's. A finding that
+/// blocks approval, opened after it, withdraws the review approval and what it hides.
 fn approvals<'a>(target: &'a Target, covered: &[Covered], qa: &QaSummary) -> Approvals<'a> {
     let approvals = || {
         target
@@ -284,9 +300,10 @@ fn approvals<'a>(target: &'a Target, covered: &[Covered], qa: &QaSummary) -> App
             .iter()
             .filter_map(|run| run.approval.as_ref())
     };
-    let review = approvals().any(|(approval, _)| approval.head == qa.head);
+    let blocked = blocking_threads(target).next().is_some();
+    let review = !blocked && approvals().any(|(approval, _)| approval.head == qa.head);
     let qa_now = qa_approvals().any(|approval| approval.head == qa.head);
-    let reviewed = covered.is_empty() || review;
+    let reviewed = !blocked && (covered.is_empty() || review);
     let tested = qa.runs.is_empty() || qa_now;
     // The last approval that left every covered kind approved: the older of the latest of each.
     let latest = |times: Vec<&'a str>, needed: bool| match (needed, times.into_iter().max()) {
@@ -301,7 +318,8 @@ fn approvals<'a>(target: &'a Target, covered: &[Covered], qa: &QaSummary) -> App
                 .collect(),
             !qa.runs.is_empty(),
         ))
-        .and_then(|(review, qa)| [review, qa].into_iter().flatten().min());
+        .and_then(|(review, qa)| [review, qa].into_iter().flatten().min())
+        .filter(|_| !blocked);
     Approvals {
         review,
         qa: qa_now,
@@ -882,6 +900,50 @@ mod tests {
         assert!(pushed.drops(&thread("2026-01-02T00:00:00Z")));
         assert!(!pushed.drops(&thread("2026-01-03T00:00:00Z")));
         assert!(!approvals(false, false, false, None).drops(&thread("2026-01-01T00:00:00Z")));
+        // A sync bumps `updated_at` of a closed thread; when it closed is what counts.
+        let mut synced = thread("2026-01-04T00:00:00Z");
+        synced.closed_at = Some("2026-01-01T00:00:00Z".into());
+        assert!(pushed.drops(&synced));
+    }
+
+    #[test]
+    fn a_blocking_finding_withdraws_the_approval() {
+        let mut target: Target = serde_json::from_value(serde_json::json!({
+            "version": 1, "revision": 1, "key": "k", "repo": "r", "kind": "branch",
+            "branch": null, "branch_birth": null, "base": null, "head": null,
+            "created_at": "t", "updated_at": "t", "review": null,
+            "runs": [], "records": [], "threads": [],
+        }))
+        .unwrap();
+        let thread = |id: &str| {
+            Thread::new(
+                id.into(),
+                crate::store::model::ThreadType::Bug,
+                Vec::new(),
+                "2026-01-01T00:00:00Z".into(),
+                "2026-01-01T00:00:00Z".into(),
+            )
+        };
+        let mut approval = thread("a1");
+        approval.resolved = true;
+        approval.approval = Some(crate::store::model::Approval {
+            head: "abc".into(),
+            formal: false,
+            approved: false,
+            refused: None,
+        });
+        target.threads.push(approval);
+        let qa = QaSummary {
+            runs: Vec::new(),
+            checks: Vec::new(),
+            head: "abc".into(),
+        };
+        let approved = super::approvals(&target, &[], &qa);
+        assert!(approved.review && approved.all);
+        // A finding opened at the same head leaves nothing approved.
+        target.threads.push(thread("f1"));
+        let blocked = super::approvals(&target, &[], &qa);
+        assert!(!blocked.review && !blocked.all && blocked.since.is_none());
     }
 
     #[test]

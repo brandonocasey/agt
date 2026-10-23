@@ -657,13 +657,13 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
             }
             let was = thread.resolved;
             if reopen {
-                thread.resolved = false;
+                thread.set_resolved(false, now);
                 thread.resolution.clone_from(&resolution);
                 thread.held = triage == Some(Triage::Question);
             } else if records_only {
                 thread.held = triage == Some(Triage::Question);
             } else {
-                thread.resolved = true;
+                thread.set_resolved(true, now);
                 thread.held = false;
                 if resolution.is_some() {
                     thread.resolution.clone_from(&resolution);

@@ -479,6 +479,9 @@ pub struct Thread {
     pub deleted_seen_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// When the thread was last closed or moved. Unlike `updated_at`, a sync does not bump it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
     /// An approval of `head`: `publish` posts it as a comment, or with `formal` as the
     /// host's approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -535,6 +538,7 @@ impl Thread {
             deleted_seen_at: None,
             created_at,
             updated_at,
+            closed_at: None,
             approval: None,
             check: None,
             issue: None,
@@ -543,11 +547,22 @@ impl Thread {
 
     /// Applies the host's resolved state, keeping `resolution` consistent: a thread the host
     /// reopened no longer carries the outcome of its resolving.
-    pub fn set_remote_resolved(&mut self, resolved: bool) {
-        self.resolved = resolved;
+    pub fn set_remote_resolved(&mut self, resolved: bool, now: &str) {
+        self.set_resolved(resolved, now);
         if !resolved && self.resolution.as_ref().is_some_and(Resolution::resolves) {
             self.resolution = None;
         }
+    }
+
+    /// Sets the resolved state, stamping `closed_at` when the thread closes and clearing it when
+    /// it reopens.
+    pub fn set_resolved(&mut self, resolved: bool, now: &str) {
+        if resolved && !self.resolved {
+            self.closed_at = Some(now.to_owned());
+        } else if !resolved {
+            self.closed_at = None;
+        }
+        self.resolved = resolved;
     }
 }
 
