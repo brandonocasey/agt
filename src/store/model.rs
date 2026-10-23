@@ -390,6 +390,18 @@ pub struct RecordPost {
     /// posted, and the summary text an edit replaces until the edit lands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<String>,
+    /// The continuation comments of a summary too long for one comment, part 2 first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<SummaryPart>,
+}
+
+/// Publish state of one continuation comment of the summary.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SummaryPart {
+    #[serde(flatten)]
+    pub delivery: Delivery,
+    pub remote_id: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

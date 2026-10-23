@@ -3,12 +3,14 @@ use serde_json::{Value, json};
 use super::plan::{Item, Write};
 use crate::core::clock;
 use crate::core::error::{Error, Result};
-use crate::forge::markers::agent_id;
+use crate::forge::markers::{self, agent_id};
 use crate::forge::service::Inline;
 use crate::review::commands::Ctx;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::sync::merge::landed;
-use crate::store::model::{Approval, Delivery, PostState, RecordPost, RemoteComment, Target};
+use crate::store::model::{
+    Approval, Delivery, PostState, RecordPost, RemoteComment, SummaryPart, Target,
+};
 
 /// Runs writes in order. Each item is marked `posting` and saved before its call and gets its
 /// remote id right after, so a rerun can match a write whose response was lost.
@@ -54,20 +56,14 @@ pub(super) fn run_writes(
                 posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": reason }));
                 continue;
             }
-            // The summary comment was deleted on the host: post it anew.
+            // The summary comment or one of its parts was deleted on the host: post it anew.
             Err(error)
                 if error.status == Some(404)
-                    && let Item::Summary {
-                        runs,
-                        remote: Some(_),
-                    } = &write.item =>
+                    && let Some(item) = reposted(&write.item) =>
             {
                 let text = write.sent.first().cloned().flatten().unwrap_or_default();
                 let again = Write {
-                    item: Item::Summary {
-                        runs: runs.clone(),
-                        remote: None,
-                    },
+                    item,
                     request: Some(connection.service.note(connection.subject(), &text)),
                     sent: write.sent.clone(),
                     fallback: None,
@@ -123,6 +119,29 @@ pub(super) fn run_writes(
     Ok(())
 }
 
+/// The summary item that posts anew what an edit found deleted.
+fn reposted(item: &Item) -> Option<Item> {
+    match item {
+        Item::Summary {
+            runs,
+            remote: Some(_),
+        } => Some(Item::Summary {
+            runs: runs.clone(),
+            remote: None,
+        }),
+        Item::SummaryPart {
+            runs,
+            number,
+            remote: Some(_),
+        } => Some(Item::SummaryPart {
+            runs: runs.clone(),
+            number: *number,
+            remote: None,
+        }),
+        _ => None,
+    }
+}
+
 /// Edits the target under its lock; fails if it was deleted since `base` was read.
 pub(super) fn change<R>(
     ctx: &Ctx,
@@ -158,9 +177,24 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
         | Item::Reply { comment } => vec![comment.clone()],
         Item::Summary { runs, remote } => {
             let text = texts.next().flatten();
+            // The parts of the comment the runs share, for a run that joins it now.
+            let mut shared: Vec<SummaryPart> = Vec::new();
+            for (run, _) in runs {
+                if let Some(Some(record)) = target.record_mut(run)
+                    && remote.is_some()
+                    && record.remote_id == *remote
+                    && shared.is_empty()
+                {
+                    shared.clone_from(&record.parts);
+                }
+            }
             for (run, head) in runs {
                 if let Some(record) = target.record_mut(run) {
                     let previous = record.take();
+                    let parts = match previous.as_ref().map(|record| record.parts.clone()) {
+                        Some(parts) if !parts.is_empty() => parts,
+                        _ => shared.clone(),
+                    };
                     let url = previous
                         .as_ref()
                         .filter(|record| record.remote_id == *remote)
@@ -184,8 +218,43 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
                         remote_id: remote.clone(),
                         url,
                         earlier,
+                        parts,
                     });
                 }
+            }
+            return;
+        }
+        Item::SummaryPart {
+            runs,
+            number,
+            remote,
+        } => {
+            let text = texts.next().flatten();
+            let index = number - 2;
+            for run in runs {
+                let Some(Some(record)) = target.record_mut(run) else {
+                    continue;
+                };
+                if record.parts.len() <= index {
+                    record.parts.resize_with(index + 1, || SummaryPart {
+                        delivery: Delivery::new(PostState::Pending),
+                        remote_id: None,
+                        url: None,
+                    });
+                }
+                let part = &mut record.parts[index];
+                if part.remote_id != *remote {
+                    part.url = None;
+                }
+                // The text this edit replaces stays trusted until the edit lands.
+                if let Some(old) = part.delivery.sent.take()
+                    && Some(&old) != text.as_ref()
+                    && !record.earlier.contains(&old)
+                {
+                    record.earlier.push(old);
+                }
+                part.delivery.begin(attempt, text.clone());
+                part.remote_id.clone_from(remote);
             }
             return;
         }
@@ -299,6 +368,30 @@ pub(super) fn save(
                 for (run, _) in runs {
                     if let Some(Some(record)) = target.record_mut(run) {
                         landed(record, id.clone(), url.clone());
+                    }
+                }
+                Ok(())
+            })?;
+            Ok(Some(id))
+        }
+        Item::SummaryPart { runs, number, .. } => {
+            let (id, url) = service
+                .comment_created(review_url, response)
+                .ok_or_else(|| {
+                    Error(format!("no comment id returned for summary part {number}"))
+                })?;
+            change(ctx, target, |target| {
+                for run in runs {
+                    if let Some(Some(record)) = target.record_mut(run)
+                        && let Some(part) = record.parts.get_mut(number - 2)
+                    {
+                        part.delivery.post = PostState::Posted;
+                        part.remote_id = Some(id.clone());
+                        part.url.clone_from(&url);
+                        let part_id = markers::summary_part_id(*number);
+                        record
+                            .earlier
+                            .retain(|body| agent_id(body).as_deref() != Some(part_id.as_str()));
                     }
                 }
                 Ok(())

@@ -7,7 +7,8 @@ use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{
-    PUBLISH, Setup, assert_never_posted, count_calls, ids, kinds, open_ids, sent, thread,
+    PUBLISH, Review, Setup, assert_never_posted, count_calls, ids, kinds, open_ids, sent, thread,
+    write_text,
 };
 use crate::support::{Env, args, executable, fixture, numbered, strs};
 
@@ -287,12 +288,9 @@ fn github_a_general_finding_is_skipped_and_listed_in_the_summary() {
     );
     assert_eq!(kinds(&dry, "writes"), ["review", "summary"], "{dry}");
     let summary = dry["writes"][1]["input"]["body"].as_str().unwrap();
+    assert!(summary.starts_with("**⚠️ 2 to fix** at `"), "{summary}");
     assert!(
-        summary.starts_with("**⚠️ 2 to fix** · agent review at `"),
-        "{summary}"
-    );
-    assert!(
-        summary.contains("2. **✏️ nit** · General text of f2.\n"),
+        summary.contains("2. ✏️ **General text of f2.**\n   whole PR\n"),
         "{summary}"
     );
     assert!(!summary.contains("   > General text of f2."), "{summary}");
@@ -676,6 +674,128 @@ fn own_github_upgrade_to_formal_is_reported() {
         "{dry}"
     );
     assert_eq!(dry["writes"], json!([]), "{dry}");
+}
+
+/// Commits no review read are the whole headline when nothing is open, and are named below.
+#[test]
+fn github_unreviewed_commits_head_the_summary_when_nothing_is_open() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--stale"]);
+    }
+    svc.link(&setup);
+    // A push after the review ended.
+    env.write("b.txt", "b\n");
+    let later = env.commit_all("later");
+    let pushed = Setup {
+        head: later.clone(),
+        ..setup
+    };
+    svc.sync(&pushed, &Remote::new());
+    let env = &pushed.env;
+    env.run(&["sync", "--pr", "42"]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let summary = write_text(&dry, "body", "review-record");
+    assert!(
+        summary.starts_with(&format!(
+            "**⏳ 1 new commit not reviewed** at `{}`\n\nNot reviewed: `{}`\n",
+            &later[..7],
+            &later[..7]
+        )),
+        "{summary}"
+    );
+}
+
+/// A summary past the size limit continues in part comments, each posted once and then edited
+/// in place, and the summary points at them once their urls are known.
+#[test]
+fn github_a_long_summary_continues_in_parts() {
+    let svc = Github::new();
+    let finding = format!(
+        r#"{{"type":"nit","scenario":"Sentence one. {}"}}"#,
+        "long text ".repeat(190)
+    );
+    let findings = format!("[{}]", vec![finding; 45].join(","));
+    let setup = Setup::branch(
+        svc.origin(),
+        &Review {
+            reviewers: PUBLISH.reviewers,
+            findings: &findings,
+        },
+        false,
+        false,
+    );
+    let env = &setup.env;
+    svc.link(&setup);
+    for (nth, id) in [(1, 601), (2, 602)] {
+        env.respond_nth(
+            &strs(&svc.call(Call::PostNote)),
+            nth,
+            &format!(
+                r#"{{"id":{id},"html_url":"https://github.com/me/repo/pull/42#issuecomment-{id}"}}"#
+            ),
+        );
+    }
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["summary", "summary"]);
+    assert_eq!(published["posted"][0]["items"], json!(["summary"]));
+    assert_eq!(published["posted"][1]["items"], json!(["summary/p2"]));
+    let record = env.run(&["status", "--full"])["runs"][0]["record"].clone();
+    assert_eq!(record["remote_id"], "601", "{record}");
+    assert_eq!(record["parts"][0]["remote_id"], "602", "{record}");
+    let summary = record["sent"].as_str().unwrap();
+    assert!(summary.chars().count() <= 65_000);
+    assert!(summary.starts_with("**⚠️ 45 to fix** at `"), "{summary}");
+    assert!(
+        summary.contains("continue in part 2 below."),
+        "the url of part 2 is not known yet: {summary}"
+    );
+    let part = record["parts"][0]["sent"].as_str().unwrap();
+    assert!(part.starts_with("Part 2 of the agt summary.\n\n"), "{part}");
+    assert!(part.contains("45. ✏️ **Sentence one.**"), "{part}");
+    assert!(!part.contains("to fix"), "a part holds no headline: {part}");
+    assert!(
+        part.contains("<!-- agent-review id=summary/p2 attempt="),
+        "{part}"
+    );
+
+    // With the urls known the next publish links the two, then nothing is left to send.
+    for id in ["601", "602"] {
+        env.respond(
+            &[
+                "api",
+                "--method",
+                "PATCH",
+                &format!("repos/me/repo/issues/comments/{id}"),
+                "--input",
+                "-",
+            ],
+            &format!(
+                r#"{{"id":{id},"html_url":"https://github.com/me/repo/pull/42#issuecomment-{id}"}}"#
+            ),
+        );
+    }
+    let again = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&again, "posted"), ["summary", "summary"], "{again}");
+    let record = env.run(&["status", "--full"])["runs"][0]["record"].clone();
+    let summary = record["sent"].as_str().unwrap();
+    assert!(
+        summary
+            .contains("continue in [part 2](https://github.com/me/repo/pull/42#issuecomment-602)."),
+        "{summary}"
+    );
+    let part = record["parts"][0]["sent"].as_str().unwrap();
+    assert!(
+        part.starts_with(
+            "Part 2 of the [agt summary](https://github.com/me/repo/pull/42#issuecomment-601)."
+        ),
+        "{part}"
+    );
+    let last = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&last, "posted"), Vec::<String>::new(), "{last}");
+    assert_eq!(svc.count(env, Call::PostNote), 2);
 }
 
 // GitLab

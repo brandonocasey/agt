@@ -178,12 +178,31 @@ fn take_record(
     comment: &CommentData,
     trust: &Trust,
 ) -> bool {
+    let own = trust.own_id(comment);
+    // A continuation of the summary holds no record, but is ours and is not a finding.
+    if let Some(number) = own.as_deref().and_then(markers::summary_part) {
+        let posts = runs
+            .iter_mut()
+            .filter_map(|run| run.record.as_mut())
+            .chain(qa_runs.iter_mut().filter_map(|run| run.record.as_mut()));
+        for part in posts.filter_map(|record| record.parts.get_mut(number - 2)) {
+            if (part.remote_id.as_deref() == Some(comment.id.as_str())
+                || (part.remote_id.is_none() && part.delivery.is_posting()))
+                && (!part.delivery.is_posting()
+                    || part.delivery.is_attempt(agent_attempt(&comment.body)))
+            {
+                part.delivery.post = PostState::Posted;
+                part.remote_id = Some(comment.id.clone());
+                part.url.clone_from(&comment.url);
+            }
+        }
+        return true;
+    }
     let found = parse_records(comment);
     let qa_found = markers::parse_qa_records(&comment.body);
     if found.is_empty() && qa_found.is_empty() {
         return false;
     }
-    let own = trust.own_id(comment);
     // A run's own record names the run in its id; the summary holds every run it lists.
     let claimed: Vec<&str> = match own.as_deref() {
         Some(markers::SUMMARY_ID) => found

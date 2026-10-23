@@ -374,7 +374,7 @@ agt qa publish --dry-run            # as agt review publish
   QA runs never count as reviews.
 - `show` takes a QA run (`qa-4f2a`) or check (`qa-4f2a.k1`) id, as does `agt review show`.
 - `publish` adds QA to the PR/MR summary: open QA findings and failed, blocked or stale checks
-  join the list of what is left to fix, the status line counts passing checks, and the checks
+  join the list of what is left to fix (an out-of-date check does not), and the checks
   table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
   a `<!-- qa-record v1 id=<run> head=<sha> -->` marker, distinct from review records, which
   `sync` reads to mark the run's record posted. A QA finding is headed
@@ -728,21 +728,29 @@ local reads continue.
 - The summary is one general comment per PR/MR: posted with the first ended
   run, then edited in place (`PATCH .../issues/comments/<id>` on GitHub,
   `PUT .../notes/<id>` on GitLab), and posted anew when the host no longer has
-  it. It opens with `**⚠️ <N> to fix** · agent review and QA at `<head>``
-  (`**✅ Nothing to fix**` when none) and a numbered list of each open finding
-  or QA thread (kind, location, first sentence, and a link to its thread, or its
-  whole text when it has none) and each failed, blocked or stale QA check. One
-  status line follows: QA checks passing, settled findings, and PR/MR commits
-  no pass read. Findings moved to issues are listed under **📋 Follow-up
-  issues**. A collapsed Details section holds the QA checks table, the settled
-  posted findings with their outcome, and a count of those settled before they
-  were posted. A grey footer names the agt version, the reviewers and their
-  models, and the review time. A summary longer than GitHub's 65,536 characters
-  is cut at a line and says so. It ends with one
+  it. The whole PR/MR, whatever `--run` selects to post. Its headline is the only status:
+  `**⚠️ <N> to fix** at `<head>`` (plus ` · <n> commits not reviewed`),
+  `**⏳ <n> new commits not reviewed** at `<head>`` when nothing is open but a PR/MR
+  commit no run read, or `**✅ Nothing to fix** at `<head>``, then ` · 🔍 approved` and
+  ` · 🧪 QA approved` for approvals of that head. "To fix" counts open findings and current
+  failed or blocked QA checks no open thread explains; out-of-date checks never count. Each
+  item has two lines: the emoji and the first sentence in bold, then severity, `Waiting on
+  the PR author`, `QA: <check>`, the place (`path:line` or `whole PR`), `Related: <issue>`
+  and `[thread](url)`, or `not posted as a thread, full text below` and the text quoted.
+  `Not reviewed: ...` names the commits no run read. Findings moved to issues are listed under
+  **📋 Follow-up issues**. A collapsed Details section holds the QA checks table (a result
+  that tested an older head says `(out of date)`) and the closed findings with their outcome,
+  with a count of those closed before they were posted. After approval, the follow-ups and
+  closed findings drop; only the QA table stays. A grey footer names the agt version, what
+  ran (🔍 review, 🧪 QA), the reviewers and their models, and the review time. A summary
+  longer than 65,000 characters continues in part comments, split at item boundaries and
+  edited in place: `<!-- agent-review id=summary/p<N> attempt=<attempt> -->`, each starting
+  `Part <N> of the agt summary` and holding items only; the summary ends with a pointer to
+  them. The summary ends with one
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`
   per run it covers and `<!-- agent-review id=summary attempt=<attempt> -->`.
   `N` counts the run's passes covering the repaired head by the same rules as
-  `status`. Each covered run's `record` names the summary comment.
+  `status`. Each covered run's `record` names the summary comment and its `parts`.
 - Concurrent `publish` commands for one repository and PR/MR run one at a time.
   Each command syncs after waiting, so it does not repeat earlier writes.
 - Crash safety: each item is saved as `posting` with the attempt id and the

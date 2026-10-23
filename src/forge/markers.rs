@@ -15,6 +15,21 @@ const REVIEW_ID: &str = "review/";
 const RECORD_SUFFIX: &str = "/record";
 /// Local id of the one summary comment of a PR/MR, which holds the record of every run.
 pub const SUMMARY_ID: &str = "summary";
+const PART_INFIX: &str = "/p";
+
+/// Local id of part `number` (2 or more) of a summary that does not fit one comment.
+pub fn summary_part_id(number: usize) -> String {
+    format!("{SUMMARY_ID}{PART_INFIX}{number}")
+}
+
+/// The number of the summary part with local id `id`.
+pub fn summary_part(id: &str) -> Option<usize> {
+    id.strip_prefix(SUMMARY_ID)?
+        .strip_prefix(PART_INFIX)?
+        .parse()
+        .ok()
+        .filter(|number| *number >= 2)
+}
 
 /// The marker that ties a posted body to a local comment id and, once sent, its attempt.
 pub fn agent(id: &str, attempt: Option<&str>) -> String {
@@ -240,6 +255,9 @@ mod tests {
         assert_eq!(agent_id(&summary).as_deref(), Some(SUMMARY_ID));
         assert!(parse_records("no marker").is_empty());
         assert_eq!(record_run("rv-7k2m/record"), Some("rv-7k2m"));
+        assert_eq!(summary_part(&summary_part_id(3)), Some(3));
+        assert_eq!(summary_part(SUMMARY_ID), None);
+        assert_eq!(summary_part("summary/p1"), None);
         assert!(is_review_id(&review_id("abc")));
         assert_eq!(
             agent_id(&agent(&review_id("abc"), None)).as_deref(),

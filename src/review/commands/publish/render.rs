@@ -32,7 +32,7 @@ pub(super) fn kind_emoji(kind: ThreadType) -> &'static str {
     match kind {
         ThreadType::Bug => "🐛",
         ThreadType::Question => "❓",
-        ThreadType::Requirement => "📋",
+        ThreadType::Requirement => "🎯",
         ThreadType::Nit => "✏️",
         ThreadType::Comment => "💬",
     }
@@ -66,12 +66,12 @@ pub(super) fn outcome(thread: &Thread) -> String {
     match (&thread.resolution, thread.resolved) {
         (Some(Resolution::Fixed { sha }), true) => format!("✅ Fixed in {}", short(sha)),
         (Some(Resolution::Answered), true) => "💬 Answered".to_owned(),
-        (Some(Resolution::Rejected { reason }), true) => format!("🚫 Rejected: {reason}"),
-        (Some(Resolution::Stale), true) => "➖ Stale".to_owned(),
+        (Some(Resolution::Rejected { reason }), true) => format!("🚫 Won't fix: {reason}"),
+        (Some(Resolution::Stale), true) => "➖ No longer applies".to_owned(),
         (Some(Resolution::Moved { issue }), true) => format!("📋 Moved to {issue}"),
         (_, true) => "✅ Resolved".to_owned(),
         (Some(Resolution::NotFixed { reason }), false) => format!("❌ Not fixed: {reason}"),
-        (_, false) if thread.held => "⏸️ Held for the author".to_owned(),
+        (_, false) if thread.held => "⏸️ Waiting on the PR author".to_owned(),
         (_, false) => "⚠️ Open".to_owned(),
     }
 }

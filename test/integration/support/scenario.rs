@@ -7,13 +7,13 @@ use serde_json::Value;
 use super::{Env, numbered};
 
 /// The reviewer and findings a [`Setup`] is reviewed with.
-pub struct Review {
-    pub reviewers: &'static str,
-    pub findings: &'static str,
+pub struct Review<'a> {
+    pub reviewers: &'a str,
+    pub findings: &'a str,
 }
 
 /// An in-diff finding (f1), an out-of-diff one (f2, line 9) and a killed one (f3).
-pub const PUBLISH: Review = Review {
+pub const PUBLISH: Review<'static> = Review {
     reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"claude-code","harness_version":"2.1.296","session":"a0b5ad828155531d2"}]"#,
     findings: r#"[
   {"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"In-diff text of f1."},
@@ -23,7 +23,7 @@ pub const PUBLISH: Review = Review {
 };
 
 /// Two in-diff findings on one line.
-pub const SYNC: Review = Review {
+pub const SYNC: Review<'static> = Review {
     reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
     findings: r#"[
   {"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"Local text of f1."},
@@ -300,15 +300,14 @@ pub fn local_changes(setup: &Setup, reopen: &str, answer: &str) {
 pub fn assert_summary(setup: &Setup, summary: &str) {
     let short = &setup.head[..7];
     let expected = [
-        "1. **✏️ nit** · ".to_owned(),
-        "✓ 1 finding settled".to_owned(),
-        "<details><summary>Details</summary>".to_owned(),
+        "1. ✏️ **".to_owned(),
+        "<details><summary>1 🔍 closed finding</summary>".to_owned(),
         "</details>".to_owned(),
         format!(
-            "> <sub>agt {} · 1 reviewer, m1 · ",
+            "> <sub>agt {} · 🔍 review · 1 reviewer, m1 · ",
             env!("CARGO_PKG_VERSION")
         ),
-        " · edited on each publish</sub>".to_owned(),
+        " · updated after each review</sub>".to_owned(),
         format!(
             "<!-- review-record v2 id={} head={} reviews-at-head=1 open=1 -->",
             setup.run, setup.head
@@ -318,7 +317,7 @@ pub fn assert_summary(setup: &Setup, summary: &str) {
         assert!(summary.contains(&text), "{text} missing from {summary}");
     }
     assert!(
-        summary.starts_with(&format!("**⚠️ 1 to fix** · agent review at `{short}`\n")),
+        summary.starts_with(&format!("**⚠️ 1 to fix** at `{short}`\n")),
         "{summary}"
     );
     assert!(

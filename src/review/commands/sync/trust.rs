@@ -43,7 +43,14 @@ impl<'a> Trust<'a> {
             .iter()
             .filter_map(|run| run.record.as_ref())
             .chain(target.qa_runs.iter().filter_map(|run| run.record.as_ref()))
-            .flat_map(|record| record.delivery.sent.iter().chain(&record.earlier))
+            .flat_map(|record| {
+                record.delivery.sent.iter().chain(&record.earlier).chain(
+                    record
+                        .parts
+                        .iter()
+                        .filter_map(|part| part.delivery.sent.as_ref()),
+                )
+            })
             .map(String::as_str);
         let killed = target
             .runs

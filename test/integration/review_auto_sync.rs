@@ -551,7 +551,8 @@ fn automatic_publish_attaches_and_sends_only_the_completed_run() {
         .join("\n");
     assert!(sent.contains("CURRENT FINDING"), "{sent}");
     assert!(sent.contains("CURRENT COMMENT"), "{sent}");
-    assert!(sent.contains(&format!("id={run}/record")), "{sent}");
+    assert!(sent.contains("id=summary attempt="), "{sent}");
+    assert!(!sent.contains("/record"), "{sent}");
     for private in [
         "OLD PRIVATE FINDING",
         "UNRELATED PENDING THREAD",

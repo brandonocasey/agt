@@ -308,6 +308,70 @@ fn published_setup(svc: &Github, finding: bool, before_end: impl FnOnce(&Env)) -
     (setup, run)
 }
 
+/// A failed check no thread explains is an item of its own, with its evidence; the headline
+/// counts it and the table keeps the whole result.
+#[test]
+fn a_failed_check_no_thread_explains_is_left_to_fix() {
+    let svc = Github::new();
+    let (setup, _) = published_setup(&svc, false, |_| {});
+    let dry = qa(&setup.env, &["publish", "--pr", "42", "--dry-run"]);
+    let summary = write_text(&dry, "body", "qa-record");
+    assert!(
+        summary.starts_with(&format!("**⚠️ 1 to fix** at `{}`\n\n", &setup.head[..7])),
+        "{summary}"
+    );
+    assert!(
+        summary.contains(
+            "1. 🧪 **pay with a card failed.**\n   [evidence](https://example.com/log)\n"
+        ),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("<details><summary>1 🧪 QA check</summary>"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains(
+            "| pay with a card | ❌ fail |  | [1](https://example.com/log) 1 not uploaded |"
+        ),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("> <sub>agt ") && summary.contains(" · 🔍 review and 🧪 QA · "),
+        "{summary}"
+    );
+}
+
+/// A passing check and a QA approval of the head make the headline say so.
+#[test]
+fn a_qa_approval_of_the_head_shows_in_the_headline() {
+    let svc = Github::new();
+    let (setup, _) = published_setup(&svc, false, |_| {});
+    let env = &setup.env;
+    let again = start(env, &[]);
+    check(env, &again, "pay with a card", "pass", &[]);
+    qa(env, &["run", "end", "--run", &again]);
+    let dry = qa(env, &["publish", "--pr", "42", "--dry-run"]);
+    let summary = write_text(&dry, "body", "qa-record");
+    assert!(
+        summary.starts_with(&format!(
+            "**✅ Nothing to fix** at `{}`\n",
+            &setup.head[..7]
+        )),
+        "{summary}"
+    );
+    qa(env, &["approve"]);
+    let dry = qa(env, &["publish", "--pr", "42", "--dry-run"]);
+    let summary = write_text(&dry, "body", "qa-record");
+    assert!(
+        summary.starts_with(&format!(
+            "**✅ Nothing to fix** at `{}` · 🧪 QA approved\n",
+            &setup.head[..7]
+        )),
+        "{summary}"
+    );
+}
+
 #[test]
 fn publish_adds_a_qa_section_to_the_summary() {
     let svc = Github::new();
@@ -337,25 +401,24 @@ fn publish_adds_a_qa_section_to_the_summary() {
         "{dry}"
     );
     let summary = write_text(&dry, "body", "qa-record");
+    assert!(summary.starts_with("**⚠️ 1 to fix** at `"), "{summary}");
     assert!(
-        summary.starts_with("**⚠️ 1 to fix** · agent review and QA at `"),
-        "{summary}"
-    );
-    assert!(
-        summary.contains("1. **🐛 bug (high)** · QA: pay with a card · Payment hangs."),
+        summary.contains("1. 🧪 **Payment hangs.**\n   High · QA: pay with a card · whole PR · not posted as a thread, full text below"),
         "{summary}"
     );
     assert!(
         summary.contains("\n   > Payment hangs. The spinner never stops."),
         "{summary}"
     );
-    assert!(summary.contains("⚠ QA 0 of 1 pass"), "{summary}");
+    assert!(summary.contains("1 🧪 QA check</summary>"), "{summary}");
     assert!(
-        summary.contains("| QA check | Result | Environment | Evidence |"),
+        summary.contains("| 🧪 QA check | Result | Where | Evidence |"),
         "{summary}"
     );
     assert!(
-        summary.contains("| pay with a card | ❌ fail |  | [1](https://example.com/log) 1 local |"),
+        summary.contains(
+            "| pay with a card | ❌ fail |  | [1](https://example.com/log) 1 not uploaded |"
+        ),
         "{summary}"
     );
     assert!(!summary.contains("local.log"), "{summary}");

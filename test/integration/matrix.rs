@@ -631,10 +631,7 @@ fn record_counts_reviews_like_status(svc: Svc) {
         "the threads this publish posts show as posted: {summary}"
     );
     assert!(
-        summary.starts_with(&format!(
-            "**⚠️ 2 to fix** · agent review at `{}`\n",
-            &setup.head[..7]
-        )),
+        summary.starts_with(&format!("**⚠️ 2 to fix** at `{}`\n", &setup.head[..7])),
         "{summary}"
     );
     assert!(
@@ -1118,9 +1115,12 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record(svc: Svc) {
     assert!(!open.contains(&f1), "{open}");
     let dry = dry_run(env, svc, &[]);
     let summary = write_starting(&dry, "body", "**⚠️ 1 to fix**");
-    assert!(summary.contains("✓ 1 finding settled"), "{summary}");
     assert!(
-        summary.contains("| 🚫 Rejected: Intended behavior |"),
+        summary.contains("1 🔍 closed finding</summary>"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("| 🚫 Won't fix: Intended behavior |"),
         "{summary}"
     );
 }
@@ -1168,7 +1168,7 @@ fn a_remote_unresolve_clears_the_fixed_outcome(svc: Svc) {
     assert_eq!(synced["resolution"], Value::Null, "{synced}");
     let dry = dry_run(env, svc, &[]);
     let summary = write_starting(&dry, "body", "**⚠️ 2 to fix**");
-    assert!(!summary.contains("settled"), "{summary}");
+    assert!(!summary.contains("closed finding"), "{summary}");
 }
 
 /// `agt qa <args>` of the branch.
@@ -1241,15 +1241,12 @@ fn a_qa_finding_resolved_before_it_is_posted_is_never_posted(svc: Svc) {
     let summary = write_text(&dry, "body", "qa-record");
     assert!(!summary.contains("Payment hangs."), "{summary}");
     assert!(
-        summary.contains("1 more finding fixed or dismissed before posting"),
+        summary.contains("1 more finding was fixed or dropped before it was posted."),
         "{summary}"
     );
     // The failing check is still something to fix: no thread says why it failed.
-    assert!(
-        summary.starts_with("**⚠️ 1 to fix** · agent review and QA at `"),
-        "{summary}"
-    );
-    assert!(summary.contains("1. **🧪 QA fail: pay**"), "{summary}");
+    assert!(summary.starts_with("**⚠️ 1 to fix** at `"), "{summary}");
+    assert!(summary.contains("1. 🧪 **pay failed.**"), "{summary}");
 }
 
 /// A QA run that ended before the PR was linked is no more published than a review run.
@@ -1290,14 +1287,11 @@ fn the_summary_of_one_open_finding_leads_with_what_to_fix(svc: Svc) {
     let dry = dry_run(env, svc, &[]);
     let summary = write_starting(&dry, "body", "**⚠️ 1 to fix**");
     assert!(
-        summary.starts_with(&format!(
-            "**⚠️ 1 to fix** · agent review at `{}`\n",
-            &setup.head[..7]
-        )),
+        summary.starts_with(&format!("**⚠️ 1 to fix** at `{}`\n", &setup.head[..7])),
         "{summary}"
     );
     assert!(
-        summary.contains("1. **🐛 bug (high)** · `a.txt:3` · In-diff text of f1."),
+        summary.contains("1. 🐛 **In-diff text of f1.**\n   High · `a.txt:3`"),
         "{summary}"
     );
     assert!(

@@ -57,13 +57,12 @@ fn resolve_issue_moves_a_finding_to_a_follow_up_issue() {
     );
     let summary = write_text(&dry, "body", "review-record");
     assert!(
-        summary
-            .contains("**📋 Follow-up issues**\n\n1. o/r#1 · In-diff text of f1. (from `a.txt:3`)"),
+        summary.contains("**📋 Follow-up issues**\n\n1. o/r#1 · In-diff text of f1."),
         "{summary}"
     );
     assert!(
-        !summary.contains("settled"),
-        "moved is not settled: {summary}"
+        !summary.contains("closed finding"),
+        "moved is not closed: {summary}"
     );
 }
 
@@ -161,7 +160,7 @@ fn comment_and_qa_finding_issue_name_a_related_issue() {
     assert!(posted.contains("\n\nRelated: o/r#1"), "{posted}");
     let summary = write_text(&dry, "body", "qa-record");
     assert!(
-        summary.contains("Login hangs. Related: o/r#1."),
+        summary.contains("3. 🧪 **Login hangs.**\n   High · QA: login · whole PR · Related: o/r#1"),
         "{summary}"
     );
 }

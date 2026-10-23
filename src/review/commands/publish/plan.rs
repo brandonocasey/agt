@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::Options;
 
 use super::render::{body, location, record_head};
-use super::summary::{Covered, QaSummary, summary_body};
+use super::summary::{Covered, Links, QaSummary, summary_texts};
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
 use crate::forge::markers;
@@ -63,6 +63,12 @@ pub(super) enum Item {
         runs: Vec<(String, String)>,
         remote: Option<String>,
     },
+    /// Part `number` of a summary too long for one comment, edited in place like the summary.
+    SummaryPart {
+        runs: Vec<String>,
+        number: usize,
+        remote: Option<String>,
+    },
     /// The host's approval of the PR/MR head, sent before the approval comment.
     Approve {
         thread: String,
@@ -90,7 +96,7 @@ impl Write {
             Item::Reply { .. } => "reply",
             Item::Resolve { resolved: true, .. } => "resolve",
             Item::Resolve { .. } => "unresolve",
-            Item::Summary { .. } => "summary",
+            Item::Summary { .. } | Item::SummaryPart { .. } => "summary",
             Item::Approve { .. } => "approve",
         }
     }
@@ -105,6 +111,7 @@ impl Write {
             | Item::Reply { comment } => vec![comment.clone()],
             Item::Resolve { thread, .. } | Item::Approve { thread } => vec![thread.clone()],
             Item::Summary { .. } => vec![markers::SUMMARY_ID.to_owned()],
+            Item::SummaryPart { number, .. } => vec![markers::summary_part_id(*number)],
         }
     }
 
@@ -519,20 +526,19 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// The summary comment when it is due: a run ended since it was posted, or its text
-    /// changed. It is posted once, then edited in place.
+    /// The summary comment, and its parts when it is long, when due: a run ended since it was
+    /// posted, or its text changed. It is posted once, then edited in place. It always covers
+    /// the whole PR/MR, whatever `--run` selects to post.
     pub(super) fn records(&self, target: &Target) -> Result<(Vec<Write>, Vec<Skipped>)> {
         let runs: Vec<&Run> = target
             .runs
             .iter()
-            .filter(|run| self.run.is_none_or(|selected| selected == run.id))
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .collect();
         let qa_runs: Vec<&QaRun> = target
             .qa_runs
             .iter()
-            .filter(|run| self.run.is_none_or(|selected| selected == run.id))
             .filter(|run| run.ended_at.is_some() && !run.checks.is_empty())
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .collect();
@@ -577,46 +583,12 @@ impl<'a> Planner<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
         let commits = self.pr_commits();
-        let mut visible = target.clone();
-        if self.run.is_some() {
-            visible
-                .threads
-                .retain(|thread| self.selected_thread(thread));
-            for thread in &mut visible.threads {
-                // A QA finding's text is its first comment, whoever wrote it.
-                let first = thread
-                    .comments
-                    .first()
-                    .filter(|_| thread.check.is_some())
-                    .map(|first| first.id.clone());
-                thread.comments.retain(|comment| {
-                    !comment.local
-                        && (first.as_ref() == Some(&comment.id)
-                            || self.run.is_none_or(|run| comment_in_run(comment, run)))
-                });
-            }
-        }
         let head = &self.review.head_sha;
         let head_tree = self.repo.tree_of(head).ok();
         let qa = QaSummary {
             checks: latest(&qa_runs, head_tree.as_deref()),
             runs: qa_runs.clone(),
             head: head.clone(),
-            approved: target.qa_runs.iter().any(|run| {
-                run.approval
-                    .as_ref()
-                    .is_some_and(|approval| approval.head == *head)
-            }),
-        };
-        let render = |attempt: &str| {
-            let text = summary_body(&visible, &covered, &qa, commits.as_deref(), attempt);
-            match self.run {
-                Some(run) => text.replace(
-                    &markers::agent(markers::SUMMARY_ID, Some(attempt)),
-                    &markers::agent(&format!("{run}/record"), Some(attempt)),
-                ),
-                None => text,
-            }
         };
         // The posted summary: the comment the latest run's record landed in, when it is one.
         let posted = records()
@@ -630,37 +602,77 @@ impl<'a> Planner<'a> {
                         .sent
                         .as_deref()
                         .and_then(markers::agent_id)
-                        .is_some_and(|id| {
-                            id == self
-                                .run
-                                .map(|run| format!("{run}/record"))
-                                .as_deref()
-                                .unwrap_or(markers::SUMMARY_ID)
-                        })
+                        .is_some_and(|id| id == markers::SUMMARY_ID)
             });
-        if let Some(record) = posted.filter(|_| !unposted) {
-            // Rendered with the attempt id it was sent with, unchanged text needs no edit.
-            let last = record.delivery.attempt.as_deref().map(render);
-            if last.as_deref().map(str::trim) == record.delivery.sent.as_deref().map(str::trim) {
-                return Ok((Vec::new(), Vec::new()));
-            }
-        }
-        let text = render(self.attempt);
-        let remote = posted.and_then(|record| record.remote_id.clone());
-        let subject = self.connection.subject();
-        let request = match &remote {
-            Some(id) => self.service().edit_note(subject, id, &text),
-            None => self.service().note(subject, &text),
+        let parts = posted.map_or(&[][..], |record| record.parts.as_slice());
+        let links = Links {
+            summary: posted.and_then(|record| record.url.clone()),
+            parts: parts.iter().map(|part| part.url.clone()).collect(),
         };
-        let runs = covered
+        let texts = summary_texts(
+            target,
+            &covered,
+            &qa,
+            commits.as_deref(),
+            &links,
+            self.attempt,
+        );
+        // Unchanged text needs no edit; the markers hold the attempt, which always differs.
+        let same = |text: &str, sent: Option<&str>| {
+            sent.is_some_and(|sent| {
+                markers::strip_agent(text).trim() == markers::strip_agent(sent).trim()
+            })
+        };
+        let subject = self.connection.subject();
+        let ids: Vec<String> = covered
             .iter()
-            .map(|covered| (covered.run.id.clone(), covered.head.clone()))
-            .chain(qa_runs.iter().map(|run| (run.id.clone(), head.clone())))
+            .map(|covered| covered.run.id.clone())
+            .chain(qa_runs.iter().map(|run| run.id.clone()))
             .collect();
-        Ok((
-            vec![self.write(Item::Summary { runs, remote }, request, &text)],
-            Vec::new(),
-        ))
+        let mut writes = Vec::new();
+        for (index, text) in texts.iter().enumerate() {
+            let part = index.checked_sub(1).and_then(|index| parts.get(index));
+            let (remote, current) = match part {
+                _ if index == 0 => (
+                    posted.and_then(|record| record.remote_id.clone()),
+                    posted.is_some()
+                        && !unposted
+                        && same(
+                            text,
+                            posted.and_then(|record| record.delivery.sent.as_deref()),
+                        ),
+                ),
+                Some(part) => (
+                    part.remote_id.clone(),
+                    part.delivery.post == PostState::Posted
+                        && same(text, part.delivery.sent.as_deref()),
+                ),
+                None => (None, false),
+            };
+            if current {
+                continue;
+            }
+            let request = match &remote {
+                Some(id) => self.service().edit_note(subject, id, text),
+                None => self.service().note(subject, text),
+            };
+            let item = if index == 0 {
+                let runs = covered
+                    .iter()
+                    .map(|covered| (covered.run.id.clone(), covered.head.clone()))
+                    .chain(qa_runs.iter().map(|run| (run.id.clone(), head.clone())))
+                    .collect();
+                Item::Summary { runs, remote }
+            } else {
+                Item::SummaryPart {
+                    runs: ids.clone(),
+                    number: index + 1,
+                    remote,
+                }
+            };
+            writes.push(self.write(item, request, text));
+        }
+        Ok((writes, Vec::new()))
     }
 
     /// The PR/MR's commits, oldest first, when git can list them.
