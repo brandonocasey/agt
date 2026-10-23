@@ -22,7 +22,8 @@ use crate::review::commands::status::run_reviews_at;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::view::author_label;
 use crate::store::model::{
-    Author, Comment, PostState, QaRun, RemoteKind, RemoteThread, Review, Run, Side, Target, Thread,
+    Author, Comment, PostState, QaRun, RecordPost, RemoteKind, RemoteThread, Review, Run, Side,
+    Target, Thread,
 };
 
 /// Stands for the id of the draft a dry run has not created yet.
@@ -530,16 +531,27 @@ impl<'a> Planner<'a> {
     /// posted, or its text changed. It is posted once, then edited in place. It always covers
     /// the whole PR/MR, whatever `--run` selects to post.
     pub(super) fn records(&self, target: &Target) -> Result<(Vec<Write>, Vec<Skipped>)> {
+        // With `--run`, the summary adds no run that was never published here: only the
+        // selected one, which names this PR/MR, and those an earlier summary already covers.
+        let shown = |record: &Option<RecordPost>, publication: &Option<String>| {
+            self.run.is_none()
+                || publication.as_deref() == Some(self.review.url.as_str())
+                || record
+                    .as_ref()
+                    .is_some_and(|record| record.delivery.post == PostState::Posted)
+        };
         let runs: Vec<&Run> = target
             .runs
             .iter()
             .filter(|run| run.ended_at.is_some() && !run.passes.is_empty())
+            .filter(|run| shown(&run.record, &run.publication_target))
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .collect();
         let qa_runs: Vec<&QaRun> = target
             .qa_runs
             .iter()
             .filter(|run| run.ended_at.is_some() && !run.checks.is_empty())
+            .filter(|run| shown(&run.record, &run.publication_target))
             .filter(|run| self.run_before_pr(target, &run.id).is_none())
             .collect();
         let records = || {
