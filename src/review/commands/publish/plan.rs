@@ -278,7 +278,9 @@ impl<'a> Planner<'a> {
             if let (Some(draft), Inline::DraftThenPublish(drafts)) =
                 (&first.draft_id, self.service().inline())
             {
-                writes.push(self.publish_draft(drafts, &first.id, draft));
+                let mut write = self.publish_draft(drafts, &first.id, draft);
+                write.fallback = self.placed_fallback(target, thread, first);
+                writes.push(write);
                 expected.push((thread.id.clone(), RemoteKind::Discussion));
                 continue;
             }
@@ -361,10 +363,7 @@ impl<'a> Planner<'a> {
                             );
                             // The host may refuse the position: the finding then posts as a
                             // general thread that names its lines.
-                            write.fallback = thread.anchor.as_ref().map(|anchor| {
-                                let lines = location(anchor);
-                                body(target, thread, first, Some(&lines), self.attempt)
-                            });
+                            write.fallback = self.placed_fallback(target, thread, first);
                             writes.push(write);
                             expected.push((thread.id.clone(), RemoteKind::Discussion));
                         }
@@ -483,6 +482,14 @@ impl<'a> Planner<'a> {
                 },
             )
             .collect()
+    }
+
+    /// The general thread that stands in for a draft the host refuses to place: the finding's
+    /// text, naming its lines.
+    fn placed_fallback(&self, target: &Target, thread: &Thread, first: &Comment) -> Option<String> {
+        let anchor = thread.anchor.as_ref()?;
+        let lines = location(anchor);
+        Some(body(target, thread, first, Some(&lines), self.attempt))
     }
 
     fn publish_draft(&self, drafts: &dyn DraftPoster, comment: &str, draft: &str) -> Write {

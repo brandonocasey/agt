@@ -155,3 +155,43 @@ fn a_refused_draft_publish_drops_the_draft_and_posts_a_general_thread() {
     assert_eq!(comment["post"], "posted", "{comment}");
     assert!(comment["draft_id"].is_null(), "{comment}");
 }
+
+#[test]
+fn a_draft_left_by_an_earlier_attempt_falls_back_when_the_host_refuses_it() {
+    let svc = Gitlab::new();
+    let setup = Setup::branch(svc.origin(), &LINE_ONLY, false, false);
+    let env = &setup.env;
+    let line = setup.finding(1);
+    svc.link(&setup);
+    // The draft is created, but publishing it fails for a reason worth retrying.
+    svc.accept(env, Call::PostInline, 77);
+    env.fail_call_with(
+        &strs(&svc.call(Call::PublishDraft)),
+        "glab: 502 Bad Gateway (HTTP 502)",
+    );
+    env.fail(&["publish", "--pr", "3"], None);
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &line)["comments"][0]["draft_id"], "77");
+
+    env.fail_call_with(
+        &strs(&svc.call(Call::PublishDraft)),
+        "glab: 400 Bad Request (HTTP 400)",
+    );
+    env.respond(&strs(&write("DELETE", &format!("{MR}/draft_notes/77"))), "");
+    env.respond(
+        &strs(&svc.call(Call::PostThread)),
+        r#"{"id":"d-1","notes":[{"id":5003}]}"#,
+    );
+    svc.accept(env, Call::PostNote, 5020);
+    let out = env.run(&["publish", "--pr", "3"]);
+    let refused = out["posted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "publish-draft")
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(refused["fallback"], "thread", "{out}");
+    assert_eq!(svc.count(env, Call::PostThread), 1, "{out}");
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &line)["comments"][0]["post"], "posted");
+}
