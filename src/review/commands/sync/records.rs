@@ -66,18 +66,34 @@ pub(super) fn fixed_sha(body: &str) -> Option<String> {
     (!sha.is_empty()).then(|| sha.to_owned())
 }
 
-/// Type and severity from a `**🐛 bug (medium):**` heading, after the location line that opens
-/// a finding on a file outside the diff.
+/// The thread an own comment marked `<thread>/c<n>` may answer: a quote reply carries no
+/// `Re:` line, only the id of the local comment it posts.
+pub(super) fn reply_thread(own: &str) -> Option<&str> {
+    let (thread, number) = own.rsplit_once("/c")?;
+    (!thread.is_empty() && number.parse::<u32>().is_ok()).then_some(thread)
+}
+
+/// Type and severity from the `**🐛 bug (medium)**` heading on a line of its own, or the
+/// `**🐛 bug (medium):**` heading that opens the text, after the location line that opens a
+/// finding on a file outside the diff.
 pub(super) fn finding_kind(body: &str) -> (ThreadType, Option<Severity>) {
     let body = body.trim_start();
     let body = match body.split_once('\n') {
         Some((first, rest)) if first.starts_with('`') => rest.trim_start(),
         _ => body,
     };
-    let heading = body
-        .strip_prefix("**")
-        .and_then(|rest| rest.split_once(":**"))
-        .map(|(heading, _)| heading.trim_start_matches(|char: char| !char.is_ascii_alphanumeric()));
+    let titled = body
+        .lines()
+        .next()
+        .and_then(|line| line.trim_end().strip_prefix("**")?.strip_suffix("**"))
+        .filter(|title| !title.contains("**"));
+    let heading = titled
+        .or_else(|| {
+            body.strip_prefix("**")
+                .and_then(|rest| rest.split_once(":**"))
+                .map(|(heading, _)| heading)
+        })
+        .map(|heading| heading.trim_start_matches(|char: char| !char.is_ascii_alphanumeric()));
     let Some(heading) = heading else {
         return (ThreadType::Comment, None);
     };
@@ -150,6 +166,28 @@ mod tests {
             fixed_sha("Fixed in 9e8d7c6.\nRe: x").as_deref(),
             Some("9e8d7c6")
         );
+    }
+
+    #[test]
+    fn parses_the_title_on_its_own_line() {
+        let titled = "**🐛 bug (medium)**\n\nx: see **this**.\n\n> <sub>🔍 agt review · m</sub>";
+        assert!(matches!(
+            finding_kind(titled),
+            (ThreadType::Bug, Some(Severity::Medium))
+        ));
+        let located = "`docs/a.md:3`\n\n**❓ question**\n\nWhy? **Note:** x";
+        assert!(matches!(
+            finding_kind(located),
+            (ThreadType::Question, None)
+        ));
+        let old = "**🐛 bug (high):** x **bold**";
+        assert!(matches!(
+            finding_kind(old),
+            (ThreadType::Bug, Some(Severity::High))
+        ));
+        assert_eq!(reply_thread("h3/c2"), Some("h3"));
+        assert_eq!(reply_thread("rv-1.c1p0.r1.f1/c3"), Some("rv-1.c1p0.r1.f1"));
+        assert_eq!(reply_thread("summary"), None);
     }
 
     #[test]

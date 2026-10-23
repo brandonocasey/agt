@@ -66,7 +66,7 @@ matrix!(
     not_own_posts_a_general_finding_as_a_comment,
     only_limits_publish_to_named_threads,
     comments_outside_the_pr_diff_are_never_posted_unless_on_another_file,
-    approvals_post_a_comment_unless_formal,
+    approvals_post_no_comment,
     formal_approval_on_someone_elses_pr,
     approval_of_an_old_head_is_not_posted,
     approving_twice_posts_once_and_reopened_findings_hold_it,
@@ -268,10 +268,15 @@ fn approve_with_only_still_posts_the_approval(svc: Svc) {
     env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
     svc.link(&setup);
     env.run(&["comment", "--body", "My own note.", "--author", "me"]);
-    let dry = dry_run(env, svc, &["--approve", "--only", "h1"]);
+    let dry = dry_run(env, svc, &["--approve", "--formal", "--only", "h1"]);
     let id = env.approval();
     let items = written_items(&dry);
-    assert!(items.contains(&format!("{id}/c1")), "{dry}");
+    // A formal approval by call goes out whatever --only names; a review needs another's PR.
+    assert_eq!(
+        items.contains(&id),
+        svc.expect().approves_by_call(),
+        "{dry}"
+    );
     assert!(items.contains(&"h1/c1".to_owned()), "{dry}");
     assert!(!skipped_items(&dry).contains(&id), "{dry}");
 }
@@ -292,10 +297,14 @@ fn not_own_approve_keeps_what_not_own_posts(svc: Svc) {
     let alice = svc.local_thread(301);
     env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
     env.run(&["run", "end", "--run", &setup.run]);
-    let dry = dry_run(env, svc, &["--not-own", "--approve"]);
+    let dry = dry_run(env, svc, &["--not-own", "--approve", "--formal"]);
     let id = env.approval();
     let items = written_items(&dry);
-    assert!(items.contains(&format!("{id}/c1")), "{dry}");
+    // The host's approval: a review of the comment, or the approve call of the thread.
+    assert!(
+        items.contains(&format!("{id}/c1")) || items.contains(&id),
+        "{dry}"
+    );
     assert!(items.iter().any(|item| item.starts_with(&alice)), "{dry}");
     assert!(!skipped_items(&dry).contains(&id), "{dry}");
 }
@@ -396,7 +405,7 @@ fn publish_target_on_detached_head(svc: Svc) {
 }
 
 /// A reply to a general finding is a native reply where the service has them for general
-/// comments, else a general comment ending in `Re: <finding>`.
+/// comments, else a general comment that quotes the one it answers.
 fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
@@ -430,7 +439,7 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let answer = if native {
         text
     } else {
-        format!("{text}\nRe: {f2}")
+        format!("> quoted\n> — @me\n\n{text}")
     };
     remote.add_reply(&general, Comment::new(603, "me", &answer));
     svc.sync(&setup, &remote);
@@ -451,15 +460,20 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let posted: Value = serde_json::from_str(posted).unwrap();
     let posted = posted["body"].as_str().unwrap();
     assert!(
-        posted.starts_with(&format!(
+        posted.contains(&format!(
             "Not fixed: needs a design change.\n<!-- agent-review id={reply} attempt=at-"
         )),
         "{posted}"
     );
+    assert!(posted.ends_with(" -->"), "{posted}");
     if native {
-        assert!(posted.ends_with(" -->"), "{posted}");
+        assert!(posted.starts_with("Not fixed"), "{posted}");
     } else {
-        assert!(posted.ends_with(&format!(" -->\nRe: {f2}")), "{posted}");
+        // GitHub's own quote reply: the first line, who wrote it and a link, then the text.
+        let (quote, _) = posted.split_once("\n\nNot fixed").unwrap();
+        assert!(quote.starts_with("> "), "{posted}");
+        assert!(quote.contains("\n> — @me, [comment](https://"), "{posted}");
+        assert!(!posted.contains("Re: "), "{posted}");
     }
     let list = env.run(&["list"]);
     let general = thread(&list, &f2);
@@ -793,11 +807,24 @@ fn not_own_posts_a_general_finding_as_a_comment(svc: Svc) {
     env.run(&["run", "end", "--run", &setup.run]);
     let general = setup.finding(2);
     let dry = dry_run(env, svc, &["--not-own", "--only", &general]);
-    assert_eq!(
-        writes_for(&dry, &format!("{general}/c1")),
-        ["thread"],
-        "{dry}"
-    );
+    let item = format!("{general}/c1");
+    if svc.expect().posts_general_findings() {
+        assert_eq!(writes_for(&dry, &item), ["thread"], "{dry}");
+    } else {
+        // Not a Conversation comment: a review of only a body at the head carries it.
+        assert_eq!(writes_for(&dry, &item), ["review"], "{dry}");
+        let review = &dry["writes"][0];
+        assert_eq!(review["input"]["event"], "COMMENT", "{dry}");
+        assert_eq!(review["input"]["commit_id"], setup.head.as_str(), "{dry}");
+        assert_eq!(review["input"]["comments"], json!([]), "{dry}");
+        let body = review["input"]["body"].as_str().unwrap();
+        assert!(body.starts_with("**"), "{body}");
+        assert!(
+            body.contains("\n\n> <sub>🔍 agt review · m1</sub>\n\n"),
+            "{body}"
+        );
+        assert!(body.contains("<!-- agent-review id=review/"), "{body}");
+    }
     assert!(
         !dry["skipped"].to_string().contains("listed in the summary"),
         "{dry}"
@@ -892,7 +919,7 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
         assert!(other_skip.is_none(), "{dry}");
         let general = write_text(&dry, "body", "A file the PR leaves alone.");
         assert!(
-            general.starts_with("`lib/b.txt:2`\n\n**✏️ nit:**"),
+            general.starts_with("`lib/b.txt:2`\n\n**✏️ nit**\n\nA file"),
             "{general}"
         );
     } else {
@@ -959,7 +986,7 @@ fn status_and_list_can_sync_first(svc: Svc) {
     assert!(offline.contains("offline"), "{offline}");
 }
 
-fn approvals_post_a_comment_unless_formal(svc: Svc) {
+fn approvals_post_no_comment(svc: Svc) {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     let f1 = setup.finding(1);
@@ -979,24 +1006,24 @@ fn approvals_post_a_comment_unless_formal(svc: Svc) {
         !open.contains(&format!("\"{id}\"")),
         "an approval is never open: {open}"
     );
-    // A formal approval of the same head upgrades the comment approval: one comment.
+    // Without --formal the approval is only recorded: no host write, no skip.
+    let dry = dry_run(env, svc, &[]);
+    assert!(
+        !written_items(&dry).iter().any(|item| item.starts_with(&id)),
+        "{dry}"
+    );
+    assert!(
+        !skipped_items(&dry).iter().any(|item| item.starts_with(&id)),
+        "{dry}"
+    );
+    assert_eq!(approval_writes(&dry), 0, "{dry}");
+    // A formal approval of the same head upgrades it: still no comment.
     let formal = env.approve(svc.number(), &["--formal"]);
     assert_eq!(formal, id);
     let dry = dry_run(env, svc, &[]);
-    let comment = dry["writes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|write| write["items"] == json!([format!("{id}/c1")]))
-        .unwrap_or_else(|| panic!("{dry}"));
-    assert_eq!(comment["call"], json!(svc.call(Call::PostNote)));
-    let text = comment["input"]["body"].as_str().unwrap();
-    assert!(
-        text.starts_with(&format!("Approved at {}.", &setup.head[..12])),
-        "{text}"
-    );
+    assert!(!written_items(&dry).contains(&format!("{id}/c1")), "{dry}");
     if svc.expect().approves_by_review() && !svc.expect().self_approval_allowed() {
-        // On your own PR a formal approval posts as a comment, with a note on the formal part.
+        // On your own PR GitHub refuses the formal part: the summary headline records it.
         let skipped = dry["skipped"].as_array().unwrap();
         assert!(
             skipped
@@ -1012,20 +1039,20 @@ fn approvals_post_a_comment_unless_formal(svc: Svc) {
     if svc.expect().approves_by_call() {
         assert_eq!(writes_for(&dry, &formal), ["approve"], "{dry}");
     }
-    assert_eq!(approval_writes(&dry), 1, "{dry}");
+    assert_eq!(
+        approval_writes(&dry),
+        usize::from(svc.expect().approves_by_call()),
+        "{dry}"
+    );
 }
 
-/// Approval text in the writes of a dry run.
+/// The host approvals in the writes of a dry run: an `approve` call or an `APPROVE` review.
 fn approval_writes(dry: &Value) -> usize {
     dry["writes"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|write| {
-            write["input"]["body"]
-                .as_str()
-                .is_some_and(|body| body.starts_with("Approved at"))
-        })
+        .filter(|write| write["kind"] == "approve" || write["input"]["event"] == "APPROVE")
         .count()
 }
 
@@ -1042,8 +1069,12 @@ fn formal_approval_on_someone_elses_pr(svc: Svc) {
         assert_eq!(writes.len(), 1, "{dry}");
         assert_eq!(writes[0]["input"]["event"], "APPROVE");
         assert_eq!(writes[0]["input"]["commit_id"], setup.head.as_str());
+        // Only the hidden marker: no approval text.
+        let body = writes[0]["input"]["body"].as_str().unwrap();
+        assert!(body.starts_with("<!-- agent-review id="), "{body}");
+        assert!(!body.contains("Approved at"), "{body}");
     } else {
-        assert_eq!(kinds(&dry, "writes"), ["approve", "thread"], "{dry}");
+        assert_eq!(kinds(&dry, "writes"), ["approve"], "{dry}");
         assert_eq!(writes[0]["input"]["sha"], setup.head.as_str());
         assert_eq!(writes[0]["call"], json!(svc.call(Call::Approve)));
     }
@@ -1054,10 +1085,13 @@ fn approval_of_an_old_head_is_not_posted(svc: Svc) {
     let env = &setup.env;
     env.run(&["resolve", &setup.finding(1), "--stale"]);
     svc.link(&setup);
-    let id = env.approve(svc.number(), &[]);
-    svc.sync(&setup, &Remote::new().head(env.git(&["rev-parse", "main"])));
+    let id = env.approve(svc.number(), &["--formal", "--not-own"]);
+    svc.sync(
+        &setup,
+        &Remote::by("alice").head(env.git(&["rev-parse", "main"])),
+    );
     sync(env, svc);
-    let dry = dry_run(env, svc, &[]);
+    let dry = dry_run(env, svc, &["--not-own", "--only", &id]);
     assert!(
         dry["skipped"]
             .as_array()
@@ -1077,13 +1111,15 @@ fn approving_twice_posts_once_and_reopened_findings_hold_it(svc: Svc) {
     let env = &setup.env;
     let f1 = setup.finding(1);
     env.run(&["resolve", &f1, "--stale"]);
-    svc.link(&setup);
-    let first = env.approve(svc.number(), &[]);
-    assert_eq!(env.approve(svc.number(), &[]), first);
-    let dry = dry_run(env, svc, &[]);
+    svc.sync(&setup, &Remote::by("alice"));
+    sync(env, svc);
+    let first = env.approve(svc.number(), &["--formal", "--not-own"]);
+    assert_eq!(env.approve(svc.number(), &["--formal", "--not-own"]), first);
+    let named = ["--not-own", "--only", first.as_str()];
+    let dry = dry_run(env, svc, &named);
     assert_eq!(approval_writes(&dry), 1, "{dry}");
     env.run(&["resolve", &f1, "--not-fixed", "reopened"]);
-    let dry = dry_run(env, svc, &[]);
+    let dry = dry_run(env, svc, &named);
     assert_eq!(approval_writes(&dry), 0, "{dry}");
     assert!(
         dry["skipped"]

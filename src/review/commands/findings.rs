@@ -619,7 +619,9 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
             Some("💬 Answered above.".to_owned()),
         )
     } else {
-        (args.triage.map(Triage::from), None, false, None)
+        // Only a verdict leaves the thread as it is; a bare resolve still names its outcome.
+        let reply = args.triage.is_none().then(|| "✅ Resolved.".to_owned());
+        (args.triage.map(Triage::from), None, false, reply)
     };
     let records_only = matches!(triage, Some(Triage::Valid | Triage::Question));
     let reply = match (&args.reply, default_reply) {

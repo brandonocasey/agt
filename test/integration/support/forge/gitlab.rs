@@ -417,9 +417,11 @@ impl FakeService for Gitlab {
             })
         );
         let note = draft["note"].as_str().unwrap();
-        // The first comment of an agent carries the model alone.
+        // The title sits on its own line; the footer names agt review and the model.
         assert!(
-            note.starts_with("**🐛 bug (high):** In-diff text of f1.\n\n> <sub>m1</sub>\n"),
+            note.starts_with(
+                "**🐛 bug (high)**\n\nIn-diff text of f1.\n\n> <sub>🔍 agt review · m1</sub>\n"
+            ),
             "{note}"
         );
     }
@@ -432,7 +434,7 @@ impl FakeService for Gitlab {
             general[0]["body"]
                 .as_str()
                 .unwrap()
-                .starts_with("**✏️ nit:** General text of f2.")
+                .starts_with("**✏️ nit**\n\nGeneral text of f2.")
         );
         assert_eq!(
             input_of(&inputs, &self.call(Call::Unresolve("d-o"))),

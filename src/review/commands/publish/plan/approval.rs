@@ -2,39 +2,50 @@
 
 use super::skips::{Skip, Unsupported};
 use super::{Item, Planner, Write};
+use crate::forge::markers;
 use crate::forge::service::ApproveCap;
 use crate::review::commands::approve::blocking_threads;
-use crate::review::commands::publish::render::{body, short};
+use crate::review::commands::publish::render::short;
 use crate::store::model::{Approval, Comment, RemoteKind, Target, Thread};
 
+/// What an approval thread asks of the host.
+pub(super) struct Approved {
+    pub(super) writes: Vec<Write>,
+    /// The remote kind the thread gets; none when nothing is posted for it.
+    pub(super) kind: Option<RemoteKind>,
+    /// Why the formal part is not sent, when it is not.
+    pub(super) note: Option<Skip>,
+}
+
+impl Approved {
+    fn nothing(note: Option<Skip>) -> Self {
+        Self {
+            writes: Vec::new(),
+            kind: None,
+            note,
+        }
+    }
+}
+
 impl Planner<'_> {
-    /// An approval's writes: a comment, plus the host's approval when formal, and a note on
-    /// a formal approval the host does not allow. Only for the head it approved, and only
-    /// while no finding blocks approval.
+    /// An approval's writes: the host's approval when formal, which posts no comment. The
+    /// review GitHub takes carries only the hidden marker; a non-formal approval is
+    /// recorded locally, and the summary headline shows it. Only for the head it approved,
+    /// and only while no finding blocks approval.
     pub(super) fn approval(
         &self,
         thread: &Thread,
         first: &Comment,
         approval: &Approval,
         target: &Target,
-    ) -> std::result::Result<(Vec<Write>, RemoteKind, Option<Skip>), Skip> {
-        self.approvable(approval, target)?;
+    ) -> std::result::Result<Approved, Skip> {
         let head = &self.review.head_sha;
-        let text = body(target, thread, first, None, self.attempt);
         let subject = self.connection.subject();
-        // A note, not a thread: some hosts make threads resolvable, so they can block merging.
-        let note = || {
-            self.write(
-                Item::Thread {
-                    comment: first.id.clone(),
-                },
-                self.service().note(subject, &text),
-                &text,
-            )
-        };
         let own = self.foreign().is_none();
         match self.caps().approve {
             ApproveCap::Review { self_allowed } if approval.formal && (self_allowed || !own) => {
+                self.approvable(approval, target)?;
+                let text = markers::agent(&first.id, Some(self.attempt));
                 let request = self.service().approve(subject, head, Some(&text));
                 let write = self.write(
                     Item::ApprovalReview {
@@ -43,20 +54,23 @@ impl Planner<'_> {
                     request,
                     &text,
                 );
-                Ok((vec![write], RemoteKind::Review, None))
+                Ok(Approved {
+                    writes: vec![write],
+                    kind: Some(RemoteKind::Review),
+                    note: None,
+                })
             }
             ApproveCap::Review { .. } => {
                 let reason = approval.formal.then(|| Skip::Unsupported {
                     service: self.service().name(),
-                    what: Unsupported::SelfApproval {
-                        posted_as_comment: true,
-                    },
+                    what: Unsupported::SelfApproval { recorded: true },
                 });
-                Ok((vec![note()], RemoteKind::General, reason))
+                Ok(Approved::nothing(reason))
             }
             ApproveCap::Call
                 if approval.formal && !approval.approved && approval.refused.is_none() =>
             {
+                self.approvable(approval, target)?;
                 let approve = Write {
                     item: Item::Approve {
                         thread: thread.id.clone(),
@@ -65,16 +79,20 @@ impl Planner<'_> {
                     sent: vec![None],
                     fallback: None,
                 };
-                Ok((vec![approve, note()], RemoteKind::General, None))
+                Ok(Approved {
+                    writes: vec![approve],
+                    kind: None,
+                    note: None,
+                })
             }
             ApproveCap::None if approval.formal => {
                 let reason = Skip::Unsupported {
                     service: self.service().name(),
                     what: Unsupported::FormalApproval,
                 };
-                Ok((vec![note()], RemoteKind::General, Some(reason)))
+                Ok(Approved::nothing(Some(reason)))
             }
-            ApproveCap::Call | ApproveCap::None => Ok((vec![note()], RemoteKind::General, None)),
+            ApproveCap::Call | ApproveCap::None => Ok(Approved::nothing(None)),
         }
     }
 
@@ -111,9 +129,7 @@ impl Planner<'_> {
         {
             return Some(Err(Skip::Unsupported {
                 service: self.service().name(),
-                what: Unsupported::SelfApproval {
-                    posted_as_comment: false,
-                },
+                what: Unsupported::SelfApproval { recorded: false },
             }));
         }
         if let Err(reason) = self.approvable(approval, target) {

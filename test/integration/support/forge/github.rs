@@ -366,7 +366,10 @@ impl FakeService for Github {
             Comment::new(
                 603,
                 "me",
-                &format!("{}\nRe: gh-c900", marked("Thanks", "gh-c900/c1")),
+                &format!(
+                    "> Please confirm.\n> — @alice, [comment](https://github.com/me/repo/pull/42#issuecomment-900)\n\n{}",
+                    marked("Thanks", "gh-c900/c1")
+                ),
             ),
         );
         let record = format!(
@@ -470,9 +473,11 @@ impl FakeService for Github {
             (&json!("a.txt"), &json!(3), &json!("RIGHT"))
         );
         let body = comment["body"].as_str().unwrap();
-        // The first comment of an agent carries the model alone.
+        // The title sits on its own line; the footer names agt review and the model.
         assert!(
-            body.starts_with("**🐛 bug (high):** In-diff text of f1.\n\n> <sub>m1</sub>\n"),
+            body.starts_with(
+                "**🐛 bug (high)**\n\nIn-diff text of f1.\n\n> <sub>🔍 agt review · m1</sub>\n"
+            ),
             "{body}"
         );
         assert!(body.contains(&format!(
@@ -498,10 +503,10 @@ impl FakeService for Github {
                 call.contains("query=AddReply") && input.contains("Fixed in the same commit.")
             })
             .unwrap();
-        // A reply carries no signature and is not quoted.
+        // An agent's reply ends with the footer, as its first comment does.
         let reply = &reply.1;
         assert!(reply.starts_with("Fixed in the same commit.\n"), "{reply}");
-        assert!(!reply.contains("<sub>"), "{reply}");
+        assert!(reply.contains("\n\n> <sub>🔍 agt review · "), "{reply}");
         let answer = inputs
             .iter()
             .find(|(_, input)| input.contains("Thanks, done."))
@@ -512,7 +517,13 @@ impl FakeService for Github {
             answer.contains("<!-- agent-review id=gh-c900/c1 attempt=at-"),
             "{answer}"
         );
-        assert!(answer.ends_with(" -->\nRe: gh-c900"), "{answer}");
+        // Your reply to a Conversation comment quotes it: no local id for anyone to see.
+        assert!(
+            answer.starts_with("> ") && answer.contains("\n> — @alice, [comment](https://"),
+            "{answer}"
+        );
+        assert!(answer.contains("\n\nThanks, done.\n<!--"), "{answer}");
+        assert!(!answer.contains("Re: "), "{answer}");
         super::super::scenario::assert_never_posted(env);
         let list = env.run(&["list"]);
         let f1 = thread(&list, &setup.finding(1));

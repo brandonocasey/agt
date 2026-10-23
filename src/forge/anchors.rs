@@ -12,6 +12,12 @@ impl FileDiff {
         self.old.as_deref() == Some(path) || self.new.as_deref() == Some(path)
     }
 
+    /// The path this diff changes `path` from: itself unless the file was renamed.
+    pub fn old_path_of(&self, path: &str) -> Option<String> {
+        self.changes_into(path)
+            .then(|| self.old.as_deref().unwrap_or(path).to_owned())
+    }
+
     /// Whether the diff changes this path and leaves a file there.
     pub fn changes_into(&self, path: &str) -> bool {
         self.new.as_deref() == Some(path)
@@ -332,6 +338,17 @@ rename to b.txt\n\
         assert_eq!(old_of_unchanged(&files, "b.txt", 4), None);
         assert_eq!(old_of_unchanged(&files, "b.txt", 7), None);
         assert_eq!(old_of_unchanged(&files, "c.txt", 1), None);
+    }
+
+    #[test]
+    fn a_renamed_file_names_the_path_it_came_from() {
+        let files = parse(DIFF);
+        let old_path = |path| files.iter().find_map(|file| file.old_path_of(path));
+        assert_eq!(old_path("b.txt").as_deref(), Some("a.txt"));
+        assert_eq!(old_path("a.txt"), None);
+        let plain =
+            parse("diff --git a/c.txt b/c.txt\n--- a/c.txt\n+++ b/c.txt\n@@ -1 +1 @@\n-1\n+2\n");
+        assert_eq!(plain[0].old_path_of("c.txt").as_deref(), Some("c.txt"));
     }
 
     #[test]

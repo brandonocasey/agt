@@ -8,7 +8,7 @@ use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{
     PUBLISH, Review, Setup, assert_never_posted, count_calls, ids, kinds, open_ids, sent, thread,
-    write_text,
+    write_starting, write_text, writes_for,
 };
 use crate::support::{Env, args, executable, fixture, numbered, strs};
 
@@ -325,6 +325,170 @@ fn github_a_general_finding_is_skipped_and_listed_in_the_summary() {
     assert_eq!(thread(&list, &f2)["comments"][0]["post"], "pending");
 }
 
+/// An agent never posts a Conversation comment: on someone else's PR a finding with no diff line
+/// goes in the body of the review that carries the in-diff comments, and sync leaves it posted.
+#[test]
+fn github_findings_without_a_diff_line_go_in_the_review_body_on_someone_elses_pr() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let (f1, f2) = (setup.finding(1), setup.finding(2));
+    let mut remote = Remote::by("alice");
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let only = format!("{f1},{f2}");
+    let args = [
+        "publish",
+        "--pr",
+        "42",
+        "--not-own",
+        "--only",
+        only.as_str(),
+    ];
+    let dry = env.run(&[args.as_slice(), &["--dry-run"]].concat());
+    assert_eq!(kinds(&dry, "writes"), ["review"], "{dry}");
+    let review = &dry["writes"][0];
+    assert_eq!(
+        review["items"],
+        json!([format!("{f1}/c1"), format!("{f2}/c1")]),
+        "{dry}"
+    );
+    assert_eq!(review["input"]["comments"].as_array().unwrap().len(), 1);
+    let body = review["input"]["body"].as_str().unwrap().to_owned();
+    assert_eq!(
+        body,
+        format!(
+            "**✏️ nit**\n\nGeneral text of f2.\n\n> <sub>🔍 agt review · m1</sub>\n\n\
+             <!-- agent-review id=review/{} -->",
+            setup.head
+        )
+    );
+
+    svc.accept(env, Call::PostInline, 700);
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "GET",
+            "repos/me/repo/pulls/42/reviews/700/comments",
+        ],
+        &json!([{
+            "id": 501,
+            "body": crate::support::scenario::marked("f1", &format!("{f1}/c1")),
+            "html_url": "https://github.com/me/repo/pull/42#discussion_r501",
+        }])
+        .to_string(),
+    );
+    let published = env.run(&args);
+    assert_eq!(kinds(&published, "posted"), ["review"], "{published}");
+    let list = env.run(&["list"]);
+    let comment = &thread(&list, &f2)["comments"][0];
+    assert_eq!(comment["post"], "posted", "{comment}");
+    assert_eq!(comment["remote"]["id"], "700", "{comment}");
+
+    // The review reads back as one body: nothing is imported, deleted or posted again.
+    remote
+        .reviews
+        .push(github::review(700, "me", "COMMENTED", &body));
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    assert!(!ids(&list).iter().any(|id| id.starts_with("gh-")), "{list}");
+    assert_eq!(thread(&list, &f2)["comments"][0]["deleted_remote"], false);
+    let again = env.run(&[args.as_slice(), &["--dry-run"]].concat());
+    assert_eq!(again["writes"], json!([]), "{again}");
+}
+
+/// On your own PR an agent's comment with no diff line has nowhere to go: it is skipped.
+#[test]
+fn github_an_agents_plain_comment_outside_the_diff_is_skipped_on_your_own_pr() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    let note = env.run(&[
+        "comment",
+        "--body",
+        "Agent note.",
+        "--reviewer",
+        &format!("{}.c1p0.fix", setup.run),
+        "--model",
+        "m1",
+        "--effort",
+        "high",
+        "--harness",
+        "codex",
+    ])["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert!(writes_for(&dry, &format!("{note}/c1")).is_empty(), "{dry}");
+    assert!(
+        dry["skipped"].as_array().unwrap().iter().any(|item| {
+            item["item"] == note.as_str()
+                && item["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does not post a general comment on your own PR")
+        }),
+        "{dry}"
+    );
+}
+
+/// An agent's reply to a Conversation comment is not posted (a Conversation comment has no
+/// reply); yours is a quote reply.
+#[test]
+fn github_only_you_answer_a_conversation_comment() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let mut remote = Remote::by("me");
+    remote.general("900", Comment::new(900, "alice", "Alice asks why.\nMore."));
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let alice = svc.local_general(900);
+    env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
+    let agent = env.run(&[
+        "reply",
+        &alice,
+        "--body",
+        "Agent answer.",
+        "--reviewer",
+        &format!("{}.c1p0.fix", setup.run),
+        "--model",
+        "m1",
+        "--effort",
+        "high",
+        "--harness",
+        "codex",
+    ]);
+    let agent = agent["thread"]["comments"][2]["id"].as_str().unwrap();
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let reply = write_starting(&dry, "body", "> Alice asks why.");
+    assert!(
+        reply.starts_with("> Alice asks why.\n> — @alice, ["),
+        "{reply}"
+    );
+    assert!(
+        reply.contains("\n\nBecause of X.\n<!-- agent-review id="),
+        "{reply}"
+    );
+    assert!(!reply.contains("More."), "{reply}");
+    assert!(
+        dry["skipped"].as_array().unwrap().iter().any(|item| {
+            item["item"] == agent
+                && item["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does not post a general comment as a reply")
+        }),
+        "{dry}"
+    );
+}
+
 const FILE_LEVEL: crate::support::scenario::Review = crate::support::scenario::Review {
     reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
     findings: r#"[
@@ -366,7 +530,7 @@ fn github_a_finding_on_a_changed_file_outside_the_hunks_posts_a_file_comment() {
     assert_eq!(input["commit_id"], setup.head.as_str());
     let body = input["body"].as_str().unwrap();
     assert!(
-        body.starts_with("`a.txt:9`\n\n**✏️ nit:** Outside the hunks."),
+        body.starts_with("`a.txt:9`\n\n**✏️ nit**\n\nOutside the hunks."),
         "{body}"
     );
 
@@ -376,7 +540,7 @@ fn github_a_finding_on_a_changed_file_outside_the_hunks_posts_a_file_comment() {
     assert_eq!(whole_post["input"]["subject_type"], "file");
     let body = whole_post["input"]["body"].as_str().unwrap();
     assert!(
-        body.starts_with("**✏️ nit:** About the whole file."),
+        body.starts_with("**✏️ nit**\n\nAbout the whole file."),
         "a whole-file anchor has no line to name: {body}"
     );
     assert!(
@@ -1034,17 +1198,17 @@ fn approved(svc: &Gitlab, kill_f2: bool, formal: bool) -> (Setup, String) {
 }
 
 #[test]
-fn gitlab_formal_approval_approves_then_comments() {
+fn gitlab_formal_approval_only_approves() {
     let svc = Gitlab::new();
-    let (setup, _) = approved(&svc, false, true);
+    let (setup, id) = approved(&svc, false, true);
     let env = &setup.env;
     let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
-    let kinds = kinds(&dry, "writes");
-    let at = kinds
+    // The approve call alone: no note carries the approval (the thread is f2's).
+    assert_eq!(writes_for(&dry, &id), ["approve"], "{dry}");
+    let at = kinds(&dry, "writes")
         .iter()
         .position(|kind| kind == "approve")
         .unwrap_or_else(|| panic!("{dry}"));
-    assert_eq!(kinds[at + 1], "thread");
     let approve = &dry["writes"][at];
     assert_eq!(approve["input"]["sha"], setup.head.as_str());
     assert!(
@@ -1055,7 +1219,7 @@ fn gitlab_formal_approval_approves_then_comments() {
 }
 
 #[test]
-fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
+fn gitlab_a_refused_approve_blocks_nothing() {
     let svc = Gitlab::new();
     let (setup, _) = approved(&svc, false, true);
     let env = &setup.env;
@@ -1075,8 +1239,8 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
         .find(|item| item["kind"] == "approve")
         .unwrap_or_else(|| panic!("{out}"));
     assert!(refused["error"].is_string(), "{out}");
-    // The approval comment and the final record both went out as notes.
-    assert_eq!(svc.count(env, Call::PostNote), 2, "{out}");
+    // The approval posts no note: only the summary went out.
+    assert_eq!(svc.count(env, Call::PostNote), 1, "{out}");
     svc.restore(env, Call::Approve);
     svc.accept(env, Call::Approve, 0);
     env.run(&["publish", "--pr", "3"]);
@@ -1085,11 +1249,11 @@ fn gitlab_approval_is_a_note_and_a_refused_approve_blocks_nothing() {
         1,
         "a refusal is not retried by itself"
     );
-    // `approve --formal` again retries the host's approval alone, without a second note.
+    // `approve --formal` again retries the host's approval alone.
     env.approve("3", &["--formal"]);
     env.run(&["publish", "--pr", "3"]);
     assert_eq!(svc.count(env, Call::Approve), 2);
-    assert_eq!(svc.count(env, Call::PostNote), 2);
+    assert_eq!(svc.count(env, Call::PostNote), 1);
     env.run(&["publish", "--pr", "3"]);
     assert_eq!(
         svc.count(env, Call::Approve),
@@ -1136,13 +1300,13 @@ fn gitlab_approve_is_retried_after_a_transient_failure() {
     );
     assert_eq!(
         svc.count(env, Call::PostNote),
-        2,
-        "the approval comment posted once"
+        1,
+        "the approval posts no note, the summary once"
     );
 }
 
 #[test]
-fn gitlab_accepted_approve_is_not_resent_after_a_failed_comment() {
+fn gitlab_accepted_approve_is_not_resent_after_a_failed_summary() {
     let svc = Gitlab::new();
     let (setup, _) = approved(&svc, false, true);
     let env = &setup.env;

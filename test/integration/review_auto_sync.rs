@@ -550,7 +550,8 @@ fn automatic_publish_attaches_and_sends_only_the_completed_run() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(sent.contains("CURRENT FINDING"), "{sent}");
-    assert!(sent.contains("CURRENT COMMENT"), "{sent}");
+    // An agent's comment with no diff line is no Conversation comment on your own PR.
+    assert!(!sent.contains("CURRENT COMMENT"), "{sent}");
     assert!(sent.contains("id=summary attempt="), "{sent}");
     assert!(!sent.contains("/record"), "{sent}");
     for private in [

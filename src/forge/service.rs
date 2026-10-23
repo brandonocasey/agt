@@ -32,6 +32,7 @@ pub enum Method {
     Post,
     Put,
     Patch,
+    Delete,
 }
 
 impl Method {
@@ -41,6 +42,7 @@ impl Method {
             Self::Post => "POST",
             Self::Put => "PUT",
             Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -168,6 +170,8 @@ pub trait DraftPoster {
     /// A draft note holding an in-diff comment.
     fn draft(&self, subject: ReviewSubject, body: &str, position: &Position) -> Request;
     fn publish_draft(&self, subject: ReviewSubject, draft: &str) -> Request;
+    /// Drops a draft the host refused to publish.
+    fn delete_draft(&self, subject: ReviewSubject, draft: &str) -> Request;
 }
 
 /// Which remote thread kinds take a native reply; the rest get a general comment ending in
@@ -293,11 +297,13 @@ pub trait ReviewService: Service {
     /// A new general thread.
     fn thread(&self, subject: ReviewSubject, text: &str) -> Request;
     /// A resolvable thread on the whole of `path` at the head of `review`, for a finding the
-    /// diff cannot place on a line; `None` when the host has no such thread.
+    /// diff cannot place on a line; `None` when the host has no such thread. `old_path` is the
+    /// path the diff renames `path` from, else `path`.
     fn file_thread(
         &self,
         _subject: ReviewSubject,
         _review: &Review,
+        _old_path: &str,
         _path: &str,
         _text: &str,
     ) -> Option<Request> {

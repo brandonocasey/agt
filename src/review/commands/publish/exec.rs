@@ -81,6 +81,26 @@ pub(super) fn run_writes(
                     "error": error.to_string(),
                     "fallback": "thread",
                 }));
+                // A draft the host will not publish is dropped, so it does not stay beside
+                // the thread that replaces it.
+                if let (Item::PublishDraft { draft, .. }, Inline::DraftThenPublish(drafts)) =
+                    (&write.item, connection.service.inline())
+                {
+                    let delete = drafts.delete_draft(connection.subject(), draft);
+                    if let Err(error) = connection.service.send(&delete) {
+                        posted.push(json!({
+                            "kind": "delete-draft",
+                            "items": write.ids(),
+                            "error": error.to_string(),
+                        }));
+                    }
+                    change(ctx, target, |target| {
+                        if let Some(local) = target.comment_mut(&comment) {
+                            local.draft_id = None;
+                        }
+                        Ok(())
+                    })?;
+                }
                 let again = Write {
                     item: Item::Thread { comment },
                     request: Some(connection.service.thread(connection.subject(), &text)),
@@ -88,6 +108,16 @@ pub(super) fn run_writes(
                     fallback: None,
                 };
                 run_writes(ctx, connection, target, vec![again], attempt, posted)?;
+                continue;
+            }
+            // A file thread the host refuses where a general comment may not stand in for it:
+            // the finding stays unposted, the failure is reported and the rest goes on.
+            Err(error) if error.refused() && matches!(write.item, Item::Thread { .. }) => {
+                posted.push(json!({
+                    "kind": write.kind(),
+                    "items": write.ids(),
+                    "error": error.to_string(),
+                }));
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -111,7 +141,7 @@ pub(super) fn run_writes(
                 },
                 request: Some(drafts.publish_draft(connection.subject(), &draft)),
                 sent: vec![None],
-                fallback: None,
+                fallback: write.fallback.clone(),
             };
             run_writes(ctx, connection, target, vec![publish], attempt, posted)?;
         }
@@ -170,7 +200,7 @@ pub(super) fn clear_pending(target: &mut Target, id: &str) {
 pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
-        Item::Review { comments } => comments.clone(),
+        Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
         Item::Thread { comment }
         | Item::ApprovalReview { comment }
         | Item::Draft { comment }
@@ -296,7 +326,7 @@ pub(super) fn save(
     let service = &connection.service;
     let review_url = target.review.as_ref().map(|review| review.url.as_str());
     match item {
-        Item::Review { comments } => {
+        Item::Review { comments, bodies } => {
             let (review, listed) = service.review_posted(connection.subject(), response)?;
             let found: Vec<(String, RemoteComment)> = listed
                 .into_iter()
@@ -306,11 +336,22 @@ pub(super) fn save(
                 })
                 .filter(|(local, _)| comments.contains(local))
                 .collect();
+            // The comments in the review's body: no thread of their own, so the review is
+            // their remote comment.
+            let body = service.comment_created(review_url, response);
             change(ctx, target, |target| {
                 for (local, remote) in found {
                     if let Some(comment) = target.comment_mut(&local) {
                         comment.delivery.post = PostState::Posted;
                         comment.remote = Some(remote);
+                    }
+                }
+                for local in bodies {
+                    if let (Some(comment), Some((id, url))) =
+                        (target.comment_mut(local), body.clone())
+                    {
+                        comment.delivery.post = PostState::Posted;
+                        comment.remote = Some(own(id, url, login, Some(review.clone())));
                     }
                 }
                 Ok(())

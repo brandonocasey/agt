@@ -3,6 +3,7 @@
 use super::Summary;
 use super::records::{
     answered_id, finding_info, finding_kind, fixed_sha, parse_records, rejected_reason,
+    reply_thread,
 };
 use super::trust::Trust;
 use crate::forge::markers::{self, agent_attempt, agent_id};
@@ -92,7 +93,9 @@ fn merge_threads(
                     summary.records += 1;
                     continue;
                 }
-                if let Some(id) = answered_id(&comment.body, own.is_some()) {
+                if let Some(id) = answered_id(&comment.body, own.is_some())
+                    .or_else(|| quoted_reply(threads, own.as_deref()?))
+                {
                     answers.push((id, data));
                     continue;
                 }
@@ -241,6 +244,15 @@ fn take_record(
     });
     records.extend(found);
     true
+}
+
+/// The thread a verified own comment answers by its marker alone, as a quote reply does:
+/// the thread has the comment's id, and not as its first comment.
+fn quoted_reply(threads: &[Thread], own: &str) -> Option<String> {
+    let id = reply_thread(own)?;
+    let thread = threads.iter().find(|thread| thread.id == id)?;
+    let first = thread.comments.first()?;
+    (first.id != own).then(|| id.to_owned())
 }
 
 /// Marks a run's record landed in comment `id`. The summary texts it replaced are gone from

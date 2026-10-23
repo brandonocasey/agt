@@ -31,11 +31,11 @@ pub const SYNC: Review<'static> = Review {
 ]"#,
 };
 
-/// Text that `publish` must never send: killed findings and other people's comments.
-const NEVER_POSTED: [&str; 4] = [
+/// Text that `publish` must never send: killed findings and other people's comments. Alice's
+/// general comment is no exception to quote: a reply to it opens with its first line.
+const NEVER_POSTED: [&str; 3] = [
     "Killed text of f3",
     "Alice thread text",
-    "Alice general text",
     "Someone else's text",
 ];
 

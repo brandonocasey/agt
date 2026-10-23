@@ -76,8 +76,8 @@ pub(super) fn outcome(thread: &Thread) -> String {
     }
 }
 
-/// The posted text: a heading, the text, the model that wrote it and the markers. Only an
-/// agent's first comment signs; the account that posts a reply already names its author.
+/// The posted text: the location when it is outside the diff, the kind as a title, the text
+/// and the footer, then the markers.
 pub(super) fn body(
     target: &Target,
     thread: &Thread,
@@ -85,35 +85,9 @@ pub(super) fn body(
     location: Option<&str>,
     attempt: &str,
 ) -> String {
-    let first = thread
-        .comments
-        .first()
-        .is_some_and(|first| first.id == comment.id);
-    let finding = thread.finding.as_ref().filter(|_| first);
-    let mut text = String::new();
-    if let Some(location) = location {
-        let _ = write!(text, "`{location}`\n\n");
-    }
-    if finding.is_some() {
-        let _ = write!(text, "**{}:** ", kind_heading(thread));
-    } else if let Some(name) = thread.check.as_deref().filter(|_| first).map(|id| {
-        target
-            .qa_runs
-            .iter()
-            .flat_map(|run| &run.checks)
-            .find(|check| check.id == id)
-            .map_or(id, |check| check.name.as_str())
-    }) {
-        let _ = write!(text, "**{} · 🧪 QA: {name}:** ", kind_heading(thread));
-    }
-    text.push_str(comment.body.trim_end());
-    if let Some(issue) = thread.issue.as_ref().filter(|_| first) {
-        let _ = write!(text, "\n\nRelated: {issue}");
-    }
-    if let (true, Author::Agent { model, .. }) = (first, &comment.author) {
-        let _ = write!(text, "\n\n> <sub>{model}</sub>");
-    }
-    if let Some(finding) = finding {
+    let mut text = paragraph(target, thread, comment, location);
+    let first = is_first(thread, comment);
+    if let Some(finding) = thread.finding.as_ref().filter(|_| first) {
         let sha = thread
             .anchor
             .as_ref()
@@ -124,6 +98,61 @@ pub(super) fn body(
     }
     let _ = write!(text, "\n{}", markers::agent(&comment.id, Some(attempt)));
     text
+}
+
+fn is_first(thread: &Thread, comment: &Comment) -> bool {
+    thread
+        .comments
+        .first()
+        .is_some_and(|first| first.id == comment.id)
+}
+
+/// The visible part of a post, which is also what a review body holds for each finding.
+pub(super) fn paragraph(
+    target: &Target,
+    thread: &Thread,
+    comment: &Comment,
+    location: Option<&str>,
+) -> String {
+    let first = is_first(thread, comment);
+    let mut text = String::new();
+    if let Some(location) = location {
+        let _ = write!(text, "`{location}`\n\n");
+    }
+    if (thread.finding.is_some() || thread.check.is_some()) && first {
+        let _ = write!(text, "**{}**\n\n", kind_heading(thread));
+    }
+    text.push_str(comment.body.trim_end());
+    if let Some(issue) = thread.issue.as_ref().filter(|_| first) {
+        let _ = write!(text, "\n\nRelated: {issue}");
+    }
+    if let Author::Agent { model, .. } = &comment.author {
+        let _ = write!(
+            text,
+            "\n\n> <sub>{}</sub>",
+            footer(target, thread, comment, model)
+        );
+    }
+    text
+}
+
+/// `🔍 agt review · model`, or `🧪 agt QA · check · model` for a QA thread or comment.
+fn footer(target: &Target, thread: &Thread, comment: &Comment, model: &str) -> String {
+    if !comment.qa && thread.check.is_none() {
+        return format!("🔍 agt review · {model}");
+    }
+    let name = thread.check.as_deref().map(|id| {
+        target
+            .qa_runs
+            .iter()
+            .flat_map(|run| &run.checks)
+            .find(|check| check.id == id)
+            .map_or(id, |check| check.name.as_str())
+    });
+    match name {
+        Some(name) => format!("🧪 agt QA · {name} · {model}"),
+        None => format!("🧪 agt QA · {model}"),
+    }
 }
 
 /// The head a run's final record is about: the repaired head, else the last pass's.

@@ -206,7 +206,7 @@ fn qa_comments_and_replies_are_marked_as_qa() {
 #[test]
 fn resolve_default_replies_name_the_outcome() {
     let env = changed_branch();
-    let ids: Vec<String> = ["a", "b", "c"]
+    let ids: Vec<String> = ["a", "b", "c", "d"]
         .iter()
         .map(|body| {
             env.run(&["comment", "--body", body])["thread"]["id"]
@@ -235,6 +235,10 @@ fn resolve_default_replies_name_the_outcome() {
         last(&env.run(&["resolve", &ids[2], "--rejected", "By design."])),
         "🚫 Won't fix: By design."
     );
+    // A bare resolve still names its outcome; a verdict only records the triage.
+    assert_eq!(last(&env.run(&["resolve", &ids[3]])), "✅ Resolved.");
+    let verdict = env.run(&["resolve", &ids[3], "--triage", "valid"]);
+    assert_eq!(last(&verdict), "✅ Resolved.");
 }
 
 #[test]
@@ -369,6 +373,69 @@ fn a_qa_approval_of_the_head_shows_in_the_headline() {
             &setup.head[..7]
         )),
         "{summary}"
+    );
+}
+
+/// A QA finding with no diff line goes in the review body on someone else's PR, and its
+/// footer names the check beside the model.
+#[test]
+fn a_qa_finding_in_a_review_body_names_its_check_in_the_footer() {
+    let svc = Github::new();
+    let setup = Setup::branch(
+        svc.origin(),
+        &Review {
+            reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+            findings: "[]",
+        },
+        false,
+        false,
+    );
+    let env = &setup.env;
+    svc.sync(&setup, &Remote::by("alice"));
+    env.run(&["sync", "--pr", "42"]);
+    let run = start(env, &["--model", "m1", "--harness", "claude-code"]);
+    let k1 = check(env, &run, "pay with a card", "fail", &[]);
+    let thread = qa(
+        env,
+        &[
+            "finding",
+            "--check",
+            &k1,
+            "--type",
+            "bug",
+            "--severity",
+            "high",
+            "--body",
+            "Payment hangs.",
+        ],
+    )["thread"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dry = qa(
+        env,
+        &[
+            "publish",
+            "--pr",
+            "42",
+            "--not-own",
+            "--only",
+            &thread,
+            "--dry-run",
+        ],
+    );
+    let review = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|write| write["kind"] == "review")
+        .unwrap_or_else(|| panic!("{dry}"));
+    let body = review["input"]["body"].as_str().unwrap();
+    assert!(
+        body.starts_with(
+            "**🐛 bug (high)**\n\nPayment hangs.\n\n> <sub>🧪 agt QA · pay with a card · m1</sub>"
+        ),
+        "{body}"
     );
 }
 

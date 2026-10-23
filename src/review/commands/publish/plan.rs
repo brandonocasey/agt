@@ -2,6 +2,7 @@ mod approval;
 mod placement;
 pub(super) mod skips;
 
+use self::approval::Approved;
 use self::placement::Spot;
 use self::skips::{Held, Skip, Skipped, Unsupported};
 
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::Options;
 
-use super::render::{body, location, record_head};
+use super::render::{body, location, paragraph, record_head};
 use super::summary::{Covered, Links, QaSummary, summary_texts};
 use crate::core::error::{Error, Result};
 use crate::forge::anchors;
@@ -22,8 +23,8 @@ use crate::review::commands::status::run_reviews_at;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::view::author_label;
 use crate::store::model::{
-    Author, Comment, PostState, QaRun, RecordPost, RemoteKind, RemoteThread, Review, Run, Side,
-    Target, Thread,
+    Author, Comment, PostState, QaRun, RecordPost, RemoteComment, RemoteKind, RemoteThread, Review,
+    Run, Side, Target, Thread,
 };
 
 /// Stands for the id of the draft a dry run has not created yet.
@@ -31,9 +32,11 @@ pub(super) const NEW_DRAFT: &str = "<draft id>";
 
 /// What one write call posts, which says how to mark and save it.
 pub(super) enum Item {
-    /// A review holding the in-diff comments of one reviewed commit.
+    /// A review holding the in-diff comments of one reviewed commit, and in its body the
+    /// comments that have no diff line.
     Review {
         comments: Vec<String>,
+        bodies: Vec<String>,
     },
     /// A thread's first comment as a general comment or discussion.
     Thread {
@@ -104,7 +107,7 @@ impl Write {
 
     pub(super) fn ids(&self) -> Vec<String> {
         match &self.item {
-            Item::Review { comments } => comments.clone(),
+            Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
             Item::Thread { comment }
             | Item::ApprovalReview { comment }
             | Item::Draft { comment }
@@ -152,6 +155,12 @@ pub(super) struct Batch {
     pub(super) commit: String,
     pub(super) ids: Vec<String>,
     pub(super) comments: Vec<(Position, String)>,
+}
+
+/// A comment with no diff line that goes in the body of a review: its id and its text.
+struct Paragraph {
+    id: String,
+    text: String,
 }
 
 /// The posting plan for one target state; built the same way for a dry run and a real one.
@@ -231,6 +240,7 @@ impl<'a> Planner<'a> {
         let mut skipped = Vec::new();
         let mut expected = Vec::new();
         let mut reviews: Vec<Batch> = Vec::new();
+        let mut paragraphs: Vec<Paragraph> = Vec::new();
         for thread in &target.threads {
             if !self.selected_thread(thread) {
                 continue;
@@ -274,9 +284,15 @@ impl<'a> Planner<'a> {
             }
             if let Some(approval) = &thread.approval {
                 match self.approval(thread, first, approval, target) {
-                    Ok((mut approve, kind, note)) => {
+                    Ok(Approved {
+                        writes: mut approve,
+                        kind,
+                        note,
+                    }) => {
                         writes.append(&mut approve);
-                        expected.push((thread.id.clone(), kind));
+                        if let Some(kind) = kind {
+                            expected.push((thread.id.clone(), kind));
+                        }
                         if let Some(note) = note {
                             skipped.push(Skipped::new(&format!("{}/formal", thread.id), note));
                         }
@@ -294,6 +310,13 @@ impl<'a> Planner<'a> {
             {
                 writes.push(write);
                 expected.push((thread.id.clone(), RemoteKind::ReviewThread));
+                continue;
+            }
+            if let Some(placed) = self.in_body(target, thread, first, &spot) {
+                match placed {
+                    Ok(paragraph) => paragraphs.push(paragraph),
+                    Err(reason) => skipped.push(Skipped::new(&thread.id, reason)),
+                }
                 continue;
             }
             // A general comment the host cannot resolve would stay on the PR/MR after the fix;
@@ -368,30 +391,98 @@ impl<'a> Planner<'a> {
                 }
             }
         }
-        let reviews = reviews.into_iter().filter_map(
-            |Batch {
-                 commit,
-                 ids,
-                 comments,
-             }| {
-                // Only a service that batches collects any.
-                let Inline::ReviewBatch(batches) = self.service().inline() else {
-                    return None;
-                };
-                // Only the marker: the summary comment says what the review found.
-                let summary = markers::agent(&markers::review_id(&commit), None);
-                let request =
-                    batches.review_batch(self.connection.subject(), &commit, &summary, &comments);
-                Some(Write {
-                    item: Item::Review { comments: ids },
-                    request: Some(request),
-                    sent: comments.into_iter().map(|(_, text)| Some(text)).collect(),
-                    fallback: None,
-                })
-            },
-        );
-        let writes = reviews.chain(writes).collect();
+        let writes = self
+            .review_writes(reviews, paragraphs)
+            .into_iter()
+            .chain(writes)
+            .collect();
         (writes, skipped, expected)
+    }
+
+    /// Where a comment with no diff line goes when an agent posts no Conversation comment: in
+    /// the body of a review on someone else's PR; on our own it stays in the summary (a
+    /// finding) or is not posted. `None` where the comment goes elsewhere.
+    fn in_body(
+        &self,
+        target: &Target,
+        thread: &Thread,
+        first: &Comment,
+        spot: &Spot,
+    ) -> Option<std::result::Result<Paragraph, Skip>> {
+        let location = match spot {
+            Spot::General => None,
+            Spot::OtherFile(location) => Some(location.as_str()),
+            _ => return None,
+        };
+        if !self.in_review_body(first) {
+            return None;
+        }
+        Some(if self.foreign().is_some() {
+            Ok(Paragraph {
+                id: first.id.clone(),
+                text: paragraph(target, thread, first, location),
+            })
+        } else if found(thread) {
+            Err(Skip::InSummary)
+        } else {
+            Err(Skip::NoConversation)
+        })
+    }
+
+    /// The reviews that carry the in-diff comments of each commit, the first also holding the
+    /// comments with no diff line; a review of only a body at the head when no commit has any.
+    fn review_writes(&self, mut reviews: Vec<Batch>, paragraphs: Vec<Paragraph>) -> Vec<Write> {
+        if !paragraphs.is_empty() && reviews.is_empty() {
+            reviews.push(Batch {
+                commit: self.review.head_sha.clone(),
+                ids: Vec::new(),
+                comments: Vec::new(),
+            });
+        }
+        let mut paragraphs = Some(paragraphs);
+        reviews
+            .into_iter()
+            .filter_map(
+                |Batch {
+                     commit,
+                     ids,
+                     comments,
+                 }| {
+                    // Only a service that batches collects any.
+                    let Inline::ReviewBatch(batches) = self.service().inline() else {
+                        return None;
+                    };
+                    let held = paragraphs.take().unwrap_or_default();
+                    let marker = markers::agent(&markers::review_id(&commit), None);
+                    let summary = held
+                        .iter()
+                        .map(|held| held.text.as_str())
+                        .chain([marker.as_str()])
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    let request = batches.review_batch(
+                        self.connection.subject(),
+                        &commit,
+                        &summary,
+                        &comments,
+                    );
+                    let sent = comments
+                        .into_iter()
+                        .map(|(_, text)| Some(text))
+                        .chain(held.iter().map(|held| Some(held.text.clone())))
+                        .collect();
+                    Some(Write {
+                        item: Item::Review {
+                            comments: ids,
+                            bodies: held.into_iter().map(|held| held.id).collect(),
+                        },
+                        request: Some(request),
+                        sent,
+                        fallback: None,
+                    })
+                },
+            )
+            .collect()
     }
 
     fn publish_draft(&self, drafts: &dyn DraftPoster, comment: &str, draft: &str) -> Write {
@@ -450,7 +541,10 @@ impl<'a> Planner<'a> {
                     ));
                     continue;
                 }
-                writes.push(self.reply(target, thread, remote, comment));
+                match self.reply(target, thread, remote, comment) {
+                    Ok(write) => writes.push(write),
+                    Err(reason) => skipped.push(Skipped::new(&comment.id, reason)),
+                }
             }
         }
         for thread in &target.threads {
@@ -494,18 +588,22 @@ impl<'a> Planner<'a> {
         thread: &Thread,
         remote: &RemoteThread,
         comment: &Comment,
-    ) -> Write {
+    ) -> std::result::Result<Write, Skip> {
         let text = body(target, thread, comment, None, self.attempt);
         let item = Item::Reply {
             comment: comment.id.clone(),
         };
         let subject = self.connection.subject();
         if self.caps().replies_natively(remote.kind) {
-            return self.write(item, self.service().reply(subject, remote, &text), &text);
+            return Ok(self.write(item, self.service().reply(subject, remote, &text), &text));
         }
-        // Such a thread has no replies: answer with a new comment naming it.
-        let text = format!("{text}\nRe: {}", thread.id);
-        self.write(item, self.service().note(subject, &text), &text)
+        // Such a thread has no replies, and an agent posts no general comment: you answer
+        // with a new comment that quotes the one you answer.
+        if matches!(comment.author, Author::Agent { .. }) {
+            return Err(Skip::NoReply);
+        }
+        let text = format!("{}{text}", quote(thread));
+        Ok(self.write(item, self.service().note(subject, &text), &text))
     }
 
     /// A thread the host cannot resolve, or cannot resolve in that direction, is only cleared
@@ -709,6 +807,7 @@ impl<'a> Planner<'a> {
         let request = self.service().file_thread(
             self.connection.subject(),
             self.review,
+            &self.pr_old_path(&anchor.path),
             &anchor.path,
             &text,
         )?;
@@ -717,9 +816,42 @@ impl<'a> Planner<'a> {
         };
         let mut write = self.write(item, request, &text);
         // A host without file threads refuses the position; the text already names the lines.
-        write.fallback = Some(text);
+        // An agent's text does not become a general comment where the host has none.
+        if !self.in_review_body(first) {
+            write.fallback = Some(text);
+        }
         Some(write)
     }
+}
+
+/// The quote that opens a reply to a general comment, in the form GitHub's own quote reply
+/// takes: the first line of the thread's first comment, who wrote it and a link to it.
+fn quote(thread: &Thread) -> String {
+    let Some(first) = thread.comments.first() else {
+        return String::new();
+    };
+    let line = first
+        .body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("<!--"))
+        .unwrap_or_default();
+    let login = match (&first.remote, &first.author) {
+        (
+            Some(RemoteComment {
+                login: Some(login), ..
+            }),
+            _,
+        )
+        | (_, Author::Human { login, .. }) => login.as_str(),
+        _ => "",
+    };
+    let link = first
+        .remote
+        .as_ref()
+        .and_then(|remote| remote.url.as_deref())
+        .map_or_else(String::new, |url| format!(", [comment]({url})"));
+    format!("> {line}\n> — @{login}{link}\n\n")
 }
 
 /// A review finding or a QA thread: what the summary reports.

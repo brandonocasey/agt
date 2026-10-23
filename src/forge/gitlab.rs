@@ -194,6 +194,7 @@ impl ReviewService for Gitlab {
         &self,
         subject: ReviewSubject,
         review: &Review,
+        old_path: &str,
         path: &str,
         text: &str,
     ) -> Option<Request> {
@@ -208,7 +209,7 @@ impl ReviewService for Gitlab {
                     "base_sha": base_sha,
                     "start_sha": review.start_sha.as_deref().unwrap_or(base_sha),
                     "head_sha": review.head_sha,
-                    "old_path": path,
+                    "old_path": old_path,
                     "new_path": path,
                 },
             })),
@@ -292,6 +293,14 @@ impl DraftPoster for Gitlab {
         Request::rest(
             Method::Put,
             format!("{}/draft_notes/{draft}/publish", base(subject)),
+            None,
+        )
+    }
+
+    fn delete_draft(&self, subject: ReviewSubject, draft: &str) -> Request {
+        Request::rest(
+            Method::Delete,
+            format!("{}/draft_notes/{draft}", base(subject)),
             None,
         )
     }
@@ -653,6 +662,7 @@ mod tests {
         let all = [
             ("draft", gitlab.draft(subject(), "text", &position)),
             ("publish_draft", gitlab.publish_draft(subject(), "77")),
+            ("delete_draft", gitlab.delete_draft(subject(), "77")),
             ("thread", gitlab.thread(subject(), "text")),
             ("note", gitlab.note(subject(), "text")),
             ("reply", gitlab.reply(subject(), &thread, "text")),
@@ -664,6 +674,33 @@ mod tests {
             "gitlab/requests.golden.json",
             &contract::requests(glab_args, &all),
         );
+    }
+
+    #[test]
+    fn a_file_thread_on_a_renamed_file_names_both_paths() {
+        let review = Review {
+            forge: Forge::Gitlab,
+            host: "gitlab.com".to_owned(),
+            repo: "me/proj".to_owned(),
+            number: 3,
+            url: "https://gitlab.com/me/proj/-/merge_requests/3".to_owned(),
+            state: ReviewState::Open,
+            closed_at: None,
+            head_branch: "feature".to_owned(),
+            head_sha: "head".to_owned(),
+            base_sha: Some("base".to_owned()),
+            start_sha: None,
+            author: None,
+            login: "me".to_owned(),
+            synced_at: String::new(),
+            attached_at: None,
+        };
+        let request = gitlab()
+            .file_thread(subject(), &review, "old.txt", "new.txt", "text")
+            .unwrap();
+        let position = &request.body.unwrap()["position"];
+        assert_eq!(position["old_path"], "old.txt");
+        assert_eq!(position["new_path"], "new.txt");
     }
 
     #[test]

@@ -66,6 +66,14 @@ impl Planner<'_> {
         self.pr_files().iter().any(|file| file.changes_into(path))
     }
 
+    /// The path the PR/MR diff renames `path` from, else `path`.
+    pub(super) fn pr_old_path(&self, path: &str) -> String {
+        self.pr_files()
+            .iter()
+            .find_map(|file| file.old_path_of(path))
+            .unwrap_or_else(|| path.to_owned())
+    }
+
     fn pr_files(&self) -> &[anchors::FileDiff] {
         self.pr_files.get_or_init(|| {
             let head = &self.review.head_sha;

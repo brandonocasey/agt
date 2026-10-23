@@ -181,6 +181,7 @@ impl ReviewService for Github {
         &self,
         subject: ReviewSubject,
         review: &Review,
+        _old_path: &str,
         path: &str,
         text: &str,
     ) -> Option<Request> {

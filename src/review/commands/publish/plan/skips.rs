@@ -3,8 +3,9 @@
 use serde_json::{Value, json};
 
 use super::{Planner, allowed, comment_in_run};
+use crate::forge::service::Inline;
 use crate::review::commands::view::author_label;
-use crate::store::model::{Comment, Pass, PassKind, Target, Thread};
+use crate::store::model::{Author, Comment, Pass, PassKind, Target, Thread};
 
 /// Why something is not posted.
 #[derive(Clone)]
@@ -37,6 +38,10 @@ pub(super) enum Skip {
     OutsideDiff,
     /// The host cannot resolve a general comment, so the summary lists the finding.
     InSummary,
+    /// An agent's comment with no diff line has no review body to go in on our own PR.
+    NoConversation,
+    /// An agent does not answer a general comment the host cannot reply to in place.
+    NoReply,
     HeadMoved {
         approved: String,
         head: String,
@@ -57,7 +62,7 @@ pub(super) enum Held {
 
 #[derive(Clone)]
 pub(super) enum Unsupported {
-    SelfApproval { posted_as_comment: bool },
+    SelfApproval { recorded: bool },
     FormalApproval,
     Resolve,
     Unresolve,
@@ -97,6 +102,14 @@ impl std::fmt::Display for Skip {
                 f,
                 "listed in the summary: a general comment here cannot be resolved"
             ),
+            Self::NoConversation => write!(
+                f,
+                "an agent does not post a general comment on your own PR: the host cannot resolve it"
+            ),
+            Self::NoReply => write!(
+                f,
+                "an agent does not post a general comment as a reply: the host has no reply in place"
+            ),
             Self::HeadMoved { approved, head } => {
                 write!(
                     f,
@@ -107,17 +120,15 @@ impl std::fmt::Display for Skip {
                 write!(f, "open findings block approval: {}", ids.join(", "))
             }
             Self::Unsupported { service, what } => match what {
-                Unsupported::SelfApproval {
-                    posted_as_comment: false,
-                } => write!(f, "{service} does not let the author approve their own PR"),
-                Unsupported::SelfApproval {
-                    posted_as_comment: true,
-                } => write!(
+                Unsupported::SelfApproval { recorded: false } => {
+                    write!(f, "{service} does not let the author approve their own PR")
+                }
+                Unsupported::SelfApproval { recorded: true } => write!(
                     f,
-                    "{service} does not let the author approve their own PR; posted as a comment"
+                    "{service} does not let the author approve their own PR; the summary records it"
                 ),
                 Unsupported::FormalApproval => {
-                    write!(f, "{service} has no formal approval; posted as a comment")
+                    write!(f, "{service} has no formal approval; recorded locally")
                 }
                 Unsupported::Resolve => {
                     write!(f, "{service} cannot resolve threads; cleared locally")
@@ -247,6 +258,15 @@ impl Planner<'_> {
             .or_else(|| self.foreign_threads().filter(|_| !self.is_approval(thread)))
     }
 
+    /// Whether this comment goes in the body of a review, not a general comment: an agent's,
+    /// on a service that batches in-diff comments into reviews and cannot resolve a general
+    /// comment (GitHub).
+    pub(super) fn in_review_body(&self, first: &Comment) -> bool {
+        matches!(first.author, Author::Agent { .. })
+            && matches!(self.service().inline(), Inline::ReviewBatch(_))
+            && !self.caps().general_resolvable
+    }
+
     fn is_approval(&self, thread: &Thread) -> bool {
         self.approval == Some(thread.id.as_str())
     }
@@ -342,11 +362,8 @@ mod tests {
             "Forgejo cannot resolve threads; cleared locally"
         );
         assert_eq!(
-            unsupported(Unsupported::SelfApproval {
-                posted_as_comment: true
-            })
-            .to_string(),
-            "Forgejo does not let the author approve their own PR; posted as a comment"
+            unsupported(Unsupported::SelfApproval { recorded: true }).to_string(),
+            "Forgejo does not let the author approve their own PR; the summary records it"
         );
     }
 }
