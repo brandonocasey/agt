@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::approve::is_open;
-use super::findings::{NewThread, author, issue_key, local_thread};
+use super::findings::{self, NewThread, author, issue_key, local_thread};
 use super::input::{limited, read_body};
 use super::{Ctx, Selection, auto, publish, usage, view};
 use crate::core::error::{Error, Result, fail};
@@ -68,6 +68,10 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
         }
         QaCommand::Check(args) => check(&ctx, args)?,
         QaCommand::Finding(args) => finding(&ctx, &args)?,
+        QaCommand::Comment(args) => {
+            findings::comment(&ctx, &args.comment, true, args.check.as_deref())?
+        }
+        QaCommand::Reply(args) => findings::reply(&ctx, &args, true)?,
         QaCommand::List => list(&ctx)?,
         QaCommand::Show { id } => view::show(&ctx, &id)?,
         QaCommand::Status { head } => status(&ctx, head.as_deref())?,
@@ -104,6 +108,8 @@ fn run_hint(command: &QaCommand) -> Option<String> {
         } => Some(run.clone()),
         QaCommand::Check(args) => Some(args.run.clone()),
         QaCommand::Finding(args) => from_id(&args.check),
+        QaCommand::Comment(args) => args.check.as_deref().and_then(from_id),
+        QaCommand::Reply(args) => from_id(&args.id),
         QaCommand::Show { id } => from_id(id),
         _ => None,
     }
@@ -277,17 +283,26 @@ fn facts(env: Vec<String>) -> Result<Vec<String>> {
 
 /// A tester or finder: the flags' author, an agent tied to `run` so its run's publish posts its
 /// threads.
-fn qa_author(
+/// The QA run holding check `check`.
+pub(super) fn check_run<'a>(target: &'a Target, check: &str) -> Result<&'a QaRun> {
+    target
+        .qa_runs
+        .iter()
+        .find(|run| run.checks.iter().any(|known| known.id == check))
+        .ok_or_else(|| Error(format!("check {check} not found in target {}", target.key)))
+}
+
+pub(super) fn qa_author(
     args: &AuthorArgs,
     target: &Target,
     default: Option<Author>,
-    run: &str,
+    run: Option<&str>,
 ) -> Result<Author> {
     if args.reviewer.is_some() {
         return fail("--reviewer names a review pass reviewer; QA takes --model and --harness");
     }
     let mut found = author(args, target, default)?;
-    if let Author::Agent { run: owner, .. } = &mut found {
+    if let (Author::Agent { run: owner, .. }, Some(run)) = (&mut found, run) {
         *owner = Some(run.to_owned());
     }
     Ok(found)
@@ -312,7 +327,7 @@ fn run_start(ctx: &Ctx, env: Vec<String>, tester: &AuthorArgs) -> Result<Value> 
             }
         };
         let run = QaRun {
-            tester: qa_author(tester, target, default, &id)?,
+            tester: qa_author(tester, target, default, Some(&id))?,
             id,
             started_at: now.to_owned(),
             ended_at: None,
@@ -432,18 +447,9 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
         .transpose()?;
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
-        let run = target
-            .qa_runs
-            .iter()
-            .find(|run| run.checks.iter().any(|check| check.id == args.check))
-            .ok_or_else(|| {
-                Error(format!(
-                    "check {} not found in target {}",
-                    args.check, target.key
-                ))
-            })?;
+        let run = check_run(target, &args.check)?;
         let finder = if args.author.is_set() {
-            qa_author(&args.author, target, default, &run.id)?
+            qa_author(&args.author, target, default, Some(&run.id))?
         } else {
             run.tester.clone()
         };
@@ -454,6 +460,7 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
                 severity: args.severity,
                 anchor: None,
                 finding: None,
+                qa: true,
             },
             finder,
             body,

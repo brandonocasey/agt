@@ -51,6 +51,7 @@ pub(super) fn approve(ctx: &Ctx, args: &ApprovalArgs) -> Result<Value> {
                 severity: None,
                 anchor: None,
                 finding: None,
+                qa: false,
             },
             author,
             body,

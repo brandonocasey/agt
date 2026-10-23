@@ -209,8 +209,8 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Finding {
             action: FindingAction::Kill { id, reason },
         } => finding_kill(&ctx, &id, &reason)?,
-        Command::Comment(args) => comment(&ctx, &args)?,
-        Command::Reply(args) => reply(&ctx, &args)?,
+        Command::Comment(args) => comment(&ctx, &args, false, None)?,
+        Command::Reply(args) => reply(&ctx, &args, false)?,
         Command::Resolve(args) => resolve(&ctx, &args)?,
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,

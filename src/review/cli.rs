@@ -236,6 +236,15 @@ pub struct CommentArgs {
 }
 
 #[derive(Args)]
+pub struct QaCommentArgs {
+    #[command(flatten)]
+    pub comment: CommentArgs,
+    /// Check the comment is about, as `qa-xxxx.k1`.
+    #[arg(long, value_name = "CHECK")]
+    pub check: Option<String>,
+}
+
+#[derive(Args)]
 pub struct ReplyArgs {
     pub id: String,
     /// Reply text, or `-` for stdin.
@@ -263,18 +272,19 @@ pub struct ResolveArgs {
     /// "❌ Not fixed: <reason>." unless `--reply` gives other text.
     #[arg(long, value_name = "REASON")]
     pub not_fixed: Option<String>,
-    /// Not to be fixed (wrong, or not worth it): resolve with `rejected: <reason>` and a
-    /// reply "🚫 Rejected: <reason>." unless `--reply` gives other text.
+    /// Won't fix (wrong, or not worth it): resolve with `rejected: <reason>` and a
+    /// reply "🚫 Won't fix: <reason>." unless `--reply` gives other text.
     #[arg(long, value_name = "REASON")]
     pub rejected: Option<String>,
     /// Left for a follow-up issue on the host (`owner/repo#12`, `#12` or `12`): resolve with
     /// `moved to <issue>` and a reply "📋 Moved to <issue>." unless `--reply` gives other text.
     #[arg(long, value_name = "ISSUE")]
     pub issue: Option<String>,
-    /// The code the thread names is gone: triage `stale` and resolve.
+    /// The code the thread names is gone: triage `stale`, resolve, and reply
+    /// "➖ No longer applies: the code changed." unless `--reply` gives other text.
     #[arg(long)]
     pub stale: bool,
-    /// Resolve as answered.
+    /// Resolve as answered, with the reply "💬 Answered above." unless `--reply` gives other text.
     #[arg(long)]
     pub answered: bool,
     /// Only record the triage: `valid` or `question` (a question holds the thread).
@@ -375,6 +385,10 @@ pub enum QaCommand {
     Check(CheckArgs),
     /// Open a thread for something a check found.
     Finding(QaFindingArgs),
+    /// Add a QA comment, as `agt review comment` does; `--check` ties it to a check.
+    Comment(QaCommentArgs),
+    /// Reply to a thread as QA, as `agt review reply` does.
+    Reply(ReplyArgs),
     /// List the latest outcome of every check and the QA threads.
     List,
     /// Show a QA run (`qa-xxxx`), check (`qa-xxxx.k1`) or thread.

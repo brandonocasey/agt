@@ -12,6 +12,7 @@ use crate::store::model::{
 use crate::store::{Namespace, Store};
 
 use super::input::{AnchorInput, build_anchor, limited, read_body};
+use super::qa::{check_run, qa_author};
 use super::{Ctx, find_pass, find_pass_mut, find_thread_mut, major_found, passes};
 
 /// A comment written here, numbered after the thread's other local comments.
@@ -40,10 +41,12 @@ pub(super) struct NewThread {
     pub(super) severity: Option<Severity>,
     pub(super) anchor: Option<Anchor>,
     pub(super) finding: Option<FindingInfo>,
+    pub(super) qa: bool,
 }
 
 pub(super) fn local_thread(new: NewThread, author: Author, body: String, now: &str) -> Thread {
-    let first = local_comment(&new.id, &[], author, body, now);
+    let mut first = local_comment(&new.id, &[], author, body, now);
+    first.qa = new.qa;
     Thread {
         severity: new.severity,
         anchor: new.anchor,
@@ -351,6 +354,7 @@ pub(super) fn add_findings(
                         tests_run: finding.tests_run,
                         post_reveal: finding.post_reveal,
                     }),
+                    qa: false,
                 },
                 agent.clone(),
                 finding.scenario,
@@ -368,7 +372,13 @@ pub(super) fn add_findings(
     }
 }
 
-pub(super) fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
+/// `qa` is set for `agt qa comment`: the thread and its comment are QA's, tied to `check`.
+pub(super) fn comment(
+    ctx: &Ctx,
+    args: &CommentArgs,
+    qa: bool,
+    check: Option<&str>,
+) -> Result<Value> {
     let scope = ctx.scope()?;
     let body = read_body(&args.body)?;
     let anchor_input = AnchorInput {
@@ -410,7 +420,21 @@ pub(super) fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
         .transpose()?;
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
-        let author = author(&args.author, target, default)?;
+        let author = if qa {
+            let run = check.map(|check| check_run(target, check)).transpose()?;
+            match run {
+                // The tester found it, unless the author flags say otherwise.
+                Some(run) if !args.author.is_set() => run.tester.clone(),
+                _ => qa_author(
+                    &args.author,
+                    target,
+                    default,
+                    run.map(|run| run.id.as_str()),
+                )?,
+            }
+        } else {
+            author(&args.author, target, default)?
+        };
         let mut thread = local_thread(
             NewThread {
                 id: target.next_thread_id(),
@@ -418,12 +442,14 @@ pub(super) fn comment(ctx: &Ctx, args: &CommentArgs) -> Result<Value> {
                 severity: args.severity,
                 anchor,
                 finding: None,
+                qa,
             },
             author,
             body,
             now,
         );
         thread.issue = issue;
+        thread.check = check.map(str::to_owned);
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
@@ -483,7 +509,8 @@ fn link_review(ctx: &Ctx, issue: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
+/// `qa` is set for `agt qa reply`: the comment is QA's.
+pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs, qa: bool) -> Result<Value> {
     let scope = ctx.scope()?;
     if scope.existing.is_none() {
         return fail(format!("thread {} not found", args.id));
@@ -491,10 +518,15 @@ pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs) -> Result<Value> {
     let body = read_body(&args.body)?;
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
-        let author = author(&args.author, target, default)?;
+        let author = if qa {
+            qa_author(&args.author, target, default, None)?
+        } else {
+            author(&args.author, target, default)?
+        };
         let thread = find_thread_mut(target, &args.id)?;
         let mut comment = local_comment(&thread.id, &thread.comments, author, body, now);
         comment.local = args.local;
+        comment.qa = qa;
         thread.comments.push(comment);
         thread.updated_at = now.to_owned();
         Ok(thread.clone())
@@ -561,7 +593,7 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
                 reason: limited(reason.to_owned(), "rejected reason")?,
             }),
             false,
-            Some(format!("🚫 Rejected: {reason}.")),
+            Some(format!("🚫 Won't fix: {reason}.")),
         )
     } else if let Some(issue) = &moved {
         (
@@ -573,9 +605,19 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
             Some(format!("📋 Moved to {issue}.")),
         )
     } else if args.stale {
-        (Some(Triage::Stale), Some(Resolution::Stale), false, None)
+        (
+            Some(Triage::Stale),
+            Some(Resolution::Stale),
+            false,
+            Some("➖ No longer applies: the code changed.".to_owned()),
+        )
     } else if args.answered {
-        (None, Some(Resolution::Answered), false, None)
+        (
+            None,
+            Some(Resolution::Answered),
+            false,
+            Some("💬 Answered above.".to_owned()),
+        )
     } else {
         (args.triage.map(Triage::from), None, false, None)
     };

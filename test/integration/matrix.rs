@@ -239,7 +239,7 @@ fn not_own_publish_posts_only_replies_and_resolves_on_others_threads(svc: Svc) {
     env.run(&["resolve", &alice, "--answered"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let dry = dry_run(env, svc, &["--not-own"]);
-    assert_eq!(kinds(&dry, "writes"), ["reply", "resolve"], "{dry}");
+    assert_eq!(kinds(&dry, "writes"), ["reply", "reply", "resolve"], "{dry}");
     let skipped = skipped_items(&dry);
     for item in [setup.finding(1), "h1".to_owned(), "summary".to_owned()] {
         assert!(skipped.contains(&item), "{item}: {dry}");
@@ -1102,7 +1102,7 @@ fn rejected_findings_resolve_with_a_reason_and_count_in_the_record(svc: Svc) {
     let replies = thread["comments"].as_array().unwrap();
     assert_eq!(
         replies.last().unwrap()["body"],
-        "🚫 Rejected: Intended behavior."
+        "🚫 Won't fix: Intended behavior."
     );
     let open = env.run(&["status"])["open_threads"].to_string();
     assert!(!open.contains(&f1), "{open}");

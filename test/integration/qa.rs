@@ -154,6 +154,90 @@ fn an_open_finding_blocks_approval_until_resolved() {
 }
 
 #[test]
+fn qa_comments_and_replies_are_marked_as_qa() {
+    let env = changed_branch();
+    let run = start(&env, &["--model", "m1", "--harness", "claude-code"]);
+    let k1 = check(&env, &run, "checkout", "pass", &[]);
+    let thread = qa(
+        &env,
+        &[
+            "comment",
+            "--check",
+            &k1,
+            "--type",
+            "question",
+            "--body",
+            "Is the coupon capped?",
+        ],
+    )["thread"]
+        .clone();
+    let id = thread["id"].as_str().unwrap().to_owned();
+    assert_eq!(thread["check"], k1.as_str());
+    assert_eq!(thread["comments"][0]["qa"], true);
+    assert_eq!(thread["comments"][0]["author"]["run"], run.as_str());
+    assert!(
+        qa_fail(&env, &["comment", "--check", "qa-zzzz.k9", "--body", "x"]).contains("not found")
+    );
+
+    // Without a check it is a plain QA thread; the reply is QA's too.
+    let general = qa(&env, &["comment", "--body", "Looks fine."])["thread"].clone();
+    assert!(general["check"].is_null());
+    assert_eq!(general["comments"][0]["qa"], true);
+    let replied = qa(&env, &["reply", &id, "--body", "Yes, at 50."])["thread"].clone();
+    assert_eq!(replied["comments"][1]["qa"], true);
+
+    // A review reply on the same thread is not marked.
+    let reviewed = env.run(&["reply", &id, "--body", "Thanks."])["thread"].clone();
+    assert!(reviewed["comments"][2].get("qa").is_none());
+    let plain = env.run(&["comment", "--body", "Review note."])["thread"].clone();
+    assert!(plain["comments"][0].get("qa").is_none());
+
+    // A finding is QA's as well.
+    let found = qa(
+        &env,
+        &[
+            "finding", "--check", &k1, "--type", "comment", "--body", "Odd.",
+        ],
+    )["thread"]
+        .clone();
+    assert_eq!(found["comments"][0]["qa"], true);
+}
+
+#[test]
+fn resolve_default_replies_name_the_outcome() {
+    let env = changed_branch();
+    let ids: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|body| {
+            env.run(&["comment", "--body", body])["thread"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let last = |value: &Value| {
+        value["thread"]["comments"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["body"]
+            .clone()
+    };
+    assert_eq!(
+        last(&env.run(&["resolve", &ids[0], "--stale"])),
+        "➖ No longer applies: the code changed."
+    );
+    assert_eq!(
+        last(&env.run(&["resolve", &ids[1], "--answered"])),
+        "💬 Answered above."
+    );
+    assert_eq!(
+        last(&env.run(&["resolve", &ids[2], "--rejected", "By design."])),
+        "🚫 Won't fix: By design."
+    );
+}
+
+#[test]
 fn show_finds_qa_runs_and_checks_and_ended_runs_take_no_checks() {
     let env = changed_branch();
     let run = start(&env, &["--env", "device=pixel"]);

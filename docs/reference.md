@@ -244,9 +244,10 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   `✅ Fixed in [<sha> <subject>](<commit URL>).`, linked once the target is linked
   to a PR/MR); `--not-fixed <reason>` (reopens with resolution `not fixed: <reason>`
   and a reply `❌ Not fixed: <reason>.`); `--rejected <reason>` (resolves a finding
-  that will not be fixed with `rejected: <reason>` and a reply `🚫 Rejected: <reason>.`;
-  the summary counts it as `<n> rejected`); `--stale` (triage and resolution `stale`);
-  `--answered` (resolution `answered`); `--issue <issue>` (resolves a finding left for a
+  that will not be fixed with `rejected: <reason>` and a reply `🚫 Won't fix: <reason>.`;
+  the summary counts it as `<n> rejected`); `--stale` (triage and resolution `stale`, reply
+  `➖ No longer applies: the code changed.`);
+  `--answered` (resolution `answered`, reply `💬 Answered above.`); `--issue <issue>` (resolves a finding left for a
   follow-up issue with `moved to <owner/repo#n>` and a reply `📋 Moved to <owner/repo#n>.`,
   which the host links; the issue must already be on the host, and its `links.reviews` gets the
   target key); `--triage valid|question` (only records the triage and leaves the thread open;
@@ -363,6 +364,9 @@ agt qa publish --dry-run            # as agt review publish
 - `finding` opens a general thread linked to the check (`check` field). Its author defaults to
   the run's tester. Reply to and resolve it with `agt review reply` and `agt review resolve`.
   An open QA bug, requirement or question also blocks the review's approval.
+- `agt qa comment` takes the arguments of `agt review comment` and an optional `--check <qa-id.kN>`
+  that sets the thread's `check`; `agt qa reply` takes those of `agt review reply`. Both store
+  the comment with `qa: true`, as `finding` does, and sign it as QA (`--reviewer` is refused).
 - `approve` records an approval of the head on the newest QA run. It needs a clean work tree, at
   least one check, no latest check that fails, is blocked or is stale, and no open bug,
   requirement or question found by a check. It sends no host approval.

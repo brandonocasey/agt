@@ -816,6 +816,9 @@ pub struct Comment {
     /// question; `publish` never posts it.
     #[serde(default)]
     pub local: bool,
+    /// Written by `agt qa`; `publish` marks the post as QA.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub qa: bool,
     pub deleted_remote: bool,
     pub deleted_seen_at: Option<String>,
 }
@@ -851,6 +854,7 @@ impl Comment {
             remote,
             draft_id: None,
             local: false,
+            qa: false,
             deleted_remote: false,
             deleted_seen_at: None,
         }
