@@ -555,10 +555,13 @@ impl Thread {
     }
 
     /// Sets the resolved state, stamping `closed_at` when the thread closes and clearing it when
-    /// it reopens.
+    /// it reopens. A thread an older build closed gets its last change as the time it closed,
+    /// before anything bumps that.
     pub fn set_resolved(&mut self, resolved: bool, now: &str) {
         if resolved && !self.resolved {
             self.closed_at = Some(now.to_owned());
+        } else if resolved && self.closed_at.is_none() {
+            self.closed_at = Some(self.updated_at.clone());
         } else if !resolved {
             self.closed_at = None;
         }
@@ -979,6 +982,24 @@ mod tests {
             assert!(Severity::parse(severity.as_str()) == Some(severity));
         }
         assert!(ThreadType::parse("other") == ThreadType::Comment);
+    }
+
+    #[test]
+    fn a_thread_closed_by_an_older_build_keeps_when_it_closed() {
+        let mut thread = Thread::new(
+            "h1".into(),
+            ThreadType::Bug,
+            Vec::new(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-01-02T00:00:00Z".into(),
+        );
+        thread.resolved = true;
+        thread.set_remote_resolved(true, "2026-03-01T00:00:00Z");
+        assert_eq!(thread.closed_at.as_deref(), Some("2026-01-02T00:00:00Z"));
+        thread.set_resolved(false, "2026-03-02T00:00:00Z");
+        assert_eq!(thread.closed_at, None);
+        thread.set_resolved(true, "2026-03-03T00:00:00Z");
+        assert_eq!(thread.closed_at.as_deref(), Some("2026-03-03T00:00:00Z"));
     }
 
     #[test]

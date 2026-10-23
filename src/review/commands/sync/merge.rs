@@ -392,6 +392,7 @@ fn import(
         finding: finding_info(&id),
         severity,
         resolved: data.info.resolvable && data.resolved,
+        closed_at: (data.info.resolvable && data.resolved).then(|| now.to_owned()),
         remote: Some(data.info),
         ..Thread::new(id, kind, comments, created_at, now.to_owned())
     });
