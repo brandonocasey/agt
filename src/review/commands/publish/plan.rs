@@ -27,6 +27,11 @@ use crate::store::model::{
     Run, Side, Target, Thread,
 };
 
+/// Longest review body, review marker included: GitHub takes at most 65,536 characters.
+const MAX_REVIEW_BODY: usize = 65_000;
+/// Room a review body keeps for the marker of the review.
+const REVIEW_MARKER: usize = 200;
+
 /// Stands for the id of the draft a dry run has not created yet.
 pub(super) const NEW_DRAFT: &str = "<draft id>";
 
@@ -163,7 +168,8 @@ pub(super) struct Batch {
     pub(super) comments: Vec<(Position, String)>,
 }
 
-/// A comment with no diff line that goes in the body of a review: its id and its text.
+/// A comment with no diff line that goes in the body of a review: its id and its text, which
+/// ends in the comment's own marker so that sync can claim it from the review body.
 struct Paragraph {
     id: String,
     text: String,
@@ -423,9 +429,16 @@ impl<'a> Planner<'a> {
             return None;
         }
         Some(if self.foreign().is_some() {
+            // One alone cannot pass the size limit of the body it goes in.
+            let mut text = paragraph(target, thread, first, location);
+            if text.chars().count() > MAX_REVIEW_BODY - REVIEW_MARKER {
+                text = text.chars().take(MAX_REVIEW_BODY - REVIEW_MARKER).collect();
+                text.push('…');
+            }
+            let marker = markers::agent(&first.id, Some(self.attempt));
             Ok(Paragraph {
                 id: first.id.clone(),
-                text: paragraph(target, thread, first, location),
+                text: format!("{text}\n{marker}"),
             })
         } else if found(thread) {
             Err(Skip::InSummary)
@@ -436,58 +449,58 @@ impl<'a> Planner<'a> {
 
     /// The reviews that carry the in-diff comments of each commit, the first also holding the
     /// comments with no diff line; a review of only a body at the head when no commit has any.
+    /// Comments with no diff line that pass a body's size limit go in reviews of only a body.
     fn review_writes(&self, mut reviews: Vec<Batch>, paragraphs: Vec<Paragraph>) -> Vec<Write> {
-        if !paragraphs.is_empty() && reviews.is_empty() {
-            reviews.push(Batch {
-                commit: self.review.head_sha.clone(),
-                ids: Vec::new(),
-                comments: Vec::new(),
-            });
+        let mut bodies = body_groups(paragraphs).into_iter();
+        let head = || Batch {
+            commit: self.review.head_sha.clone(),
+            ids: Vec::new(),
+            comments: Vec::new(),
+        };
+        if reviews.is_empty() && bodies.len() > 0 {
+            reviews.push(head());
         }
-        let mut paragraphs = Some(paragraphs);
-        reviews
+        let mut writes: Vec<Write> = reviews
             .into_iter()
-            .filter_map(
-                |Batch {
-                     commit,
-                     ids,
-                     comments,
-                 }| {
-                    // Only a service that batches collects any.
-                    let Inline::ReviewBatch(batches) = self.service().inline() else {
-                        return None;
-                    };
-                    let held = paragraphs.take().unwrap_or_default();
-                    let marker = markers::agent(&markers::review_id(&commit), None);
-                    let summary = held
-                        .iter()
-                        .map(|held| held.text.as_str())
-                        .chain([marker.as_str()])
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    let request = batches.review_batch(
-                        self.connection.subject(),
-                        &commit,
-                        &summary,
-                        &comments,
-                    );
-                    let sent = comments
-                        .into_iter()
-                        .map(|(_, text)| Some(text))
-                        .chain(held.iter().map(|held| Some(held.text.clone())))
-                        .collect();
-                    Some(Write {
-                        item: Item::Review {
-                            comments: ids,
-                            bodies: held.into_iter().map(|held| held.id).collect(),
-                        },
-                        request: Some(request),
-                        sent,
-                        fallback: None,
-                    })
-                },
-            )
-            .collect()
+            .filter_map(|batch| self.review_write(batch, bodies.next().unwrap_or_default()))
+            .collect();
+        writes.extend(bodies.filter_map(|held| self.review_write(head(), held)));
+        writes
+    }
+
+    /// One review: the in-diff comments of `batch` and, in its body, the comments `held`.
+    fn review_write(&self, batch: Batch, held: Vec<Paragraph>) -> Option<Write> {
+        let Batch {
+            commit,
+            ids,
+            comments,
+        } = batch;
+        // Only a service that batches collects any.
+        let Inline::ReviewBatch(batches) = self.service().inline() else {
+            return None;
+        };
+        let marker = markers::agent(&markers::review_id(&commit), None);
+        let summary = held
+            .iter()
+            .map(|held| held.text.as_str())
+            .chain([marker.as_str()])
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let request = batches.review_batch(self.connection.subject(), &commit, &summary, &comments);
+        let sent = comments
+            .into_iter()
+            .map(|(_, text)| Some(text))
+            .chain(held.iter().map(|held| Some(held.text.clone())))
+            .collect();
+        Some(Write {
+            item: Item::Review {
+                comments: ids,
+                bodies: held.into_iter().map(|held| held.id).collect(),
+            },
+            request: Some(request),
+            sent,
+            fallback: None,
+        })
     }
 
     /// The general thread that stands in for a draft the host refuses to place: the finding's
@@ -836,6 +849,26 @@ impl<'a> Planner<'a> {
         }
         Some(write)
     }
+}
+
+/// The paragraphs split into the bodies of reviews, each within the host's size limit.
+fn body_groups(paragraphs: Vec<Paragraph>) -> Vec<Vec<Paragraph>> {
+    let mut groups: Vec<Vec<Paragraph>> = Vec::new();
+    let mut used = 0;
+    for paragraph in paragraphs {
+        let cost = paragraph.text.chars().count() + 2;
+        match groups.last_mut() {
+            Some(group) if used + cost <= MAX_REVIEW_BODY - REVIEW_MARKER => {
+                used += cost;
+                group.push(paragraph);
+            }
+            _ => {
+                used = cost;
+                groups.push(vec![paragraph]);
+            }
+        }
+    }
+    groups
 }
 
 /// The quote that opens a reply to a general comment, in the form GitHub's own quote reply

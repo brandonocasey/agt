@@ -82,6 +82,22 @@ pub fn agent_id(body: &str) -> Option<String> {
     last_token(body, AGENT)
 }
 
+/// Every `agent-review` marker of `body`, in order, as its id and attempt: a review body holds
+/// one for each comment it carries.
+pub fn agent_markers(body: &str) -> Vec<(String, Option<String>)> {
+    body.split(AGENT)
+        .skip(1)
+        .filter_map(|rest| {
+            let mut words = rest.split_once(CLOSE)?.0.split_whitespace();
+            let id = words.next()?.to_owned();
+            let attempt = words
+                .find_map(|word| word.strip_prefix("attempt="))
+                .map(str::to_owned);
+            Some((id, attempt))
+        })
+        .collect()
+}
+
 /// The attempt id in an `<!-- agent-review id=<id> attempt=<attempt> -->` marker.
 pub fn agent_attempt(body: &str) -> Option<&str> {
     let inner = body.rsplit_once(AGENT)?.1.split_once(CLOSE)?.0;
@@ -187,6 +203,25 @@ mod tests {
             strip_agent("<!-- agent-review id=x"),
             "<!-- agent-review id=x"
         );
+    }
+
+    #[test]
+    fn every_marker_of_a_body_is_read() {
+        let body = format!(
+            "A\n{}\n\nB\n{}\n\n{}",
+            agent("h1/c1", Some("at-1")),
+            agent("h2/c1", Some("at-1")),
+            agent(&review_id("abc"), None)
+        );
+        assert_eq!(
+            agent_markers(&body),
+            [
+                ("h1/c1".to_owned(), Some("at-1".to_owned())),
+                ("h2/c1".to_owned(), Some("at-1".to_owned())),
+                ("review/abc".to_owned(), None)
+            ]
+        );
+        assert!(agent_markers("No marker.").is_empty());
     }
 
     #[test]

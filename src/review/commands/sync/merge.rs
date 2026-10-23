@@ -86,6 +86,7 @@ fn merge_threads(
             if data.info.kind == RemoteKind::Review
                 && own.as_ref().is_some_and(|id| markers::is_review_id(id))
             {
+                claim_paragraphs(threads, comment, trust);
                 continue;
             }
             if data.info.kind == RemoteKind::General {
@@ -395,6 +396,26 @@ fn import(
         ..Thread::new(id, kind, comments, created_at, now.to_owned())
     });
     summary.imported += 1;
+}
+
+/// Claims the comments a review body of mine carries, each under its own marker: a response lost
+/// after the review landed leaves them pending, and posting them again would repeat the review.
+fn claim_paragraphs(threads: &mut [Thread], review: &CommentData, trust: &Trust) {
+    let marks = markers::agent_markers(&review.body);
+    for comment in threads
+        .iter_mut()
+        .flat_map(|thread| thread.comments.iter_mut())
+        .filter(|comment| comment.remote.is_none() && comment.delivery.is_posting())
+    {
+        let landed = marks.iter().any(|(id, attempt)| {
+            *id == comment.id && comment.delivery.is_attempt(attempt.as_deref())
+        });
+        if landed {
+            comment.remote = Some(review.remote(trust.login));
+            comment.delivery.post = PostState::Posted;
+            comment.draft_id = None;
+        }
+    }
 }
 
 /// Remote wins for posted text and resolved state; local fields and unposted comments stay.

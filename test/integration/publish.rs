@@ -359,7 +359,8 @@ fn github_findings_without_a_diff_line_go_in_the_review_body_on_someone_elses_pr
     assert_eq!(
         body,
         format!(
-            "**✏️ nit**\n\nGeneral text of f2.\n\n> <sub>🔍 agt review · m1</sub>\n\n\
+            "**✏️ nit**\n\nGeneral text of f2.\n\n> <sub>🔍 agt review · m1</sub>\n\
+             <!-- agent-review id={f2}/c1 attempt=<attempt> -->\n\n\
              <!-- agent-review id=review/{} -->",
             setup.head
         )
@@ -879,6 +880,88 @@ fn github_unreviewed_commits_head_the_summary_when_nothing_is_open() {
         )),
         "{summary}"
     );
+}
+
+/// A response lost after a review with body comments landed leaves them unclaimed, unless each
+/// carries its own marker in the body: sync then claims them, and they are not posted again.
+#[test]
+fn github_review_body_comments_are_claimed_by_sync_after_a_lost_response() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let f2 = setup.finding(2);
+    let mut remote = Remote::by("alice");
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let args = ["publish", "--pr", "42", "--not-own", "--only", f2.as_str()];
+    svc.lose(env, Call::PostInline);
+    env.fail(&args, None);
+    let body = format!(
+        "{}\n\n<!-- agent-review id=review/{} -->",
+        sent(env, &f2),
+        setup.head
+    );
+    remote
+        .reviews
+        .push(github::review(700, "me", "COMMENTED", &body));
+    svc.sync(&setup, &remote);
+    svc.restore(env, Call::PostInline);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let comment = &thread(&list, &f2)["comments"][0];
+    assert_eq!(comment["post"], "posted", "{comment}");
+    assert_eq!(comment["remote"]["id"], "700", "{comment}");
+    let again = env.run(&[args.as_slice(), &["--dry-run"]].concat());
+    assert_eq!(again["writes"], json!([]), "{again}");
+}
+
+/// Body comments that pass the size limit of one review body go in more reviews.
+#[test]
+fn github_review_body_comments_are_split_across_reviews_at_the_size_limit() {
+    let svc = Github::new();
+    let finding = |number: u32| {
+        format!(
+            r#"{{"type":"nit","scenario":"Finding {number}. {}"}}"#,
+            "x".repeat(25_000)
+        )
+    };
+    let findings = format!("[{}]", (1..=5).map(finding).collect::<Vec<_>>().join(","));
+    let setup = Setup::branch(
+        svc.origin(),
+        &Review {
+            reviewers: PUBLISH.reviewers,
+            findings: &findings,
+        },
+        false,
+        false,
+    );
+    let env = &setup.env;
+    svc.sync(&setup, &Remote::by("alice"));
+    env.run(&["sync", "--pr", "42"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let only: Vec<String> = (1..=5).map(|number| setup.finding(number)).collect();
+    let dry = env.run(&[
+        "publish",
+        "--pr",
+        "42",
+        "--not-own",
+        "--only",
+        &only.join(","),
+        "--dry-run",
+    ]);
+    assert_eq!(
+        kinds(&dry, "writes"),
+        ["review", "review", "review"],
+        "{dry}"
+    );
+    for write in dry["writes"].as_array().unwrap() {
+        let body = write["input"]["body"].as_str().unwrap();
+        assert!(body.chars().count() <= 65_536, "{}", body.chars().count());
+    }
+    for finding in &only {
+        assert_eq!(writes_for(&dry, &format!("{finding}/c1")), ["review"]);
+    }
 }
 
 /// A PR head the local repository lacks is not claimed as reviewed: the headline names the
