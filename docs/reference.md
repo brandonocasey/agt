@@ -179,13 +179,14 @@ tokens; the summary's steps show each run's time.
 `publish --approve` first records an approval of the head as a general thread,
 refused while a `bug`, `requirement` or `question` is open; approving the same
 head again reuses the same thread, and `--formal` upgrades a comment approval.
-`publish` then posts it as a comment (default text `Approved at <sha>.`, or
-`--body`; a GitLab note, which never blocks merging). The author flags (`--author`,
+`publish` posts no comment for it (the text, default `Approved at <sha>.` or
+`--body`, stays in the store). The summary headline shows ` · 🔍 approved` while
+the PR/MR head is the approved head. The author flags (`--author`,
 `--reviewer`, `--model`, ...) sign the approval as for `comment`. With `--dry-run`
 the approval is still recorded locally, and nothing is posted.
-`--approve --formal` also submits the host's approval: a GitHub `APPROVE` review,
-or GitLab's `approve` at that head. On your own GitHub PR, which GitHub refuses
-to approve, the comment still posts and `skipped` lists `<id>/formal`. A host
+`--approve --formal` submits the host's approval: a GitHub `APPROVE` review whose body is
+only the hidden marker, or GitLab's `approve` at that head. On your own GitHub PR, which
+GitHub refuses to approve, nothing is posted and `skipped` lists `<id>/formal`. A host
 refusal of the formal approval (an HTTP 4xx: already approved, not allowed)
 shows as an `error` under `posted`, blocks nothing and is remembered, so
 `publish` does not send it again; `publish --approve --formal` again retries only the host's
@@ -250,7 +251,7 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   `--answered` (resolution `answered`, reply `💬 Answered above.`); `--issue <issue>` (resolves a finding left for a
   follow-up issue with `moved to <owner/repo#n>` and a reply `📋 Moved to <owner/repo#n>.`,
   which the host links; the issue must already be on the host, and its `links.reviews` gets the
-  target key); `--triage valid|question` (only records the triage and leaves the thread open;
+  target key); a bare `resolve` (reply `✅ Resolved.`); `--triage valid|question` (only records the triage and leaves the thread open;
   `question` marks it held). A finding or QA thread resolved in any way before it was ever
   posted is not posted; the summary counts it, and lists one moved to an issue under
   follow-up issues. Another store that syncs a reply to a general comment reads a fix or
@@ -378,7 +379,8 @@ agt qa publish --dry-run            # as agt review publish
   table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
   a `<!-- qa-record v1 id=<run> head=<sha> -->` marker, distinct from review records, which
   `sync` reads to mark the run's record posted. A QA finding is headed
-  `**🐛 bug (high) · 🧪 QA: <check name>:**`; it follows the same posting rules as a review
+  `**🐛 bug (high)**` on its own line, with the check in the footer
+  `> <sub>🧪 agt QA · <check name> · <model></sub>`; it follows the same posting rules as a review
   finding, so on GitHub, where a general comment cannot be resolved, only the summary lists it. With `sync.auto_push = true`, `run end`
   publishes the ended QA run, as `agt review run end` does.
 
@@ -621,7 +623,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   lines that end it, so text that quotes a marker claims nothing.
   Trusted records are stored under `records`; a trusted general comment ending
   in `Re: <thread id>` after `Fixed in <sha>` (or after an `agent-review`
-  marker) answers that thread: it is added as a reply and, when the thread is
+  marker), or marked `<thread id>/c<n>` for `n` above 1 (a quote reply), answers that thread: it is added as a reply and, when the thread is
   not resolvable, resolves it as `fixed <sha>` (a `Fixed in` answer, also with
   the sha as a link) or `rejected: <reason>` (a `Rejected:` answer), or reopens
   it (any other answer).
@@ -690,10 +692,11 @@ local reads continue.
   comments by another human author, and runs that ended before the target's
   `attached_at` (history from before the PR/MR) with their findings, replies,
   resolves and records (listed under `skipped`).
-- A finding opens with its kind and an emoji: `**🐛 bug (high):**`,
-  `**❓ question:**`, `**📋 requirement:**`, `**✏️ nit:**`. An agent's first
-  comment ends with its model in a grey quote, `> <sub><model></sub>`; replies
-  and people sign nothing. Every body ends with
+- A finding opens with its kind and an emoji on a line of its own, then the text:
+  `**🐛 bug (high)**`, `**❓ question**`, `**🎯 requirement**`, `**✏️ nit**`. An agent's
+  comment, first or reply, ends with a footer in a grey quote, `> <sub>🔍 agt review · <model></sub>`
+  or `> <sub>🧪 agt QA · <check> · <model></sub>` (a QA thread or comment); people sign
+  nothing. Every body ends with
   `<!-- agent-review id=<local id> attempt=<attempt> -->`, with one attempt id
   per `publish` (`<attempt>` in a dry run). Finding threads also carry
   `<!-- review-finding v1 id=<finding id> sha=<reviewed sha> -->`.
@@ -702,9 +705,12 @@ local reads continue.
   comment (`subject_type: file`) whose first line names its lines, so it can be
   resolved; on GitLab it is listed under `skipped`. A thread on a file the PR/MR
   does not change posts as a general comment whose first line names its
-  location; on your own GitHub PR, where a general comment cannot be resolved, a
-  finding or QA thread there, or without an anchor, is not posted and the summary
-  lists it with its whole text (`skipped` says so). A
+  location. On GitHub an agent never posts a general comment: on someone else's PR a
+  finding or comment there, or without an anchor, goes in the body of a review (one
+  paragraph each, with its title and footer; a review of only a body when no in-diff
+  comment goes out), where it cannot be resolved or answered in place. On your own PR a
+  finding is listed in the summary with its whole text and an agent's plain comment is
+  not posted (`skipped` says so). A
   line range (`start_line`..`line`) posts only as one multi-line comment, with
   both ends on the new side of one hunk. Other threads without an anchor post as
   general comments. On GitLab, lines a later commit changed (such as a fix)
@@ -712,10 +718,11 @@ local reads continue.
   their location.
 - GitHub: in-diff comments go out as one `COMMENT` review per reviewed commit
   (`POST repos/<repo>/pulls/<n>/reviews`; comment ids are read back from the
-  review), whose body is only its marker, with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
+  review), whose body is its marker after the comments that have no diff line, with `start_line` and `start_side` for a range. Replies and resolves use the GraphQL
   `addPullRequestReviewThreadReply`, `resolveReviewThread` and
-  `unresolveReviewThread` mutations; a reply to a general comment is a new
-  issue comment ending in `Re: <thread id>`.
+  `unresolveReviewThread` mutations; your reply to a general comment is a new
+  issue comment in GitHub's quote form (`> <first line>`, `> — @<author>, [comment](<url>)`,
+  then your text). An agent's reply to one is not posted.
 - GitLab: in-diff comments are draft notes at the latest MR diff, each
   published on its own (never `bulk_publish`), with a `line_range` for a range
   (line codes are the SHA-1 of the path plus the old and new line counters).
