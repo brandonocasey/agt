@@ -80,9 +80,10 @@ fn subcommand<'a>(base: &str, mut args: impl Iterator<Item = &'a str>) -> Option
     None
 }
 
-// A wrapper word, kept when no command follows it, as in `command -v rg` or `env | grep`.
+// A wrapper word, kept when no command follows it, as in `command -v rg`, `env | grep`,
+// `env > out` or `time (make)`.
 static WRAPPER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?s:(?:env|time|nohup|command|timeout\s+\S+)\s+([^-|;&\s].*))$")
+    Regex::new(r"^(?s:(?:env|time|nohup|command|timeout\s+\S+)\s+([^-|;&<>(){}\s0-9].*))$")
         .expect("valid pattern")
 });
 
@@ -522,6 +523,8 @@ mod tests {
         assert_eq!(key("cd /x"), "Bash:cd");
         assert_eq!(key("command -v rg"), "Bash:command");
         assert_eq!(key("env | grep PATH"), "Bash:env");
+        assert_eq!(key("env 2>&1 | sort"), "Bash:env");
+        assert_eq!(key("time (make)"), "Bash:time");
         assert_eq!(key("cd dir || exit 1; make"), "Bash:cd");
         assert_eq!(key("time command mise run test"), "Bash:mise run");
         assert_eq!(key("env A=1 nohup git fetch"), "Bash:git fetch");

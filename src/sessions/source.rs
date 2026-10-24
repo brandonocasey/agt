@@ -213,7 +213,11 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
     if needs.time {
         summary["uuid"] = get(record, "uuid").clone();
         summary["ended"] = get(record, "ended").clone();
-        summary["by_you"] = super::events::user_text(record).is_some().into();
+        // Claude Code writes a slash command's caveat just before the command, stamped after it.
+        let caveat = get(message, "content")
+            .as_str()
+            .is_some_and(|content| content.starts_with("<local-command-caveat>"));
+        summary["by_you"] = (caveat || super::events::user_text(record).is_some()).into();
     }
     Some(summary)
 }

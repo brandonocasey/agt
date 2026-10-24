@@ -573,6 +573,9 @@ fn time_splits_model_tool_and_your_waits() {
             assistant("11:10:10", "a3", r#"{"type":"text","text":"done"}"#),
             user("11:20:00", "<task-notification>done</task-notification>", true),
             user("11:21:00", "next", false),
+            // A slash command's caveat is written just before the command, stamped after it.
+            r#"{"type":"user","timestamp":"2026-03-07T11:21:10.022Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>x</local-command-caveat>"}}"#.to_owned(),
+            user("11:21:10", "<command-name>/context</command-name>", false),
             user("11:20:30", "<task-notification>late</task-notification>", true),
             user("11:21:30", "again", false),
         ]
