@@ -18,20 +18,86 @@ use crate::sessions::prices::{Prices, tokens};
 use crate::sessions::source::Loaded;
 use crate::sessions::spend::short_project;
 
-// Leading `cd DIR &&`, `cd DIR;`, and `VAR=value;` steps hide the command that did the work.
+// Leading steps hide the command that did the work: `cd DIR &&` (also `cd DIR 2>/dev/null ||`),
+// `export VAR=value;`, `VAR=value`, the `env`, `time`, `nohup`, `command` and `timeout N`
+// wrappers, and the head of a `for` or `while` loop up to its `do`.
 static PREAMBLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:(?:cd\s+\S+|[A-Za-z_]\w*=\S*)\s*(?:&&|;)\s*)+").expect("valid pattern")
+    Regex::new(
+        r#"^(?s:(?:cd\s+\S+(?:\s+2>\S+)?\s*(?:&&|\|\||;|\n)|export\s+[^;&\n]*(?:&&|;|\n)|[A-Za-z_]\w*=(?:'[^']*'|"[^"]*"|\$\([^)]*\)|\$[^(]|[^\s;&'"$])*\s*(?:&&|;|\n)?|(?:env|time|nohup|command)\s|timeout\s+\S+\s|(?:for|while)\s.*?(?:;|\n)\s*do\s)\s*)+"#,
+    )
+    .expect("valid pattern")
 });
+
+// Commands whose first plain argument names what they did, as in `git status`.
+const SUBCOMMANDS: [&str; 30] = [
+    "agt",
+    "aws",
+    "brew",
+    "bun",
+    "cargo",
+    "chezmoi",
+    "claude",
+    "claude-two",
+    "codex",
+    "deno",
+    "docker",
+    "gcloud",
+    "gh",
+    "git",
+    "glab",
+    "go",
+    "jira",
+    "just",
+    "kubectl",
+    "make",
+    "mise",
+    "npm",
+    "pip",
+    "pip3",
+    "pnpm",
+    "poetry",
+    "rustup",
+    "terraform",
+    "uv",
+    "yarn",
+];
+
+static SUBCOMMAND: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9:_-]*$").expect("valid pattern"));
+
+/// `git status` for `git -C DIR status --short`: the first argument that is not an option, an
+/// option's value (`-C DIR`, `-c KEY=VALUE`) or a toolchain (`+nightly`).
+fn subcommand<'a>(base: &str, mut args: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    if !SUBCOMMANDS.contains(&base) {
+        return None;
+    }
+    while let Some(arg) = args.next() {
+        if arg == "-C" || arg == "-c" {
+            args.next();
+        } else if !arg.starts_with(['-', '+']) {
+            return Some(arg).filter(|arg| arg.len() <= 20 && SUBCOMMAND.is_match(arg));
+        }
+    }
+    None
+}
+
+/// A shell command without the leading steps that hide the one that did the work.
+pub(super) fn bare_command(command: &str) -> std::borrow::Cow<'_, str> {
+    PREAMBLE.replace(command.trim(), "")
+}
 
 pub(super) fn tool_key(name: &str, input: &Value, home: &Path) -> String {
     if name == "Bash" {
-        let command = text(input, "command");
-        let command = PREAMBLE.replace(command.trim(), "");
-        let Some(first) = command.split_whitespace().next() else {
+        let command = bare_command(text(input, "command"));
+        let mut words = command.split_whitespace();
+        let Some(first) = words.next() else {
             return "Bash".into();
         };
-        let base = first.rsplit('/').next().unwrap_or(first);
-        return format!("Bash:{}", head(base, 20));
+        let base = head(first.rsplit('/').next().unwrap_or(first), 20);
+        return match subcommand(base, words) {
+            Some(sub) => format!("Bash:{base} {sub}"),
+            None => format!("Bash:{base}"),
+        };
     }
     if name == "Read" {
         let path = text(input, "file_path");
@@ -419,7 +485,29 @@ mod tests {
     fn bash_keys_skip_cd_and_assignments() {
         let home = Path::new("/home/al");
         let key = |command: &str| tool_key("Bash", &json!({ "command": command }), home);
-        assert_eq!(key("cd /x && FOO=1; /usr/bin/git status"), "Bash:git");
+        assert_eq!(
+            key("cd /x && FOO=1; /usr/bin/git status"),
+            "Bash:git status"
+        );
+        assert_eq!(
+            key("cd /a 2>/dev/null || cd /b; git -C /r log -1"),
+            "Bash:git log"
+        );
+        assert_eq!(
+            key("export A=1 B=2 && cargo +nightly test -q"),
+            "Bash:cargo test"
+        );
+        assert_eq!(key("FOO=1 timeout 5 npm run build"), "Bash:npm run");
+        assert_eq!(key("for f in a b; do cat $f; done"), "Bash:cat");
+        assert_eq!(key("while read x\ndo rg -n x; done"), "Bash:rg");
+        assert_eq!(key("git -c a=b --no-pager"), "Bash:git");
+        assert_eq!(key("git README.md"), "Bash:git");
+        assert_eq!(key("rg status src"), "Bash:rg");
+        assert_eq!(key("cd /x"), "Bash:cd");
+        assert_eq!(
+            key("B=$(ls -l x); D=\"a b\" E='c d' $F/bin/agt ps"),
+            "Bash:agt ps"
+        );
         assert_eq!(key("  "), "Bash");
         assert_eq!(tool_key("mcp__slack__post", &json!({}), home), "mcp:slack");
         assert_eq!(

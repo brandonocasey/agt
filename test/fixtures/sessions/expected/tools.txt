@@ -4,7 +4,7 @@ tool               calls  avg result tok  share %
 Read:skills/rules      1            1700      0.8
 Edit                   2              19      0.0
 Grep                   3               5      0.0
-Bash:npm               1              10      0.0
+Bash:npm test          1              10      0.0
 mcp:slack              1              29      0.0
-Bash:git               1              13      0.0
+Bash:git status        1              13      0.0
 Bash:rm                1              13      0.0

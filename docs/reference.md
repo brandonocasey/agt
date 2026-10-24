@@ -1134,7 +1134,11 @@ which includes permission prompts) and before each of your messages (`you`; a wa
 is idle and left out). `active` is model plus tools. Its `Slowest tools` table times each tool
 from its call to its result, keyed as in `tools` (`Bash:git`, `Read:skills/rules`, `mcp:slack`),
 with `failed` (error results other than permission denials, which `denials` lists) and `est tok`
-(input and result tokens, estimated at four characters per token).
+(input and result tokens, estimated at four characters per token). `Slowest runs` lists single tool
+calls, longest first, with their start, whether they failed, their estimated tokens, agent, session
+and command (60 characters). A shell command's key skips leading `cd DIR &&`, `export`, `VAR=value`,
+`env`, `time`, `nohup`, `command` and `timeout N` steps and a `for` or `while` loop's head, and
+adds the subcommand of `git`, `cargo`, `npm`, `mise`, `gh` and similar tools: `Bash:git status`.
 Subagent time also counts in the main agent's `Agent` tool time. `tools` counts tool calls and the share of
 cost their results carry. `--gap` sets the idle minutes of the cache-gaps section. `errors` lists
 tool errors and `denials` permission denials. `friction` lists interrupts, corrections, short

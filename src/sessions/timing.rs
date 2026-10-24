@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::core::clock;
 use crate::core::error::Result;
 use crate::core::local;
-use crate::core::transcripts::json::{get, key, object, text};
+use crate::core::transcripts::json::{get, head, key, object, text};
 use crate::sessions::Scope;
 use crate::sessions::fmt::{self, duration, tok};
 use crate::sessions::source::Loaded;
@@ -29,6 +29,7 @@ pub struct Time {
     groups: IndexMap<Vec<String>, [f64; 3]>,
     /// Per tool, from its call to its result.
     tools: IndexMap<String, Run>,
+    runs: Vec<Slow>,
     idle: i64,
     subagents: bool,
     seen: HashSet<String>,
@@ -47,6 +48,27 @@ struct Run {
     longest: f64,
 }
 
+/// One tool call, for the slowest runs.
+struct Slow {
+    secs: f64,
+    failed: bool,
+    tokens: f64,
+    at: String,
+    agent: String,
+    session: String,
+    /// The tool and its command or description.
+    detail: String,
+}
+
+/// A tool call waiting for its result.
+struct Pending {
+    tool: String,
+    detail: String,
+    at: i128,
+    stamp: String,
+    tokens: f64,
+}
+
 fn secs(from: i128, to: i128) -> Option<f64> {
     Some((to - from) as f64 / 1e6).filter(|secs| *secs >= 0.0)
 }
@@ -57,6 +79,7 @@ impl Time {
             keys: by_keys(by)?,
             groups: IndexMap::new(),
             tools: IndexMap::new(),
+            runs: Vec::new(),
             idle: 0,
             subagents: false,
             seen: HashSet::new(),
@@ -67,7 +90,7 @@ impl Time {
     pub fn feed(&mut self, transcript: &Loaded) {
         let mut previous: Option<i128> = None;
         let mut model = String::from("?");
-        let mut pending: HashMap<String, (String, i128, f64)> = HashMap::new();
+        let mut pending: HashMap<String, Pending> = HashMap::new();
         transcript.records(|record| {
             let kind = text(record, "type");
             if kind != "user" && kind != "assistant" {
@@ -97,33 +120,43 @@ impl Time {
                 for block in blocks.filter(|block| text(block, "type") == "tool_use") {
                     pending.insert(
                         key(get(block, "id")),
-                        (
-                            text(block, "tool_key").to_owned(),
+                        Pending {
+                            tool: text(block, "tool_key").to_owned(),
+                            detail: text(block, "run_detail").to_owned(),
                             at,
-                            get(block, "input_tokens").as_f64().unwrap_or_default(),
-                        ),
+                            stamp: text(record, "timestamp").to_owned(),
+                            tokens: get(block, "input_tokens").as_f64().unwrap_or_default(),
+                        },
                     );
                 }
             } else {
                 for block in blocks.filter(|block| text(block, "type") == "tool_result") {
                     results = true;
-                    let Some((name, started, input)) =
-                        pending.remove(&key(get(block, "tool_use_id")))
-                    else {
+                    let Some(call) = pending.remove(&key(get(block, "tool_use_id"))) else {
                         continue;
                     };
-                    let Some(took) = secs(started, at) else {
+                    let Some(took) = secs(call.at, at) else {
                         continue;
                     };
-                    let run = self.tools.entry(name).or_default();
+                    let failed = get(block, "is_error").as_bool() == Some(true)
+                        && get(block, "denial").is_null();
+                    let tokens =
+                        call.tokens + get(block, "result_tokens").as_f64().unwrap_or_default();
+                    let run = self.tools.entry(call.tool).or_default();
                     run.calls += 1;
-                    run.failed += i64::from(
-                        get(block, "is_error").as_bool() == Some(true)
-                            && get(block, "denial").is_null(),
-                    );
-                    run.tokens += input + get(block, "result_tokens").as_f64().unwrap_or_default();
+                    run.failed += i64::from(failed);
+                    run.tokens += tokens;
                     run.total += took;
                     run.longest = run.longest.max(took);
+                    self.runs.push(Slow {
+                        secs: took,
+                        failed,
+                        tokens,
+                        at: head(&call.stamp, 16).to_owned(),
+                        agent: transcript.agent.clone(),
+                        session: transcript.session.clone(),
+                        detail: call.detail,
+                    });
                 }
             }
             let slot = match (kind, results) {
@@ -148,7 +181,11 @@ impl Time {
     pub fn render(self, scope: &Scope) -> String {
         let active = |spent: &[f64; 3]| spent[MODEL] + spent[TOOLS];
         let mut rows: Vec<(Vec<String>, [f64; 3])> = self.groups.into_iter().collect();
-        rows.sort_by(|a, b| active(&b.1).total_cmp(&active(&a.1)));
+        rows.sort_by(|a, b| {
+            active(&b.1)
+                .total_cmp(&active(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
         let mut totals = [0.0; 3];
         for (_, spent) in &rows {
             for (total, part) in totals.iter_mut().zip(spent) {
@@ -196,7 +233,7 @@ impl Time {
         }
         if !self.tools.is_empty() {
             let mut tools: Vec<(String, Run)> = self.tools.into_iter().collect();
-            tools.sort_by(|a, b| b.1.total.total_cmp(&a.1.total));
+            tools.sort_by(|a, b| b.1.total.total_cmp(&a.1.total).then_with(|| a.0.cmp(&b.0)));
             let table: Vec<Vec<String>> = tools
                 .iter()
                 .take(scope.limit)
@@ -216,6 +253,38 @@ impl Time {
             fmt::table(
                 &mut out,
                 &["tool", "calls", "failed", "est tok", "total", "avg", "max"],
+                &table,
+            );
+        }
+        if !self.runs.is_empty() {
+            let mut runs = self.runs;
+            runs.sort_by(|a, b| {
+                b.secs
+                    .total_cmp(&a.secs)
+                    .then_with(|| a.at.cmp(&b.at))
+                    .then_with(|| a.detail.cmp(&b.detail))
+            });
+            let table: Vec<Vec<String>> = runs
+                .iter()
+                .take(scope.limit)
+                .map(|run| {
+                    vec![
+                        run.at.clone(),
+                        duration(run.secs),
+                        if run.failed { "yes" } else { "" }.to_owned(),
+                        tok(run.tokens),
+                        run.agent.clone(),
+                        run.session.clone(),
+                        run.detail.clone(),
+                    ]
+                })
+                .collect();
+            out.push_str("\nSlowest runs:\n");
+            fmt::table(
+                &mut out,
+                &[
+                    "time", "took", "failed", "est tok", "agent", "session", "command",
+                ],
                 &table,
             );
         }

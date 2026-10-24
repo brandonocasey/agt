@@ -132,7 +132,7 @@ impl Loaded {
 }
 
 fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serde_json::Value> {
-    use crate::core::transcripts::json::{get, text};
+    use crate::core::transcripts::json::{get, head, text};
     use serde_json::{Value, json};
 
     let kind = text(record, "type");
@@ -153,6 +153,16 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
                 }
                 if needs.gaps {
                     summary["gap_tool"] = super::tools::gap_tool(block).into();
+                }
+                if needs.time {
+                    let detail = match text(block, "name") {
+                        "Bash" => super::tools::bare_command(text(get(block, "input"), "command"))
+                            .into_owned(),
+                        _ => super::events::input_summary(block),
+                    }
+                    .replace('\n', " ");
+                    summary["run_detail"] =
+                        format!("{}: {}", text(block, "name"), head(&detail, 60)).into();
                 }
                 if needs.failures {
                     summary["name"] = get(block, "name").clone();

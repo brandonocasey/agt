@@ -10,11 +10,25 @@ main      ?                  0s      0s     55s     0s       0
 Slowest tools:
 tool               calls  failed  est tok  total  avg  max
 -----------------  -----  ------  -------  -----  ---  ---
-Bash:npm               1       1       24  24s    24s  24s
+Bash:npm test          1       1       24  24s    24s  24s
 Grep                   3       3       27  4s     1s   2s
-mcp:slack              1       0       34  2s     2s   2s
-Edit                   2       2       51  2s     1s   1s
 Bash:rm                1       0       19  2s     2s   2s
+Edit                   2       2       51  2s     1s   1s
+mcp:slack              1       0       34  2s     2s   2s
+Bash:git status        1       0       19  1s     1s   1s
 Read:skills/rules      1       0     1.7k  1s     1s   1s
-Bash:git               1       0       19  1s     1s   1s
+
+Slowest runs:
+time              took  failed  est tok  agent     session   command
+----------------  ----  ------  -------  --------  --------  ---------------------------------------
+2026-03-01T10:00  24s   yes          24  main      aaaaaaaa  Bash: npm test -- --watch=false
+2026-03-01T10:00  2s                 34  main      aaaaaaaa  mcp__slack__post: {"text":"héllo 😀"}
+2026-03-01T10:05  2s    yes           9  explorer  aaaaaaaa  Grep: {"pattern":"baz"}
+2026-03-01T10:40  2s                 19  main      aaaaaaaa  Bash: rm -rf build
+2026-03-01T10:00  1s               1.7k  main      aaaaaaaa  Read: /home/u/.claude/skills/x/SKILL.md
+2026-03-01T10:05  1s    yes           9  explorer  aaaaaaaa  Grep: {"pattern":"bar"}
+2026-03-01T10:05  1s    yes           9  explorer  aaaaaaaa  Grep: {"pattern":"foo"}
+2026-03-01T10:20  1s                 19  main      aaaaaaaa  Bash: git status
+2026-03-01T10:40  1s    yes          25  main      aaaaaaaa  Edit: /repo/a.ts
+2026-03-01T10:40  1s    yes          25  main      aaaaaaaa  Edit: /repo/b.ts
 Subagent time also counts in the main agent's Agent tool time.
