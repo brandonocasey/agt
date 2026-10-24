@@ -514,3 +514,102 @@ fn selected_reports_do_not_require_unused_prices() {
     .join("\n");
     assert_eq!(actual, wanted);
 }
+
+#[test]
+fn time_splits_model_tool_and_your_waits() {
+    let env = Env::new();
+    let root = env.path("time-roots");
+    std::fs::create_dir_all(root.join("-repo-t")).unwrap();
+    // A Codex response is stamped at its first item, here a developer message before the
+    // prompt; it ends at the tool call, 4 s after the prompt, and the tool runs 2 s.
+    std::fs::write(
+        root.join("rollout-2026-03-07T10-00-00-0199dddd-0000-7000-8000-00000000dddd.jsonl"),
+        [
+            r#"{"timestamp":"2026-03-07T10:00:00.000Z","type":"session_meta","payload":{"id":"0199dddd-0000-7000-8000-00000000dddd","cwd":"/repo/t","source":"cli"}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:00.000Z","type":"turn_context","payload":{"model":"gpt-test-1"}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:02.000Z","type":"response_item","payload":{"type":"reasoning"}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"x"}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:07.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":"ok"}}"#,
+            r#"{"timestamp":"2026-03-07T10:00:07.500Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":1},"last_token_usage":{"input_tokens":10,"output_tokens":1}}}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    // A question answered after 10 min is a wait on you; a task notification starts no wait,
+    // and a record stamped back in time adds nothing.
+    let assistant = |at: &str, id: &str, content: &str| {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-03-07T{at}.000Z","message":{{"id":"{id}","model":"claude-opus-4-8","usage":{{"input_tokens":1,"output_tokens":1}},"content":[{content}]}}}}"#
+        )
+    };
+    let result = |at: &str, id: &str| {
+        format!(
+            r#"{{"type":"user","timestamp":"2026-03-07T{at}.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}","content":"ok"}}]}}}}"#
+        )
+    };
+    let user = |at: &str, text: &str, meta: bool| {
+        format!(
+            r#"{{"type":"user","timestamp":"2026-03-07T{at}.000Z","isMeta":{meta},"message":{{"role":"user","content":"{text}"}}}}"#
+        )
+    };
+    std::fs::write(
+        root.join("-repo-t/eeeeeeee-6666.jsonl"),
+        [
+            user("11:00:00", "go", false),
+            assistant(
+                "11:00:04",
+                "a1",
+                r#"{"type":"tool_use","id":"t1","name":"AskUserQuestion","input":{}}"#,
+            ),
+            result("11:10:04", "t1"),
+            assistant(
+                "11:10:06",
+                "a2",
+                r#"{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"command -v rg"}}"#,
+            ),
+            result("11:10:09", "t2"),
+            assistant("11:10:10", "a3", r#"{"type":"text","text":"done"}"#),
+            user("11:20:00", "<task-notification>done</task-notification>", true),
+            user("11:21:00", "next", false),
+            user("11:20:30", "<task-notification>late</task-notification>", true),
+            user("11:21:30", "again", false),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let time = |harness: &str| {
+        let mut command = bare(
+            &env,
+            &[
+                "report",
+                "--sections",
+                "time",
+                "--since",
+                SINCE,
+                "--harness",
+                harness,
+                "--root",
+            ],
+        );
+        command.arg(&root);
+        stdout(command)
+    };
+    let codex = time("codex");
+    assert!(
+        codex.starts_with(
+            "Active 6s since 2026-02-15: model 4s (67%), tools 2s (33%); waiting on you 0s\n"
+        ),
+        "{codex}"
+    );
+    let claude = time("claude");
+    assert!(
+        claude.starts_with(
+            "Active 10s since 2026-02-15: model 7s (70%), tools 3s (30%); waiting on you 11m30s\n"
+        ),
+        "{claude}"
+    );
+    assert!(claude.contains("\nBash:command "), "{claude}");
+    assert!(!claude.contains("AskUserQuestion"), "{claude}");
+}

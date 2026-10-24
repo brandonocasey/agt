@@ -254,6 +254,8 @@ pub struct Adapter {
     calls: usize,
     total: Option<Value>,
     started: Option<Value>,
+    /// The last item of the response so far: when the model finished it.
+    ended: Option<Value>,
     tools: Vec<Value>,
     waiting: Vec<Value>,
 }
@@ -269,6 +271,7 @@ impl Adapter {
             calls: 0,
             total: None,
             started: None,
+            ended: None,
             tools: Vec::new(),
             waiting: Vec::new(),
         }
@@ -283,7 +286,11 @@ impl Adapter {
     }
 
     fn flush(&mut self, message: Value, timestamp: Value, out: &mut impl FnMut(&Value)) {
-        out(&json!({"type": "assistant", "timestamp": timestamp, "message": message}));
+        let ended = self.ended.take().unwrap_or(Value::Null);
+        out(
+            &json!({"type": "assistant", "timestamp": timestamp, "ended": ended,
+                    "message": message}),
+        );
         self.tools.clear();
         self.started = None;
         for record in std::mem::take(&mut self.waiting) {
@@ -328,6 +335,7 @@ impl Adapter {
                 }
             }
             ("response_item", "function_call" | "custom_tool_call" | "local_shell_call") => {
+                self.ended = Some(timestamp.clone());
                 self.started.get_or_insert(timestamp);
                 self.tools.push(tool_use(payload));
             }
@@ -344,6 +352,7 @@ impl Adapter {
                 );
             }
             ("response_item", _) => {
+                self.ended = Some(timestamp.clone());
                 self.started.get_or_insert(timestamp);
             }
             ("event_msg", "token_count") => self.bill(payload, timestamp, out),
@@ -361,6 +370,7 @@ impl Adapter {
         if !self.started_turn {
             self.tools.clear();
             self.started = None;
+            self.ended = None;
             for record in std::mem::take(&mut self.waiting) {
                 out(&record);
             }

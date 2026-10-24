@@ -1129,15 +1129,17 @@ discovers transcripts once and parses each transcript once for the selected repo
 `cost` is USD by `--by` group (`agent`, `model`, `project`, `session`, `file`, `harness`; one
 session's cost is `--by session`, per-agent totals `--by agent`); `FILE...` prices those
 transcript or stream-json files instead of the roots. `time` splits wall-clock time by the same
-`--by` groups: the time before each model response (`model`), before each tool result (`tools`,
-which includes permission prompts) and before each of your messages (`you`; a wait over 30 minutes
-is idle and left out). `active` is model plus tools. Its `Slowest tools` table times each tool
+`--by` groups: the time before each model response (`model`; a Codex response ends at its last
+item), before each tool result (`tools`, which includes permission prompts) and before each of your
+messages or answers to `AskUserQuestion` and `ExitPlanMode` (`you`; a wait over 30 minutes is idle
+and left out). Time before an injected message, such as a task notification, a reminder or a
+compaction summary, counts nowhere. `active` is model plus tools. Its `Slowest tools` table times each tool
 from its call to its result, keyed as in `tools` (`Bash:git`, `Read:skills/rules`, `mcp:slack`),
 with `failed` (error results other than permission denials, which `denials` lists) and `est tok`
 (input and result tokens, estimated at four characters per token). `Slowest runs` lists single tool
 calls, longest first, with their start, whether they failed, their estimated tokens, agent, session
 and command (60 characters). A shell command's key skips leading `cd DIR &&`, `export`, `VAR=value`,
-`env`, `time`, `nohup`, `command` and `timeout N` steps and a `for` or `while` loop's head, and
+`env`, `time`, `nohup`, `command` and `timeout N` steps that a command follows and a `for` or `while` loop's head, and
 adds the subcommand of `git`, `cargo`, `npm`, `mise`, `gh` and similar tools: `Bash:git status`.
 Subagent time also counts in the main agent's `Agent` tool time. `tools` counts tool calls and the share of
 cost their results carry. `--gap` sets the idle minutes of the cache-gaps section. `errors` lists

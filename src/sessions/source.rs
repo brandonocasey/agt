@@ -156,8 +156,7 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
                 }
                 if needs.time {
                     let detail = match text(block, "name") {
-                        "Bash" => super::tools::bare_command(text(get(block, "input"), "command"))
-                            .into_owned(),
+                        "Bash" => super::tools::bare_command(text(get(block, "input"), "command")),
                         _ => super::events::input_summary(block),
                     }
                     .replace('\n', " ");
@@ -213,6 +212,8 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
     });
     if needs.time {
         summary["uuid"] = get(record, "uuid").clone();
+        summary["ended"] = get(record, "ended").clone();
+        summary["by_you"] = super::events::user_text(record).is_some().into();
     }
     Some(summary)
 }

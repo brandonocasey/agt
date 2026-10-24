@@ -1,8 +1,8 @@
-Active 20m07s since 2026-02-15: model 19m34s (97%), tools 33s (3%); waiting on you 54m02s
+Active 20m07s since 2026-02-15: model 19m34s (97%), tools 33s (3%); waiting on you 52m02s
 agent     model              model   tools  you     active   %
 --------  -----------------  ------  -----  ------  ------  --
 main      claude-sonnet-4-6  16m27s  3s     29m00s  16m30s  82
-main      claude-opus-4-8    2m01s   27s    24m07s  2m28s   12
+main      claude-opus-4-8    2m01s   27s    22m07s  2m28s   12
 main      claude-mystery-1   1m00s   0s     0s      1m00s    5
 explorer  claude-sonnet-4-6  6s      3s     0s      9s       1
 main      ?                  0s      0s     55s     0s       0

@@ -18,12 +18,11 @@ use crate::sessions::prices::{Prices, tokens};
 use crate::sessions::source::Loaded;
 use crate::sessions::spend::short_project;
 
-// Leading steps hide the command that did the work: `cd DIR &&` (also `cd DIR 2>/dev/null ||`),
-// `export VAR=value;`, `VAR=value`, the `env`, `time`, `nohup`, `command` and `timeout N`
-// wrappers, and the head of a `for` or `while` loop up to its `do`.
+// Leading steps hide the command that did the work: `cd DIR &&` (also `cd A 2>/dev/null || cd B;`),
+// `export VAR=value;`, `VAR=value`, and the head of a `for` or `while` loop up to its `do`.
 static PREAMBLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"^(?s:(?:cd\s+\S+(?:\s+2>\S+)?\s*(?:&&|\|\||;|\n)|export\s+[^;&\n]*(?:&&|;|\n)|[A-Za-z_]\w*=(?:'[^']*'|"[^"]*"|\$\([^)]*\)|\$[^(]|[^\s;&'"$])*\s*(?:&&|;|\n)?|(?:env|time|nohup|command)\s|timeout\s+\S+\s|(?:for|while)\s.*?(?:;|\n)\s*do\s)\s*)+"#,
+        r#"^(?s:(?:cd\s+\S+(?:\s+2>\S+)?\s*(?:&&|;|\n)|cd\s+\S+(?:\s+2>\S+)?\s*\|\|\s*cd\s+\S+\s*(?:&&|;|\n)|export\s+[^;&\n]*(?:&&|;|\n)|[A-Za-z_]\w*=(?:'[^']*'|"[^"]*"|\$\([^)]*\)|\$[^(]|[^\s;&'"$])*\s*(?:&&|;|\n)?|(?:for|while)\s.*?(?:;|\n)\s*do\s)\s*)+"#,
     )
     .expect("valid pattern")
 });
@@ -81,9 +80,26 @@ fn subcommand<'a>(base: &str, mut args: impl Iterator<Item = &'a str>) -> Option
     None
 }
 
+// A wrapper word, kept when no command follows it, as in `command -v rg` or `env | grep`.
+static WRAPPER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?s:(?:env|time|nohup|command|timeout\s+\S+)\s+([^-|;&\s].*))$")
+        .expect("valid pattern")
+});
+
 /// A shell command without the leading steps that hide the one that did the work.
-pub(super) fn bare_command(command: &str) -> std::borrow::Cow<'_, str> {
-    PREAMBLE.replace(command.trim(), "")
+pub(super) fn bare_command(command: &str) -> String {
+    let mut command = command.trim().to_owned();
+    loop {
+        let stripped = PREAMBLE.replace(&command, "").into_owned();
+        let stripped = match WRAPPER.captures(&stripped) {
+            Some(rest) => rest[1].to_owned(),
+            None => stripped,
+        };
+        if stripped == command {
+            return command;
+        }
+        command = stripped;
+    }
 }
 
 pub(super) fn tool_key(name: &str, input: &Value, home: &Path) -> String {
@@ -504,6 +520,11 @@ mod tests {
         assert_eq!(key("git README.md"), "Bash:git");
         assert_eq!(key("rg status src"), "Bash:rg");
         assert_eq!(key("cd /x"), "Bash:cd");
+        assert_eq!(key("command -v rg"), "Bash:command");
+        assert_eq!(key("env | grep PATH"), "Bash:env");
+        assert_eq!(key("cd dir || exit 1; make"), "Bash:cd");
+        assert_eq!(key("time command mise run test"), "Bash:mise run");
+        assert_eq!(key("env A=1 nohup git fetch"), "Bash:git fetch");
         assert_eq!(
             key("B=$(ls -l x); D=\"a b\" E='c d' $F/bin/agt ps"),
             "Bash:agt ps"

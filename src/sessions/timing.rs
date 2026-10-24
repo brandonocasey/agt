@@ -18,12 +18,17 @@ use crate::sessions::spend::{by_keys, group_key};
 /// A wait on you longer than this is idle time and is left out.
 const IDLE_SECS: f64 = 30.0 * 60.0;
 
+/// Tools whose result is your answer: their time is a wait on you.
+const ASKS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
 const MODEL: usize = 0;
 const TOOLS: usize = 1;
 const YOU: usize = 2;
 
 /// Seconds since the previous record, split by what the record ended: a model response, a
 /// tool result or a message from you. Each second counts once, so parallel tools share theirs.
+/// Time before an injected message (a task notification, a reminder, a compaction summary)
+/// counts nowhere.
 pub struct Time {
     keys: Vec<String>,
     groups: IndexMap<Vec<String>, [f64; 3]>,
@@ -96,10 +101,17 @@ impl Time {
             if kind != "user" && kind != "assistant" {
                 return;
             }
-            let Some(at) = clock::parse_micros(text(record, "timestamp")) else {
+            // A Codex response is stamped when it started; it ended at its last item.
+            let stamp = match text(record, "ended") {
+                "" => text(record, "timestamp"),
+                ended => ended,
+            };
+            let Some(at) = clock::parse_micros(stamp) else {
                 return;
             };
-            let gap = previous.replace(at).and_then(|before| secs(before, at));
+            // A record stamped earlier than the one before it adds nothing and moves nothing back.
+            let gap = previous.and_then(|before| secs(before, at));
+            previous = Some(previous.map_or(at, |before| before.max(at)));
             // A resumed session repeats earlier records; they were counted in their own file.
             let fresh = record
                 .get("uuid")
@@ -111,6 +123,7 @@ impl Time {
             let message = object(record, "message");
             let blocks = get(message, "content").as_array().into_iter().flatten();
             let mut results = false;
+            let mut asks = true;
             if kind == "assistant" {
                 if let Some(name) = message.get("model").and_then(Value::as_str)
                     && name != "<synthetic>"
@@ -124,7 +137,7 @@ impl Time {
                             tool: text(block, "tool_key").to_owned(),
                             detail: text(block, "run_detail").to_owned(),
                             at,
-                            stamp: text(record, "timestamp").to_owned(),
+                            stamp: stamp.to_owned(),
                             tokens: get(block, "input_tokens").as_f64().unwrap_or_default(),
                         },
                     );
@@ -133,8 +146,13 @@ impl Time {
                 for block in blocks.filter(|block| text(block, "type") == "tool_result") {
                     results = true;
                     let Some(call) = pending.remove(&key(get(block, "tool_use_id"))) else {
+                        asks = false;
                         continue;
                     };
+                    if ASKS.contains(&call.tool.as_str()) {
+                        continue;
+                    }
+                    asks = false;
                     let Some(took) = secs(call.at, at) else {
                         continue;
                     };
@@ -161,8 +179,10 @@ impl Time {
             }
             let slot = match (kind, results) {
                 ("assistant", _) => MODEL,
+                (_, true) if asks => YOU,
                 (_, true) => TOOLS,
-                _ => YOU,
+                _ if get(record, "by_you").as_bool() == Some(true) => YOU,
+                _ => return,
             };
             let Some(gap) = gap else {
                 return;
