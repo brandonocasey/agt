@@ -19,6 +19,7 @@ fn report_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
         Some((name, rest))
             if [
                 "cost",
+                "time",
                 "tools",
                 "cache-gaps",
                 "errors",
@@ -91,6 +92,7 @@ fn claude_reports_print_the_expected_tables() {
         ),
         ("cost --limit 2", "cost_--limit_2"),
         ("cost --by agent", "cost_--by_agent"),
+        ("time", "time"),
         ("tools", "tools"),
         ("cache-gaps", "cache-gaps"),
         ("cache-gaps --gap 0.5", "cache-gaps_--gap_0_5"),
@@ -404,6 +406,7 @@ fn combined_reports_match_standalone_sections() {
     for root in ["projects", "codex"] {
         let sections = [
             ("cost", "Cost"),
+            ("time", "Time"),
             ("tools", "Tools"),
             ("cache-gaps", "Cache gaps"),
             ("errors", "Errors"),

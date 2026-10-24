@@ -1,4 +1,4 @@
-//! `agt sessions`: cost, tool, cache, error and friction reports from Claude Code and Codex
+//! `agt sessions`: cost, time, tool, cache, error and friction reports from Claude Code and Codex
 //! transcripts, and the search of what was typed in them.
 
 mod events;
@@ -8,6 +8,7 @@ pub mod live;
 mod prices;
 mod source;
 mod spend;
+mod timing;
 mod tools;
 
 use std::io::Write;
@@ -21,7 +22,7 @@ use crate::core::harness::Harness;
 use crate::core::local;
 use crate::core::output::Output;
 
-/// Cost, tools, cache gaps, errors and friction from Claude Code and Codex transcripts in
+/// Cost, time, tools, cache gaps, errors and friction from Claude Code and Codex transcripts in
 /// `~/.claude*/projects` and `~/.codex`. Prices come from
 /// `$XDG_CONFIG_HOME/agt/model-prices.json` (override: `AGT_PRICES`). Scratch and probe projects
 /// are skipped unless `--scratch` is given. `search` keeps a private index of the transcripts
@@ -91,6 +92,7 @@ enum ErrorKind {
 #[derive(Clone, Copy, ValueEnum)]
 enum Section {
     Cost,
+    Time,
     Tools,
     CacheGaps,
     Errors,
@@ -107,10 +109,10 @@ struct ReportArgs {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "cost,tools,cache-gaps,errors,denials,friction"
+        default_value = "cost,time,tools,cache-gaps,errors,denials,friction"
     )]
     sections: Vec<Section>,
-    /// Cost grouping, comma list of agent, model, project, session, file, harness.
+    /// Cost and time grouping, comma list of agent, model, project, session, file, harness.
     #[arg(long, default_value = "agent,model")]
     by: String,
     /// Idle minutes that count as a cache gap [default: 5].
@@ -131,6 +133,7 @@ struct ReportArgs {
 
 enum Report {
     Cost(spend::Cost, bool),
+    Time(timing::Time),
     Tools(tools::Tools),
     CacheGaps(tools::CacheGaps),
     Failures(events::Failures),
@@ -141,6 +144,7 @@ impl Report {
     fn needs(&self, needs: &mut source::Needs) {
         match self {
             Self::Cost(..) => needs.calls = true,
+            Self::Time(_) => needs.time = true,
             Self::Tools(_) => needs.tools = true,
             Self::CacheGaps(_) => needs.gaps = true,
             Self::Failures(_) => needs.failures = true,
@@ -151,6 +155,7 @@ impl Report {
     fn feed(&mut self, transcript: &source::Loaded) {
         match self {
             Self::Cost(report, _) => report.feed(transcript),
+            Self::Time(report) => report.feed(transcript),
             Self::Tools(report) => report.feed(transcript),
             Self::CacheGaps(report) => report.feed(transcript),
             Self::Failures(report) => report.feed(transcript),
@@ -161,6 +166,7 @@ impl Report {
     fn render(self, scope: &Scope) -> Result<String> {
         match self {
             Self::Cost(report, json) => report.render(scope, json),
+            Self::Time(report) => Ok(report.render(scope)),
             Self::Tools(report) => Ok(report.render(scope)),
             Self::CacheGaps(report) => Ok(report.render(scope)),
             Self::Failures(report) => Ok(report.render(scope)),
@@ -233,6 +239,7 @@ fn report(args: ReportArgs) -> Result<String> {
         .map(|section| {
             Ok(match section {
                 Section::Cost => ("Cost", Report::Cost(spend::Cost::new(&args.by)?, args.json)),
+                Section::Time => ("Time", Report::Time(timing::Time::new(&args.by)?)),
                 Section::Tools => ("Tools", Report::Tools(tools::Tools::new())),
                 Section::CacheGaps => (
                     "Cache gaps",

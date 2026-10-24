@@ -38,6 +38,16 @@ pub fn tok(n: f64) -> String {
     format!("{}", n.trunc() as i64)
 }
 
+/// Seconds as `45s`, `3m05s` or `1h02m`.
+pub fn duration(secs: f64) -> String {
+    let secs = secs.round() as i64;
+    match secs {
+        ..60 => format!("{secs}s"),
+        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 pub use crate::core::table::table;
 
 #[cfg(test)]
@@ -53,5 +63,8 @@ mod tests {
         assert_eq!(tok(999.0), "999");
         assert_eq!(tok(2_500_000.0), "2.5M");
         assert_eq!(round(0.12345, 4), 0.1235);
+        assert_eq!(duration(44.6), "45s");
+        assert_eq!(duration(185.0), "3m05s");
+        assert_eq!(duration(3720.0), "1h02m");
     }
 }

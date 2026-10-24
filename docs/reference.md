@@ -1118,17 +1118,24 @@ and Codex rollouts (`~/.codex/sessions`, `~/.codex/archived_sessions`). Reports 
 tables; `report --json` prints the cost section as indented JSON with `rows`, `unpriced` and `fast_calls`.
 
 ```sh
-agt sessions report [--sections cost,tools,cache-gaps,errors,denials,friction] [--by agent,model] [--gap MIN]
+agt sessions report [--sections cost,time,tools,cache-gaps,errors,denials,friction] [--by agent,model] [--gap MIN]
                     [--json] [--tsv [--width N]] [FILE...]
 agt sessions search [--query TEXT] [--session ID] [--limit N] [--file FILE] [--rebuild]
 ```
 
-`report` prints all six sections by default, or the selected sections in the given order. One
+`report` prints all seven sections by default, or the selected sections in the given order. One
 selected section prints without its heading, so `--sections cost --json` is the JSON alone. It
 discovers transcripts once and parses each transcript once for the selected reports.
 `cost` is USD by `--by` group (`agent`, `model`, `project`, `session`, `file`, `harness`; one
 session's cost is `--by session`, per-agent totals `--by agent`); `FILE...` prices those
-transcript or stream-json files instead of the roots. `tools` counts tool calls and the share of
+transcript or stream-json files instead of the roots. `time` splits wall-clock time by the same
+`--by` groups: the time before each model response (`model`), before each tool result (`tools`,
+which includes permission prompts) and before each of your messages (`you`; a wait over 30 minutes
+is idle and left out). `active` is model plus tools. Its `Slowest tools` table times each tool
+from its call to its result, keyed as in `tools` (`Bash:git`, `Read:skills/rules`, `mcp:slack`),
+with `failed` (error results other than permission denials, which `denials` lists) and `est tok`
+(input and result tokens, estimated at four characters per token).
+Subagent time also counts in the main agent's `Agent` tool time. `tools` counts tool calls and the share of
 cost their results carry. `--gap` sets the idle minutes of the cache-gaps section. `errors` lists
 tool errors and `denials` permission denials. `friction` lists interrupts, corrections, short
 replies and repeated prompts; `--tsv` prints every user message instead, text cut to `--width`

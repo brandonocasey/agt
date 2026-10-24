@@ -102,6 +102,7 @@ pub struct Needs {
     pub gaps: bool,
     pub failures: bool,
     pub friction: bool,
+    pub time: bool,
 }
 
 pub struct Loaded {
@@ -139,9 +140,11 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
     let mut blocks = Vec::new();
     for block in get(message, "content").as_array().into_iter().flatten() {
         match text(block, "type") {
-            "tool_use" if needs.calls || needs.tools || needs.gaps || needs.failures => {
+            "tool_use"
+                if needs.calls || needs.tools || needs.gaps || needs.failures || needs.time =>
+            {
                 let mut summary = json!({"type": "tool_use", "id": get(block, "id")});
-                if needs.tools {
+                if needs.tools || needs.time {
                     summary["tool_key"] =
                         super::tools::tool_key(text(block, "name"), get(block, "input"), home)
                             .into();
@@ -157,14 +160,14 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
                 }
                 blocks.push(summary);
             }
-            "tool_result" if needs.tools || needs.failures => {
+            "tool_result" if needs.tools || needs.failures || needs.time => {
                 let mut summary =
                     json!({"type": "tool_result", "tool_use_id": get(block, "tool_use_id")});
-                if needs.tools {
+                if needs.tools || needs.time {
                     summary["result_tokens"] =
                         super::tools::est_tokens(get(block, "content")).into();
                 }
-                if needs.failures {
+                if needs.failures || needs.time {
                     super::events::compact_failure(block, &mut summary);
                 }
                 blocks.push(summary);
@@ -180,6 +183,7 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
         && !(kind == "assistant" && (needs.calls || needs.tools || needs.gaps))
         && !(kind == "system" && needs.tools && text(record, "subtype") == "compact_boundary")
         && typed.is_none()
+        && !(needs.time && matches!(kind, "user" | "assistant"))
     {
         return None;
     }
@@ -190,13 +194,17 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
         }
     }
     message_summary.insert("content".into(), Value::Array(blocks));
-    Some(json!({
+    let mut summary = json!({
         "type": kind,
         "subtype": get(record, "subtype"),
         "timestamp": get(record, "timestamp"),
         "typed": typed,
         "message": message_summary,
-    }))
+    });
+    if needs.time {
+        summary["uuid"] = get(record, "uuid").clone();
+    }
+    Some(summary)
 }
 
 pub fn load(scope: &Scope, needs: Needs) -> impl Iterator<Item = Loaded> + '_ {

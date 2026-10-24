@@ -68,13 +68,9 @@ pub struct Cost {
 
 impl Cost {
     pub fn new(by: &str) -> Result<Self> {
-        let keys: Vec<String> = by.split(',').map(str::to_owned).collect();
-        if let Some(bad) = keys.iter().find(|key| !BY_KEYS.contains(&key.as_str())) {
-            return fail(format!("--by takes {}; got {bad}", BY_KEYS.join(", ")));
-        }
         Ok(Self {
             prices: Prices::load()?,
-            keys,
+            keys: by_keys(by)?,
             groups: IndexMap::new(),
             unpriced: IndexMap::new(),
             fast: 0,
@@ -84,19 +80,9 @@ impl Cost {
     }
     pub fn feed(&mut self, transcript: &Loaded) {
         for call in transcript.api_calls(&mut self.seen) {
-            let fields = |name: &str| -> String {
-                match name {
-                    "agent" => transcript.agent.clone(),
-                    "model" => call.model.clone(),
-                    "project" => short_project(&transcript.project, &self.home),
-                    "session" => transcript.session.clone(),
-                    "file" => transcript.path.to_string_lossy().into_owned(),
-                    _ => transcript.harness.id().to_owned(),
-                }
-            };
             let group = self
                 .groups
-                .entry(self.keys.iter().map(|key| fields(key)).collect())
+                .entry(group_key(&self.keys, transcript, &call.model, &self.home))
                 .or_default();
             self.fast += i64::from(text(&call.usage, "speed") == "fast");
             if group.add(&call, &self.prices).is_none() {
@@ -198,6 +184,29 @@ impl Cost {
         }
         Ok(out)
     }
+}
+
+/// The `--by` keys, checked.
+pub fn by_keys(by: &str) -> Result<Vec<String>> {
+    let keys: Vec<String> = by.split(',').map(str::to_owned).collect();
+    if let Some(bad) = keys.iter().find(|key| !BY_KEYS.contains(&key.as_str())) {
+        return fail(format!("--by takes {}; got {bad}", BY_KEYS.join(", ")));
+    }
+    Ok(keys)
+}
+
+/// The group a call of `model` in `transcript` falls in, one value per `--by` key.
+pub fn group_key(keys: &[String], transcript: &Loaded, model: &str, home: &Path) -> Vec<String> {
+    keys.iter()
+        .map(|name| match name.as_str() {
+            "agent" => transcript.agent.clone(),
+            "model" => model.to_owned(),
+            "project" => short_project(&transcript.project, home),
+            "session" => transcript.session.clone(),
+            "file" => transcript.path.to_string_lossy().into_owned(),
+            _ => transcript.harness.id().to_owned(),
+        })
+        .collect()
 }
 
 /// What one session cost so far.
