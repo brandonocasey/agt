@@ -334,6 +334,139 @@ fn merge_sends_the_head_guard() {
     );
 }
 
+/// A GitHub merge of PR 7: it is open for the guard, then `after` is what the forge reports.
+fn merge_pr_seven(env: &Env, after: &Value) -> Value {
+    gh_view(env, 7, &json!({}));
+    let view = [
+        "api",
+        "graphql",
+        "-f",
+        "query=PrView",
+        "-f",
+        "owner=o",
+        "-f",
+        "name=r",
+        "-F",
+        "number=7",
+    ];
+    env.respond_nth(
+        &view,
+        2,
+        &format!(
+            r#"{{"data":{{"repository":{{"pullRequest":{}}}}}}}"#,
+            node(7, after)
+        ),
+    );
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "PUT",
+            "repos/o/r/pulls/7/merge",
+            "--input",
+            "-",
+        ],
+        "{}",
+    );
+    ok(env, &["merge", "7", "--sha", SHA, "--method", "squash"])
+}
+
+fn issue_state(env: &Env, key: &str) -> String {
+    env.issue(&["show", key])["state"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn merge_closes_the_local_issues_the_pr_names() {
+    let env = github();
+    let named = env.issue(&["create", "--title", "Named"])["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = env.issue(&["create", "--title", "Other"])["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let merged = merge_pr_seven(
+        &env,
+        &json!({"state": "MERGED", "body": format!("Done.\n\nFixes {named}\nSee {other}")}),
+    );
+    assert_eq!(merged["state"], "merged");
+    assert_eq!(merged["closed_issues"], json!([named]));
+    assert_eq!(issue_state(&env, &named), "closed");
+    assert_eq!(issue_state(&env, &other), "open");
+}
+
+#[test]
+fn merge_closes_a_local_issue_named_in_the_title() {
+    let env = github();
+    let key = env.issue(&["create", "--title", "Named"])["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let merged = merge_pr_seven(
+        &env,
+        &json!({"state": "MERGED", "title": format!("Resolves {key}")}),
+    );
+    assert_eq!(merged["closed_issues"], json!([key]));
+}
+
+#[test]
+fn merge_leaves_issues_open_while_the_pr_is_not_merged() {
+    let env = github();
+    let key = env.issue(&["create", "--title", "Named"])["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = merge_pr_seven(&env, &json!({"body": format!("Fixes {key}")}));
+    assert!(result.get("closed_issues").is_none());
+    assert_eq!(issue_state(&env, &key), "open");
+}
+
+#[test]
+fn merge_still_succeeds_when_a_named_issue_is_missing() {
+    let env = github();
+    gh_view(&env, 7, &json!({}));
+    env.respond_nth(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=PrView",
+            "-f",
+            "owner=o",
+            "-f",
+            "name=r",
+            "-F",
+            "number=7",
+        ],
+        2,
+        &format!(
+            r#"{{"data":{{"repository":{{"pullRequest":{}}}}}}}"#,
+            node(7, &json!({"state": "MERGED", "body": "Fixes local-nosuch"}))
+        ),
+    );
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "PUT",
+            "repos/o/r/pulls/7/merge",
+            "--input",
+            "-",
+        ],
+        "{}",
+    );
+    let output = pr(&env, &["merge", "7", "--sha", SHA, "--method", "squash"]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("could not close local-nosuch"), "{stderr}");
+    let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(shown.get("closed_issues").is_none());
+}
+
 #[test]
 fn auto_merge_of_a_pr_that_can_merge_now_merges_it() {
     let env = github();

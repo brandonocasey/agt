@@ -95,6 +95,18 @@ pub fn comment(
     })
 }
 
+/// Closes the issue `key` names unless it is closed already; whether this call closed it.
+pub(super) fn close_if_open(store: &Store, key: &str) -> Result<bool> {
+    let (_, issue) = trackers::find(store, None, key)?;
+    if issue.fields.state == Category::Closed {
+        return Ok(false);
+    }
+    change(store, None, key, |tracker, issue| {
+        set_state(tracker, issue, State::Closed, None)
+    })?;
+    Ok(true)
+}
+
 fn set_state(
     tracker: &Tracker,
     issue: &mut Issue,

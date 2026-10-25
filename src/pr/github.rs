@@ -9,7 +9,7 @@ use crate::forge::transport::Transport;
 use crate::forge::{self, github};
 use crate::store::model::ReviewState;
 
-const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
+const FIELDS: &str = "id number url title body state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
 
 fn pr(node: &Value) -> Pr {
     let text = |pointer: &str| {
@@ -31,6 +31,7 @@ fn pr(node: &Value) -> Pr {
         number: shared.number.unwrap_or_default(),
         url: shared.url,
         title: shared.title,
+        body: text("/body"),
         state: shared.state.unwrap_or(ReviewState::Open),
         draft: node["isDraft"].as_bool().unwrap_or(false),
         head_branch: shared.head_branch,

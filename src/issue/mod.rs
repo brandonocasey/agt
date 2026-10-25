@@ -4,6 +4,7 @@
 
 mod auto;
 mod cli;
+mod fixes;
 mod local;
 mod merge;
 pub mod prune;
@@ -14,6 +15,7 @@ mod trackers;
 mod view;
 
 pub use cli::Cli;
+pub use fixes::close_fixed;
 
 use cli::Command;
 

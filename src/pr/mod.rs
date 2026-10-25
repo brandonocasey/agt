@@ -115,6 +115,9 @@ enum Command {
     /// queue (then auto-merge queues it).
     /// Without --auto, a GitHub PR whose base requires a merge queue is added to the queue
     /// through auto-merge, so it needs --method too. GitLab cannot rebase on merge.
+    ///
+    /// When this call merges the PR/MR, each local issue that its title or body names after a
+    /// closing keyword (`Fixes local-ab12cd`) is closed and listed as `closed_issues`.
     Merge {
         number: String,
         /// The head commit reviewed; the merge is refused when the PR/MR head differs.
@@ -153,6 +156,8 @@ pub struct Pr {
     pub number: u64,
     pub url: String,
     pub title: String,
+    /// Not part of the JSON output; `merge` hands it on so issues it fixes can close.
+    pub body: String,
     pub state: ReviewState,
     pub draft: bool,
     pub head_branch: String,
@@ -334,11 +339,14 @@ fn explain(error: Error) -> Error {
     error
 }
 
-pub fn run(cli: Cli) -> Result<Output> {
-    execute(cli.command).map_err(explain)
+/// Runs the command. Also returns the title and body of a PR/MR that this call merged.
+pub fn run(cli: Cli) -> Result<(Output, Option<String>)> {
+    let mut merged = None;
+    let output = execute(cli.command, &mut merged).map_err(explain)?;
+    Ok((output, merged))
 }
 
-fn execute(command: Command) -> Result<Output> {
+fn execute(command: Command, merged: &mut Option<String>) -> Result<Output> {
     Offline::current().forbid("agt pr")?;
     let repo = Repo::discover()?;
     let remote = Remote::connect(&repo)?;
@@ -459,7 +467,11 @@ fn execute(command: Command) -> Result<Output> {
                     }
                 }?;
             }
-            shown(remote.view(at)?)
+            let after = remote.view(at)?;
+            if after.state == ReviewState::Merged {
+                *merged = Some(format!("{}\n{}", after.title, after.body));
+            }
+            shown(after)
         }
         Command::AutoMerge {
             switch,

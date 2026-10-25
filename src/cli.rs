@@ -74,7 +74,13 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Check(args) => check::run(args),
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
-        Command::Pr(args) => pr::run(args),
+        Command::Pr(args) => {
+            let (output, merged) = pr::run(args)?;
+            Ok(match merged {
+                Some(text) => issue::close_fixed(output, &text),
+                None => output,
+            })
+        }
         Command::Cleanup(args) => cleanup::run(args),
         Command::Sessions(args) => sessions::run(args),
         Command::Ps(args) => sessions::live::run(args),

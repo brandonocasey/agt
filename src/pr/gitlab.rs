@@ -35,6 +35,7 @@ fn mr(node: &Value) -> Pr {
         number: shared.number.unwrap_or_default(),
         url: shared.url,
         title: shared.title,
+        body: text("description"),
         state: shared.state.unwrap_or(ReviewState::Open),
         draft: node["draft"].as_bool().unwrap_or(false),
         head_branch: shared.head_branch,
