@@ -377,37 +377,39 @@ pub fn create(
 /// comments, and keeps its synced copy, links and private notes.
 pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
     let (tracker, issue) = trackers::find(store, filter, key)?;
+    // Held for the whole discard: with it no push is running, so a `Posting` mark is stale.
+    let Some(_lock) = store.try_publish_lock(&tracker.dir, "push")? else {
+        return fail("another agt is pushing issues; try again when it is done");
+    };
     let name = issue.doc_name();
     if issue.number.is_none() {
-        let sending = issue
+        let mut possibly_sent = Vec::new();
+        if issue
             .create
             .as_ref()
-            .is_some_and(|create| create.post == PostState::Posting);
-        if sending {
-            return fail(format!(
-                "{} is being sent; run `agt issue push` to finish it first",
-                issue.key
-            ));
+            .is_some_and(|create| create.post == PostState::Posting)
+        {
+            possibly_sent.push("create".to_owned());
         }
-        let removed = store.try_remove_doc_if(&tracker.dir, &name, |found: &Issue| {
-            found.number.is_none()
-                && found
-                    .create
-                    .as_ref()
-                    .is_none_or(|create| create.post != PostState::Posting)
-        })?;
+        possibly_sent.extend(posting_comments(&issue));
+        let removed =
+            store.try_remove_doc_if(&tracker.dir, &name, |found: &Issue| found.number.is_none())?;
         return match removed {
-            Removal::Removed(_) => Ok(json!({
-                "key": issue.key,
-                "tracker": issue.tracker,
-                "discarded": {
+            Removal::Removed(_) => {
+                let mut discarded = json!({
                     "issue": true,
                     "comments": issue.comments.len(),
                     "notes": issue.notes.len(),
-                },
-            })),
+                });
+                add_possibly_sent(&mut discarded, possibly_sent);
+                Ok(json!({"key": issue.key, "tracker": issue.tracker, "discarded": discarded}))
+            }
             Removal::Busy => fail(format!("{} is locked by another process", issue.key)),
-            Removal::Kept => fail(format!("{} changed while discarding; try again", issue.key)),
+            Removal::Kept => {
+                // A document a newer agt wrote is kept too; an unchanged rewrite reports it.
+                store.update_existing_doc(&tracker.dir, &name, |_: &mut Issue| Ok(()))?;
+                fail(format!("{} changed while discarding; try again", issue.key))
+            }
         };
     }
     let dropped = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
@@ -428,15 +430,7 @@ pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> 
         if fields.is_empty() && comments == 0 && issue.conflicts.is_empty() {
             return fail(format!("nothing is queued for {}", issue.key));
         }
-        if unsent_comments(issue)
-            .iter()
-            .any(|comment| comment.delivery.post == PostState::Posting)
-        {
-            return fail(format!(
-                "a comment on {} is being sent; run `agt issue push` to finish it first",
-                issue.key
-            ));
-        }
+        let possibly_sent = posting_comments(issue);
         if let Some(base) = issue.base.clone() {
             issue.fields = base;
         }
@@ -446,15 +440,25 @@ pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> 
         issue.conflicts.clear();
         issue.errors.clear();
         issue.updated_at = clock::now()?;
-        Ok((fields, comments))
+        Ok((fields, comments, possibly_sent))
     })?;
-    Ok(json!({
-        "key": issue.key,
-        "tracker": issue.tracker,
-        "discarded": {
-            "issue": false,
-            "edits": dropped.0,
-            "comments": dropped.1,
-        },
-    }))
+    let mut discarded = json!({"issue": false, "edits": dropped.0, "comments": dropped.1});
+    add_possibly_sent(&mut discarded, dropped.2);
+    Ok(json!({"key": issue.key, "tracker": issue.tracker, "discarded": discarded}))
+}
+
+/// Ids of the queued comments marked `Posting`: a push may have sent them before it stopped.
+fn posting_comments(issue: &Issue) -> Vec<String> {
+    unsent_comments(issue)
+        .iter()
+        .filter(|comment| comment.delivery.post == PostState::Posting)
+        .map(|comment| comment.id.clone())
+        .collect()
+}
+
+/// Lists what a stale `Posting` mark dropped, so the user can check whether it landed.
+fn add_possibly_sent(discarded: &mut Value, possibly_sent: Vec<String>) {
+    if !possibly_sent.is_empty() {
+        discarded["possibly_sent"] = json!(possibly_sent);
+    }
 }

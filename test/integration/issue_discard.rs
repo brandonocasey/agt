@@ -1,5 +1,7 @@
 //! `agt issue discard`: drops one issue's queued changes locally and never calls a host.
 
+use std::fs;
+
 use serde_json::{Value, json};
 
 use crate::support::Env;
@@ -30,6 +32,11 @@ matrix!(
     discarding_queued_edits_keeps_the_remote_copy_and_private_note,
     unknown_key_and_nothing_queued_fail,
     another_issues_pending_changes_are_untouched,
+    discard_is_refused_while_the_push_lock_is_held,
+    a_stale_posting_create_can_be_discarded_and_is_reported,
+    a_stale_posting_comment_can_be_discarded_and_is_reported,
+    a_document_from_a_newer_agt_says_to_upgrade,
+    an_issue_whose_only_queue_is_a_conflict_can_be_discarded,
 );
 
 fn pushable(fake: Fake, specs: &[Spec]) -> Env {
@@ -136,4 +143,123 @@ fn another_issues_pending_changes_are_untouched(fake: Fake) {
     assert_eq!(two["comments"].as_array().unwrap().len(), 1);
     let one = env.issue_doc(fake.tracker(), "1");
     assert_eq!(one["fields"]["title"], "One");
+}
+
+fn write_doc(env: &Env, fake: Fake, name: &str, change: impl FnOnce(&mut Value)) {
+    let mut doc = env.issue_doc(fake.tracker(), name);
+    change(&mut doc);
+    let path = env
+        .issue_state()
+        .join(fake.tracker())
+        .join(format!("{name}.json"));
+    fs::write(path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+}
+
+fn discard_is_refused_while_the_push_lock_is_held(fake: Fake) {
+    let env = pushable(fake, &[Spec::new(1, "Login fails")]);
+    env.issue(&["edit", "1", "--title", "Changed"]);
+    let lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            env.issue_state()
+                .join(fake.tracker())
+                .join(".push.publish.lock"),
+        )
+        .unwrap();
+    lock.lock().unwrap();
+    let error = env.issue_fail(&["discard", "1"]);
+    assert!(error.contains("another agt is pushing issues"), "{error}");
+    assert_eq!(
+        env.issue_doc(fake.tracker(), "1")["fields"]["title"],
+        "Changed"
+    );
+    drop(lock);
+    env.issue(&["discard", "1"]);
+    assert_eq!(
+        env.issue_doc(fake.tracker(), "1")["fields"]["title"],
+        "Login fails"
+    );
+}
+
+fn a_stale_posting_create_can_be_discarded_and_is_reported(fake: Fake) {
+    let env = pushable(fake, &[Spec::new(1, "Login fails")]);
+    let created = env.issue(&["create", "--title", "Sent?", "--tracker", fake.tracker()]);
+    let key = created["key"].as_str().unwrap().to_owned();
+    write_doc(&env, fake, &key, |doc| {
+        doc["create"]["post"] = json!("posting");
+        doc["create"]["attempt"] = json!("attempt-1");
+    });
+    let out = env.issue(&["discard", &key]);
+    assert_eq!(out["discarded"]["issue"], true);
+    assert_eq!(
+        out["discarded"]["possibly_sent"],
+        json!(["create"]),
+        "{out}"
+    );
+    assert!(env.issue_fail(&["show", &key]).contains("no issue"));
+}
+
+fn a_stale_posting_comment_can_be_discarded_and_is_reported(fake: Fake) {
+    let env = pushable(fake, &[Spec::new(1, "Login fails")]);
+    env.issue(&["comment", "1", "maybe sent"]);
+    let mut id = String::new();
+    write_doc(&env, fake, "1", |doc| {
+        let comment = &mut doc["comments"][0];
+        comment["post"] = json!("posting");
+        comment["attempt"] = json!("attempt-1");
+        id = comment["id"].as_str().unwrap().to_owned();
+    });
+    let out = env.issue(&["discard", "1"]);
+    assert_eq!(out["discarded"]["issue"], false);
+    assert_eq!(out["discarded"]["comments"], 1);
+    assert_eq!(out["discarded"]["possibly_sent"], json!([id]), "{out}");
+    assert_eq!(
+        env.issue_doc(fake.tracker(), "1")["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(env.forge_writes(fake).is_empty());
+}
+
+fn a_document_from_a_newer_agt_says_to_upgrade(fake: Fake) {
+    let env = pushable(fake, &[Spec::new(1, "Login fails")]);
+    let created = env.issue(&["create", "--title", "Mine", "--tracker", fake.tracker()]);
+    let key = created["key"].as_str().unwrap().to_owned();
+    write_doc(&env, fake, &key, |doc| {
+        doc["from_a_newer_agt"] = json!(true);
+    });
+    let error = env.issue_fail(&["discard", &key]);
+    assert!(error.contains("newer agt"), "{error}");
+    assert!(error.contains("upgrade agt"), "{error}");
+    assert!(!error.contains("try again"), "{error}");
+    assert!(env.issue_doc(fake.tracker(), &key)["from_a_newer_agt"] == json!(true));
+}
+
+fn an_issue_whose_only_queue_is_a_conflict_can_be_discarded(fake: Fake) {
+    let env = pushable(fake, &[Spec::new(1, "Login fails").labels(&["bug"])]);
+    env.issue(&["edit", "1", "--title", "Mine"]);
+    let mut remote = Spec::new(1, "Theirs")
+        .labels(&["bug"])
+        .updated("2026-10-12T10:00:00Z");
+    remote.body = "Body of Login fails".to_owned();
+    fake.serve_issue(&env, &remote);
+    env.issue(&["push"]);
+    let stored = env.issue_doc(fake.tracker(), "1");
+    assert_eq!(stored["conflicts"].as_array().unwrap().len(), 1);
+    assert_eq!(env.issue(&["show", "1"])["pending"], false);
+    let out = env.issue(&["discard", "1"]);
+    assert_eq!(out["discarded"]["edits"], json!([]));
+    assert_eq!(out["discarded"]["comments"], 0);
+    let stored = env.issue_doc(fake.tracker(), "1");
+    assert_eq!(stored["conflicts"], json!([]));
+    assert_eq!(stored["fields"]["title"], "Theirs");
+    assert!(
+        env.issue_fail(&["discard", "1"])
+            .contains("nothing is queued")
+    );
 }
