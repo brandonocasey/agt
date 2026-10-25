@@ -38,6 +38,11 @@ pub enum Command {
     Create(CreateArgs),
     /// Queue a new title, body, state, labels or assignees.
     Edit(EditArgs),
+    /// Drop every queued, unpushed change of one issue; a never-pushed issue is removed. Local only.
+    Discard {
+        /// `owner/repo#12`, `#12`, `12` or `local-xxxx`.
+        key: String,
+    },
     /// Send queued changes; explicit `push = false` denies a tracker.
     Push {
         /// Show the requests without sending anything.

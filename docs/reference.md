@@ -1487,6 +1487,15 @@ Queued writes (`<text>` is read from stdin when it is `-`):
 | `create --title T [--body B] [--add-label L]... [--add-assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. `--label` and `--assignee` are accepted for `--add-label` and `--add-assignee`. |
 | `edit <key> [--title T] [--body B] [--state open\|closed [--reason completed\|not-planned]] [--add-label L]... [--remove-label L]... [--add-assignee A]... [--remove-assignee A]...` | Any of these in one change; at least one is required. A reason is GitHub only. GitLab takes one assignee here; removals apply first, so one call can swap it. |
 
+`discard <key>` drops every queued, unpushed change of one issue and never calls a host. A
+`local-` issue that was never pushed is removed with its queued comments and private notes. For
+an issue on a tracker it drops the queued edits (fields reset to the synced copy), the queued
+comments, and any conflicts and send errors for them; the synced copy, links and private notes
+stay. It prints `key`, `tracker` and `discarded` (`issue`, `comments`, and for a tracker issue
+`edits`, the fields reset; for a local issue `notes`). An unknown key, or an issue with nothing
+queued, is an error; so is an issue or comment a `push` is sending right now. Other issues are
+untouched.
+
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
 one update with every changed field, then each comment. `--dry-run` prints the exact
 `gh`/`glab` argument list and body of every write (`writes`; a real run lists `sent`)

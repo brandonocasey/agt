@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use super::cli::{CreateArgs, EditArgs, LinkArgs, Lists, Reason, State};
+use super::merge::{pending_changes, unsent_comments};
 use super::trackers::{self, Tracker};
 use super::view::summary;
 use crate::core::clock;
@@ -15,6 +16,8 @@ use crate::forge::{self, service};
 use crate::store::Store;
 use crate::store::issues::{Category, Fields, Issue, LinkSource, Links, Note, PrLink, VERSION};
 use crate::store::model::{Author, Comment, Delivery, PostState, last_number};
+use crate::store::prune::Removal;
+use serde_json::json;
 
 const MAX_TEXT: usize = 65_536;
 
@@ -367,4 +370,91 @@ pub fn create(
     issue.fields.normalize();
     let created = store.update_doc(&tracker.dir, &key, || issue.clone(), |_| Ok(issue.clone()))?;
     Ok(summary(&created))
+}
+
+/// Drops every queued, unpushed change of the issue `key` names. A never-pushed issue goes
+/// entirely, with its comments and notes; a pushed one loses only its queued edits and
+/// comments, and keeps its synced copy, links and private notes.
+pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
+    let (tracker, issue) = trackers::find(store, filter, key)?;
+    let name = issue.doc_name();
+    if issue.number.is_none() {
+        let sending = issue
+            .create
+            .as_ref()
+            .is_some_and(|create| create.post == PostState::Posting);
+        if sending {
+            return fail(format!(
+                "{} is being sent; run `agt issue push` to finish it first",
+                issue.key
+            ));
+        }
+        let removed = store.try_remove_doc_if(&tracker.dir, &name, |found: &Issue| {
+            found.number.is_none()
+                && found
+                    .create
+                    .as_ref()
+                    .is_none_or(|create| create.post != PostState::Posting)
+        })?;
+        return match removed {
+            Removal::Removed(_) => Ok(json!({
+                "key": issue.key,
+                "tracker": issue.tracker,
+                "discarded": {
+                    "issue": true,
+                    "comments": issue.comments.len(),
+                    "notes": issue.notes.len(),
+                },
+            })),
+            Removal::Busy => fail(format!("{} is locked by another process", issue.key)),
+            Removal::Kept => fail(format!("{} changed while discarding; try again", issue.key)),
+        };
+    }
+    let dropped = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
+        let edits = pending_changes(issue);
+        let mut fields = Vec::new();
+        for (name, changed) in [
+            ("title", edits.title.is_some()),
+            ("body", edits.body.is_some()),
+            ("state", edits.state.is_some()),
+            ("labels", edits.labels.is_some()),
+            ("assignees", edits.assignees.is_some()),
+        ] {
+            if changed {
+                fields.push(name);
+            }
+        }
+        let comments = unsent_comments(issue).len();
+        if fields.is_empty() && comments == 0 && issue.conflicts.is_empty() {
+            return fail(format!("nothing is queued for {}", issue.key));
+        }
+        if unsent_comments(issue)
+            .iter()
+            .any(|comment| comment.delivery.post == PostState::Posting)
+        {
+            return fail(format!(
+                "a comment on {} is being sent; run `agt issue push` to finish it first",
+                issue.key
+            ));
+        }
+        if let Some(base) = issue.base.clone() {
+            issue.fields = base;
+        }
+        issue
+            .comments
+            .retain(|comment| comment.remote.is_some() || comment.local);
+        issue.conflicts.clear();
+        issue.errors.clear();
+        issue.updated_at = clock::now()?;
+        Ok((fields, comments))
+    })?;
+    Ok(json!({
+        "key": issue.key,
+        "tracker": issue.tracker,
+        "discarded": {
+            "issue": false,
+            "edits": dropped.0,
+            "comments": dropped.1,
+        },
+    }))
 }

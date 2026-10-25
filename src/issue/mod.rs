@@ -66,6 +66,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             local::create(&store, &config, filter, args)?
         }
         Command::Edit(args) => local::edit(&store, filter, args)?,
+        Command::Discard { key } => local::discard(&store, filter, key)?,
         Command::Push { dry_run, force } => {
             let mut config = Config::load_for_repo(&repo)?;
             trackers::destinations(&mut config, &repo, filter, false)?;
