@@ -117,7 +117,8 @@ enum Command {
     /// through auto-merge, so it needs --method too. GitLab cannot rebase on merge.
     ///
     /// When this call merges the PR/MR, each local issue that its title or body names after a
-    /// closing keyword (`Fixes local-ab12cd`) is closed and listed as `closed_issues`.
+    /// closing keyword (`Fixes local-ab12cd`; one keyword per key) is closed and listed as
+    /// `closed_issues`. Auto-merge that merges later closes nothing.
     Merge {
         number: String,
         /// The head commit reviewed; the merge is refused when the PR/MR head differs.
@@ -341,12 +342,12 @@ fn explain(error: Error) -> Error {
 
 /// Runs the command. Also returns the title and body of a PR/MR that this call merged.
 pub fn run(cli: Cli) -> Result<(Output, Option<String>)> {
-    let mut merged = None;
-    let output = execute(cli.command, &mut merged).map_err(explain)?;
-    Ok((output, merged))
+    let mut merged_text = None;
+    let output = execute(cli.command, &mut merged_text).map_err(explain)?;
+    Ok((output, merged_text))
 }
 
-fn execute(command: Command, merged: &mut Option<String>) -> Result<Output> {
+fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output> {
     Offline::current().forbid("agt pr")?;
     let repo = Repo::discover()?;
     let remote = Remote::connect(&repo)?;
@@ -469,7 +470,7 @@ fn execute(command: Command, merged: &mut Option<String>) -> Result<Output> {
             }
             let after = remote.view(at)?;
             if after.state == ReviewState::Merged {
-                *merged = Some(format!("{}\n{}", after.title, after.body));
+                *merged_text = Some(format!("{}\n{}", after.title, after.body));
             }
             shown(after)
         }
@@ -491,6 +492,9 @@ fn execute(command: Command, merged: &mut Option<String>) -> Result<Output> {
             // Turning auto-merge on merges at once when the checks already passed.
             let merged =
                 matches!(switch, Switch::On) && changed && now.state == ReviewState::Merged;
+            if merged {
+                *merged_text = Some(format!("{}\n{}", now.title, now.body));
+            }
             if changed && !merged && on == matches!(switch, Switch::Off) {
                 return fail(format!(
                     "auto-merge is still {} on #{at} after the change",

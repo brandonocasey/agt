@@ -927,6 +927,10 @@ fn gitlab_merge_method_merge_refuses_a_squash_on_mr() {
 #[test]
 fn gitlab_auto_merge_on_that_merges_at_once_succeeds_and_forgets_the_memo() {
     let env = gitlab();
+    let key = env.issue(&["create", "--title", "Named"])["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let mr = format!("{GL_MRS}/3");
     let open = |auto: bool| {
         gl_mr(
@@ -960,11 +964,16 @@ fn gitlab_auto_merge_on_that_merges_at_once_succeeds_and_forgets_the_memo() {
     env.respond_nth(
         &["api", "-X", "GET", &mr],
         2,
-        &gl_mr(&json!({"state": "merged", "merge_when_pipeline_succeeds": false})),
+        &gl_mr(&json!({
+            "state": "merged", "merge_when_pipeline_succeeds": false,
+            "description": format!("Fixes {key}"),
+        })),
     );
     gl_put(&env, &format!("{mr}/merge"));
     let on = ok(&env, &["auto-merge", "on", "3"]);
     assert_eq!(on["merged"], true);
+    assert_eq!(on["closed_issues"], json!([key]));
+    assert_eq!(issue_state(&env, &key), "closed");
     assert_eq!(on["pr"]["state"], "merged");
     assert!(!std::fs::read_to_string(&record).unwrap().contains("squash"));
 }

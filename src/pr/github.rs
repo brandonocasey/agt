@@ -9,7 +9,7 @@ use crate::forge::transport::Transport;
 use crate::forge::{self, github};
 use crate::store::model::ReviewState;
 
-const FIELDS: &str = "id number url title body state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
+const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
 
 fn pr(node: &Value) -> Pr {
     let text = |pointer: &str| {
@@ -71,7 +71,7 @@ fn graphql(t: &dyn Transport, query: &str, vars: Vec<Var>) -> Result<Value> {
 pub fn view(t: &dyn Transport, repo: &str, number: u64) -> Result<Pr> {
     let (owner, name) = forge::split_repo(repo);
     let query = format!(
-        "query PrView($owner:String!,$name:String!,$number:Int!){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{FIELDS}}}}}}}"
+        "query PrView($owner:String!,$name:String!,$number:Int!){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{FIELDS} body}}}}}}"
     );
     let reply = graphql(
         t,
