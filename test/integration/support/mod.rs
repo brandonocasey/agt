@@ -254,6 +254,9 @@ pub fn proc_start(pid: u32) -> String {
     } else {
         let output = Command::new("ps")
             .args(["-o", "lstart=", "-p", &pid.to_string()])
+            // Every agt under test runs with `TZ=UTC` (see `Env::command`), and Claude Code writes
+            // UTC; the machine's own zone would put the record hours off the process.
+            .env("TZ", "UTC")
             .output()
             .unwrap();
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
