@@ -62,7 +62,7 @@ pub(super) enum Held {
 
 #[derive(Clone)]
 pub(super) enum Unsupported {
-    SelfApproval { recorded: bool },
+    SelfApproval { commented: bool },
     FormalApproval,
     Resolve,
     Unresolve,
@@ -120,12 +120,12 @@ impl std::fmt::Display for Skip {
                 write!(f, "open findings block approval: {}", ids.join(", "))
             }
             Self::Unsupported { service, what } => match what {
-                Unsupported::SelfApproval { recorded: false } => {
+                Unsupported::SelfApproval { commented: false } => {
                     write!(f, "{service} does not let the author approve their own PR")
                 }
-                Unsupported::SelfApproval { recorded: true } => write!(
+                Unsupported::SelfApproval { commented: true } => write!(
                     f,
-                    "{service} does not let the author approve their own PR; the summary records it"
+                    "{service} does not let the author approve their own PR; a comment review carries it"
                 ),
                 Unsupported::FormalApproval => {
                     write!(f, "{service} has no formal approval; recorded locally")
@@ -362,8 +362,8 @@ mod tests {
             "Forgejo cannot resolve threads; cleared locally"
         );
         assert_eq!(
-            unsupported(Unsupported::SelfApproval { recorded: true }).to_string(),
-            "Forgejo does not let the author approve their own PR; the summary records it"
+            unsupported(Unsupported::SelfApproval { commented: true }).to_string(),
+            "Forgejo does not let the author approve their own PR; a comment review carries it"
         );
     }
 }

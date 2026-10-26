@@ -180,14 +180,16 @@ tokens; the summary's steps show each run's time.
 refused while a `bug`, `requirement` or `question` is open; approving the same
 head again reuses the same thread, and `--formal` upgrades a comment approval.
 `publish` posts no comment for it (the text, default `Approved at <sha>.` or
-`--body`, stays in the store, also after `sync` reads back the formal approval's review).
+`--body`, stays in the store, also after `sync` reads back the review that carries a formal
+approval).
 The summary headline shows ` · 🔍 approved` while the PR/MR head is the approved head and
 no open finding blocks approval. The author flags (`--author`,
 `--reviewer`, `--model`, ...) sign the approval as for `comment`. With `--dry-run`
 the approval is still recorded locally, and nothing is posted.
 `--approve --formal` submits the host's approval: a GitHub `APPROVE` review whose body is
 only the hidden marker, or GitLab's `approve` at that head. On your own GitHub PR, which
-GitHub refuses to approve, nothing is posted and `skipped` lists `<id>/formal`. A host
+GitHub refuses to approve, a `COMMENT` review carries the approval text with its footer
+instead, posted once, and `skipped` lists `<id>/formal`. A host
 refusal of the formal approval (an HTTP 4xx: already approved, not allowed)
 shows as an `error` under `posted`, blocks nothing and is remembered, so
 `publish` does not send it again; `publish --approve --formal` again retries only the host's

@@ -3,9 +3,9 @@
 use super::skips::{Skip, Unsupported};
 use super::{Item, Planner, Write};
 use crate::forge::markers;
-use crate::forge::service::ApproveCap;
+use crate::forge::service::{ApproveCap, Inline};
 use crate::review::commands::approve::blocking_threads;
-use crate::review::commands::publish::render::short;
+use crate::review::commands::publish::render::{body, short};
 use crate::store::model::{Approval, Comment, RemoteKind, Target, Thread};
 
 /// What an approval thread asks of the host.
@@ -29,9 +29,10 @@ impl Approved {
 
 impl Planner<'_> {
     /// An approval's writes: the host's approval when formal, which posts no comment. The
-    /// review GitHub takes carries only the hidden marker; a non-formal approval is
-    /// recorded locally, and the summary headline shows it. Only for the head it approved,
-    /// and only while no finding blocks approval.
+    /// review GitHub takes carries only the hidden marker; on your own PR, which GitHub does
+    /// not let you approve, a comment review carries the approval text instead. A non-formal
+    /// approval is recorded locally, and the summary headline shows it. Only for the head it
+    /// approved, and only while no finding blocks approval.
     pub(super) fn approval(
         &self,
         thread: &Thread,
@@ -60,13 +61,31 @@ impl Planner<'_> {
                     note: None,
                 })
             }
-            ApproveCap::Review { .. } => {
-                let reason = approval.formal.then(|| Skip::Unsupported {
+            ApproveCap::Review { .. } if approval.formal => {
+                self.approvable(approval, target)?;
+                let skip = |commented| Skip::Unsupported {
                     service: self.service().name(),
-                    what: Unsupported::SelfApproval { recorded: true },
-                });
-                Ok(Approved::nothing(reason))
+                    what: Unsupported::SelfApproval { commented },
+                };
+                let Inline::ReviewBatch(poster) = self.service().inline() else {
+                    return Ok(Approved::nothing(Some(skip(false))));
+                };
+                let text = body(target, thread, first, None, self.attempt);
+                let request = poster.review_batch(subject, head, &text, &[]);
+                let write = self.write(
+                    Item::Thread {
+                        comment: first.id.clone(),
+                    },
+                    request,
+                    &text,
+                );
+                Ok(Approved {
+                    writes: vec![write],
+                    kind: Some(RemoteKind::Review),
+                    note: Some(skip(true)),
+                })
             }
+            ApproveCap::Review { .. } => Ok(Approved::nothing(None)),
             ApproveCap::Call
                 if approval.formal && !approval.approved && approval.refused.is_none() =>
             {
@@ -129,7 +148,7 @@ impl Planner<'_> {
         {
             return Some(Err(Skip::Unsupported {
                 service: self.service().name(),
-                what: Unsupported::SelfApproval { recorded: false },
+                what: Unsupported::SelfApproval { commented: false },
             }));
         }
         if let Err(reason) = self.approvable(approval, target) {

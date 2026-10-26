@@ -829,7 +829,7 @@ fn github_approve_review_claimed_by_sync_is_not_sent_again() {
 }
 
 #[test]
-fn own_github_upgrade_to_formal_is_reported() {
+fn own_github_formal_approval_posts_a_comment_review() {
     let svc = Github::new();
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
@@ -842,12 +842,36 @@ fn own_github_upgrade_to_formal_is_reported() {
     env.respond_nth(&strs(&comments), 2, r#"{"id":611,"html_url":"u"}"#);
     env.run(&["publish", "--pr", "42"]);
     env.approve("42", &["--formal"]);
+    let text = thread(&env.run(&["list"]), &id)["comments"][0]["body"].clone();
+    // GitHub does not let the author approve their own PR: a comment review carries it.
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert!(
         dry["skipped"].to_string().contains(&format!("{id}/formal")),
         "{dry}"
     );
-    assert_eq!(dry["writes"], json!([]), "{dry}");
+    let writes = dry["writes"].as_array().unwrap();
+    assert_eq!(writes.len(), 1, "{dry}");
+    assert_eq!(writes[0]["items"], json!([format!("{id}/c1")]), "{dry}");
+    assert_eq!(writes[0]["input"]["event"], "COMMENT", "{dry}");
+    let body = writes[0]["input"]["body"].as_str().unwrap();
+    assert!(body.starts_with("Approved at"), "{dry}");
+    svc.accept(env, Call::Approve, 702);
+    env.run(&["publish", "--pr", "42"]);
+    assert_eq!(svc.count(env, Call::Approve), 1);
+    // Sync claims the review and keeps the approval text as stored.
+    let mut remote = Remote::new();
+    remote
+        .reviews
+        .push(github::review(702, "me", "COMMENTED", &sent(env, &id)));
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "42"]);
+    let list = env.run(&["list"]);
+    let approval = &thread(&list, &id)["comments"][0];
+    assert_eq!(approval["remote"]["id"], "702", "{approval}");
+    assert_eq!(approval["body"], text, "{approval}");
+    let again = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(again["writes"], json!([]), "{again}");
+    assert!(!again["skipped"].to_string().contains(&id), "{again}");
 }
 
 /// Commits no review read are the whole headline when nothing is open, and are named below.

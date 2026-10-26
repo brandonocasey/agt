@@ -1019,13 +1019,26 @@ fn approvals_post_no_comment(svc: Svc) {
         "{dry}"
     );
     assert_eq!(approval_writes(&dry), 0, "{dry}");
-    // A formal approval of the same head upgrades it: still no comment.
+    // A formal approval of the same head upgrades it: no comment, unless the host refuses
+    // the formal part.
     let formal = env.approve(svc.number(), &["--formal"]);
     assert_eq!(formal, id);
     let dry = dry_run(env, svc, &[]);
-    assert!(!written_items(&dry).contains(&format!("{id}/c1")), "{dry}");
-    if svc.expect().approves_by_review() && !svc.expect().self_approval_allowed() {
-        // On your own PR GitHub refuses the formal part: the summary headline records it.
+    let refused = svc.expect().approves_by_review() && !svc.expect().self_approval_allowed();
+    assert_eq!(
+        written_items(&dry).contains(&format!("{id}/c1")),
+        refused,
+        "{dry}"
+    );
+    if refused {
+        // On your own PR GitHub refuses the formal part: a comment review carries it.
+        let review = dry["writes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|write| write["items"][0] == format!("{id}/c1"))
+            .unwrap();
+        assert_eq!(review["input"]["event"], "COMMENT", "{dry}");
         let skipped = dry["skipped"].as_array().unwrap();
         assert!(
             skipped
