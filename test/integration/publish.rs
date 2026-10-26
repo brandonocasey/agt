@@ -1399,28 +1399,45 @@ fn gitlab_formal_approval_only_approves() {
 }
 
 #[test]
-fn gitlab_a_refused_approve_blocks_nothing() {
+fn gitlab_a_refused_approve_posts_a_comment() {
     let svc = Gitlab::new();
-    let (setup, _) = approved(&svc, false, true);
+    let (setup, id) = approved(&svc, false, true);
     let env = &setup.env;
+    let text = thread(&env.run(&["list"]), &id)["comments"][0]["body"].clone();
     let approve = svc.call(Call::Approve);
     // GitLab refuses: already approved, or the author may not approve.
     env.fail_call_with(&strs(&approve), "glab: 403 Forbidden (HTTP 403)");
-    svc.accept(env, Call::PostNote, 5020);
+    svc.accept_nth(env, Call::PostNote, 1, 5021);
+    svc.accept_nth(env, Call::PostNote, 2, 5020);
     env.respond(
         &strs(&svc.call(Call::PostThread)),
         r#"{"id":"d-1","notes":[{"id":5003}]}"#,
     );
     let out = env.run(&["publish", "--pr", "3"]);
-    let refused = out["posted"]
-        .as_array()
-        .unwrap()
+    let posted = out["posted"].as_array().unwrap();
+    let refused = posted
         .iter()
         .find(|item| item["kind"] == "approve")
         .unwrap_or_else(|| panic!("{out}"));
     assert!(refused["error"].is_string(), "{out}");
-    // The approval posts no note: only the summary went out.
-    assert_eq!(svc.count(env, Call::PostNote), 1, "{out}");
+    assert_eq!(refused["fallback"], "comment", "{out}");
+    // A comment carries the approval text instead, then the summary goes out.
+    let comment = posted
+        .iter()
+        .find(|item| item["items"] == json!([format!("{id}/c1")]))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(comment["remote_id"], "5021", "{out}");
+    assert!(sent(env, &id).starts_with("Approved at"), "{out}");
+    assert_eq!(svc.count(env, Call::PostNote), 2, "{out}");
+    // Sync claims the comment and keeps the approval text as stored.
+    let mut remote = Remote::new();
+    remote.general("d-5021", Comment::new(5021, "me", &sent(env, &id)));
+    svc.sync(&setup, &remote);
+    env.run(&["sync", "--pr", "3"]);
+    let list = env.run(&["list"]);
+    let approval = &thread(&list, &id)["comments"][0];
+    assert_eq!(approval["remote"]["id"], "5021", "{approval}");
+    assert_eq!(approval["body"], text, "{approval}");
     svc.restore(env, Call::Approve);
     svc.accept(env, Call::Approve, 0);
     env.run(&["publish", "--pr", "3"]);
@@ -1433,12 +1450,44 @@ fn gitlab_a_refused_approve_blocks_nothing() {
     env.approve("3", &["--formal"]);
     env.run(&["publish", "--pr", "3"]);
     assert_eq!(svc.count(env, Call::Approve), 2);
-    assert_eq!(svc.count(env, Call::PostNote), 1);
+    assert_eq!(svc.count(env, Call::PostNote), 2);
     env.run(&["publish", "--pr", "3"]);
     assert_eq!(
         svc.count(env, Call::Approve),
         2,
         "an accepted approval is not sent again"
+    );
+}
+
+/// A refusal kept while its comment did not post: the next publish posts the comment alone.
+#[test]
+fn gitlab_a_refused_approve_comment_is_retried() {
+    let svc = Gitlab::new();
+    let (setup, id) = approved(&svc, false, true);
+    let env = &setup.env;
+    env.fail_call_with(
+        &strs(&svc.call(Call::Approve)),
+        "glab: 403 Forbidden (HTTP 403)",
+    );
+    env.fail_call_with(
+        &strs(&svc.call(Call::PostNote)),
+        "glab: 503 Service Unavailable",
+    );
+    env.respond(
+        &strs(&svc.call(Call::PostThread)),
+        r#"{"id":"d-1","notes":[{"id":5003}]}"#,
+    );
+    env.fail(&["publish", "--pr", "3"], None);
+    svc.restore(env, Call::PostNote);
+    svc.accept(env, Call::PostNote, 5021);
+    let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
+    assert_eq!(writes_for(&dry, &format!("{id}/c1")), ["thread"], "{dry}");
+    assert_eq!(writes_for(&dry, &id), Vec::<String>::new(), "{dry}");
+    env.run(&["publish", "--pr", "3"]);
+    assert_eq!(svc.count(env, Call::Approve), 1, "a refusal is not retried");
+    assert!(
+        thread(&env.run(&["list"]), &id)["comments"][0]["remote"]["id"] == "5021",
+        "the comment posted"
     );
 }
 

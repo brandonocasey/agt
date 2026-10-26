@@ -45,15 +45,40 @@ pub(super) fn run_writes(
             // server error leaves the approval to be sent again.
             Err(error) if matches!(write.item, Item::Approve { .. }) => {
                 let reason = error.to_string();
+                let thread = write.ids().remove(0);
                 if error.refused() {
                     change(ctx, target, |target| {
-                        set_approval(target, &write.ids()[0], |approval| {
+                        set_approval(target, &thread, |approval| {
                             approval.refused = Some(reason.clone());
                         });
                         Ok(())
                     })?;
                 }
-                posted.push(json!({ "kind": write.kind(), "items": write.ids(), "error": reason }));
+                // A refused approval's text posts as a comment instead, so it is not lost.
+                let comment = target
+                    .threads
+                    .iter()
+                    .find(|local| local.id == thread)
+                    .and_then(|local| local.comments.first())
+                    .map(|first| first.id.clone());
+                let again = match (error.refused(), comment, &write.fallback) {
+                    (true, Some(comment), Some(text)) => Some(Write {
+                        item: Item::Thread { comment },
+                        request: Some(connection.service.note(connection.subject(), text)),
+                        sent: vec![Some(text.clone())],
+                        fallback: None,
+                    }),
+                    _ => None,
+                };
+                let mut entry =
+                    json!({ "kind": write.kind(), "items": write.ids(), "error": reason });
+                if again.is_some() {
+                    entry["fallback"] = json!("comment");
+                }
+                posted.push(entry);
+                if let Some(again) = again {
+                    run_writes(ctx, connection, target, vec![again], attempt, posted)?;
+                }
                 continue;
             }
             // The summary comment or one of its parts was deleted on the host: post it anew.

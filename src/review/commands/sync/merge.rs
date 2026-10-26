@@ -466,8 +466,8 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
                 used[found] = true;
                 let mut comment = thread.comments[found].clone();
                 comment.remote = Some(incoming.remote(login));
-                // The review that carries an approval holds only its marker, or the text as
-                // rendered with its footer; the approval text stays in the store.
+                // The review or comment that carries an approval holds only its marker, or the
+                // text as rendered with its footer; the approval text stays in the store.
                 if thread.approval.is_none() || found != 0 {
                     comment.body = incoming.body;
                 }

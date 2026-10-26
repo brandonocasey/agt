@@ -30,7 +30,8 @@ impl Approved {
 impl Planner<'_> {
     /// An approval's writes: the host's approval when formal, which posts no comment. The
     /// review GitHub takes carries only the hidden marker; on your own PR, which GitHub does
-    /// not let you approve, a comment review carries the approval text instead. A non-formal
+    /// not let you approve, a comment review carries the approval text instead, as a comment
+    /// does when GitLab refuses the approval (see `run_writes`). A non-formal
     /// approval is recorded locally, and the summary headline shows it. Only for the head it
     /// approved, and only while no finding blocks approval.
     pub(super) fn approval(
@@ -96,11 +97,29 @@ impl Planner<'_> {
                     },
                     request: Some(self.service().approve(subject, head, None)),
                     sent: vec![None],
-                    fallback: None,
+                    fallback: Some(body(target, thread, first, None, self.attempt)),
                 };
                 Ok(Approved {
                     writes: vec![approve],
                     kind: None,
+                    note: None,
+                })
+            }
+            // Refused before the comment that carries it posted.
+            ApproveCap::Call if approval.formal && approval.refused.is_some() => {
+                self.approvable(approval, target)?;
+                let text = body(target, thread, first, None, self.attempt);
+                let request = self.service().note(subject, &text);
+                let write = self.write(
+                    Item::Thread {
+                        comment: first.id.clone(),
+                    },
+                    request,
+                    &text,
+                );
+                Ok(Approved {
+                    writes: vec![write],
+                    kind: Some(RemoteKind::General),
                     note: None,
                 })
             }

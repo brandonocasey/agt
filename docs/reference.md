@@ -179,8 +179,8 @@ tokens; the summary's steps show each run's time.
 `publish --approve` first records an approval of the head as a general thread,
 refused while a `bug`, `requirement` or `question` is open; approving the same
 head again reuses the same thread, and `--formal` upgrades a comment approval.
-`publish` posts no comment for it, except the `COMMENT` review below (the text, default `Approved at <sha>.` or
-`--body`, stays in the store, also after `sync` reads back the review that carries a formal
+`publish` posts no comment for it, except the `COMMENT` review or GitLab comment below (the text, default `Approved at <sha>.` or
+`--body`, stays in the store, also after `sync` reads back the review or comment that carries a formal
 approval).
 The summary headline shows ` · 🔍 approved` while the PR/MR head is the approved head and
 no open finding blocks approval. The author flags (`--author`,
@@ -189,7 +189,10 @@ the approval is still recorded locally, and nothing is posted.
 `--approve --formal` submits the host's approval: a GitHub `APPROVE` review whose body is
 only the hidden marker, or GitLab's `approve` at that head. On your own GitHub PR, which
 GitHub refuses to approve, a `COMMENT` review carries the approval text with its footer
-instead, posted once, and `skipped` lists `<id>/formal`. A host
+instead, posted once, and `skipped` lists `<id>/formal`. When GitLab refuses the approval,
+a comment (a note, which needs no resolving) carries the approval text with its footer
+instead, posted once, and the refusal's `posted` entry adds `"fallback": "comment"`; a
+comment that fails to post is sent by the next `publish`. A host
 refusal of the formal approval (an HTTP 4xx: already approved, not allowed)
 shows as an `error` under `posted`, blocks nothing and is remembered, so
 `publish` does not send it again; `publish --approve --formal` again retries only the host's
@@ -596,7 +599,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   `outdated` is `null` (unknown). `sync` never fetches commits or writes to the
   repository.
 - Merge: remote wins for posted text and resolved state, except a local resolve
-  or reopen that `publish` has not sent yet (`resolve_pending`). The review that carries an approval, whose body is only a marker or
+  or reopen that `publish` has not sent yet (`resolve_pending`). The review or comment that carries an approval, whose body is only a marker or
   the rendered text, keeps the approval text stored. Local fields
   (type, severity, triage, held, killed findings, anchors of our findings) and
   comments not yet posted stay. Remote threads match local ones by remote id,
