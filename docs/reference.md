@@ -189,7 +189,8 @@ the approval is still recorded locally, and nothing is posted.
 `--approve --formal` submits the host's approval: a GitHub `APPROVE` review whose body is
 only the hidden marker, or GitLab's `approve` at that head. On your own GitHub PR, which
 GitHub refuses to approve, a `COMMENT` review carries the approval text with its footer
-instead, posted once, and `skipped` lists `<id>/formal`. When GitLab refuses the approval,
+instead, posted once, and `skipped` lists `<id>/formal`. When GitLab will not let you
+approve (HTTP 401 or 403; not a 409 for a head that moved),
 a comment (a note, which needs no resolving) carries the approval text with its footer
 instead, posted once, and the refusal's `posted` entry adds `"fallback": "comment"`; a
 comment that fails to post is sent by the next `publish`. A host

@@ -322,7 +322,7 @@ pub struct ApprovalArgs {
     pub approve: bool,
     /// With `--approve`, also submit the host's approval (GitHub APPROVE review, GitLab approve).
     /// On your own GitHub PR, which GitHub will not let you approve, post a COMMENT review with
-    /// the approval text instead; when GitLab refuses the approval, post the text as a comment.
+    /// the approval text instead; when GitLab will not let you approve, post the text as a comment.
     #[arg(long, requires = "approve")]
     pub formal: bool,
     /// With `--approve`, the approval text kept in the store and posted only in that COMMENT

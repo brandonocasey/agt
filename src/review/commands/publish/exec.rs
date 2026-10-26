@@ -54,14 +54,17 @@ pub(super) fn run_writes(
                         Ok(())
                     })?;
                 }
-                // A refused approval's text posts as a comment instead, so it is not lost.
+                // When the host will not let you approve (401, 403), the approval's text posts
+                // as a comment instead, so it is not lost. Other refusals post nothing, such as
+                // a 409 for a head that moved since it was approved.
+                let forbidden = matches!(error.status, Some(401 | 403));
                 let comment = target
                     .threads
                     .iter()
                     .find(|local| local.id == thread)
                     .and_then(|local| local.comments.first())
                     .map(|first| first.id.clone());
-                let again = match (error.refused(), comment, &write.fallback) {
+                let again = match (forbidden, comment, &write.fallback) {
                     (true, Some(comment), Some(text)) => Some(Write {
                         item: Item::Thread { comment },
                         request: Some(connection.service.note(connection.subject(), text)),

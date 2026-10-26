@@ -1491,6 +1491,41 @@ fn gitlab_a_refused_approve_comment_is_retried() {
     );
 }
 
+/// GitLab refuses an approve whose head moved (409): no comment approves the new head, then or
+/// later, as for a refusal an older agt kept without a comment.
+#[test]
+fn gitlab_a_head_moved_refusal_posts_no_comment() {
+    let svc = Gitlab::new();
+    let (setup, id) = approved(&svc, false, true);
+    let env = &setup.env;
+    env.fail_call_with(
+        &strs(&svc.call(Call::Approve)),
+        "glab: 409 Conflict (HTTP 409)",
+    );
+    svc.accept(env, Call::PostNote, 5020);
+    env.respond(
+        &strs(&svc.call(Call::PostThread)),
+        r#"{"id":"d-1","notes":[{"id":5003}]}"#,
+    );
+    let out = env.run(&["publish", "--pr", "3"]);
+    let refused = out["posted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "approve")
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(refused["error"].is_string(), "{out}");
+    assert!(refused["fallback"].is_null(), "{out}");
+    // Only the summary went out.
+    assert_eq!(svc.count(env, Call::PostNote), 1, "{out}");
+    let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
+    assert_eq!(
+        writes_for(&dry, &format!("{id}/c1")),
+        Vec::<String>::new(),
+        "{dry}"
+    );
+}
+
 #[test]
 fn gitlab_approve_is_retried_after_a_transient_failure() {
     let svc = Gitlab::new();

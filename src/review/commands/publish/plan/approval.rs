@@ -105,8 +105,13 @@ impl Planner<'_> {
                     note: None,
                 })
             }
-            // Refused before the comment that carries it posted.
-            ApproveCap::Call if approval.formal && approval.refused.is_some() => {
+            // Refused, and the comment that carries it was sent but did not post. A refusal
+            // that sent no comment (an older agt, a head that moved) posts nothing.
+            ApproveCap::Call
+                if approval.formal
+                    && approval.refused.is_some()
+                    && first.delivery.sent.is_some() =>
+            {
                 self.approvable(approval, target)?;
                 let text = body(target, thread, first, None, self.attempt);
                 let request = self.service().note(subject, &text);
