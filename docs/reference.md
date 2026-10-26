@@ -179,7 +179,7 @@ tokens; the summary's steps show each run's time.
 `publish --approve` first records an approval of the head as a general thread,
 refused while a `bug`, `requirement` or `question` is open; approving the same
 head again reuses the same thread, and `--formal` upgrades a comment approval.
-`publish` posts no comment for it (the text, default `Approved at <sha>.` or
+`publish` posts no comment for it, except the `COMMENT` review below (the text, default `Approved at <sha>.` or
 `--body`, stays in the store, also after `sync` reads back the review that carries a formal
 approval).
 The summary headline shows ` · 🔍 approved` while the PR/MR head is the approved head and
@@ -596,8 +596,8 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   `outdated` is `null` (unknown). `sync` never fetches commits or writes to the
   repository.
 - Merge: remote wins for posted text and resolved state, except a local resolve
-  or reopen that `publish` has not sent yet (`resolve_pending`). A formal approval's review, whose body is only a marker, keeps the
-  approval text stored. Local fields
+  or reopen that `publish` has not sent yet (`resolve_pending`). The review that carries an approval, whose body is only a marker or
+  the rendered text, keeps the approval text stored. Local fields
   (type, severity, triage, held, killed findings, anchors of our findings) and
   comments not yet posted stay. Remote threads match local ones by remote id,
   then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first

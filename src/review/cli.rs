@@ -316,15 +316,17 @@ impl From<Verdict> for Triage {
 #[derive(Args)]
 pub struct ApprovalArgs {
     /// Approve the head first: record an approval (reused for the same head), then publish.
-    /// It posts no comment; the summary headline shows it. Refused while a bug, requirement or
-    /// question is open.
+    /// It posts no comment, except as `--formal` says; the summary headline shows it. Refused
+    /// while a bug, requirement or question is open.
     #[arg(long)]
     pub approve: bool,
     /// With `--approve`, also submit the host's approval (GitHub APPROVE review, GitLab approve).
+    /// On your own GitHub PR, which GitHub will not let you approve, post a COMMENT review with
+    /// the approval text instead.
     #[arg(long, requires = "approve")]
     pub formal: bool,
-    /// With `--approve`, the approval text kept in the store, or `-` for stdin [default:
-    /// "Approved at <sha>."].
+    /// With `--approve`, the approval text kept in the store and posted only in that COMMENT
+    /// review, or `-` for stdin [default: "Approved at <sha>."].
     #[arg(long, requires = "approve")]
     pub body: Option<String>,
     /// With `--approve`: who approves.
