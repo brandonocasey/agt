@@ -215,8 +215,11 @@ pub struct Notice {
 pub struct Links {
     notices: Vec<Notice>,
     child: Option<(String, String)>,
-    /// For the rollout of an agent that a parent spawned: its agent path, empty when unrecorded.
-    spawned: Option<String>,
+    /// This rollout's thread id.
+    thread: String,
+    /// For the rollout of an agent that a parent spawned: its agent path, empty when unrecorded,
+    /// and the parent's thread id.
+    spawned: Option<(String, String)>,
 }
 
 /// A newer rollout's `agent_message` from a descendant to its ancestor, whose body is encrypted.
@@ -298,12 +301,10 @@ pub fn links(transcript: &Transcript, since: &str) -> Links {
                     "agent_path",
                 );
                 let spawn = get(get(get(payload, "source"), "subagent"), "thread_spawn");
-                // A deeper child groups under its parent agent's thread, which holds none of that
-                // agent's records, so counting it there would repeat the parent agent's own spawn
-                // call, already counted in the root session.
-                let direct = get(spawn, "depth").as_i64().is_none_or(|depth| depth <= 1);
-                if spawn.is_object() && direct {
-                    links.spawned = Some(path.to_owned());
+                links.thread = text(payload, "id").to_owned();
+                if spawn.is_object() {
+                    let parent = text(spawn, "parent_thread_id").to_owned();
+                    links.spawned = Some((path.to_owned(), parent));
                 }
                 if !path.is_empty() {
                     links.child = Some((text(payload, "id").to_owned(), path.to_owned()));
@@ -355,8 +356,9 @@ struct Session {
     spawns: Vec<Spawn>,
     notices: Vec<Notice>,
     children: HashMap<String, String>,
-    /// Agents whose own rollouts name this session as the parent: their type and agent path.
-    spawned: Vec<(String, String)>,
+    /// Agents whose own rollouts name this session as the parent: their type, agent path and
+    /// parent thread id.
+    spawned: Vec<(String, String, String)>,
 }
 
 #[derive(Default)]
@@ -379,6 +381,8 @@ pub struct Agents {
     sides: IndexMap<&'static str, Side>,
     sessions: HashMap<(&'static str, String, String), Session>,
     seen: HashSet<(&'static str, String)>,
+    /// Codex threads whose own rollout shows a `spawn_agent` call.
+    spawning: HashSet<String>,
 }
 
 impl Agents {
@@ -387,6 +391,7 @@ impl Agents {
             sides: IndexMap::new(),
             sessions: HashMap::new(),
             seen: HashSet::new(),
+            spawning: HashSet::new(),
         }
     }
 
@@ -487,15 +492,18 @@ impl Agents {
             }
         } else {
             let links = transcript.links();
+            if !spawns.is_empty() {
+                self.spawning.insert(links.thread.clone());
+            }
             session.spawns.extend(spawns);
             session.notices.extend(links.notices.iter().map(|n| Notice {
                 agent: n.agent.clone(),
                 tokens: n.tokens,
             }));
-            if let Some(path) = &links.spawned {
+            if let Some((path, parent)) = &links.spawned {
                 session
                     .spawned
-                    .push((transcript.agent.clone(), path.clone()));
+                    .push((transcript.agent.clone(), path.clone(), parent.clone()));
             }
             if let Some((child, path)) = &links.child {
                 session.children.insert(child.clone(), path.clone());
@@ -509,18 +517,20 @@ impl Agents {
         for ((harness, ..), session) in &mut self.sessions {
             let side = self.sides.entry(harness).or_default();
             // Older rollouts spawn from an `exec` script, so only the children's own rollouts
-            // show the spawns; their prompts are not read.
-            if session.spawns.is_empty() {
-                for (agent, path) in std::mem::take(&mut session.spawned) {
-                    let stats = side.types.entry(agent.clone()).or_default();
-                    stats.spawns += 1;
-                    session.spawns.push(Spawn {
-                        agent,
-                        task: path.rsplit('/').next().unwrap_or_default().to_owned(),
-                        path,
-                        result: None,
-                    });
+            // show the spawns; their prompts are not read. A child whose parent thread shows its
+            // `spawn_agent` calls was counted from them, at any depth.
+            for (agent, path, parent) in std::mem::take(&mut session.spawned) {
+                if self.spawning.contains(&parent) {
+                    continue;
                 }
+                let stats = side.types.entry(agent.clone()).or_default();
+                stats.spawns += 1;
+                session.spawns.push(Spawn {
+                    agent,
+                    task: path.rsplit('/').next().unwrap_or_default().to_owned(),
+                    path,
+                    result: None,
+                });
             }
             for notice in std::mem::take(&mut session.notices) {
                 let path = session.children.get(&notice.agent).unwrap_or(&notice.agent);
@@ -965,7 +975,7 @@ mod tests {
                 &rollout(
                     child,
                     json!({"subagent": {"thread_spawn": {"parent_thread_id": parent,
-                        "agent_path": null, "agent_role": role}}}),
+                        "depth": 1, "agent_path": null, "agent_role": role}}}),
                     &[],
                 ),
             );
@@ -991,6 +1001,48 @@ mod tests {
         // Columns: agent, spawns, prompt tok, avg; the average skips spawns with no prompt.
         assert_eq!(cells[1], "3", "{out}");
         assert_eq!(cells[3], "100", "{out}");
+    }
+
+    #[test]
+    fn a_nested_child_of_an_exec_script_counts_once() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let root = "019f0000-0000-7000-8000-00000000aaaa";
+        let child = "019f0000-0000-7000-8000-00000000bbbb";
+        let grandchild = "019f0000-0000-7000-8000-00000000cccc";
+        let exec = json!({"type": "response_item", "payload": {"type": "custom_tool_call",
+            "name": "exec", "call_id": "c1",
+            "input": "await tools.multi_agent_v1__spawn_agent({message: \"go\"});"}});
+        let rollouts = [
+            (root, json!("cli"), vec![exec.clone()]),
+            (
+                child,
+                json!({"subagent": {"thread_spawn": {"parent_thread_id": root, "depth": 1,
+                    "agent_path": null, "agent_role": "explorer"}}}),
+                vec![exec],
+            ),
+            (
+                grandchild,
+                json!({"subagent": {"thread_spawn": {"parent_thread_id": child, "depth": 2,
+                    "agent_path": null, "agent_role": "worker"}}}),
+                Vec::new(),
+            ),
+        ];
+        for (id, source, records) in rollouts {
+            write(
+                &dir.path()
+                    .join(format!("sessions/2026/03/01/rollout-{id}.jsonl")),
+                &rollout(id, source, &records),
+            );
+        }
+        let out = render(dir.path());
+        let spawns = |name: &str| {
+            out.lines()
+                .find(|line| line.starts_with(name))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .map(str::to_owned)
+        };
+        assert_eq!(spawns("explorer").as_deref(), Some("1"), "{out}");
+        assert_eq!(spawns("worker").as_deref(), Some("1"), "{out}");
     }
 
     #[test]
