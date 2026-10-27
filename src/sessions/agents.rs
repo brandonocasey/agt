@@ -162,6 +162,15 @@ pub fn compact_call(block: &Value, home: &Path, summary: &mut Value) {
     });
 }
 
+/// The full agent path (`/root/<task>`) a Codex `spawn_agent` result names, if `content` is one.
+pub fn task_path(content: &Value) -> Option<String> {
+    let body = content
+        .as_str()
+        .or_else(|| content.as_array()?.first().map(|part| text(part, "text")))?;
+    let reply: Value = serde_json::from_str(body).ok()?;
+    Some(text(&reply, "task_name").to_owned()).filter(|path| !path.is_empty())
+}
+
 /// A background sub-agent's reply to a Claude Code parent, which Claude Code queues as an
 /// attachment or a user message holding a `<task-notification>` that names the spawning call.
 pub fn claude_notice(record: &Value) -> Option<Value> {
@@ -206,6 +215,8 @@ pub struct Notice {
 pub struct Links {
     notices: Vec<Notice>,
     child: Option<(String, String)>,
+    /// For the rollout of an agent that a parent spawned: its agent path, empty when unrecorded.
+    spawned: Option<String>,
 }
 
 /// A newer rollout's `agent_message` from a descendant to its ancestor, whose body is encrypted.
@@ -286,6 +297,10 @@ pub fn links(transcript: &Transcript, since: &str) -> Links {
                     get(get(get(payload, "source"), "subagent"), "thread_spawn"),
                     "agent_path",
                 );
+                let spawn = get(get(get(payload, "source"), "subagent"), "thread_spawn");
+                if spawn.is_object() {
+                    links.spawned = Some(path.to_owned());
+                }
                 if !path.is_empty() {
                     links.child = Some((text(payload, "id").to_owned(), path.to_owned()));
                 }
@@ -312,6 +327,8 @@ impl Stats {
 #[derive(Default)]
 struct Stats {
     spawns: i64,
+    /// Spawns whose prompt was read; spawns seen only through a child rollout have none.
+    prompts: i64,
     prompt: f64,
     prompt_max: f64,
     results: i64,
@@ -334,6 +351,8 @@ struct Session {
     spawns: Vec<Spawn>,
     notices: Vec<Notice>,
     children: HashMap<String, String>,
+    /// Agents whose own rollouts name this session as the parent: their type and agent path.
+    spawned: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -347,6 +366,8 @@ struct Side {
 struct Spawn {
     agent: String,
     task: String,
+    /// The full agent path from the spawn's result, when it names one.
+    path: String,
     result: Option<f64>,
 }
 
@@ -377,12 +398,14 @@ impl Agents {
         let mut spawn_at: HashMap<String, usize> = HashMap::new();
         let mut waiting_read: HashMap<String, String> = HashMap::new();
         transcript.records(|record| {
+            let notice = get(record, "notice");
+            if notice.is_object()
+                && let Some(&at) = spawn_at.get(&key(get(notice, "tool_use_id")))
+            {
+                let tokens = get(notice, "tokens").as_f64().unwrap_or_default();
+                *spawns[at].result.get_or_insert(0.0) += tokens;
+            }
             if text(record, "type") == "notice" {
-                let notice = get(record, "notice");
-                if let Some(&at) = spawn_at.get(&key(get(notice, "tool_use_id"))) {
-                    let tokens = get(notice, "tokens").as_f64().unwrap_or_default();
-                    *spawns[at].result.get_or_insert(0.0) += tokens;
-                }
                 return;
             }
             let Some(blocks) = get(get(record, "message"), "content").as_array() else {
@@ -401,6 +424,7 @@ impl Agents {
                                 .entry(text(spawn, "agent").to_owned())
                                 .or_default();
                             stats.spawns += 1;
+                            stats.prompts += 1;
                             stats.prompt += prompt;
                             stats.prompt_max = stats.prompt_max.max(prompt);
                             let lines = get(spawn, "lines").as_array().into_iter().flatten();
@@ -415,6 +439,7 @@ impl Agents {
                             spawns.push(Spawn {
                                 agent: text(spawn, "agent").to_owned(),
                                 task: text(spawn, "task").to_owned(),
+                                path: String::new(),
                                 result: None,
                             });
                         }
@@ -424,10 +449,12 @@ impl Agents {
                     }
                     "tool_result" => {
                         let tokens = get(block, "result_tokens").as_f64().unwrap_or_default();
-                        if let Some(&at) = spawn_at.get(&call_of(block))
-                            && id == "claude"
-                        {
-                            *spawns[at].result.get_or_insert(0.0) += tokens;
+                        if let Some(&at) = spawn_at.get(&call_of(block)) {
+                            if id == "claude" {
+                                *spawns[at].result.get_or_insert(0.0) += tokens;
+                            } else if let Some(path) = get(block, "task_path").as_str() {
+                                spawns[at].path = path.to_owned();
+                            }
                         }
                         if let Some(path) = waiting_read.remove(&call_of(block)) {
                             let reads = if parent {
@@ -461,6 +488,11 @@ impl Agents {
                 agent: n.agent.clone(),
                 tokens: n.tokens,
             }));
+            if let Some(path) = &links.spawned {
+                session
+                    .spawned
+                    .push((transcript.agent.clone(), path.clone()));
+            }
             if let Some((child, path)) = &links.child {
                 session.children.insert(child.clone(), path.clone());
             }
@@ -472,10 +504,29 @@ impl Agents {
     fn join_replies(&mut self) {
         for ((harness, ..), session) in &mut self.sessions {
             let side = self.sides.entry(harness).or_default();
+            // Older rollouts spawn from an `exec` script, so only the children's own rollouts
+            // show the spawns; their prompts are not read.
+            if session.spawns.is_empty() {
+                for (agent, path) in std::mem::take(&mut session.spawned) {
+                    let stats = side.types.entry(agent.clone()).or_default();
+                    stats.spawns += 1;
+                    session.spawns.push(Spawn {
+                        agent,
+                        task: path.rsplit('/').next().unwrap_or_default().to_owned(),
+                        path,
+                        result: None,
+                    });
+                }
+            }
             for notice in std::mem::take(&mut session.notices) {
                 let path = session.children.get(&notice.agent).unwrap_or(&notice.agent);
+                // The spawn's result names the full path; an older spawn named only its task.
                 let spawn = session.spawns.iter_mut().find(|spawn| {
-                    !spawn.task.is_empty() && path.ends_with(&format!("/{}", spawn.task))
+                    if spawn.path.is_empty() {
+                        !spawn.task.is_empty() && path.ends_with(&format!("/{}", spawn.task))
+                    } else {
+                        spawn.path == *path
+                    }
                 });
                 if let Some(spawn) = spawn {
                     *spawn.result.get_or_insert(0.0) += notice.tokens;
@@ -599,6 +650,7 @@ fn spawn_table(out: &mut String, side: &Side, scope: &Scope) {
     rows.sort_by(|a, b| b.1.prompt.total_cmp(&a.1.prompt));
     let all = rows.iter().fold(Stats::default(), |mut all, (_, s)| {
         all.spawns += s.spawns;
+        all.prompts += s.prompts;
         all.prompt += s.prompt;
         all.prompt_max = all.prompt_max.max(s.prompt_max);
         all.results += s.results;
@@ -618,7 +670,7 @@ fn spawn_table(out: &mut String, side: &Side, scope: &Scope) {
             name,
             s.spawns.to_string(),
             tok(s.prompt),
-            average(s.prompt, s.spawns),
+            average(s.prompt, s.prompts),
             tok(s.prompt_max),
             tok(s.result),
             average(s.result, s.results),
@@ -834,6 +886,131 @@ mod tests {
             .expect("row");
         // The acknowledgement and the notification both reach the parent.
         assert!(row.contains("222"), "{out}");
+    }
+
+    #[test]
+    fn notifications_count_when_hooks_are_selected_too() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let notice = format!(
+            "<task-notification>\n<tool-use-id>t1</tool-use-id>\n{}",
+            "y".repeat(800)
+        );
+        write(
+            &dir.path().join("-repo/22222222-aaaa.jsonl"),
+            &[
+                call(
+                    "t1",
+                    "Agent",
+                    json!({"subagent_type": "worker", "prompt": "go"}),
+                ),
+                result("t1", 40),
+                json!({"type": "attachment", "attachment": {"type": "queued_command", "prompt": notice}}),
+            ],
+        );
+        let scope = scoped(dir.path());
+        let mut report = Agents::new();
+        for transcript in load(
+            &scope,
+            Needs {
+                agents: true,
+                hooks: true,
+                ..Needs::default()
+            },
+        ) {
+            report.feed(&transcript);
+        }
+        let out = report.render(&scope);
+        let row = out
+            .lines()
+            .find(|line| line.starts_with("worker"))
+            .expect("row");
+        assert!(row.contains("222"), "{out}");
+    }
+
+    #[test]
+    fn older_codex_spawns_from_exec_scripts_count_from_the_children() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let parent = "019f0000-0000-7000-8000-00000000aaaa";
+        let exec = json!({"type": "response_item", "payload": {"type": "custom_tool_call",
+            "name": "exec", "call_id": "c1",
+            "input": "const r = await tools.multi_agent_v1__spawn_agent({message: \"go\"});"}});
+        write(
+            &dir.path().join("sessions/2026/03/01/rollout-parent.jsonl"),
+            &rollout(parent, json!("cli"), &[exec]),
+        );
+        for (child, role) in [
+            ("019f0000-0000-7000-8000-00000000bbbb", "reviewer"),
+            ("019f0000-0000-7000-8000-00000000cccc", "reviewer"),
+        ] {
+            write(
+                &dir.path()
+                    .join(format!("sessions/2026/03/01/rollout-{child}.jsonl")),
+                &rollout(
+                    child,
+                    json!({"subagent": {"thread_spawn": {"parent_thread_id": parent,
+                        "agent_path": null, "agent_role": role}}}),
+                    &[],
+                ),
+            );
+        }
+        // A newer session's spawn has a readable prompt; the children above have none.
+        let spawn = json!({"type": "response_item", "payload": {"type": "function_call",
+            "name": "spawn_agent", "call_id": "c2",
+            "arguments": json!({"agent_type": "reviewer", "message": "x".repeat(400)}).to_string()}});
+        write(
+            &dir.path().join("sessions/2026/03/01/rollout-newer.jsonl"),
+            &rollout(
+                "019f0000-0000-7000-8000-00000000dddd",
+                json!("cli"),
+                &[spawn],
+            ),
+        );
+        let out = render(dir.path());
+        let row = out
+            .lines()
+            .find(|line| line.starts_with("reviewer"))
+            .expect("row");
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        // Columns: agent, spawns, prompt tok, avg; the average skips spawns with no prompt.
+        assert_eq!(cells[1], "3", "{out}");
+        assert_eq!(cells[3], "100", "{out}");
+    }
+
+    #[test]
+    fn replies_match_the_spawn_by_full_agent_path() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let parent = "019f0000-0000-7000-8000-00000000aaaa";
+        let spawn = |id: &str, kind: &str, task: &str, path: &str| {
+            vec![
+                json!({"type": "response_item", "payload": {"type": "function_call",
+                    "name": "spawn_agent", "call_id": id,
+                    "arguments": json!({"task_name": task, "agent_type": kind}).to_string()}}),
+                json!({"type": "response_item", "payload": {"type": "function_call_output",
+                    "call_id": id, "output": json!({"task_name": path}).to_string()}}),
+            ]
+        };
+        // Two spawns share a task name at different depths; the reply is the second's.
+        let mut records = spawn("c1", "alpha", "audit", "/root/audit");
+        records.extend(spawn("c2", "beta", "audit", "/root/team/audit"));
+        records.push(
+            json!({"type": "response_item", "payload": {"type": "agent_message",
+            "author": "/root/team/audit", "recipient": "/root",
+            "content": [{"type": "input_text", "text": "x".repeat(400)}]}}),
+        );
+        write(
+            &dir.path().join("sessions/2026/03/01/rollout-parent.jsonl"),
+            &rollout(parent, json!("cli"), &records),
+        );
+        let out = render(dir.path());
+        let cells = |name: &str| -> Vec<String> {
+            out.lines()
+                .find(|line| line.starts_with(name))
+                .map(|line| line.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default()
+        };
+        // Columns: agent, spawns, prompt tok, avg, max, result tok.
+        assert_eq!(cells("beta")[5], "100", "{out}");
+        assert_eq!(cells("alpha")[5], "0", "{out}");
     }
 
     fn rollout(id: &str, source: Value, records: &[Value]) -> Vec<Value> {

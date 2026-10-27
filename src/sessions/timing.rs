@@ -320,3 +320,63 @@ impl Time {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::sessions::source::{Needs, load, scoped};
+
+    fn render(root: &std::path::Path, needs: Needs) -> String {
+        let scope = scoped(root);
+        let mut report = Time::new("model").expect("timing report");
+        for transcript in load(
+            &scope,
+            Needs {
+                time: true,
+                ..needs
+            },
+        ) {
+            report.feed(&transcript);
+        }
+        report.render(&scope)
+    }
+
+    #[test]
+    fn a_task_notification_does_not_change_the_time_section() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let notice = "<task-notification>\n<tool-use-id>t1</tool-use-id>\ndone";
+        let records = [
+            json!({"type": "user", "uuid": "u1", "timestamp": "2026-03-01T00:00:00Z",
+                "message": {"content": "start"}}),
+            json!({"type": "assistant", "uuid": "a1", "timestamp": "2026-03-01T00:00:10Z",
+                "message": {"id": "m1", "model": "test", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Agent", "input": {"prompt": "go"}}]}}),
+            json!({"type": "user", "uuid": "u2", "timestamp": "2026-03-01T00:00:12Z",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "started"}]}}),
+            json!({"type": "user", "uuid": "u3", "timestamp": "2026-03-01T00:30:00Z",
+                "message": {"content": notice}}),
+            json!({"type": "assistant", "uuid": "a2", "timestamp": "2026-03-01T00:30:10Z",
+                "message": {"id": "m2", "model": "test", "content": [{"type": "text", "text": "ok"}]}}),
+        ];
+        let lines: Vec<String> = records.iter().map(ToString::to_string).collect();
+        let path = dir.path().join("-repo/44444444-aaaa.jsonl");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create directory");
+        fs::write(&path, lines.join("\n") + "\n").expect("write transcript");
+        let alone = render(dir.path(), Needs::default());
+        let with = render(
+            dir.path(),
+            Needs {
+                agents: true,
+                hooks: true,
+                ..Needs::default()
+            },
+        );
+        assert!(alone.contains("test"), "{alone}");
+        assert_eq!(alone, with);
+    }
+}
