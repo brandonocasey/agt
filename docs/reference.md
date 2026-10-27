@@ -1124,12 +1124,12 @@ and Codex rollouts (`~/.codex/sessions`, `~/.codex/archived_sessions`). Reports 
 tables; `report --json` prints the cost section as indented JSON with `rows`, `unpriced` and `fast_calls`.
 
 ```sh
-agt sessions report [--sections cost,time,tools,cache-gaps,errors,denials,friction] [--by agent,model] [--gap MIN]
+agt sessions report [--sections cost,time,tools,cache-gaps,errors,denials,friction,agents,hooks] [--by agent,model] [--gap MIN]
                     [--json] [--tsv [--width N]] [FILE...]
 agt sessions search [--query TEXT] [--session ID] [--limit N] [--file FILE] [--rebuild]
 ```
 
-`report` prints all seven sections by default, or the selected sections in the given order. One
+`report` prints the first seven sections by default (`agents` and `hooks` only when selected), or the selected sections in the given order. One
 selected section prints without its heading, so `--sections cost --json` is the JSON alone. It
 discovers transcripts once and parses each transcript once for the selected reports.
 `cost` is USD by `--by` group (`agent`, `model`, `project`, `session`, `file`, `harness`; one
@@ -1152,6 +1152,28 @@ cost their results carry. `--gap` sets the idle minutes of the cache-gaps sectio
 tool errors and `denials` permission denials. `friction` lists interrupts, corrections, short
 replies and repeated prompts; `--tsv` prints every user message instead, text cut to `--width`
 (300). `--json` applies to the cost section and `--tsv` to the friction section.
+
+`agents` reports sub-agent spawns for each harness, from the parent's `Agent` or `Task` call
+(Claude Code) or `spawn_agent` call (Codex). Its first table groups spawns by agent type (Claude
+`subagent_type`, Codex `agent_type`, else `general-purpose` or `default`) with the estimated tokens
+of the prompts sent (total, average, largest) and of the results that came back to the parent
+(a Claude spawn's tool result plus the `task-notification` of a background one; a Codex child's
+`agent_message` or `subagent_notification`). Codex stores spawn prompts and replies encrypted, so
+those are estimated from their size and Codex prompts are not compared line by line. `overlap`
+counts the files that a parent and one of its sub-agents in the same session both read, with the
+tokens the repeat reads cost (every read of the file but the largest) and the top files, as home-relative paths with
+the reads on each side. It counts `Read` calls and shell reads of one absolute or `~/` file by
+`cat`, `head`, `tail`, `sed` or `rg`/`grep`; a pipeline, a relative path or several files are not
+counted. The last table lists prompt lines, trimmed and with whitespace collapsed, of at least 40
+characters that occur in 3 or more spawn prompts, with their prompt count and total tokens, cut
+to 120 characters. `hooks` lists Claude Code hook runs by event and command: how often each ran, how many
+runs gave the model text, and the estimated tokens of that text (average, largest, total). Only
+output that reaches the model counts: `hook_success` content of `SessionStart`,
+`UserPromptSubmit`, `Setup` and `SubagentStart`, `hook_additional_context` and
+`hook_blocking_error`; cancelled hooks, non-blocking errors, system messages and the output of
+tool hooks do not. `UserPromptSubmit` runs once per prompt and tool events once per tool call.
+Codex rollouts record no hook output, so Codex gets one line saying so. Neither section prints
+file contents or hook output.
 
 `report` takes `--days N` (30) or `--since YYYY-MM-DD`, `--project TEXT`, `--scratch`
 (scratch and probe projects are skipped otherwise), `--root DIR` (repeatable), `--limit N` (25 rows per table) and

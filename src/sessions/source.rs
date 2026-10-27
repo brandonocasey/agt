@@ -103,11 +103,15 @@ pub struct Needs {
     pub failures: bool,
     pub friction: bool,
     pub time: bool,
+    pub agents: bool,
+    pub hooks: bool,
 }
 
 pub struct Loaded {
     transcript: Transcript,
     records: Vec<serde_json::Value>,
+    /// What the record adapter drops from a Codex rollout that `agents` joins on.
+    links: super::agents::Links,
 }
 
 impl std::ops::Deref for Loaded {
@@ -123,6 +127,10 @@ impl Loaded {
         self.records.iter().for_each(each);
     }
 
+    pub fn links(&self) -> &super::agents::Links {
+        &self.links
+    }
+
     pub fn api_calls(
         &self,
         seen: &mut std::collections::HashSet<String>,
@@ -136,12 +144,25 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
     use serde_json::{Value, json};
 
     let kind = text(record, "type");
+    if needs.hooks && kind == "attachment" {
+        return super::hooks::summary(get(record, "attachment"), home);
+    }
+    if needs.agents
+        && let Some(notice) = super::agents::claude_notice(record)
+    {
+        return Some(notice);
+    }
     let message = get(record, "message");
     let mut blocks = Vec::new();
     for block in get(message, "content").as_array().into_iter().flatten() {
         match text(block, "type") {
             "tool_use"
-                if needs.calls || needs.tools || needs.gaps || needs.failures || needs.time =>
+                if needs.calls
+                    || needs.tools
+                    || needs.gaps
+                    || needs.failures
+                    || needs.time
+                    || needs.agents =>
             {
                 let mut summary = json!({"type": "tool_use", "id": get(block, "id")});
                 if needs.tools || needs.time {
@@ -167,12 +188,15 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
                     summary["name"] = get(block, "name").clone();
                     summary["input_summary"] = super::events::input_summary(block).into();
                 }
+                if needs.agents {
+                    super::agents::compact_call(block, home, &mut summary);
+                }
                 blocks.push(summary);
             }
-            "tool_result" if needs.tools || needs.failures || needs.time => {
+            "tool_result" if needs.tools || needs.failures || needs.time || needs.agents => {
                 let mut summary =
                     json!({"type": "tool_result", "tool_use_id": get(block, "tool_use_id")});
-                if needs.tools || needs.time {
+                if needs.tools || needs.time || needs.agents {
                     summary["result_tokens"] =
                         super::tools::est_tokens(get(block, "content")).into();
                 }
@@ -222,6 +246,23 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
     Some(summary)
 }
 
+/// A scope that reads every transcript under `root`, for tests.
+#[cfg(test)]
+pub(super) fn scoped(root: &Path) -> Scope {
+    Scope {
+        since: "2026-01-01".into(),
+        since_iso: String::new(),
+        cutoff: 0.0,
+        project: None,
+        scratch: false,
+        roots: vec![root.to_string_lossy().into_owned()],
+        files: Vec::new(),
+        limit: 25,
+        harness: crate::sessions::Which::All,
+        home: PathBuf::from("/home/al"),
+    }
+}
+
 pub fn load(scope: &Scope, needs: Needs) -> impl Iterator<Item = Loaded> + '_ {
     transcripts(scope).into_iter().map(move |transcript| {
         let mut records = Vec::new();
@@ -230,9 +271,15 @@ pub fn load(scope: &Scope, needs: Needs) -> impl Iterator<Item = Loaded> + '_ {
                 records.push(summary);
             }
         });
+        let links = if needs.agents {
+            super::agents::links(&transcript, &scope.since_iso)
+        } else {
+            super::agents::Links::default()
+        };
         Loaded {
             transcript,
             records,
+            links,
         }
     })
 }

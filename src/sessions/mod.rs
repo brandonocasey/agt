@@ -1,8 +1,10 @@
 //! `agt sessions`: cost, time, tool, cache, error and friction reports from Claude Code and Codex
 //! transcripts, and the search of what was typed in them.
 
+mod agents;
 mod events;
 mod fmt;
+mod hooks;
 mod index;
 pub mod live;
 mod prices;
@@ -22,7 +24,7 @@ use crate::core::harness::Harness;
 use crate::core::local;
 use crate::core::output::Output;
 
-/// Cost, time, tools, cache gaps, errors and friction from Claude Code and Codex transcripts in
+/// Cost, time, tools, cache gaps, errors, friction, sub-agent spawns and hook context from Claude Code and Codex transcripts in
 /// `~/.claude*/projects` and `~/.codex`. Prices come from
 /// `$XDG_CONFIG_HOME/agt/model-prices.json` (override: `AGT_PRICES`). Scratch and probe projects
 /// are skipped unless `--scratch` is given. `search` keeps a private index of the transcripts
@@ -98,13 +100,17 @@ enum Section {
     Errors,
     Denials,
     Friction,
+    Agents,
+    Hooks,
 }
 
 #[derive(Args)]
 struct ReportArgs {
     #[command(flatten)]
     common: Common,
-    /// Comma-separated reports to print, in this order.
+    /// Comma-separated reports to print, in this order: cost, time, tools, cache-gaps, errors,
+    /// denials, friction, and the opt-in agents (spawns, shared file reads, repeated prompt lines)
+    /// and hooks (context that hooks add).
     #[arg(
         long,
         value_enum,
@@ -138,6 +144,8 @@ enum Report {
     CacheGaps(tools::CacheGaps),
     Failures(events::Failures),
     Friction(events::Friction, bool, usize),
+    Agents(agents::Agents),
+    Hooks(hooks::Hooks),
 }
 
 impl Report {
@@ -149,6 +157,8 @@ impl Report {
             Self::CacheGaps(_) => needs.gaps = true,
             Self::Failures(_) => needs.failures = true,
             Self::Friction(..) => needs.friction = true,
+            Self::Agents(_) => needs.agents = true,
+            Self::Hooks(_) => needs.hooks = true,
         }
     }
 
@@ -160,6 +170,8 @@ impl Report {
             Self::CacheGaps(report) => report.feed(transcript),
             Self::Failures(report) => report.feed(transcript),
             Self::Friction(report, _, _) => report.feed(transcript),
+            Self::Agents(report) => report.feed(transcript),
+            Self::Hooks(report) => report.feed(transcript),
         }
     }
 
@@ -171,6 +183,8 @@ impl Report {
             Self::CacheGaps(report) => Ok(report.render(scope)),
             Self::Failures(report) => Ok(report.render(scope)),
             Self::Friction(report, tsv, width) => Ok(report.render(scope, tsv, width)),
+            Self::Agents(report) => Ok(report.render(scope)),
+            Self::Hooks(report) => Ok(report.render(scope)),
         }
     }
 }
@@ -257,6 +271,8 @@ fn report(args: ReportArgs) -> Result<String> {
                     "Friction",
                     Report::Friction(events::Friction::new(), args.tsv, args.width),
                 ),
+                Section::Agents => ("Agents", Report::Agents(agents::Agents::new())),
+                Section::Hooks => ("Hooks", Report::Hooks(hooks::Hooks::new())),
             })
         })
         .collect::<Result<Vec<_>>>()?;
