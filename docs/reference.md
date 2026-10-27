@@ -1166,12 +1166,18 @@ the reads on each side. It counts `Read` calls and shell reads of one absolute o
 `cat`, `head`, `tail`, `sed` or `rg`/`grep`; a pipeline, a relative path or several files are not
 counted. The last table lists prompt lines, trimmed and with whitespace collapsed, of at least 40
 characters that occur in 3 or more spawn prompts, with their prompt count and total tokens, cut
-to 120 characters. `hooks` lists Claude Code hook runs by event and command: how often each ran, how many
-runs gave the model text, and the estimated tokens of that text (average, largest, total). Only
+to 120 characters. A Codex spawn that an older rollout makes from an `exec` script is counted from
+the child rollouts that name the parent thread, with no prompt size. `hooks` lists Claude Code hook
+outputs by event and command. Its rows count recorded outputs, not runs: a hook that prints
+nothing leaves no record to count. The `outputs` column is how many were recorded; `to model` is how
+many gave the model text, with the estimated tokens of that text (average, largest, total). Only
 output that reaches the model counts: `hook_success` content of `SessionStart`,
-`UserPromptSubmit`, `Setup` and `SubagentStart`, `hook_additional_context` and
-`hook_blocking_error`; cancelled hooks, non-blocking errors, system messages and the output of
-tool hooks do not. `UserPromptSubmit` runs once per prompt and tool events once per tool call.
+`UserPromptSubmit`, `Setup` and `SubagentStart`, `hook_additional_context`,
+`hook_blocking_error`, a blocking `PreToolUse` hook's `tool_result` text (`PreToolUse:<Tool> hook
+error: [command]: ...`) and a `Stop` hook's feedback (`Stop hook feedback:` user text, listed under that name rather than a command); cancelled
+hooks, non-blocking errors, system messages and the output of tool hooks do not. A hook output
+copied into a resumed session counts once. The cadence column says how often the event fires: per
+prompt, per tool call, per turn (`Stop`), per sub-agent, per start, per compact, else per event.
 Codex rollouts record no hook output, so Codex gets one line saying so. Neither section prints
 file contents or hook output.
 

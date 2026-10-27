@@ -144,14 +144,25 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
     use serde_json::{Value, json};
 
     let kind = text(record, "type");
-    if needs.hooks && kind == "attachment" {
-        return super::hooks::summary(get(record, "attachment"), home);
-    }
-    if needs.agents
-        && let Some(notice) = super::agents::claude_notice(record)
+    if needs.hooks
+        && kind == "attachment"
+        && let Some(hook) =
+            super::hooks::summary(get(record, "attachment"), get(record, "uuid"), home)
     {
-        return Some(notice);
+        return Some(hook);
     }
+    let notice = needs
+        .agents
+        .then(|| super::agents::claude_notice(record))
+        .flatten();
+    if kind == "attachment" && notice.is_some() {
+        return notice;
+    }
+    let hooks = if needs.hooks {
+        super::hooks::blocked(record, home)
+    } else {
+        Vec::new()
+    };
     let message = get(record, "message");
     let mut blocks = Vec::new();
     for block in get(message, "content").as_array().into_iter().flatten() {
@@ -200,6 +211,11 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
                     summary["result_tokens"] =
                         super::tools::est_tokens(get(block, "content")).into();
                 }
+                if needs.agents
+                    && let Some(path) = super::agents::task_path(get(block, "content"))
+                {
+                    summary["task_path"] = path.into();
+                }
                 if needs.failures || needs.time {
                     super::events::compact_failure(block, &mut summary);
                 }
@@ -217,6 +233,8 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
         && !(kind == "system" && needs.tools && text(record, "subtype") == "compact_boundary")
         && typed.is_none()
         && !(needs.time && matches!(kind, "user" | "assistant"))
+        && notice.is_none()
+        && hooks.is_empty()
     {
         return None;
     }
@@ -242,6 +260,14 @@ fn compact(record: &serde_json::Value, needs: Needs, home: &Path) -> Option<serd
             .as_str()
             .is_some_and(|content| content.starts_with("<local-command-caveat>"));
         summary["by_you"] = (caveat || super::events::user_text(record).is_some()).into();
+    }
+    // Other sections read the same record with or without these; only `agents` and `hooks` look
+    // at the extra fields.
+    if let Some(notice) = notice {
+        summary["notice"] = notice["notice"].clone();
+    }
+    if !hooks.is_empty() {
+        summary["hooks"] = hooks.into();
     }
     Some(summary)
 }
