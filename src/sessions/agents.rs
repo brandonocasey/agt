@@ -520,15 +520,21 @@ impl Agents {
             }
             for notice in std::mem::take(&mut session.notices) {
                 let path = session.children.get(&notice.agent).unwrap_or(&notice.agent);
-                // The spawn's result names the full path; an older spawn named only its task.
-                let spawn = session.spawns.iter_mut().find(|spawn| {
-                    if spawn.path.is_empty() {
-                        !spawn.task.is_empty() && path.ends_with(&format!("/{}", spawn.task))
-                    } else {
-                        spawn.path == *path
-                    }
+                // The spawn's result names the full path. An older spawn named only its task, and
+                // a failed spawn names none, so match the full path first: a failed attempt
+                // must not take the reply of its successful retry.
+                let exact = session
+                    .spawns
+                    .iter()
+                    .position(|spawn| !path.is_empty() && spawn.path == *path);
+                let index = exact.or_else(|| {
+                    session.spawns.iter().position(|spawn| {
+                        spawn.path.is_empty()
+                            && !spawn.task.is_empty()
+                            && path.ends_with(&format!("/{}", spawn.task))
+                    })
                 });
-                if let Some(spawn) = spawn {
+                if let Some(spawn) = index.map(|index| &mut session.spawns[index]) {
                     *spawn.result.get_or_insert(0.0) += notice.tokens;
                 }
             }
@@ -612,7 +618,8 @@ impl Agents {
             tok(duplicate)
         ));
         let mut rows: Vec<_> = files.into_iter().collect();
-        rows.sort_by(|a, b| b.1.2.total_cmp(&a.1.2));
+        // Sessions come from a hash map, so ties need a stable order.
+        rows.sort_by(|a, b| b.1.2.total_cmp(&a.1.2).then(a.0.cmp(b.0)));
         let table: Vec<Vec<String>> = rows
             .iter()
             .take(scope.limit)
@@ -647,7 +654,13 @@ fn home_relative(path: &str, home: &Path) -> String {
 fn spawn_table(out: &mut String, side: &Side, scope: &Scope) {
     let mut rows: Vec<(&String, &Stats)> =
         side.types.iter().filter(|(_, s)| s.spawns > 0).collect();
-    rows.sort_by(|a, b| b.1.prompt.total_cmp(&a.1.prompt));
+    // Types are added in hash-map order, and spawns seen only through a child all have prompt 0.
+    rows.sort_by(|a, b| {
+        b.1.prompt
+            .total_cmp(&a.1.prompt)
+            .then(b.1.spawns.cmp(&a.1.spawns))
+            .then(a.0.cmp(b.0))
+    });
     let all = rows.iter().fold(Stats::default(), |mut all, (_, s)| {
         all.spawns += s.spawns;
         all.prompts += s.prompts;
@@ -974,6 +987,81 @@ mod tests {
         // Columns: agent, spawns, prompt tok, avg; the average skips spawns with no prompt.
         assert_eq!(cells[1], "3", "{out}");
         assert_eq!(cells[3], "100", "{out}");
+    }
+
+    #[test]
+    fn a_failed_spawn_does_not_take_its_retry_reply() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let parent = "019f0000-0000-7000-8000-00000000aaaa";
+        let call = |id: &str, kind: &str| {
+            json!({"type": "response_item", "payload": {"type": "function_call",
+                "name": "spawn_agent", "call_id": id,
+                "arguments": json!({"task_name": "critic", "agent_type": kind}).to_string()}})
+        };
+        let output = |id: &str, body: String| {
+            json!({"type": "response_item", "payload": {"type": "function_call_output",
+                "call_id": id, "output": body}})
+        };
+        let records = [
+            call("c1", "alpha"),
+            output("c1", "agent thread limit reached".into()),
+            call("c2", "beta"),
+            output("c2", json!({"task_name": "/root/critic"}).to_string()),
+            json!({"type": "response_item", "payload": {"type": "agent_message",
+                "author": "/root/critic", "recipient": "/root",
+                "content": [{"type": "input_text", "text": "x".repeat(400)}]}}),
+        ];
+        write(
+            &dir.path().join("sessions/2026/03/01/rollout-parent.jsonl"),
+            &rollout(parent, json!("cli"), &records),
+        );
+        let out = render(dir.path());
+        let cells = |name: &str| -> Vec<String> {
+            out.lines()
+                .find(|line| line.starts_with(name))
+                .map(|line| line.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default()
+        };
+        // Columns: agent, spawns, prompt tok, avg, max, result tok.
+        assert_eq!(cells("beta")[5], "100", "{out}");
+        assert_eq!(cells("alpha")[5], "0", "{out}");
+    }
+
+    #[test]
+    fn tied_agent_rows_keep_a_stable_order() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        // Exec-script sessions whose children all have prompt 0: only the tie-break orders them.
+        let roles = [
+            "worker", "explorer", "tester", "cheap", "consult", "reviewer",
+        ];
+        for (n, role) in roles.iter().enumerate() {
+            let parent = format!("019f0000-0000-7000-8000-0000000010{n:02}");
+            let child = format!("019f0000-0000-7000-8000-0000000020{n:02}");
+            write(
+                &dir.path()
+                    .join(format!("sessions/2026/03/01/rollout-{parent}.jsonl")),
+                &rollout(&parent, json!("cli"), &[]),
+            );
+            write(
+                &dir.path()
+                    .join(format!("sessions/2026/03/01/rollout-{child}.jsonl")),
+                &rollout(
+                    &child,
+                    json!({"subagent": {"thread_spawn": {"parent_thread_id": parent,
+                        "agent_path": null, "agent_role": role}}}),
+                    &[],
+                ),
+            );
+        }
+        let out = render(dir.path());
+        let order: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|name| roles.contains(name))
+            .collect();
+        let mut sorted = roles.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "{out}");
     }
 
     #[test]
