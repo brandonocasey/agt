@@ -298,7 +298,11 @@ pub fn links(transcript: &Transcript, since: &str) -> Links {
                     "agent_path",
                 );
                 let spawn = get(get(get(payload, "source"), "subagent"), "thread_spawn");
-                if spawn.is_object() {
+                // A deeper child groups under its parent agent's thread, which holds none of that
+                // agent's records, so counting it there would repeat the parent agent's own spawn
+                // call, already counted in the root session.
+                let direct = get(spawn, "depth").as_i64().is_none_or(|depth| depth <= 1);
+                if spawn.is_object() && direct {
                     links.spawned = Some(path.to_owned());
                 }
                 if !path.is_empty() {
@@ -987,6 +991,54 @@ mod tests {
         // Columns: agent, spawns, prompt tok, avg; the average skips spawns with no prompt.
         assert_eq!(cells[1], "3", "{out}");
         assert_eq!(cells[3], "100", "{out}");
+    }
+
+    #[test]
+    fn a_nested_child_counts_once() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let root = "019f0000-0000-7000-8000-00000000aaaa";
+        let child = "019f0000-0000-7000-8000-00000000bbbb";
+        let grandchild = "019f0000-0000-7000-8000-00000000cccc";
+        let spawn = |id: &str, kind: &str, task: &str, path: &str| {
+            vec![
+                json!({"type": "response_item", "payload": {"type": "function_call",
+                    "name": "spawn_agent", "call_id": id,
+                    "arguments": json!({"task_name": task, "agent_type": kind}).to_string()}}),
+                json!({"type": "response_item", "payload": {"type": "function_call_output",
+                    "call_id": id, "output": json!({"task_name": path}).to_string()}}),
+            ]
+        };
+        let rollouts = [
+            (root, json!("cli"), spawn("c1", "explorer", "a", "/root/a")),
+            (
+                child,
+                json!({"subagent": {"thread_spawn": {"parent_thread_id": root, "depth": 1,
+                    "agent_path": "/root/a", "agent_role": "explorer"}}}),
+                spawn("c2", "worker", "b", "/root/a/b"),
+            ),
+            (
+                grandchild,
+                json!({"subagent": {"thread_spawn": {"parent_thread_id": child, "depth": 2,
+                    "agent_path": "/root/a/b", "agent_role": "worker"}}}),
+                Vec::new(),
+            ),
+        ];
+        for (id, source, records) in rollouts {
+            write(
+                &dir.path()
+                    .join(format!("sessions/2026/03/01/rollout-{id}.jsonl")),
+                &rollout(id, source, &records),
+            );
+        }
+        let out = render(dir.path());
+        let spawns = |name: &str| {
+            out.lines()
+                .find(|line| line.starts_with(name))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .map(str::to_owned)
+        };
+        assert_eq!(spawns("explorer").as_deref(), Some("1"), "{out}");
+        assert_eq!(spawns("worker").as_deref(), Some("1"), "{out}");
     }
 
     #[test]
