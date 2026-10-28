@@ -315,6 +315,7 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
                     only,
                     approval: approval_id,
                     run: None,
+                    what: "publish",
                 },
             )?
         }

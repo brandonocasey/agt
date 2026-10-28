@@ -97,6 +97,7 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
                 only,
                 approval: None,
                 run: None,
+                what: "publish",
             },
         )?,
     };

@@ -66,14 +66,13 @@ pub fn run(
         }
     }
     let mut report = json!({ "dry_run": options.dry_run, "trackers": reports });
-    // Every tracker kept its changes local: say so, as `review publish` does.
+    // Some or all trackers kept their changes local: say which, as `review publish` does.
     if !kept.is_empty()
-        && kept.len() == reached.len()
         && let Some(reason) = crate::forge::auto::kept_local(
             "issue push",
             Kind::Issues,
             &kept.join(", "),
-            reached.iter().find_map(|tracker| tracker.push),
+            Some(Mode::Off),
         )
     {
         report["kept_local"] = json!(reason);

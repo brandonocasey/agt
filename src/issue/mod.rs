@@ -59,8 +59,8 @@ fn push_after_pull(
     }
     push::run(
         store,
-        &sending,
-        None,
+        destinations,
+        filter,
         &push::Options {
             dry_run: false,
             force: false,
@@ -91,13 +91,48 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Sync => {
             let config = Config::load_for_repo(&repo)?;
             let destinations = trackers::destinations(&config, &repo, filter, false)?;
-            let mut value = sync::run(&store, &destinations, filter)?;
-            value["push"] = push_after_pull(&store, &destinations, filter)?;
+            let synced = sync::run(&store, &destinations, filter)?;
+            let mut value = synced.report;
+            // A tracker that failed to pull is not pushed to; its changes stay queued.
+            let healthy: Vec<crate::core::config::Tracker> = destinations
+                .iter()
+                .filter(|tracker| {
+                    !synced
+                        .failed
+                        .iter()
+                        .any(|(name, _)| *name == tracker.name())
+                })
+                .cloned()
+                .collect();
+            value["push"] = if healthy.is_empty() {
+                serde_json::json!({ "dry_run": false, "trackers": [] })
+            } else {
+                push_after_pull(&store, &healthy, filter)?
+            };
+            if !synced.failed.is_empty() {
+                let failures: Vec<String> = synced
+                    .failed
+                    .iter()
+                    .map(|(name, error)| format!("{name}: {error}"))
+                    .collect();
+                eprintln!(
+                    "agt: error: issue sync failed for {} tracker(s): {}",
+                    failures.len(),
+                    failures.join("; ")
+                );
+                return Ok(Output::Json(value).exiting(1));
+            }
             value
         }
         Command::List(args) => view::list(&store, filter, args)?,
         Command::Show { key } => view::show(&store, filter, key)?,
-        Command::Status => view::status(&store, filter)?,
+        Command::Status => {
+            // Without a readable configuration the push flag is the one stored at the last sync.
+            let current = Config::load_for_repo(&repo)
+                .and_then(|config| config.trackers_for(&repo, crate::core::config::Kind::Issues))
+                .ok();
+            view::status(&store, filter, current.as_deref())?
+        }
         Command::Link(args) => local::link(&store, filter, args)?,
         Command::Comment { key, text, private } => {
             local::comment(&store, filter, key, text, *private)?

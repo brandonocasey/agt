@@ -127,6 +127,7 @@ fn push(ctx: &Ctx, key: &str) -> Result<Value> {
             only: Vec::new(),
             approval: None,
             run: None,
+            what: "push",
         },
     )
 }

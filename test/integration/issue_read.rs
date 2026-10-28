@@ -35,6 +35,7 @@ matrix!(
     list_filters_by_state_label_assignee_and_author,
     show_has_the_documented_shape,
     status_counts_per_tracker,
+    status_push_follows_the_current_mode,
     search_matches_title_body_comments_and_notes,
     find_by_pr_branch_and_title,
     link_and_note_stay_local,
@@ -244,6 +245,17 @@ fn status_counts_per_tracker(fake: Fake) {
     assert_eq!(tracker["push"], false);
     assert_eq!(tracker["pending"], json!([]));
     assert_eq!(tracker["synced_at"], "2026-10-17T12:00:00Z");
+}
+
+fn status_push_follows_the_current_mode(fake: Fake) {
+    // Synced while push was on, then turned off: status must not still say true.
+    let env = Env::new();
+    env.write_config(&fake.config(true));
+    fake.serve(&env, &two_issues());
+    env.issue(&["sync"]);
+    assert_eq!(env.issue(&["status"])["trackers"][0]["push"], true);
+    env.write_config(&fake.config(false));
+    assert_eq!(env.issue(&["status"])["trackers"][0]["push"], false);
 }
 
 fn search_matches_title_body_comments_and_notes(fake: Fake) {

@@ -47,6 +47,7 @@ matrix!(
     push_stays_local_while_push_is_off,
     sync_pulls_then_pushes_where_push_is_on,
     sync_only_pulls_while_push_is_off,
+    a_narrower_repository_key_cannot_lower_the_global_push,
     no_token_reaches_a_call_a_file_or_the_output,
 );
 
@@ -603,6 +604,20 @@ fn sync_only_pulls_while_push_is_off(fake: Fake) {
     assert!(report["push"]["kept_local"].is_string(), "{report}");
     assert!(env.forge_writes(fake).is_empty());
     assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
+}
+
+fn a_narrower_repository_key_cannot_lower_the_global_push(fake: Fake) {
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["comment", "1", "Thanks"]);
+    env.write_config(&format!(
+        "[sync]\npush = \"manual\"\n{}",
+        fake.config(true).replace(", push = \"manual\"", "")
+    ));
+    env.write_repo_config("[issues]\npush = \"off\"\n");
+    env.respond_nth(&strs(&fake.comment_call(1)), 1, &fake.comment_response(100));
+    let report = env.issue(&["push"]);
+    assert_eq!(kinds(&writes(&report, "sent")), ["comment"], "{report}");
+    assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "posted");
 }
 
 fn no_token_reaches_a_call_a_file_or_the_output(fake: Fake) {

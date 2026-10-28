@@ -27,6 +27,9 @@ pub(super) struct Options {
     /// The approval thread `--approve` just recorded: always posted, whatever `only` names.
     pub approval: Option<String>,
     pub run: Option<String>,
+    /// What the command is called in the line that says a push stayed local: `publish`, or
+    /// `push` for the push half of `sync`.
+    pub what: &'static str,
 }
 
 pub(super) fn publish(
@@ -47,7 +50,7 @@ pub(super) fn publish(
             return Ok(json!({"dry_run": false, "posted": []}));
         }
         if let Some(reason) = auto::kept_local(
-            "publish",
+            options.what,
             Kind::PullRequests,
             &selected.name(),
             selected.push,

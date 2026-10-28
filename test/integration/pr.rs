@@ -1088,6 +1088,21 @@ fn several_trackers_without_origin_ask_for_remote() {
 }
 
 #[test]
+fn no_tracker_with_remotes_none_says_that_turns_remote_trackers_off() {
+    let env = github();
+    env.write_config("[sync]\nremotes = \"none\"\n");
+    let message = err(&env, &["view", "7"]);
+    assert!(
+        message.contains("no tracker for pull requests"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`[sync] remotes = \"none\"` turns off remote trackers"),
+        "{message}"
+    );
+}
+
+#[test]
 fn a_pull_requests_push_of_off_blocks_every_write_and_no_call_is_made() {
     let env = github();
     env.write_config("[pull_requests]\npush = \"off\"\n");
@@ -1103,6 +1118,8 @@ fn a_pull_requests_push_of_off_blocks_every_write_and_no_call_is_made() {
             "{args:?}: {message}"
         );
         assert!(message.contains("`[pull_requests]`"), "{message}");
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.contains(".config/agt.toml"), "{message}");
     }
     assert!(env.forge_calls().is_empty());
     // Reads are never gated.

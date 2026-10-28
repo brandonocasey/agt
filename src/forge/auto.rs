@@ -159,8 +159,7 @@ pub fn kept_local(what: &str, kind: Kind, target: &str, push: Option<Mode>) -> O
     if push.is_some_and(|push| push != Mode::Off) {
         return None;
     }
-    let global = crate::core::config::path()
-        .map_or_else(|_| "config.toml".into(), |path| path.display().to_string());
+    let global = config_file();
     let reason = format!(
         "{what} kept local: push is off for {target}; set `push = \"manual\"` under `[{}]`, \
          `[sync]` or the tracker in {global} or the repository's .config/agt.toml to send",
@@ -178,8 +177,16 @@ pub fn pr_write_allowed(what: &str, target: &str, push: Option<Mode>) -> Result<
     }
     fail(format!(
         "{what} refused: push is off for {target}; set `push = \"manual\"` under \
-         `[pull_requests]`, `[sync]` or the tracker to allow it"
+         `[pull_requests]`, `[sync]` or the tracker in {} or the repository's .config/agt.toml \
+         to allow it",
+        config_file()
     ))
+}
+
+/// The global configuration file's path, for messages.
+fn config_file() -> String {
+    crate::core::config::path()
+        .map_or_else(|_| "config.toml".into(), |path| path.display().to_string())
 }
 
 fn load_unless_offline(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {

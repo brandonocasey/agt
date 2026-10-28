@@ -51,13 +51,24 @@ pub fn configured<'a>(
     if found.is_empty() {
         return match filter {
             Some(filter) => fail(format!("no configured tracker matches {filter}")),
-            None => fail(format!(
-                "no tracker serves issues: add a supported origin remote or a [[tracker]] in {}",
-                config::path()?.display()
-            )),
+            None => no_tracker_serves(false),
         };
     }
     Ok(found)
+}
+
+/// The error for a repository no tracker serves issues for; `remotes_none` adds why remotes are
+/// no help.
+fn no_tracker_serves<T>(remotes_none: bool) -> Result<T> {
+    let hint = if remotes_none {
+        "; `[sync] remotes = \"none\"` turns off remote trackers"
+    } else {
+        ""
+    };
+    fail(format!(
+        "no tracker serves issues: add a supported origin remote or a [[tracker]] in {}{hint}",
+        config::path()?.display()
+    ))
 }
 
 fn matches(filter: &str, key: &str, repo: &str) -> bool {
@@ -162,6 +173,9 @@ pub fn destinations(
     automatic: bool,
 ) -> Result<Vec<config::Tracker>> {
     let mut trackers = config.trackers_for(repo, Kind::Issues)?;
+    if trackers.is_empty() && filter.is_none() && !automatic {
+        return no_tracker_serves(config.sync.remotes == config::RemoteSet::None);
+    }
     if automatic && filter.is_none() {
         trackers.retain(|tracker| tracker.remote.as_deref() == Some("origin"));
     }

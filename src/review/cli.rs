@@ -68,7 +68,9 @@ pub enum Command {
         /// every stored review].
         #[arg(long)]
         pr: Option<String>,
-        /// Tracker to use: a git remote name or `host/repo` [default: the tracker of `origin`].
+        /// Tracker to use: a git remote name or `host/repo`. Plain `sync` refreshes every stored
+        /// review; `--remote` limits it to that tracker's. With `--pr` the default is the
+        /// tracker of `origin`.
         #[arg(long)]
         remote: Option<String>,
     },

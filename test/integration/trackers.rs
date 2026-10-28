@@ -42,12 +42,82 @@ fn every_remote_is_a_tracker_unless_remotes_says_origin() {
     assert!(!reached(&env, "projects/g%2Fp"), "{:?}", env.forge_calls());
 }
 
+/// Both remotes as trackers reading every issue; `gitlab` is extra keys of GitLab's issues table.
+fn both_all(gitlab: &str) -> String {
+    format!(
+        "[sync]\npush = \"manual\"\n\
+         [[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\nissues = {{ scope = \"all\" }}\n\
+         [[tracker]]\nhost = \"gitlab.com\"\nrepo = \"g/p\"\nissues = {{ {gitlab}scope = \"all\" }}\n"
+    )
+}
+
+#[test]
+fn one_failing_tracker_is_named_and_the_others_still_sync() {
+    let env = two_remotes();
+    // GitHub answers; GitLab's listing fails.
+    let github: &dyn IssueFake = &GithubIssues;
+    github.serve(&env, &[Spec::new(1, "One")]);
+    let gitlab: &dyn IssueFake = &GitlabIssues;
+    env.fail_call_with(
+        &strs(&gitlab.list_call("2026-07-12T10%3A00%3A00Z")),
+        "HTTP 500",
+    );
+    env.write_config(&both_all(""));
+    let output = env.issue_exec(&["sync"], "", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("gitlab.com/g/p"), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let trackers = report["trackers"].as_array().unwrap();
+    assert_eq!(trackers.len(), 2, "{report}");
+    assert!(
+        trackers.iter().any(|tracker| tracker["error"].is_string()),
+        "{report}"
+    );
+    assert!(
+        trackers
+            .iter()
+            .any(|tracker| tracker.get("error").is_none()),
+        "{report}"
+    );
+}
+
+#[test]
+fn sync_reports_the_trackers_that_keep_changes_local_when_only_some_do() {
+    let env = two_remotes();
+    let github: &dyn IssueFake = &GithubIssues;
+    github.serve(&env, &[Spec::new(1, "One")]);
+    let gitlab: &dyn IssueFake = &GitlabIssues;
+    gitlab.serve(&env, &[Spec::new(1, "One")]);
+    env.write_config(&both_all("push = \"off\", "));
+    let output = env.issue_exec(&["sync"], "", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("kept local") && stderr.contains("gitlab.com/g/p"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("github.com/o/r"), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let kept = report["push"]["kept_local"].as_str().unwrap_or_default();
+    assert!(kept.contains("gitlab.com/g/p"), "{report}");
+}
+
 #[test]
 fn remotes_none_leaves_only_configured_trackers() {
     let env = two_remotes();
     env.write_config("[sync]\nremotes = \"none\"\n");
     let error = env.issue_fail(&["sync"]);
     assert!(error.contains("no tracker serves issues"), "{error}");
+    assert!(
+        error.contains("`[sync] remotes = \"none\"` turns off"),
+        "{error}"
+    );
+    // Without it the hint is not there.
+    let env = Env::new();
+    let error = env.issue_fail(&["sync"]);
+    assert!(error.contains("no tracker serves issues"), "{error}");
+    assert!(!error.contains("remotes"), "{error}");
     assert!(env.forge_calls().is_empty());
 }
 

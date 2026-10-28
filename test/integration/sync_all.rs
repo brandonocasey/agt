@@ -33,7 +33,7 @@ fn review_sync_refreshes_a_stored_review_and_keeps_the_push_local_by_default() {
     let output = env.exec(&["sync"], None, &[]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("kept local"), "{stderr}");
+    assert!(stderr.contains("push kept local"), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["synced"][0]["target"], "gh-42", "{report}");
     assert_eq!(report["push"]["kept_local"], true, "{report}");
@@ -72,4 +72,20 @@ fn review_sync_sends_nothing_with_push_off() {
     let output = env.exec(&["sync"], None, &[]);
     assert!(output.status.success());
     assert_read_only(&svc, env);
+}
+
+#[test]
+fn sync_help_says_plain_sync_refreshes_every_review_and_remote_limits_it() {
+    let env = crate::support::Env::new();
+    let output = env.exec(&["sync", "--help"], None, &[]);
+    let help = String::from_utf8_lossy(&output.stdout);
+    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("Plain `sync` refreshes every stored review; `--remote` limits it"),
+        "{help}"
+    );
+    assert!(
+        flat.contains("With `--pr` the default is the tracker of `origin`"),
+        "{help}"
+    );
 }

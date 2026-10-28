@@ -28,14 +28,35 @@ pub fn connect(tracker: &Tracker) -> Result<(Box<dyn IssueService>, String)> {
     Ok((service, login))
 }
 
-pub fn run(store: &Store, destinations: &[config::Tracker], filter: Option<&str>) -> Result<Value> {
+/// What a sync did: one report per tracker, and the trackers (named `host/repo`) that failed.
+pub struct Synced {
+    pub report: Value,
+    pub failed: Vec<(String, String)>,
+}
+
+pub fn run(
+    store: &Store,
+    destinations: &[config::Tracker],
+    filter: Option<&str>,
+) -> Result<Synced> {
     let mut reports = Vec::new();
+    let mut failed = Vec::new();
     let targets = trackers::configured(destinations, filter)?;
     for configured in targets {
-        let tracker = trackers::ensure(store, configured)?;
-        reports.push(sync_tracker(store, tracker)?);
+        let outcome =
+            trackers::ensure(store, configured).and_then(|tracker| sync_tracker(store, tracker));
+        match outcome {
+            Ok(report) => reports.push(report),
+            Err(error) => {
+                reports.push(json!({"tracker": configured.name(), "error": error.0}));
+                failed.push((configured.name(), error.0));
+            }
+        }
     }
-    Ok(json!({ "trackers": reports }))
+    Ok(Synced {
+        report: json!({ "trackers": reports }),
+        failed,
+    })
 }
 
 pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {

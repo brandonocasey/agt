@@ -180,6 +180,7 @@ pub(super) fn publish_ended(ctx: &mut Ctx, run: &str, offline: Offline) {
                 only: Vec::new(),
                 approval: None,
                 run: Some(run.to_owned()),
+                what: "publish",
             },
         )?;
         Ok(())

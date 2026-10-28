@@ -246,7 +246,13 @@ pub fn show(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
     Ok(view)
 }
 
-pub fn status(store: &Store, filter: Option<&str>) -> Result<Value> {
+/// `current` is the configured trackers when the configuration loads: a tracker's `push` is
+/// whether its mode is `manual` or `auto` now, not as of its last sync.
+pub fn status(
+    store: &Store,
+    filter: Option<&str>,
+    current: Option<&[crate::core::config::Tracker]>,
+) -> Result<Value> {
     let mut reports = Vec::new();
     for (tracker, issues) in all(store, filter)? {
         let open = issues
@@ -277,12 +283,19 @@ pub fn status(store: &Store, filter: Option<&str>) -> Result<Value> {
             })
             .collect();
         let doc = &tracker.doc;
+        let pushes = match current {
+            Some(current) => current.iter().any(|configured| {
+                configured.is_at(&doc.host, &doc.repo)
+                    && configured.push_mode() != crate::core::config::Mode::Off
+            }),
+            None => doc.push,
+        };
         reports.push(json!({
             "tracker": doc.key,
             "forge": doc.forge,
             "host": doc.host,
             "repo": doc.repo,
-            "push": doc.push,
+            "push": pushes,
             "synced_at": doc.synced_at,
             "watermark": doc.watermark,
             "issues": issues.len(),

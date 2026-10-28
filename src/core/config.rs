@@ -42,6 +42,10 @@ pub struct Config {
     /// repository has.
     #[serde(skip)]
     pub repo_trackers: bool,
+    /// The global file alone: the repository file may raise a tracker's `push` above what this
+    /// gives but never below it.
+    #[serde(skip)]
+    global_floor: Option<Box<Config>>,
 }
 
 /// What agt does in one direction between the machine and a host.
@@ -339,6 +343,11 @@ impl Config {
         let (overrides, local_legacy) = read_value(local)?;
         let repo_trackers = overrides.get("tracker").is_some();
         let global_value = merged.clone();
+        let mut floor_value = global_value.clone();
+        apply_legacy_push(&mut floor_value, &global_legacy, &Legacy::default());
+        let floor: Self = floor_value.try_into().map_err(|error: toml::de::Error| {
+            Error(format!("parse {}: {}", global.display(), error.message()))
+        })?;
         merge_values(&mut merged, overrides);
         raise_push(&mut merged, &global_value);
         apply_legacy_push(&mut merged, &global_legacy, &local_legacy);
@@ -346,6 +355,7 @@ impl Config {
             Error(format!("parse {}: {}", local.display(), error.message()))
         })?;
         config.repo_trackers = repo_trackers;
+        config.global_floor = Some(Box::new(floor));
         Ok(config)
     }
 
@@ -562,7 +572,16 @@ impl Config {
                 }
                 let overrides = setting.map(KindSetting::overrides).unwrap_or_default();
                 let tracker_pull = entry.and_then(|entry| entry.pull);
-                let tracker_push = entry.and_then(|entry| entry.push);
+                let (push, push_pinned) = {
+                    let own = self.tracker_push(kind, &draft.host, &draft.repo);
+                    match self.global_floor.as_ref() {
+                        Some(floor) => {
+                            let low = floor.tracker_push(kind, &draft.host, &draft.repo);
+                            if low.0 > own.0 { low } else { own }
+                        }
+                        None => own,
+                    }
+                };
                 Some(Tracker {
                     forge: draft.forge,
                     host: draft.host,
@@ -574,11 +593,30 @@ impl Config {
                         .pull
                         .or(tracker_pull)
                         .unwrap_or_else(|| self.pull_for(kind)),
-                    push: overrides.push.or(tracker_push).or(self.push_for(kind)),
-                    push_pinned: overrides.push.or(tracker_push).is_some(),
+                    push,
+                    push_pinned,
                 })
             })
             .collect()
+    }
+
+    /// The push mode of the tracker at `host` and `repo` for `kind` from this file set alone, and
+    /// whether the tracker or its kind table set it.
+    fn tracker_push(&self, kind: Kind, host: &str, repo: &str) -> (Option<Mode>, bool) {
+        let entry = self
+            .tracker
+            .iter()
+            .find(|entry| same(&entry.host, &entry.repo, host, repo));
+        let kind_push = entry.and_then(|entry| {
+            match kind {
+                Kind::Issues => &entry.issues,
+                Kind::PullRequests => &entry.pull_requests,
+            }
+            .overrides()
+            .push
+        });
+        let pinned = kind_push.or(entry.and_then(|entry| entry.push));
+        (pinned.or(self.push_for(kind)), pinned.is_some())
     }
 
     /// Like [`Config::trackers`], with the remotes of `repo`.
@@ -610,11 +648,56 @@ fn read_value(path: &Path) -> Result<(toml::Value, Legacy)> {
     let mut value: toml::Value = toml::from_str(&text)
         .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
     let legacy = migrate(&mut value, path)?;
+    check_choices(&value, path)?;
     let config: Config = value.clone().try_into().map_err(|error: toml::de::Error| {
         Error(format!("parse {}: {}", path.display(), error.message()))
     })?;
     config.validate(path)?;
     Ok((value, legacy))
+}
+
+/// Names the key and the choices when a `pull`, `push` or `remotes` value is not one of them,
+/// which serde's own message does not. Values of another type are left to serde.
+fn check_choices(value: &toml::Value, path: &Path) -> Result<()> {
+    const PULL: &[&str] = &["manual", "auto"];
+    const PUSH: &[&str] = &["off", "manual", "auto"];
+    const REMOTES: &[&str] = &["origin", "all", "none"];
+    let check = |table: Option<&toml::Value>, at: &str, key: &str, choices: &[&str]| {
+        let Some(text) = table
+            .and_then(|table| table.get(key))
+            .and_then(toml::Value::as_str)
+        else {
+            return Ok(());
+        };
+        // `off` for a pull is refused later, by `validate`, with its own explanation.
+        if choices.contains(&text) || (key == "pull" && text == "off") {
+            return Ok(());
+        }
+        let list = match choices {
+            [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+            [] => String::new(),
+        };
+        fail(format!(
+            "{}: {at} {key} = {text:?}: expected {list}",
+            path.display()
+        ))
+    };
+    let modes = |table: Option<&toml::Value>, at: &str| {
+        check(table, at, "pull", PULL)?;
+        check(table, at, "push", PUSH)
+    };
+    modes(value.get("sync"), "[sync]")?;
+    check(value.get("sync"), "[sync]", "remotes", REMOTES)?;
+    modes(value.get("issues"), "[issues]")?;
+    modes(value.get("pull_requests"), "[pull_requests]")?;
+    if let Some(toml::Value::Array(entries)) = value.get("tracker") {
+        for entry in entries {
+            modes(Some(entry), "[[tracker]]")?;
+            modes(entry.get("issues"), "[[tracker]] issues")?;
+            modes(entry.get("pull_requests"), "[[tracker]] pull_requests")?;
+        }
+    }
+    Ok(())
 }
 
 /// Rewrites the old keys of one file to the new ones and warns. `[forge] post` and
@@ -635,15 +718,26 @@ fn migrate(value: &mut toml::Value, path: &Path) -> Result<Legacy> {
         Some(toml::Value::Boolean(flag)) => Ok(Some(*flag)),
         Some(_) => fail(format!("{}: {at} must be true or false", path.display())),
     };
+    // The value `[forge] post` maps to; `auto_push` in the same file decides manual or auto.
+    let auto_push = root
+        .get("sync")
+        .and_then(|sync| sync.get("auto_push"))
+        .and_then(toml::Value::as_bool)
+        == Some(true);
     if let Some(forge) = root.get_mut("forge").and_then(toml::Value::as_table_mut)
         && forge.contains_key("post")
     {
         legacy.post = flag(forge, "post", "forge.post")?;
         forge.remove("post");
+        let mapped = match (legacy.post, auto_push) {
+            (Some(true), true) => "auto",
+            (Some(true), false) => "manual",
+            _ => "off",
+        };
         deprecated(
             path,
             "`[forge] post`",
-            "`[sync] push = \"off\"`, `\"manual\"` or `\"auto\"`",
+            &format!("`[sync] push = \"{mapped}\"`"),
         );
         if forge.is_empty() {
             root.remove("forge");
@@ -988,6 +1082,34 @@ mod tests {
     }
 
     #[test]
+    fn a_narrower_repository_key_never_lowers_the_effective_push() {
+        let origin = [remote("origin", "github.com", "me/agt")];
+        let push = |global: &str, local: &str, kind: Kind| {
+            let config = load_both(global, local).unwrap();
+            config.trackers(kind, &origin)[0].clone()
+        };
+        let sync = "[sync]\npush = \"manual\"\n";
+        for local in [
+            "[issues]\npush = \"off\"\n",
+            "[[tracker]]\nhost = \"github.com\"\nrepo = \"me/agt\"\npush = \"off\"\n",
+            "[[tracker]]\nhost = \"github.com\"\nrepo = \"me/agt\"\nissues = { push = \"off\" }\n",
+        ] {
+            let tracker = push(sync, local, Kind::Issues);
+            assert_eq!(tracker.push, Some(Mode::Manual), "{local}");
+        }
+        // The other kind and a raise still work.
+        let local = "[issues]\npush = \"auto\"\n[pull_requests]\npush = \"off\"\n";
+        assert_eq!(push(sync, local, Kind::Issues).push, Some(Mode::Auto));
+        assert_eq!(
+            push(sync, local, Kind::PullRequests).push,
+            Some(Mode::Manual)
+        );
+        // Without a global push the repository file sets its own.
+        let tracker = push("", "[issues]\npush = \"off\"\n", Kind::Issues);
+        assert_eq!(tracker.push, Some(Mode::Off));
+    }
+
+    #[test]
     fn a_repository_tracker_without_a_remote_here_is_ignored() {
         let config = load_both(
             "",
@@ -1267,6 +1389,40 @@ mod tests {
             let (_dir, config) = load(text);
             let error = config.unwrap_err().0;
             assert!(error.contains("config.toml"), "{error}");
+        }
+    }
+
+    #[test]
+    fn bad_choices_name_the_key_and_the_allowed_values() {
+        for (text, expected) in [
+            (
+                "[sync]\npull = \"bad\"\n",
+                "[sync] pull = \"bad\": expected manual or auto",
+            ),
+            (
+                "[sync]\npush = \"bad\"\n",
+                "[sync] push = \"bad\": expected off, manual or auto",
+            ),
+            (
+                "[sync]\nremotes = \"bogus\"\n",
+                "[sync] remotes = \"bogus\": expected origin, all or none",
+            ),
+            (
+                "[issues]\npush = \"x\"\n",
+                "[issues] push = \"x\": expected off, manual or auto",
+            ),
+            (
+                "[[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\npull = \"x\"\n",
+                "[[tracker]] pull = \"x\": expected manual or auto",
+            ),
+            (
+                "[[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\nissues = { push = \"x\" }\n",
+                "[[tracker]] issues push = \"x\"",
+            ),
+        ] {
+            let error = load(text).1.unwrap_err().0;
+            assert!(error.contains(expected), "{expected}: {error}");
+            assert!(!error.contains("unknown variant"), "{error}");
         }
     }
 

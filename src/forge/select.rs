@@ -149,8 +149,13 @@ pub fn require_tracker(
     pr: Option<&PrRef>,
 ) -> Result<Selected> {
     select_tracker(repo, config, kind, remote, pr)?.ok_or_else(|| {
+        let hint = if config.sync.remotes == crate::core::config::RemoteSet::None {
+            "; `[sync] remotes = \"none\"` turns off remote trackers"
+        } else {
+            ""
+        };
         Error(format!(
-            "no tracker for {}: add a GitHub or GitLab origin remote, a [[tracker]], or pass a PR/MR URL",
+            "no tracker for {}: add a GitHub or GitLab origin remote, a [[tracker]], or pass a PR/MR URL{hint}",
             kind_name(kind)
         ))
     })
