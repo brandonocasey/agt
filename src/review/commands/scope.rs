@@ -598,9 +598,6 @@ impl Ctx {
             }
             Named::Branch { branch, pr } => (branch, pr),
         };
-        if self.repo.current_branch()?.as_deref() == Some(&branch) {
-            return Ok(());
-        }
         let newest = targets
             .iter()
             .filter(|target| {
@@ -615,6 +612,13 @@ impl Ctx {
                     })
             })
             .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        // The current branch keeps its work tree, unless a PR/MR named it and every target of
+        // the branch holds another PR/MR's review.
+        if self.repo.current_branch()?.as_deref() == Some(&branch)
+            && (pr.is_none() || newest.is_some())
+        {
+            return Ok(());
+        }
         match (newest, pr) {
             (Some(target), _) => self.selection.target = Some(target.key.clone()),
             (None, Some(number)) => {

@@ -719,3 +719,38 @@ fn a_missing_pull_number_is_unknown() {
     let error = failure(&agt(&env, &["status"], &["9"], &[]));
     assert!(error.contains("9 is no known PR/MR"), "{error}");
 }
+
+#[test]
+fn a_fork_pull_with_the_parents_number_and_branch_takes_no_parent_target() {
+    let setup = parent_review_in_a_fork();
+    let mut pull = gh_pull(42, "feat", "2026-10-20T08:00:00Z");
+    pull["url"] = json!("https://github.com/me/app/pull/42");
+    respond_open_pulls_of(&setup.env, "me", &[pull]);
+    let summary = success(&agt(&setup.env, &["status"], &["--all"], &[]));
+    let rows = summary["targets"].as_array().unwrap();
+    let own = rows
+        .iter()
+        .find(|row| row["url"] == "https://github.com/me/app/pull/42")
+        .unwrap();
+    assert_eq!(own["target"], Value::Null, "{summary}");
+    assert!(
+        rows.iter()
+            .any(|row| row["mr"] == 42 && row["target"] != Value::Null),
+        "{summary}"
+    );
+}
+
+#[test]
+fn a_closed_pull_of_the_current_branch_does_not_report_another_pulls_review() {
+    let setup = parent_review_in_a_fork();
+    let env = &setup.env;
+    let mut pull = gh_pull(5, "feat", "2026-10-01T08:00:00Z");
+    pull["url"] = json!("https://github.com/me/app/pull/5");
+    pull["state"] = json!("CLOSED");
+    respond_one_pull(env, "me", 5, Some(pull));
+    let error = failure(&agt(env, &["status"], &["5"], &[]));
+    assert!(
+        error.contains("5 is PR/MR 5 of branch feat, which has no review or QA records here"),
+        "{error}"
+    );
+}

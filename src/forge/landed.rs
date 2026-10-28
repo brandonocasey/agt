@@ -91,8 +91,11 @@ impl Origin {
     pub fn pull(&self, number: u64) -> Result<Option<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();
+        // Only GitHub says which object is missing; a GitLab 404 may be the project itself, so
+        // it stays an error the caller can report.
         let missing = |error: &TransportError| {
-            error.status == Some(404) || error.message.contains("Could not resolve to a")
+            self.forge == Forge::Github
+                && error.message.contains("Could not resolve to a PullRequest")
         };
         match self.forge {
             Forge::Github => {

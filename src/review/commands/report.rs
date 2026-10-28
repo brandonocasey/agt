@@ -568,14 +568,27 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
                     )
             };
             for pull in pulls {
+                // The pull's own URL names its repository as the forge does now, so a renamed
+                // repository still matches the reviews synced under its new name.
+                let location = crate::forge::parse_pr(&pull.url)
+                    .ok()
+                    .and_then(|pr| pr.location);
+                let this = |review: &crate::store::model::Review| {
+                    review.number == pull.number
+                        && match &location {
+                            Some((host, repo)) => {
+                                review.forge == origin.forge
+                                    && super::scope::same_location(
+                                        (host.as_str(), repo.as_str()),
+                                        (review.host.as_str(), review.repo.as_str()),
+                                    )
+                            }
+                            None => here(review),
+                        }
+                };
                 let position = stored
                     .iter()
-                    .position(|target| {
-                        target
-                            .review
-                            .as_ref()
-                            .is_some_and(|review| here(review) && review.number == pull.number)
-                    })
+                    .position(|target| target.review.as_ref().is_some_and(this))
                     .or_else(|| {
                         // A fork's branch name proves nothing, and a target with another
                         // PR/MR's review is that one's.
@@ -584,10 +597,7 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
                         }
                         stored.iter().position(|target| {
                             target.branch.as_deref() == Some(&pull.head_branch)
-                                && target
-                                    .review
-                                    .as_ref()
-                                    .is_none_or(|review| review.number == pull.number)
+                                && target.review.as_ref().is_none_or(this)
                         })
                     });
                 mrs.push(Row {
