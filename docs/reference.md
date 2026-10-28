@@ -49,7 +49,7 @@ Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
 
 | File | Keys and defaults | Described in |
 | --- | --- | --- |
-| `$XDG_CONFIG_HOME/agt/config.toml` | `[forge]` `post = false`; `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
+| `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `pull = "manual"`, `push = "off"`, `max_age_secs = 300`, `remotes = "all"`; `[issues]` and `[pull_requests]` `pull`, `push` (unset: `[sync]`); `[[tracker]]` `host`, `repo`, `forge`, `remote`, `pull`, `push`, `enabled = true`, `issues`, `pull_requests`; `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
 | `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
 | `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}` | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
 | `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model | [Sessions](#sessions) |
@@ -341,13 +341,15 @@ posted by `publish` with its marker), so other people's and my own unmarked ones
 Sync with a PR or MR:
 
 ```sh
-agt review sync                     # the PR/MR whose head is this branch
-agt review sync --pr 1235
+agt review sync                     # refresh every stored review, then publish where push is on
+agt review sync --pr 1235           # start (or refresh) the review of one PR/MR
 agt review sync --pr https://gitlab.example.com/group/proj/-/merge_requests/3
 ```
 
-`sync` is read-only on the forge: it sends only `GET` requests and GraphQL
-queries. With `sync.auto_pull = true`, `list`, `show` and `status` refresh stale data; see
+`sync` always pulls (`GET` requests and GraphQL queries), then publishes each synced review
+whose tracker has `push = "manual"` or `"auto"`, like `publish`; with the default `push = "off"`
+it only pulls and reports the push as kept local. Without `--pr` it never imports a PR/MR the
+store does not already have. With `pull = "auto"`, `list`, `show` and `status` refresh stale data; see
 [Auto-sync](#auto-sync) and [Sync](#sync).
 
 Publish to an own PR or MR:
@@ -412,7 +414,7 @@ agt qa publish --dry-run            # as agt review publish
   `sync` reads to mark the run's record posted. A QA finding is headed
   `**🐛 bug (high)**` on its own line, with the check in the footer
   `> <sub>🧪 agt QA · <check name> · <model></sub>`; it follows the same posting rules as a review
-  finding, so on GitHub, where a general comment cannot be resolved, only the summary lists it. With `sync.auto_push = true` and `forge.post = true`, `run end`
+  finding, so on GitHub, where a general comment cannot be resolved, only the summary lists it. With `push = "auto"` for the tracker, `run end`
   publishes the ended QA run, as `agt review run end` does.
 
 ## Cleanup
@@ -595,7 +597,8 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   logged in to). Any other host fails with
   `unsupported forge <host>`; the forge is never guessed. The host and
   repository come from `--pr <url>` (a GitHub `/pull/<n>` or GitLab
-  `/-/merge_requests/<iid>` URL) or the `origin` remote.
+  `/-/merge_requests/<iid>` URL), `--remote <name|host/repo>` or the tracker of the `origin`
+  remote ([Issues](#issues) lists how trackers are chosen).
 - PR/MR lookup: the PR whose head is `<origin owner>:<branch>` (GitHub) or the
   MR whose source branch is the current branch (GitLab), first in `origin`,
   then in the repository `origin` was forked from. Open ones win, then the
@@ -672,14 +675,17 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 
 ### Auto-sync
 
-Review commands stay local by default. Enable `sync.auto_pull` to fetch before
-`list`, `show` and `status`. Enable `sync.auto_push` and `forge.post` to publish after `run end`.
-Global settings live in `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's
-`.config/agt.toml` overrides individual fields. See [Issues](#issues) for the table.
+Review commands stay local by default. Set `pull = "auto"` to fetch before
+`list`, `show` and `status`, and `push = "auto"` to publish after `run end`. Both are
+per tracker and come from `[pull_requests]`, `[sync]` or the `[[tracker]]`; see
+[Issues](#issues) for the table and the order. The values of `pull_requests` also govern
+`agt pr`. Global settings live in `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's
+`.config/agt.toml` overrides individual fields.
 
 Automatic pulls refresh a known PR/MR after `max_age_secs` (default 300).
-Unknown or closed PRs/MRs are looked up at most once per interval. Missing
-origins and unsupported hosts stay local. `.auto-sync.json` remembers failed
+Unknown or closed PRs/MRs are looked up at most once per interval. Without a
+tracker and with unsupported hosts, reads stay local. Only the tracker `agt` picks without being told (the one of
+`origin`) is synced. `.auto-sync.json` remembers failed
 requests and unsuccessful branch lookups.
 
 Automatic publication saves the completed run first. It sends only that run's
@@ -701,9 +707,10 @@ local reads continue.
 
 ## Publish
 
-- Sends only with `[forge] post = true` in the global or repository configuration
-  ([Issues](#issues)). Otherwise it stays local: it exits 0, posts nothing, prints why on
-  stderr and returns `kept_local`; `--approve` still records the approval.
+- Sends only when `push` is `manual` or `auto` for the tracker (`[pull_requests]`, `[sync]` or
+  the `[[tracker]]`, see [Issues](#issues)). With `off`, the default, it stays local: it exits 0,
+  posts nothing, prints why on stderr, naming the key, and returns `kept_local`; `--approve`
+  still records the approval. `--remote <name|host/repo>` picks another tracker than `origin`'s.
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
   threads imported from the host (other people's threads); our findings, local
@@ -1049,20 +1056,23 @@ whose answer comes from the remote refuses with `offline mode forbids <what>` (e
 `agt branch check` runs push and merge checks and prints one JSON report.
 
 ```sh
-agt branch check [BRANCH] [--checks pushed,landable] [--remote origin] [--base BRANCH]
+agt branch check [BRANCH] [--checks pushed,landable] [--remote NAME|HOST/REPO] [--base BRANCH]
 ```
 
 `check` runs both checks by default. `--checks pushed` or `--checks landable` selects one.
 Its `checks` object holds each check's `status` and `report`, or `error` when it fails
 (for a single selected check too). Every selected check runs even when one fails. The exit status
 prioritizes errors (1), then conflicts (5), then an unpushed branch (4), otherwise success (0).
-`--remote` applies to the pushed check; `--base` applies to the landable check. `--offline` refuses the pushed check (see [Offline](#offline)).
+`--remote` applies to the pushed check: a git remote name or a tracker as `host/repo`; without it the
+tracker is chosen as `agt pr` does (the tracker of `origin`, else the only one; several trackers and
+no `origin` is an error in the check's report that lists the `--remote` choices) and its git remote
+is compared, `origin` when no tracker names one. `--base` applies to the landable check. `--offline` refuses the pushed check (see [Offline](#offline)).
 
 `BRANCH` defaults to the current branch. The `pushed` check fetches `refs/heads/<branch>` from the remote,
 pins the fetched commit and compares it with the local tip: `state` is `equal`, `ahead`, `behind`,
 `diverged` or `missing` (not on the remote), with `ahead` and `behind` counts. `uncommitted`
 counts the changed paths of the worktree that has the branch checked out (null when none does).
-When an open PR/MR of the branch exists in the repository `origin` names, `pr` holds its `number`,
+When an open PR/MR of the branch exists in the repository of that tracker (none when the repository has no usable remote), `pr` holds its `number`,
 `url`, `head`, `head_matches` (its head equals the local tip) and `pipeline` (`sha` and `exists`: a
 check run, status or pipeline exists for the PR/MR head). When only the check or pipeline query
 fails, the PR/MR fields stay, `pipeline.exists` is null and a warning names the cause. When the
@@ -1081,12 +1091,14 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 `agt ci` waits for PR/MR checks and triages GitLab failures.
 
 ```sh
-agt ci wait TARGET... [--timeout SEC] [--interval SEC] [--max-interval SEC]
-agt ci failures <mr> [--limit N]
+agt ci wait TARGET... [--timeout SEC] [--interval SEC] [--max-interval SEC] [--remote NAME|HOST/REPO]
+agt ci failures <mr> [--limit N] [--remote NAME|HOST/REPO]
 ```
 
 `wait` takes one or more targets: GitHub `OWNER/REPO#PR[@SHA]`, GitLab `GROUP/PROJECT!IID[@SHA]`,
-a PR or MR URL, `#PR` or `!IID` in the current repository (named by its `origin` remote), and a
+a PR or MR URL, `#PR` or `!IID` in the current repository (the tracker `agt pr` picks: `--remote <name|host/repo>`, else the
+tracker of `origin`, else the only one; several trackers and no `origin` fail and list the `--remote`
+choices; no tracker at all is an error), and a
 GitLab pipeline id (current repository) or pipeline URL. Without `@SHA` the head read by the first
 poll is pinned, and a later head is a change. `@SHA` on a PR or MR target is for right after a
 push: the target stays pending (`waiting_for_pipeline`) until the head and, on GitLab, a pipeline
@@ -1107,7 +1119,7 @@ query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
 `failures <mr>` is GitLab only (`123`, `!123`, `group/project!123` or an MR URL; without a project the current repository
-is used). It lists the failed and retried jobs of the MR's head pipeline, the failing
+is used, or the tracker `--remote` names). It lists the failed and retried jobs of the MR's head pipeline, the failing
 specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the last
 `--limit` (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
 `pending` or `unclear`.
@@ -1115,10 +1127,12 @@ specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each fa
 ## PR
 
 `agt pr` is one GitHub/GitLab-neutral command for the PR/MR of the current repository; the forge
-comes from the `origin` remote, and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`) must be installed and logged in. Output is JSON.
+comes from the tracker of the `origin` remote (or the tracker `--remote <name|host/repo>`, or a PR/MR URL, names; see
+[Issues](#issues)), and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`) must be installed and logged in. `create`, `update`,
+`merge` and `auto-merge` are refused when `push` was set to `off` for the tracker. Output is JSON.
 
 ```sh
-agt pr view [<n>|<url>] [--branch B]
+agt pr [--remote R] view [<n>|<url>] [--branch B]
 agt pr list [--mine] [--branch B] [--state open|merged|all]
 agt pr create --title T [--body B] [--base BRANCH] [--draft]
 agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--draft[=false]]
@@ -1339,7 +1353,7 @@ roots = ["~/Projects/*/*", "~/projects/*/*"]
 
 `agt cleanup --only worktrees` finds work that already landed in the default branch and removes it: in the current repository, or with `--all-repos` in every repository under the roots. Its report is the `worktrees` field of the cleanup report. Without `--yes` it prints the plan (`plan: true`; per repository `remove`, `delete`, `kept` and `warnings`, each candidate with its `verdict`, `evidence` and the exact `action`) and changes nothing except fetching PR heads into the object store. With `--yes` the lists are `removed` (`path`, backup `id` and `ref`), `deleted` (`branch`, `tip`, `verdict`, `evidence`, `restore`: the `git branch <name> <tip>` that brings it back), `kept` (`branch` or `path`, `verdict`, `reason`) (a `closed` row also carries the PR/MR's `head` sha, `title` and `closed_at`, read from the forge lookup) and `warnings`. `--worktree <branch-or-path>` (repeatable, with or without `--yes`) limits the pass to the named rows: a name is a local branch or a worktree path, a worktree row and its branch go together, and unnamed rows are never judged or touched. Each named row is judged exactly as the plan judges it, so it is acted on only while it still qualifies; one that does not is listed under the repository's `skipped` (the `kept` row, with its reason, in place of `kept`), and a name that matches no row (protected, unknown or gone) is listed in `worktrees.skipped` with a reason. It never touches the default branch, `main`, `master` or `develop` by name, the main checkout's branch, the current branch or the worktree holding the current directory, and it never deletes a remote branch, pushes, closes a PR, resets or discards files.
 
-A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or `origin` is neither GitHub nor GitLab, the repository's PRs/MRs for that source branch are listed (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. An open PR gives `open` (kept, even when an older PR merged); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from `origin` and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). The forge host is found from `origin` as `agt review` finds it, including its `hosts.json`.
+A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or the repository has no tracker that serves pull requests (every git remote on a known GitHub or GitLab host is one under the default `[sync] remotes = "all"`; `pull = "off"` drops one), the PRs/MRs for that source branch are listed on every such tracker (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. An open PR on any tracker gives `open` (kept, even when an older PR merged); a PR merged on any one tracker lands the branch; a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from the tracker's git remote and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). Each forge host is found as `agt review` finds it, including its `hosts.json`.
 
 A linked worktree whose branch is `merged` or `squash-merged`, or whose detached HEAD is in the default branch, is removed first, exactly as `remove --yes` does (snapshot backup, then `git worktree remove --force` once), and then its branch is deleted. It is kept when it is locked, missing, holds a submodule or a nested git repository `remove` would refuse, has a live Claude Code session in it (as `remove`), or any process with its current directory inside it (native process APIs on macOS, `/proc/*/cwd` on Linux; unreadable individual processes are skipped, but a failed process enumeration keeps the worktree and reports the reason). It is kept as `recent` when anything in it changed in the last 3 days (its HEAD commit time, the mtime of its git dir's `HEAD`, `index` or `logs/HEAD`, or of any tracked or untracked non-ignored file), so a worktree just made by `create` survives, unless `--recent` is passed. It is also kept as `dirty` when it has modified tracked files or untracked files that are not disposable, unless `--dirty` is passed; the snapshot preserves them either way. It is kept as `dirty` too when its `ignored_lost` list is not empty, unless `--dirty` is passed: no backup keeps those files. It is checked again after the remove hooks run, so a file a hook leaves keeps the worktree too. A kept worktree keeps its branch. Each `remove` row also lists `ignored_lost`, as `remove` does. With `--yes`, stderr announces each step as it starts (`agt: removing <path> (<verdict>)`, `agt: deleting branch <branch>`); stdout keeps the JSON report.
 
@@ -1480,39 +1494,108 @@ when mise pins `github:brandonocasey/agt` (no pin is ok). All subprocesses share
 GitHub/GitLab mirrors and remote publication are optional.
 
 Global configuration lives in `$XDG_CONFIG_HOME/agt/config.toml` (`~/.config` when unset).
-The main checkout's `.config/agt.toml` overrides fields, including explicit `false`;
+The main checkout's `.config/agt.toml` overrides fields, except that it cannot lower a `push` mode;
 arrays replace inherited arrays. Linked worktrees read the main checkout's configuration.
 No configuration file is required. Unknown keys and invalid values name their file and key.
 
 ```toml
-[forge]
-post = false                # allow comments, approvals and issue changes on GitHub/GitLab
-
-[sync]
-auto_pull = false           # fetch stale remote data before reads
-auto_push = false           # send changed issues and newly completed review runs
+[sync]                      # defaults for issues and pull requests
+pull = "manual"             # manual | auto (pulling is always allowed on a command)
+push = "off"                # off | manual | auto
 max_age_secs = 300          # minimum age before an automatic pull
+remotes = "all"             # all | origin | none: which git remotes become trackers
 
-# Optional: select a tracker instead of inferring the supported origin.
-[[issues.tracker]]
-forge = "github"            # or "gitlab"
+[issues]                    # overrides [sync] for issues
+push = "manual"
+
+[pull_requests]             # overrides [sync] for reviews and `agt pr`
+pull = "auto"
+
+[[tracker]]                 # shared by issues and pull requests (the default)
 host = "github.com"
 repo = "owner/repo"         # GitLab: the full project path
-scope = "involved"          # involved (default) | assigned | all
-since_days = 90             # first sync only; later syncs use the watermark
-# push = false              # explicitly prohibit writes for this tracker
+push = "auto"               # this tracker, both kinds
+issues = { scope = "assigned" }   # issues only: scope (involved | assigned | all), since_days
+
+[[tracker]]                 # issues only
+forge = "gitlab"            # only for a host agt cannot identify
+host = "gitlab.example.com"
+repo = "team/tickets"
+pull_requests = false
+
+[[tracker]]                 # drop a remote that became a tracker for pull requests
+host = "github.com"
+repo = "upstream-org/agt"
+pull_requests = false
 ```
 
-agt sends no comments, approvals or issue changes until the global file or the
-repository's `.config/agt.toml` sets `[forge] post = true`; a `false` in one file never
-overrides a `true` in the other. Without it,
-`review publish`, `qa publish` and `issue push` keep everything local, exit 0 and print
-why on stderr, and `auto_push` sends nothing and prints a skipped line. Their `--dry-run` previews still work. `agt pr` commands
-are not affected. With posting on, `push = true` permits a tracker's writes;
-it never enables automatic publication. Omitted push permissions permit explicit
-commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching
-tracker or supported `origin`. Unrelated global trackers do not participate automatically.
-Missing or ambiguous automatic destinations preserve local data and report the problem.
+One `[[tracker]]` list serves issues and pull requests. "Pull requests" means review sync and
+publish, and the writes of `agt pr`.
+
+Trackers come first from the git remotes. `[sync] remotes` chooses which: `all` (the
+default) every remote (`origin`, `upstream`, then the rest by name), `origin` only `origin`,
+`none` only the configured entries. A remote becomes a tracker only when its URL names a
+repository on a host agt knows to be GitHub or GitLab. A `[[tracker]]` at the same host and
+repository (ASCII case ignored) overrides the fields of that tracker; any other entry adds one.
+`enabled = false` drops a tracker, and `issues = false` or `pull_requests = false` drops it for that
+kind. `issues` and `pull_requests` can also be a table that overrides `pull` and `push` for that
+kind; for issues also `scope` and `since_days`. `forge` is needed only for a host agt cannot
+identify. `remote` names the git remote of an entry (filled in for remotes) and lets `--remote`
+select it.
+
+Each tracker has a `pull` and a `push` mode per kind, from the first of these that sets it: the
+kind table of the tracker, the tracker, `[issues]` or `[pull_requests]`, `[sync]`, then the
+defaults `pull = "manual"` and `push = "off"`.
+
+| Mode | Meaning |
+| --- | --- |
+| `off` | `push` only, and its default. Nothing is sent; explicit commands keep work local and say which key to set. |
+| `manual` | Only explicit commands reach the forge. This is the `pull` default. |
+| `auto` | Explicit commands, plus automatic stale reads (`pull`) and automatic sending after a change (`push`). |
+
+`pull` has no `off`: pulling is always allowed on an explicit command, and `pull = "off"` is a
+configuration error naming the key. The old `[sync] auto_pull = false` means `manual`.
+
+`agt issue sync` and `agt review sync` always pull, then push the local changes of every tracker
+whose `push` is `manual` or `auto`, with the same sending code and safety rules as `issue push`
+and `review publish` (a review of someone else's PR/MR is never published). With the default
+`push = "off"` they only pull, and the report says the push was kept local. `issue push` and
+`review publish` only push. `issue sync` pulls every issue tracker, each with its own `scope`
+(default `involved`). `review sync` without `--pr` refreshes only the reviews already in the
+local store, on whichever tracker each belongs to (`--remote` limits it to one), and never
+imports a new PR/MR; `--pr <n|url>` starts a local review of one, as `review run` on a branch can.
+
+`agt pr create`, `update`, `merge` and `auto-merge` are refused only when `push` was set to
+`off` explicitly; unset, they stay allowed. Reads of any command are never refused by `push`.
+`review publish`, `qa publish` and `issue push` need `manual` or `auto`: with `off`, or unset,
+they keep everything local, exit 0 and print why on stderr, naming the key. Their `--dry-run`
+previews still work.
+
+Commands that act on one PR/MR choose the tracker in this order: `--remote <name|host/repo>`,
+the repository of the PR/MR URL given, the tracker a synced review target stores, the tracker
+of `origin`, the only tracker. When several remain and none is `origin`, the command fails and
+lists the `--remote` choices. Without any tracker for a repository whose `origin` names a host
+agt cannot identify, `origin` is used as before. `agt ci` and `agt branch check` choose their tracker
+the same way and take `--remote`. `agt cleanup` instead asks every pull request tracker for the PRs/MRs of a branch, and a PR/MR merged on any of them counts as landed. `--tracker` on `agt issue` selects an issue
+destination by key or `owner/repo`; `issue sync` pulls every issue tracker; automatic issue work uses only the tracker of `origin` unless `--tracker` is given.
+
+The repository's `.config/agt.toml` can raise a `push` mode but never lower the global one:
+where both files set the same `push`, the higher of `off`, `manual`, `auto` wins. A
+`[[tracker]]` in the repository file whose host and repository match no remote of that
+repository is ignored, with a warning.
+
+The older keys still load and are rewritten, with one `agt: config: ... is deprecated; use ...`
+line on stderr per key and file:
+
+| Old | New |
+| --- | --- |
+| `[forge] post = false` | `[sync] push = "off"` |
+| `post = true` | `[sync] push = "manual"`, or `"auto"` with `[sync] auto_push = true` |
+| `[sync] auto_pull = true` or `false` | `[sync] pull = "auto"` or `"manual"` |
+| `[[issues.tracker]]` | `[[tracker]]` with `pull_requests = false`; `scope` and `since_days` move into `issues = { ... }` |
+| `push = false` on an issue tracker | `issues = { push = "off" }` |
+
+An old key and its new key in one file are an error that names both.
 
 `involved` includes issues you created, are assigned or (GitHub only) are mentioned in.
 GitLab has no mentions filter. Credentials come from `gh` and `glab`.
@@ -1526,12 +1609,12 @@ Host and repository comparisons ignore ASCII case; existing tracker keys stay un
 
 ### Auto-sync of issues
 
-Reads (`list`, `show`, `status`) stay local unless
-`sync.auto_pull = true`. Enabled pulls refresh applicable trackers when unsynced
+Reads (`list`, `show`, `status`) stay local unless a tracker's issue `pull` is `auto`.
+Enabled pulls refresh applicable trackers when unsynced
 or at least `max_age_secs` old. Failures back off for that interval and print
 `agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
 
-With `sync.auto_push = true` and `forge.post = true`, mutations with a remote representation send only
+With `push = "auto"` for the tracker, mutations with a remote representation send only
 the changed issue after saving it. Its pending content is eligible; untouched
 issues remain local. Notes and local links never trigger publication or get sent.
 Automatic failures preserve queued changes. Private data is never included in remote bodies.

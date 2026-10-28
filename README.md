@@ -99,8 +99,8 @@ Most commands return JSON for agents and scripts.
 Activity and diagnostic commands also provide readable tables or text.
 
 Issues and reviews stay local by default.
-Syncing reads remote data; publishing or pushing sends eligible local changes, only after `[forge] post = true` is set in the configuration.
-Automatic pulls and pushes are separate settings, both off by default.
+`agt issue sync` and `agt review sync` always pull (review sync only refreshes reviews already stored; `--pr` starts one), then push local changes only where `[sync] push` is `"manual"` or `"auto"`; the default `off` only pulls. `issue push` and `review publish` only push.
+One `[[tracker]]` list, filled from all your git remotes (`[sync] remotes = "all"`; `"origin"` and `"none"` narrow it), serves issues and pull requests. `pull` (`manual`, `auto`) and `push` (`off`, `manual`, `auto`) modes are set once in `[sync]` and can be overridden for issues, for pull requests and for each tracker. The default is manual pulls and no pushes.
 `--offline` (also `AGT_OFFLINE=1`) is a global flag that blocks network access: the issue and review commands stay local, `agt pr`, `agt ci` and the remote checks refuse to run, and `agt branch check` and `agt worktree` skip the remote refresh. The reference lists each command's behavior.
 
 Repository records live in the main checkout's `.agt/` directory, shared by linked worktrees.

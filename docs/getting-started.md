@@ -100,12 +100,12 @@ Review runs and passes record its findings and the changes reviewed.
 
 The issue and question above remain on your machine.
 You can keep working locally or connect a supported GitHub or GitLab repository.
-Remote commands use the repository's `origin` and an authenticated `gh` or `glab`.
-Issues can also use an explicitly configured tracker.
+Remote commands use the trackers filled from the repository's git remotes (every remote on a GitHub or GitLab host, `origin` first; `[sync] remotes = "origin"` limits that to `origin`) and an authenticated `gh` or `glab`. Commands that act on one PR, `agt ci` and `agt branch check` pick the tracker of `origin`, else the only one; `--remote` chooses another. `agt cleanup` looks for a merged PR on every tracker.
+Other remotes, or repositories you name in a `[[tracker]]`, can serve issues and pull requests too; `--remote` picks one.
 
 Read [review sync and publication](reference.md#sync) or [issue sync](reference.md#issues) before sharing records.
 Both offer previews of outgoing changes: `review publish --dry-run` and `issue push --dry-run`.
-These previews can read remote data but do not publish it. Sending needs `[forge] post = true` in `~/.config/agt/config.toml` or the repository's `.config/agt.toml`.
+These previews can read remote data but do not publish it. Sending needs `push = "manual"` (or `"auto"`) under `[sync]` in `~/.config/agt/config.toml` or the repository's `.config/agt.toml`; `off` is the default. `issue sync` and `review sync` always pull, then send only where `push` allows it.
 
 Automatic syncing is optional; [the sync settings](reference.md#issues) control pulls and pushes separately.
 Use only the parts of `agt` that fit your work.

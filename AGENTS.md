@@ -34,9 +34,19 @@ import a domain module and domain modules never import each other;
 
 `agt issue` and `agt review` stay local by default. Global TOML configuration lives in
 `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's `.config/agt.toml` overrides fields.
-`[sync] auto_pull = true` enables stale reads; `auto_push = true` enables publication
-of the changed issue or newly completed review run. Work stays local and nothing is posted, automatic or explicit,
-until the global or repository file sets `[forge] post = true`; dry runs stay allowed.
+One `[[tracker]]` list (auto-filled from the git remotes picked by `[sync] remotes`, default `all`)
+serves issues and pull requests (reviews and `agt pr`); an entry can be limited with
+`issues = false` or `pull_requests = false`. `[sync]` sets `pull` (`manual | auto`; `off` is a config error) and `push` (`off | manual | auto`)
+once; `[issues]`, `[pull_requests]` and each tracker (or its kind table) override them, in that
+order of precedence. `pull = "auto"` enables stale reads (explicit commands always pull); `issue sync` and `review sync` pull, then push where `push` is `manual`/`auto` (`review sync` without `--pr` refreshes stored reviews only; `issue push`/`review publish` push only);  `push = "auto"` enables publication
+of the changed issue or newly completed review run. Defaults: `pull = "manual"`, `push = "off"`:
+work stays local and nothing is posted, automatic or explicit, until `push` is `manual` or `auto`
+for the tracker; dry runs stay allowed. `agt pr` writes are refused only when `push` was set to `off`
+explicitly. The repository file can raise a `push` mode, never lower the global one. The old
+`[forge] post`, `[sync] auto_pull`/`auto_push` and `[[issues.tracker]]` keys still load, map to the
+new ones and warn once. `src/forge/select.rs` picks the tracker for one PR/MR (`--remote`, PR URL,
+stored review, `origin`, the only one); `agt ci` and `agt branch check` use it too (`--remote`), while
+`agt cleanup` asks every pull request tracker for a branch's PR/MR (`forge::landed::Source`) and a PR merged on any counts as landed.
 
 `src/forge/auto.rs` holds shared policy and the 15-second automatic-call deadline.
 `src/issue/auto.rs` and `src/review/commands/auto.rs` choose the eligible records.
