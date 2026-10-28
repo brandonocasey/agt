@@ -399,3 +399,142 @@ fn all_takes_no_name_and_no_target() {
     let error = failure(&agt(&env, &["status"], &["--all", "feat"], &[]));
     assert!(error.contains("--all"), "{error}");
 }
+
+fn respond_open_pulls(env: &Env, nodes: &[Value]) {
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "owner=acme",
+            "-f",
+            "name=app",
+            "-f",
+            "query=OpenPulls",
+        ],
+        &json!({"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": nodes,
+        }}}})
+        .to_string(),
+    );
+}
+
+#[test]
+fn a_relative_worktree_path_names_the_branch() {
+    let (env, _, _) = reviewed();
+    env.git(&["switch", "-q", "main"]);
+    let tree = env.path("trees").join("rel-tree");
+    env.git(&["worktree", "add", "-q", tree.to_str().unwrap(), "feat"]);
+    let relative = tree
+        .strip_prefix(env.repo.parent().unwrap())
+        .map(|rest| format!("../{}", rest.display()))
+        .unwrap();
+    let status = top(&env, &[&relative]);
+    assert_eq!(status["branch"], "feat", "{relative}");
+}
+
+#[test]
+fn a_fork_pull_does_not_resolve_to_a_same_named_local_branch() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    let mut fork = gh_pull(9, "feat", "2026-10-20T08:00:00Z");
+    fork["isCrossRepository"] = json!(true);
+    respond_open_pulls(&env, &[fork]);
+    let error = failure(&agt(&env, &["status"], &["9"], &[]));
+    assert!(error.contains("9 is no known PR/MR"), "{error}");
+}
+
+#[test]
+fn a_url_for_another_repository_is_not_origins_number() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    respond_open_pulls(&env, &[gh_pull(9, "feat", "2026-10-20T08:00:00Z")]);
+    let error = failure(&agt(
+        &env,
+        &["status"],
+        &["https://github.com/someone/else/pull/9"],
+        &[],
+    ));
+    assert!(error.contains("is no known PR/MR"), "{error}");
+}
+
+#[test]
+fn a_failing_forge_call_falls_back_to_a_local_name() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    // No response is registered for the open PR/MR query, so the forge call fails.
+    let tree = env.path("trees").join("123");
+    env.git(&["worktree", "add", "-q", tree.to_str().unwrap(), "feat"]);
+    let status = top(&env, &["123"]);
+    assert_eq!(status["branch"], "feat");
+}
+
+#[test]
+fn the_summary_drops_local_targets_whose_branch_is_gone() {
+    let (env, _, _) = reviewed();
+    local_only(&env, "scratch");
+    env.git(&["switch", "-q", "main"]);
+    env.git(&["branch", "-D", "scratch"]);
+    let summary = success(&agt(&env, &["status"], &["--all"], &[]));
+    let branches: Vec<&Value> = summary["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| &row["branch"])
+        .collect();
+    assert_eq!(branches, [&json!("feat")], "{summary}");
+}
+
+#[test]
+fn a_pull_does_not_take_a_target_that_holds_another_review() {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    env.run(&["sync"]);
+    let mut pull = gh_pull(77, "feat", "2026-10-20T08:00:00Z");
+    pull["url"] = json!("https://github.com/me/repo/pull/77");
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "owner=me",
+            "-f",
+            "name=repo",
+            "-f",
+            "query=OpenPulls",
+        ],
+        &json!({"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": [pull],
+        }}}})
+        .to_string(),
+    );
+    let summary = success(&agt(env, &["status"], &["--all"], &[]));
+    let row = summary["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["mr"] == 77)
+        .unwrap();
+    assert_eq!(row["target"], Value::Null, "{summary}");
+}
+
+#[test]
+fn sync_refuses_all_and_status_target_conflicts_with_range() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    let error = failure(&agt(&env, &["status"], &["--all", "--sync"], &[]));
+    assert!(error.contains("--all"), "{error}");
+    let output = agt(
+        &env,
+        &["status"],
+        &["--target", "x", "--range", "a..b"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}

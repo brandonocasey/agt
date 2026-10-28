@@ -105,7 +105,7 @@ pub struct ReportArgs {
 #[derive(Args)]
 pub struct StatusCli {
     /// Use this stored target key instead of the current branch.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "range")]
     pub target: Option<String>,
     /// Report a commit (`<rev>`) or a range (`<from>..<to>`) instead of the current branch.
     #[arg(long)]

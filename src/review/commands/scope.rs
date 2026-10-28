@@ -572,16 +572,22 @@ impl Ctx {
     /// branch leaves the selection alone, so the current work tree is still evaluated.
     pub(super) fn resolve_name(&mut self, name: &str) -> Result<()> {
         let targets = self.store.targets(&self.dir)?;
+        let mut forge_error = None;
         let named = match crate::forge::parse_pr(name) {
-            Ok(pr) => match self.named_pr(&pr, &targets)? {
-                Some(named) => Some(named),
-                None => self.named_local(name, &targets)?,
+            Ok(pr) => match self.named_pr(&pr, &targets) {
+                Ok(Some(named)) => Some(named),
+                Ok(None) => self.named_local(name, &targets)?,
+                Err(why) => {
+                    forge_error = Some(why);
+                    self.named_local(name, &targets)?
+                }
             },
             Err(_) => self.named_local(name, &targets)?,
         };
         let Some(named) = named else {
+            let note = forge_error.map_or_else(String::new, |why| format!(" ({why})"));
             return fail(format!(
-                "{name} is no known PR/MR, worktree or branch with review or QA records"
+                "{name} is no known PR/MR, worktree or branch with review or QA records{note}"
             ));
         };
         let branch = match named {
@@ -614,7 +620,12 @@ impl Ctx {
             .iter()
             .filter(|target| {
                 target.review.as_ref().is_some_and(|review| {
-                    review.number == pr.number && pr.forge.is_none_or(|forge| forge == review.forge)
+                    review.number == pr.number
+                        && pr.forge.is_none_or(|forge| forge == review.forge)
+                        && pr
+                            .location
+                            .as_ref()
+                            .is_none_or(|(host, repo)| *host == review.host && *repo == review.repo)
                 })
             })
             .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
@@ -624,13 +635,20 @@ impl Ctx {
         if crate::forge::auto::Offline::current().is_set() {
             return Ok(None);
         }
+        // A URL for another repository than origin names a number origin does not own.
+        if let Some(location) = &pr.location
+            && self.repo.origin_location()?.as_ref() != Some(location)
+        {
+            return Ok(None);
+        }
         let Some(origin) = crate::forge::landed::Origin::of(&self.repo)? else {
             return Ok(None);
         };
+        // A fork's head branch name says nothing about local branches of the same name.
         Ok(origin
             .open_pulls()?
             .into_iter()
-            .find(|pull| pull.number == pr.number)
+            .find(|pull| pull.number == pr.number && pull.same_repo)
             .map(|pull| Named::Branch(pull.head_branch)))
     }
 
@@ -638,9 +656,18 @@ impl Ctx {
     /// error that names both.
     fn named_local(&self, name: &str, targets: &[Target]) -> Result<Option<Named>> {
         let mut branches: Vec<String> = Vec::new();
+        let wanted = std::env::current_dir()
+            .map(|cwd| cwd.join(name))
+            .ok()
+            .map(|path| path.canonicalize().unwrap_or(path));
         for worktree in self.repo.worktrees()? {
+            let path = worktree
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| worktree.path.clone());
             let named = !worktree.bare
                 && (worktree.path == Path::new(name)
+                    || wanted.as_ref().is_some_and(|wanted| *wanted == path)
                     || worktree.path.file_name().is_some_and(|base| base == name));
             if let (true, Some(branch)) = (named, worktree.branch) {
                 branches.push(branch);

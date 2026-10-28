@@ -2,6 +2,7 @@
 //! detail, or a summary of every open PR/MR. At a terminal it prints text; piped, or with
 //! `--json`, the status JSON.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::IsTerminal;
 
@@ -109,9 +110,10 @@ pub(super) fn summary_line(thread: &Thread) -> Option<String> {
     Some(format!("{cut}…"))
 }
 
-/// The commits of `history` (oldest first) after the newest one that a check ran on, matched by
-/// head or by tree so a rebase that changes no content still counts as tested, and that commit.
-/// Without checks every commit is untested.
+/// The commits of `history` that are not reachable from the newest commit a check ran on,
+/// matched by head or by tree so a rebase that changes no content still counts as tested, and
+/// that commit. Reachability, not list position, so an older commit merged in later is still
+/// untested. Merges are not listed. Without checks every commit is untested.
 fn untested<'a>(
     history: &'a [LogEntry],
     target: Option<&Target>,
@@ -126,11 +128,26 @@ fn untested<'a>(
             .iter()
             .any(|check| check.head.as_deref() == Some(&entry.sha) || check.tree == entry.tree)
     });
-    let after = tested.map_or(0, |index| index + 1);
+    let by_sha: HashMap<&str, &LogEntry> = history
+        .iter()
+        .map(|entry| (entry.sha.as_str(), entry))
+        .collect();
+    let mut covered: HashSet<&str> = HashSet::new();
+    let mut pending: Vec<&str> = tested
+        .map(|index| history[index].sha.as_str())
+        .into_iter()
+        .collect();
+    while let Some(sha) = pending.pop() {
+        if let Some(entry) = by_sha.get(sha)
+            && covered.insert(entry.sha.as_str())
+        {
+            pending.extend(entry.parents.iter().map(String::as_str));
+        }
+    }
     (
-        history[after..]
+        history
             .iter()
-            .filter(|entry| entry.parents.len() < 2)
+            .filter(|entry| entry.parents.len() < 2 && !covered.contains(entry.sha.as_str()))
             .collect(),
         tested.map(|index| history[index].sha.as_str()),
     )
@@ -447,6 +464,14 @@ fn local_targets(ctx: &Ctx) -> Result<Vec<Target>> {
         .collect())
 }
 
+/// Whether the target's branch still exists, so merged and deleted branches drop out.
+fn on_local_branch(ctx: &Ctx, target: &Target) -> bool {
+    target
+        .branch
+        .as_ref()
+        .is_some_and(|branch| ctx.repo.commit(&format!("refs/heads/{branch}")).is_ok())
+}
+
 fn stored_row(target: Target) -> Row {
     let review = target.review.clone();
     Row {
@@ -502,9 +527,18 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
                         })
                     })
                     .or_else(|| {
-                        stored
-                            .iter()
-                            .position(|target| target.branch.as_deref() == Some(&pull.head_branch))
+                        // A fork's branch name proves nothing, and a target with another
+                        // PR/MR's review is that one's.
+                        if !pull.same_repo {
+                            return None;
+                        }
+                        stored.iter().position(|target| {
+                            target.branch.as_deref() == Some(&pull.head_branch)
+                                && target
+                                    .review
+                                    .as_ref()
+                                    .is_none_or(|review| review.number == pull.number)
+                        })
                     });
                 mrs.push(Row {
                     number: Some(pull.number),
@@ -519,14 +553,15 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
             local.extend(
                 stored
                     .into_iter()
-                    .filter(|target| target.review.is_none())
+                    .filter(|target| target.review.is_none() && on_local_branch(ctx, target))
                     .map(stored_row),
             );
         }
         None => {
             for target in stored {
                 match target.review.as_ref().map(|review| review.state) {
-                    None => local.push(stored_row(target)),
+                    None if on_local_branch(ctx, &target) => local.push(stored_row(target)),
+                    None => {}
                     Some(crate::store::model::ReviewState::Open) => mrs.push(stored_row(target)),
                     Some(_) => {}
                 }
@@ -665,9 +700,9 @@ fn summary_text(summary: &Value, section: Section) -> String {
                     || "-".to_owned(),
                     |number| {
                         // GitHub says `#12`, GitLab `!12`.
-                        let github = entry["url"]
-                            .as_str()
-                            .is_some_and(|url| url.contains("/pull/"));
+                        let github = entry["url"].as_str().is_some_and(|url| {
+                            url.contains("github.com/") && url.contains("/pull/")
+                        });
                         format!("{}{number}", if github { '#' } else { '!' })
                     },
                 ),
@@ -714,11 +749,11 @@ fn summary_text(summary: &Value, section: Section) -> String {
 mod tests {
     use super::*;
 
-    fn entry(sha: &str, tree: &str, parents: usize) -> LogEntry {
+    fn entry(sha: &str, tree: &str, parents: &[&str]) -> LogEntry {
         LogEntry {
             sha: sha.to_owned(),
             tree: tree.to_owned(),
-            parents: vec!["p".to_owned(); parents],
+            parents: parents.iter().map(|parent| (*parent).to_owned()).collect(),
             subject: format!("subject {sha}"),
         }
     }
@@ -745,7 +780,7 @@ mod tests {
 
     #[test]
     fn every_commit_is_untested_without_checks() {
-        let history = [entry("a", "ta", 1), entry("b", "tb", 1)];
+        let history = [entry("a", "ta", &["z"]), entry("b", "tb", &["a"])];
         let (commits, head) = untested(&history, None);
         assert_eq!(commits.len(), 2);
         assert_eq!(head, None);
@@ -754,9 +789,9 @@ mod tests {
     #[test]
     fn commits_after_the_tested_head_are_untested() {
         let history = [
-            entry("a", "ta", 1),
-            entry("b", "tb", 1),
-            entry("c", "tc", 1),
+            entry("a", "ta", &["z"]),
+            entry("b", "tb", &["a"]),
+            entry("c", "tc", &["b"]),
         ];
         let target = tested(Some("a"), "elsewhere");
         let (commits, head) = untested(&history, Some(&target));
@@ -772,7 +807,7 @@ mod tests {
 
     #[test]
     fn a_rebase_with_the_same_tree_counts_as_tested() {
-        let history = [entry("a2", "ta", 1), entry("b2", "tb", 1)];
+        let history = [entry("a2", "ta", &["z"]), entry("b2", "tb", &["a2"])];
         let target = tested(Some("a-before-rebase"), "tb");
         let (commits, head) = untested(&history, Some(&target));
         assert!(commits.is_empty());
@@ -781,9 +816,29 @@ mod tests {
 
     #[test]
     fn merges_are_not_counted_as_untested_commits() {
-        let history = [entry("a", "ta", 1), entry("m", "tm", 2)];
+        let history = [entry("a", "ta", &["z"]), entry("m", "tm", &["a", "o"])];
         let target = tested(Some("a"), "x");
         assert!(untested(&history, Some(&target)).0.is_empty());
+    }
+
+    #[test]
+    fn an_older_commit_merged_in_after_the_tested_head_is_untested() {
+        // `old` is listed first but is not an ancestor of the tested `t`.
+        let history = [
+            entry("old", "to", &["z"]),
+            entry("t", "tt", &["z"]),
+            entry("m", "tm", &["t", "old"]),
+        ];
+        let target = tested(Some("t"), "x");
+        let (commits, head) = untested(&history, Some(&target));
+        assert_eq!(head, Some("t"));
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| commit.sha.as_str())
+                .collect::<Vec<_>>(),
+            ["old"]
+        );
     }
 
     fn status_json() -> Value {
@@ -886,6 +941,13 @@ mod tests {
             summary_text(&github, Section::All)
                 .lines()
                 .any(|line| line.starts_with("#4"))
+        );
+        let other =
+            json!({"targets": [{"mr": 5, "url": "https://git.example/o/pull/5", "branch": "x"}]});
+        assert!(
+            summary_text(&other, Section::All)
+                .lines()
+                .any(|line| line.starts_with("!5"))
         );
         let review = summary_text(&summary, Section::Review);
         assert!(!review.contains("UNTESTED") && !review.contains("QA"));

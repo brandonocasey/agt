@@ -21,6 +21,10 @@ mod publish;
 mod qa;
 mod report;
 mod run;
+
+pub fn run(cli: Cli) -> Result<Output> {
+    run_with(cli, Section::Review)
+}
 mod scope;
 mod status;
 mod sync;
@@ -64,10 +68,6 @@ struct Scope {
     /// The default branch the base was taken against: `--default-branch`, else the target's.
     default_branch: Option<String>,
     existing: Option<Target>,
-}
-
-pub fn run(cli: Cli) -> Result<Output> {
-    run_with(cli, Section::Review)
 }
 
 /// `agt status`: the review command's status over review and QA together.
@@ -120,7 +120,26 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
     let preview = matches!(cli.command, Command::Publish { dry_run: true, .. }) && !approving;
     // `--sync` writes through its own repository so the read itself stays read-only.
     if let Some(first) = sync_first {
-        let writer = Ctx::new(selection.clone(), false, false, false)?;
+        let mut writer = Ctx::new(selection.clone(), false, false, false)?;
+        if let Command::Status { report: args, .. } = &cli.command {
+            if args.all {
+                return fail("--sync syncs one PR/MR and cannot be combined with --all");
+            }
+            if args.name.is_some() {
+                report::select(&mut writer, args)?;
+                let pinned = writer.selection.target.clone();
+                let has_review = match &pinned {
+                    Some(key) => writer
+                        .store
+                        .load(&writer.dir, key)?
+                        .is_some_and(|target| target.review.is_some()),
+                    None => true,
+                };
+                if !has_review && first.pr.is_none() {
+                    return fail("--sync needs a NAME whose target has a PR/MR; pass --pr");
+                }
+            }
+        }
         sync::sync(&writer, first.pr.as_deref())?;
     }
     let mut ctx = open_ctx(
