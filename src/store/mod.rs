@@ -141,7 +141,7 @@ impl Store {
 
     pub fn load(&self, dir: &Path, key: &str) -> Result<Option<Target>> {
         validate_key(key)?;
-        read_target(&dir.join(format!("{key}.json")), self.schema)
+        read_target(&doc_path(dir, key), self.schema)
     }
 
     pub fn targets(&self, dir: &Path) -> Result<Vec<Target>> {
@@ -305,7 +305,7 @@ impl Store {
         validate_key(key)?;
         create_dir(dir)?;
         let _lock = lock_file(&dir.join(format!(".{key}.lock")))?;
-        let path = dir.join(format!("{key}.json"));
+        let path = doc_path(dir, key);
         let current = read_target_for_write(&path, self.schema)?;
         let expected = current.as_ref().map(|target| target.revision);
         let mut target = current.unwrap_or_else(init);
@@ -366,8 +366,8 @@ impl Store {
         };
         let _first = lock_file(first)?;
         let _second = lock_file(second)?;
-        let from_path = dir.join(format!("{from}.json"));
-        let to_path = dir.join(format!("{to}.json"));
+        let from_path = doc_path(dir, from);
+        let to_path = doc_path(dir, to);
         let old = read_target_for_write(&from_path, self.schema)?;
         let current = read_target_for_write(&to_path, self.schema)?;
         let expected = current.as_ref().map(|target| target.revision);
@@ -393,6 +393,11 @@ impl Store {
         }
         Ok(result)
     }
+}
+
+/// The file of the document `name` in `dir`.
+pub fn doc_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.json"))
 }
 
 /// The lock file of the document `name` in `dir`.

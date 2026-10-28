@@ -17,7 +17,7 @@ use crate::store::issues::{Issue, TRACKER_FILE};
 use crate::store::model::Target;
 use crate::store::prune::PRUNE_AFTER_SECS;
 use crate::store::prune::backups::Backup;
-use crate::store::{Namespace, Store};
+use crate::store::{Namespace, Store, doc_path};
 use crate::task::prune::{Expired, expired as expired_tasks, orphan_locks};
 
 pub const CATEGORIES: [&str; 11] = [
@@ -169,7 +169,7 @@ impl Plan {
             if !expired(&target, now)? {
                 continue;
             }
-            let path = dir.join(format!("{}.json", target.key));
+            let path = doc_path(dir, &target.key);
             let repository = store.relative(dir);
             let key = if repository.is_empty() {
                 target.key.clone()
@@ -210,7 +210,7 @@ impl Plan {
         }
         let mut bytes = 0;
         for target in &repo.targets {
-            let path = dir.join(format!("{}.json", target.key));
+            let path = doc_path(&dir, &target.key);
             // Expired targets are items of their own, with their own bytes.
             let planned = self
                 .items
@@ -276,7 +276,7 @@ impl Plan {
                             continue;
                         }
                         let name = issue.doc_name();
-                        let path = dir.join(format!("{name}.json"));
+                        let path = doc_path(&dir, &name);
                         self.add(
                         "issues",
                         path.clone(),
@@ -313,7 +313,7 @@ impl Plan {
                         continue;
                     }
                     // A cache entry nothing can read is only ever replaced by a run of its exact key.
-                    let path = store.root().join(format!("{}.json", left.name));
+                    let path = doc_path(store.root(), &left.name);
                     self.add(
                         "checks",
                         path.clone(),
@@ -331,7 +331,7 @@ impl Plan {
                         continue;
                     }
                     let name = entry.key.clone();
-                    let path = store.root().join(format!("{name}.json"));
+                    let path = doc_path(store.root(), &name);
                     self.add(
                         "checks",
                         path.clone(),

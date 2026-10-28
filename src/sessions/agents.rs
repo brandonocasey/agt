@@ -17,6 +17,7 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use crate::core::harness::Harness;
+use crate::core::local;
 use crate::core::transcripts::Transcript;
 use crate::core::transcripts::json::{get, head, key, text};
 use crate::sessions::fmt::{self, tok};
@@ -108,10 +109,14 @@ fn shell_read(command: &str, home: &Path) -> Option<String> {
     {
         return None;
     }
-    match path.strip_prefix("~/") {
-        Some(rest) => Some(format!("{}/{rest}", home.display())),
-        None if path.starts_with('/') => Some(path.to_owned()),
-        None => None,
+    if path.starts_with("~/") {
+        Some(
+            local::expand_home(path, home)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        path.starts_with('/').then(|| path.to_owned())
     }
 }
 

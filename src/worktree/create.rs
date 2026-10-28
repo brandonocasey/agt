@@ -49,7 +49,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     if branch.starts_with('-') || !repo.succeeds(&["check-ref-format", &full])? {
         return fail(format!("{branch} is not a valid branch name"));
     }
-    let exists = repo.succeeds(&["show-ref", "--verify", "--quiet", &full])?;
+    let exists = repo.ref_commit(&full)?.is_some();
     if exists && cli.base.is_some() {
         return fail(format!(
             "{branch} exists; --base applies to a new branch only"
@@ -72,7 +72,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         .is_some_and(|resolved| !resolved.is_empty(hooks::Kind::Create));
     let mut value = match checked_out {
         Some(entry) => {
-            let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
+            let commit = Repo::at(&entry.path).head()?;
             json!({"path": entry.path, "branch": branch, "commit": commit, "reused": true})
         }
         None => {
@@ -142,7 +142,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 /// any failure to ask is an error rather than a silent new branch.
 fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
     let tracking = format!("refs/remotes/origin/{branch}");
-    let known = || repo.succeeds(&["show-ref", "--verify", "--quiet", &tracking]);
+    let known = || repo.ref_commit(&tracking).map(|tip| tip.is_some());
     if known()? {
         return Ok(true);
     }
@@ -259,7 +259,7 @@ fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
     value["warnings"] = json!(warnings);
     value["path"] = json!(dir);
     value["branch"] = json!(branch);
-    value["commit"] = json!(inside.git(&["rev-parse", "HEAD"])?);
+    value["commit"] = json!(inside.head()?);
     value["submodules"] = json!(submodules);
     Ok(value)
 }

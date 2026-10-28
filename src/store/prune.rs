@@ -13,7 +13,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use super::schema::read_target_intact;
-use super::{Store, ctx, fail, lock_path, publish_lock_path, validate_key};
+use super::{Store, ctx, doc_path, fail, lock_path, publish_lock_path, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{is_current, try_lock_file};
 use crate::store::model::Target;
@@ -71,7 +71,7 @@ impl Store {
             path: &publish_path,
             unlink: created,
         };
-        let path = dir.join(format!("{key}.json"));
+        let path = doc_path(dir, key);
         // A file with fields this agt does not know may be newer than it; it stays.
         let Some(Ok(target)) = read_target_intact(&path, self.schema)? else {
             return Ok(Removal::Kept);

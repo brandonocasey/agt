@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::json::persist_json;
 use super::prune::{Removal, remove_with_lock};
 use super::schema::{lost_field_of, parse_versioned, refuse_lost_field};
-use super::{Store, create_dir, ctx, fail, lock_path, validate_key};
+use super::{Store, create_dir, ctx, doc_path, fail, lock_path, validate_key};
 use crate::core::error::Result;
 use crate::core::local::{lock_file, try_lock_file};
 use crate::core::local::{read_dir_opt, read_json};
@@ -57,7 +57,7 @@ impl Store {
 
     pub fn load_doc<T: DeserializeOwned>(&self, dir: &Path, name: &str) -> Result<Option<T>> {
         validate_key(name)?;
-        let path = dir.join(format!("{name}.json"));
+        let path = doc_path(dir, name);
         read_json::<Value>(&path)?
             .map(|document| self.parse_doc(&path, document).map(|(doc, _)| doc))
             .transpose()
@@ -181,7 +181,7 @@ impl Store {
         validate_key(name)?;
         create_dir(dir)?;
         let _lock = lock_file(&lock_path(dir, name))?;
-        let path = dir.join(format!("{name}.json"));
+        let path = doc_path(dir, name);
         let mut doc = match read_json::<Value>(&path)? {
             Some(document) => {
                 let (doc, document): (T, _) = self.parse_doc(&path, document)?;
@@ -207,7 +207,7 @@ impl Store {
         validate_key(name)?;
         let lock = lock_path(dir, name);
         let _lock = lock_file(&lock)?;
-        let path = dir.join(format!("{name}.json"));
+        let path = doc_path(dir, name);
         if fs::symlink_metadata(&path).is_err()
             || self.read_doc_intact::<T>(&path).is_ok()
             || self.is_newer(&path)
@@ -230,7 +230,7 @@ impl Store {
         let Some(_lock) = try_lock_file(&lock)? else {
             return Ok(Removal::Busy);
         };
-        let path = dir.join(format!("{name}.json"));
+        let path = doc_path(dir, name);
         let Some(document) = read_json::<Value>(&path)? else {
             return Ok(Removal::Kept);
         };
@@ -255,11 +255,11 @@ impl Store {
         };
         let _first = lock_file(first)?;
         let _second = lock_file(second)?;
-        let target = dir.join(format!("{to}.json"));
+        let target = doc_path(dir, to);
         if target.exists() {
             return fail(format!("{} already exists", target.display()));
         }
-        let source = dir.join(format!("{from}.json"));
+        let source = doc_path(dir, from);
         fs::rename(&source, &target).map_err(ctx(format!("move {}", source.display())))?;
         fs::remove_file(&from_lock).map_err(ctx(format!("remove {}", from_lock.display())))?;
         Ok(())

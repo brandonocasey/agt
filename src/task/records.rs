@@ -30,7 +30,7 @@ pub(super) fn is_id(id: &str) -> bool {
 }
 
 pub(super) fn task_path(id: &str) -> Result<PathBuf> {
-    Ok(files::root()?.join(format!("{id}.json")))
+    Ok(crate::store::doc_path(&files::root()?, id))
 }
 
 pub(super) fn read_task(id: &str) -> Result<Value> {

@@ -193,6 +193,16 @@ pub fn hostname() -> String {
     String::from_utf8_lossy(&buffer[..length]).into_owned()
 }
 
+/// `~` and `~/...` as the `home` directory; any other text is a path as it is.
+pub fn expand_home(text: &str, home: &Path) -> PathBuf {
+    match text.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(format!("{}{rest}", home.display()))
+        }
+        _ => PathBuf::from(text),
+    }
+}
+
 pub fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .filter(|home| !home.is_empty())

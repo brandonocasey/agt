@@ -19,11 +19,9 @@ pub fn repositories() -> Result<Vec<PathBuf>> {
     let home = local::home()?;
     let mut found = Vec::new();
     for pattern in patterns {
-        let pattern = match pattern.strip_prefix("~/") {
-            Some(rest) => format!("{}/{rest}", home.display()),
-            None if pattern == "~" => home.display().to_string(),
-            None => pattern,
-        };
+        let pattern = local::expand_home(&pattern, &home)
+            .to_string_lossy()
+            .into_owned();
         for path in expand(&pattern) {
             if path.join(".git").is_dir()
                 && let Ok(real) = fs::canonicalize(&path)

@@ -136,8 +136,7 @@ fn update(
 /// stop the local default from moving.
 fn advance_tracking(repo: &Repo, remote: &str, tracked: &str, to: &str) {
     let tracking = format!("refs/remotes/{remote}/{tracked}");
-    let spec = format!("{tracking}^{{commit}}");
-    let Ok(Some(old)) = repo.git_opt(&["rev-parse", "--verify", "--quiet", &spec]) else {
+    let Ok(Some(old)) = repo.ref_commit(&tracking) else {
         return;
     };
     if old != to && repo.is_ancestor(&old, to).unwrap_or(false) {

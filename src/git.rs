@@ -930,7 +930,7 @@ impl Repo {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "repo".to_owned());
         let hash = self.hash_text(&common)?;
-        let short = hash.get(..12).unwrap_or(&hash);
+        let short = crate::core::text::prefix(&hash, 12);
         Ok(format!("local/{name}-{short}"))
     }
 

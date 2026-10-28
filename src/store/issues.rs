@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::{self, Scope};
 use crate::core::local::lock_file;
+use crate::store::doc_path;
 use crate::store::model::{Comment, Forge};
 
 pub const VERSION: u32 = 1;
@@ -279,7 +280,7 @@ impl super::Store {
         super::validate_key(name)?;
         let _source = lock_file(&super::lock_path(source, name))?;
         let _target = lock_file(&super::lock_path(target, name))?;
-        let destination = target.join(format!("{name}.json"));
+        let destination = doc_path(target, name);
         match std::fs::symlink_metadata(&destination) {
             Ok(_) => {
                 return crate::core::error::fail(format!(
@@ -295,7 +296,7 @@ impl super::Store {
                 )));
             }
         }
-        std::fs::rename(source.join(format!("{name}.json")), destination)
+        std::fs::rename(doc_path(source, name), destination)
             .map_err(crate::core::error::ctx("attach local issue"))?;
         for directory in [source, target] {
             std::fs::File::open(directory)

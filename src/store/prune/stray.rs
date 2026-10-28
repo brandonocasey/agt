@@ -4,7 +4,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use super::super::Store;
+use super::super::{Store, doc_path};
 use super::Removal;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::{is_current, read_dir_opt, try_lock};
@@ -126,7 +126,7 @@ pub(super) fn lock_target_gone(dir: &Path, name: &str) -> bool {
     else {
         return false;
     };
-    let exists = |stem: &str| dir.join(format!("{stem}.json")).exists();
+    let exists = |stem: &str| doc_path(dir, stem).exists();
     // `agt issue push` holds `.push.publish.lock` for the whole tracker, which has no `push`
     // document.
     if stem == "push.publish" && exists("tracker") {

@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::super::sidecars::{ACCOUNT_FILE, LOOKUP_FILE, REPO_FILE};
-use super::super::{Store, validate_key};
+use super::super::{Store, doc_path, validate_key};
 use super::presence::{Presence, seen_by_mtime};
 use super::stray::{StrayLock, lock_target_gone};
 use super::{PRUNE_AFTER_SECS, Removal, remove_if_present};
@@ -92,7 +92,7 @@ impl Store {
                 held.push(file);
                 locks.push(lock_path);
             }
-            documents.push(dir.join(format!("{}.json", target.key)));
+            documents.push(doc_path(dir, &target.key));
         }
         for path in &repo.stray_locks {
             match self.lock_stray(path)? {

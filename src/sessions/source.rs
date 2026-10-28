@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::core::harness::Harness;
+use crate::core::local;
 use crate::core::transcripts::{Step, Transcript, Walker, is_scratch, roots};
 use crate::sessions::Scope;
 
@@ -19,16 +20,6 @@ fn modified(path: &Path) -> Option<f64> {
 
 fn wanted(scope: &Scope, harness: Harness) -> bool {
     scope.harness.includes(harness)
-}
-
-/// `~` and `~/...` as the home directory.
-fn expand(text: &str, home: &Path) -> PathBuf {
-    match text.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            PathBuf::from(format!("{}{rest}", home.display()))
-        }
-        _ => PathBuf::from(text),
-    }
 }
 
 /// The transcripts in scope. Prints how many scratch transcripts it skipped.
@@ -52,7 +43,7 @@ pub fn transcripts(scope: &Scope) -> Vec<Transcript> {
         scope
             .roots
             .iter()
-            .map(|root| (expand(root, home), None))
+            .map(|root| (local::expand_home(root, home), None))
             .collect()
     };
     let mut found = Vec::new();

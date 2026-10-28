@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::core::error::{Result, fail};
+use crate::core::text::prefix;
 
 use super::api::{Jobs, Project, RUNNING, id_text, parallel};
 use super::specs::{family, parse_specs};
@@ -138,8 +139,8 @@ pub fn pipeline_failures(
     Ok(result)
 }
 
-fn short(sha: &str) -> String {
-    sha.chars().take(8).collect()
+fn short(sha: &str) -> &str {
+    prefix(sha, 8)
 }
 
 fn day(stamp: &Value) -> String {
