@@ -661,9 +661,16 @@ fn summary_text(summary: &Value, section: Section) -> String {
         .iter()
         .map(|entry| {
             let mut row = vec![
-                entry["mr"]
-                    .as_u64()
-                    .map_or_else(|| "-".to_owned(), |number| format!("!{number}")),
+                entry["mr"].as_u64().map_or_else(
+                    || "-".to_owned(),
+                    |number| {
+                        // GitHub says `#12`, GitLab `!12`.
+                        let github = entry["url"]
+                            .as_str()
+                            .is_some_and(|url| url.contains("/pull/"));
+                        format!("{}{number}", if github { '#' } else { '!' })
+                    },
+                ),
                 entry["branch"].as_str().unwrap_or("-").to_owned(),
                 now.and_then(|now| since(entry["opened_at"].as_str(), now))
                     .unwrap_or_else(|| "-".to_owned()),
@@ -856,7 +863,8 @@ mod tests {
         let summary = json!({
             "note": "offline: PRs/MRs come from stored reviews",
             "targets": [
-                {"mr": 3, "branch": "feat", "opened_at": null, "unreviewed": 1,
+                {"mr": 3, "url": "https://gitlab.com/o/r/-/merge_requests/3", "branch": "feat",
+                 "opened_at": null, "unreviewed": 1,
                  "untested": 2, "open": 1, "fixed": 0, "qa": null},
                 {"mr": null, "branch": "local", "opened_at": null},
             ],
@@ -872,6 +880,13 @@ mod tests {
                 .any(|line| line.starts_with('-') && line.contains("local"))
         );
         assert!(text.contains("(offline: PRs/MRs come from stored reviews)"));
+        let github =
+            json!({"targets": [{"mr": 4, "url": "https://github.com/o/r/pull/4", "branch": "gh"}]});
+        assert!(
+            summary_text(&github, Section::All)
+                .lines()
+                .any(|line| line.starts_with("#4"))
+        );
         let review = summary_text(&summary, Section::Review);
         assert!(!review.contains("UNTESTED") && !review.contains("QA"));
     }
