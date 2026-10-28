@@ -784,6 +784,26 @@ fn automatic_create_attaches_one_issue_and_returns_its_canonical_key() {
 }
 
 #[test]
+fn auto_push_without_forge_post_sends_nothing() {
+    let fake: Fake = &crate::support::issue::Github;
+    let env = pushable(fake, &[issue()]);
+    env.write_config(&format!(
+        "{}\n[sync]\nauto_push = true\n[forge]\npost = false\n",
+        fake.config(true)
+    ));
+    let calls = env.forge_calls().len();
+    let output = env.issue_exec(&["comment", "1", "Thanks"], "", &[]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("auto_push needs `[forge] post = true`"),
+        "{stderr}"
+    );
+    assert_eq!(env.forge_calls().len(), calls);
+    assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
+}
+
+#[test]
 fn automatic_failure_preserves_local_save_and_explicit_false_denies_network() {
     let fake: Fake = &crate::support::issue::Github;
     let env = Env::new();

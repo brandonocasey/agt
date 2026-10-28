@@ -649,7 +649,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 ### Auto-sync
 
 Review commands stay local by default. Enable `sync.auto_pull` to fetch before
-`list`, `show` and `status`. Enable `sync.auto_push` to publish after `run end`.
+`list`, `show` and `status`. Enable `sync.auto_push` and `forge.post` to publish after `run end`.
 Global settings live in `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's
 `.config/agt.toml` overrides individual fields. See [Issues](#issues) for the table.
 
@@ -677,6 +677,8 @@ local reads continue.
 
 ## Publish
 
+- Only with `[forge] post = true` in the global configuration ([Issues](#issues));
+  otherwise only `--dry-run` works.
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
   threads imported from the host (other people's threads); our findings, local
@@ -1476,9 +1478,11 @@ since_days = 90             # first sync only; later syncs use the watermark
 # push = false              # explicitly prohibit writes for this tracker
 ```
 
-agt posts nothing to GitHub or GitLab until `[forge] post = true`: `review publish`,
-`qa publish` and `issue push` fail with an error, and `auto_push` sends nothing. Their
-`--dry-run` previews still work. With posting on, `push = true` permits a tracker's writes;
+agt sends no comments, approvals or issue changes until the global file sets
+`[forge] post = true`; a repository's `.config/agt.toml` cannot turn it on. Without it,
+`review publish`, `qa publish` and `issue push` fail with an error, and `auto_push` sends
+nothing and prints a skipped line. Their `--dry-run` previews still work. `agt pr` commands
+are not affected. With posting on, `push = true` permits a tracker's writes;
 it never enables automatic publication. Omitted push permissions permit explicit
 commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching
 tracker or supported `origin`. Unrelated global trackers do not participate automatically.
