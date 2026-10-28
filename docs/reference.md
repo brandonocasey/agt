@@ -283,7 +283,31 @@ agt review status
 agt review status --head 1a2b3c4
 agt review status --full                         # plus commits, runs, records
 agt review status --sync                         # import the PR/MR first
+agt review status '!12'                          # a PR/MR, worktree or branch by name
+agt review status --all                          # every open PR/MR, as a table
+agt status [NAME]                                # review and QA together
+agt qa status [NAME]                             # QA only
 ```
+
+`NAME` is a PR/MR (`12`, `#12`, `!12` or its URL), a worktree (directory name or
+path) or a branch, tried in that order, and defaults to the current branch. A PR/MR
+uses the stored target with that number, else asks the forge for its head branch.
+A name that matches two different branches fails and lists both. `NAME` does not
+combine with `--target`, `--range` or `--all`.
+
+At a terminal, the three status commands print a report; piped, or with `--json`,
+they print JSON, so scripts see the same keys as before plus new ones. `review
+status` hides QA and `qa status` shows only QA. The report shows the PR/MR (link,
+branch, author, age, state), `N of M commits unreviewed` with each commit, the open
+findings and held questions, the commits untested since the newest commit a check
+ran on (a rebase with the same tree counts as tested), and what was fixed with each
+fix commit. New JSON keys: `opened_at`, `untested_commits`, `tested_head` and
+`fixed` (`threads`, `checks`).
+
+`--all` prints `MR | BRANCH | OPENED | UNREVIEWED | UNTESTED | OPEN | FIXED | QA`:
+open PRs/MRs from the forge, oldest first, then local targets that have records but
+no PR/MR. Offline, or without a forge, it lists the stored open reviews and notes
+that. Its JSON is `{repo, offline, note, targets: [...]}`.
 
 `list` prints threads (each with `current`: the anchor mapped to `HEAD`, or
 for imported threads the host's path, line and outdated state) and killed
@@ -356,7 +380,7 @@ EOF
 agt qa check --run qa-4f2a --name "checkout total" --outcome fail --env browser=chrome
 agt qa finding --check qa-4f2a.k2 --type bug --severity high --body "The total ignores the coupon."
 agt qa run end --run qa-4f2a
-agt qa status                       # latest outcome per check, blockers, approvable
+agt qa status                       # latest outcome per check, blockers, approvable (also `[NAME]`, `--all`)
 agt qa approve                      # refused while anything blocks
 agt qa publish --dry-run            # as agt review publish
 ```

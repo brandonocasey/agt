@@ -17,7 +17,7 @@ mise run test
 `cargo test` also works without nextest. `rust-version = "1.95"` is the floor; mise pins a newer toolchain.
 
 `mise run install` installs the binary into `~/.cargo/bin`. Commands run as
-`agt review <command>`, `agt qa <command>`, `agt issue <command>`, `agt cleanup`, `agt sessions <command>`, `agt ps`, `agt worktree <command>`, `agt branch <command>`, `agt wait`, `agt ci`, `agt secrets`, `agt pr`, `agt check` and `agt doctor`; the integration helper `Env::agt` prepends
+`agt review <command>`, `agt qa <command>`, `agt status` (review and QA report; `src/review/commands/report.rs`), `agt issue <command>`, `agt cleanup`, `agt sessions <command>`, `agt ps`, `agt worktree <command>`, `agt branch <command>`, `agt wait`, `agt ci`, `agt secrets`, `agt pr`, `agt check` and `agt doctor`; the integration helper `Env::agt` prepends
 `review` and `Env::issue*` (in `support/issue.rs`, with the fake issue tracker) prepend `issue`.
 
 ## Layout
