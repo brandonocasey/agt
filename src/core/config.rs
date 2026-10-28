@@ -143,11 +143,14 @@ impl Config {
     fn load_paths(global: &Path, local: &Path) -> Result<Self> {
         let mut merged = read_value(global)?;
         let overrides = read_value(local)?;
+        // Posting is on when either file turns it on; one file's `false` never revokes the other.
+        let post = posts(&merged) || posts(&overrides);
         merge_values(&mut merged, overrides);
-        let config: Self = merged.try_into().map_err(|error: toml::de::Error| {
+        let mut config: Self = merged.try_into().map_err(|error: toml::de::Error| {
             Error(format!("parse {}: {}", local.display(), error.message()))
         })?;
         config.validate(local)?;
+        config.forge.post = post;
         Ok(config)
     }
 
@@ -199,6 +202,14 @@ fn read_value(path: &Path) -> Result<toml::Value> {
         .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
     config.validate(path)?;
     Ok(value)
+}
+
+fn posts(value: &toml::Value) -> bool {
+    value
+        .get("forge")
+        .and_then(|forge| forge.get("post"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn merge_values(base: &mut toml::Value, overrides: toml::Value) {
@@ -291,6 +302,8 @@ mod tests {
         assert!(Config::load_paths(&global, &local).unwrap().forge.post);
         std::fs::write(&global, "[forge]\npost = true\n").unwrap();
         std::fs::write(&local, "").unwrap();
+        assert!(Config::load_paths(&global, &local).unwrap().forge.post);
+        std::fs::write(&local, "[forge]\npost = false\n").unwrap();
         assert!(Config::load_paths(&global, &local).unwrap().forge.post);
     }
 

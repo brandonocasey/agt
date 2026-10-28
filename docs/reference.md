@@ -1479,7 +1479,8 @@ since_days = 90             # first sync only; later syncs use the watermark
 ```
 
 agt sends no comments, approvals or issue changes until the global file or the
-repository's `.config/agt.toml` sets `[forge] post = true`. Without it,
+repository's `.config/agt.toml` sets `[forge] post = true`; a `false` in one file never
+overrides a `true` in the other. Without it,
 `review publish`, `qa publish` and `issue push` fail with an error, and `auto_push` sends
 nothing and prints a skipped line. Their `--dry-run` previews still work. `agt pr` commands
 are not affected. With posting on, `push = true` permits a tracker's writes;
