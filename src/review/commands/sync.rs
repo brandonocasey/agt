@@ -76,13 +76,19 @@ impl Connection {
 pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
     if pr.is_none()
         && let Some(key) = &ctx.selection.target
-        && let Some(review) = ctx
-            .store
-            .load(&ctx.dir, key)?
-            .and_then(|target| target.review)
+        && let Some(target) = ctx.store.load(&ctx.dir, key)?
     {
         // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`.
-        return connection_of(&review);
+        if let Some(review) = &target.review {
+            return connection_of(review);
+        }
+        // Without one, the current branch's PR/MR would be imported into another branch's
+        // records.
+        if target.branch.is_none() || target.branch != ctx.repo.current_branch()? {
+            return fail(format!(
+                "target {key} has no PR/MR and is not the current branch's; pass --pr"
+            ));
+        }
     }
     let pr_ref = pr.map(forge::parse_pr).transpose()?;
     let origin = ctx.repo.origin_location()?;

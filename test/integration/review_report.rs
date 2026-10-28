@@ -560,3 +560,25 @@ fn sync_with_an_mr_name_imports_that_mr() {
     assert_eq!(status["target"], "gh-42");
     assert_eq!(status["branch"], "feat");
 }
+
+#[test]
+fn sync_refuses_another_branch_target_without_a_pr() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    local_only(&env, "scratch");
+    let key = top(&env, &["--json"])["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.git(&["switch", "-q", "feat"]);
+    for command in [
+        &["status", "--target", &key, "--sync"][..],
+        &["review", "--target", &key, "sync"],
+    ] {
+        let error = failure(&agt(&env, command, &[], &[]));
+        assert!(
+            error.contains("has no PR/MR and is not the current branch's"),
+            "{error}"
+        );
+    }
+}

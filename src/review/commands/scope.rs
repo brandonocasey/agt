@@ -622,10 +622,12 @@ impl Ctx {
                 target.review.as_ref().is_some_and(|review| {
                     review.number == pr.number
                         && pr.forge.is_none_or(|forge| forge == review.forge)
-                        && pr
-                            .location
-                            .as_ref()
-                            .is_none_or(|(host, repo)| same_location((host.as_str(), repo.as_str()), (review.host.as_str(), review.repo.as_str())))
+                        && pr.location.as_ref().is_none_or(|(host, repo)| {
+                            same_location(
+                                (host.as_str(), repo.as_str()),
+                                (review.host.as_str(), review.repo.as_str()),
+                            )
+                        })
                 })
             })
             .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
@@ -711,8 +713,17 @@ mod tests {
 
     #[test]
     fn locations_match_without_case_or_port() {
-        assert!(same_location(("github.com", "Acme/App"), ("github.com", "acme/app")));
-        assert!(same_location(("gitlab.example.com:8443", "g/p"), ("gitlab.example.com", "g/p")));
-        assert!(!same_location(("github.com", "acme/app"), ("github.com", "acme/other")));
+        assert!(same_location(
+            ("github.com", "Acme/App"),
+            ("github.com", "acme/app")
+        ));
+        assert!(same_location(
+            ("gitlab.example.com:8443", "g/p"),
+            ("gitlab.example.com", "g/p")
+        ));
+        assert!(!same_location(
+            ("github.com", "acme/app"),
+            ("github.com", "acme/other")
+        ));
     }
 }
