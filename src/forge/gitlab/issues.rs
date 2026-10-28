@@ -4,12 +4,12 @@
 use serde_json::{Value, json};
 
 use super::{CAPS, Gitlab, discussions, project_path};
-use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
+use crate::forge::issue;
 use crate::forge::issue::{
-    Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, merge_listing, names,
-    strings,
+    Changes, IssueCaps, IssueData, IssueFetched, IssuePointers, ListQuery, NewIssue, merge_listing,
+    names, strings,
 };
 use crate::forge::service::{IssueService, IssueSubject, Method, Request, Service};
 use crate::forge::{self, CommentData};
@@ -164,31 +164,21 @@ impl Gitlab {
 }
 
 fn parse_issue(item: &Value) -> Result<IssueData> {
-    let what = "GitLab issue";
-    let closed = item["state"] == "closed";
-    Ok(IssueData {
-        number: item["iid"]
-            .as_u64()
-            .ok_or_else(|| Error("GitLab issue has no iid".into()))?,
-        id: field(item, "/id", what)?,
-        url: field(item, "/web_url", what)?,
-        title: forge::text(item, "/title").unwrap_or_default(),
-        body: forge::text(item, "/description").unwrap_or_default(),
-        state: if closed {
-            Category::Closed
-        } else {
-            Category::Open
+    let mut issue = issue::parse_issue(
+        item,
+        "GitLab issue",
+        &IssuePointers {
+            number: "iid",
+            id: "/id",
+            url: "/web_url",
+            body: "/description",
+            author: "/author/username",
         },
-        reason: None,
-        native_state: forge::text(item, "/state").unwrap_or_default(),
-        labels: strings(item, "/labels"),
-        assignees: names(item, "/assignees", "username"),
-        author: forge::text(item, "/author/username"),
-        milestone: forge::text(item, "/milestone/title"),
-        due_date: forge::text(item, "/due_date"),
-        created_at: clock::normalize(&field(item, "/created_at", what)?)?,
-        updated_at: clock::normalize(&field(item, "/updated_at", what)?)?,
-    })
+    )?;
+    issue.labels = strings(item, "/labels");
+    issue.assignees = names(item, "/assignees", "username");
+    issue.due_date = forge::text(item, "/due_date");
+    Ok(issue)
 }
 
 /// A merge request of a `closed_by` or `related_merge_requests` list. Its project is the one

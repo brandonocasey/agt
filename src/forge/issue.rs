@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
 use crate::forge::{self, CommentData};
@@ -108,5 +109,43 @@ pub fn merge_listing(mut issues: Vec<IssueData>) -> Vec<IssueData> {
 
 /// A required, non-empty id or text field.
 pub fn field(value: &Value, pointer: &str, what: &str) -> Result<String> {
-    forge::id(value, pointer).ok_or_else(|| Error(format!("{what} is missing {pointer}")))
+    forge::id(value, pointer).ok_or_else(|| forge::missing(pointer, what))
+}
+
+/// The fields a GitHub and a GitLab issue share, read from the JSON pointers of the host.
+/// The caller sets the rest: `reason`, `labels`, `assignees` and `due_date`.
+pub struct IssuePointers {
+    /// The issue number, `number` on GitHub and `iid` on GitLab.
+    pub number: &'static str,
+    pub id: &'static str,
+    pub url: &'static str,
+    pub body: &'static str,
+    pub author: &'static str,
+}
+
+pub fn parse_issue(item: &Value, what: &str, at: &IssuePointers) -> Result<IssueData> {
+    let closed = item["state"] == "closed";
+    Ok(IssueData {
+        number: item[at.number]
+            .as_u64()
+            .ok_or_else(|| Error(format!("{what} has no {}", at.number)))?,
+        id: field(item, at.id, what)?,
+        url: field(item, at.url, what)?,
+        title: forge::text(item, "/title").unwrap_or_default(),
+        body: forge::text(item, at.body).unwrap_or_default(),
+        state: if closed {
+            Category::Closed
+        } else {
+            Category::Open
+        },
+        reason: None,
+        native_state: forge::text(item, "/state").unwrap_or_default(),
+        labels: Vec::new(),
+        assignees: Vec::new(),
+        author: forge::text(item, at.author),
+        milestone: forge::text(item, "/milestone/title"),
+        due_date: None,
+        created_at: clock::normalize(&field(item, "/created_at", what)?)?,
+        updated_at: clock::normalize(&field(item, "/updated_at", what)?)?,
+    })
 }

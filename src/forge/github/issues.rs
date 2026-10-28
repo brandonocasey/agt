@@ -6,8 +6,10 @@ use super::Github;
 use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
+use crate::forge::issue;
 use crate::forge::issue::{
-    Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue, field, merge_listing, names,
+    Changes, IssueCaps, IssueData, IssueFetched, IssuePointers, ListQuery, NewIssue, field,
+    merge_listing, names,
 };
 use crate::forge::service::{
     IssueService, IssueSubject, Method, Pagination, Request, Service, Var,
@@ -156,31 +158,21 @@ impl IssueService for Github {
 }
 
 fn parse_issue(item: &Value) -> Result<IssueData> {
-    let what = "GitHub issue";
-    let closed = item["state"] == "closed";
-    Ok(IssueData {
-        number: item["number"]
-            .as_u64()
-            .ok_or_else(|| Error("GitHub issue has no number".into()))?,
-        id: field(item, "/node_id", what)?,
-        url: field(item, "/html_url", what)?,
-        title: forge::text(item, "/title").unwrap_or_default(),
-        body: forge::text(item, "/body").unwrap_or_default(),
-        state: if closed {
-            Category::Closed
-        } else {
-            Category::Open
+    let mut issue = issue::parse_issue(
+        item,
+        "GitHub issue",
+        &IssuePointers {
+            number: "number",
+            id: "/node_id",
+            url: "/html_url",
+            body: "/body",
+            author: "/user/login",
         },
-        reason: forge::text(item, "/state_reason").filter(|_| closed),
-        native_state: forge::text(item, "/state").unwrap_or_default(),
-        labels: names(item, "/labels", "name"),
-        assignees: names(item, "/assignees", "login"),
-        author: forge::text(item, "/user/login"),
-        milestone: forge::text(item, "/milestone/title"),
-        due_date: None,
-        created_at: clock::normalize(&field(item, "/created_at", what)?)?,
-        updated_at: clock::normalize(&field(item, "/updated_at", what)?)?,
-    })
+    )?;
+    issue.reason = forge::text(item, "/state_reason").filter(|_| issue.state == Category::Closed);
+    issue.labels = names(item, "/labels", "name");
+    issue.assignees = names(item, "/assignees", "login");
+    Ok(issue)
 }
 
 fn parse_comment(item: &Value) -> Result<CommentData> {

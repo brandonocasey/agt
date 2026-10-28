@@ -289,7 +289,12 @@ pub fn id(value: &Value, pointer: &str) -> Option<String> {
 }
 
 pub fn required(value: &Value, pointer: &str, what: &str) -> Result<String> {
-    text(value, pointer).ok_or_else(|| Error(format!("{what} is missing {pointer}")))
+    text(value, pointer).ok_or_else(|| missing(pointer, what))
+}
+
+/// The error for a field `what` lacks at `pointer`.
+pub fn missing(pointer: &str, what: &str) -> Error {
+    Error(format!("{what} is missing {pointer}"))
 }
 
 #[cfg(test)]

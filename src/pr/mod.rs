@@ -252,6 +252,46 @@ impl Remote {
         }
     }
 
+    fn create(
+        &self,
+        branch: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<u64> {
+        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
+        match self.origin.forge {
+            Forge::Github => github::create(t, repo, branch, base, title, body, draft),
+            Forge::Gitlab => gitlab::create(t, repo, branch, base, title, body, draft),
+        }
+    }
+
+    fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {
+        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
+        match self.origin.forge {
+            Forge::Github => github::update(t, repo, current, changes),
+            Forge::Gitlab => gitlab::update(t, repo, current, changes),
+        }
+    }
+
+    /// Merges now, without auto-merge.
+    fn merge(&self, pr: &Pr, sha: &str, method: Option<How>) -> Result<()> {
+        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
+        match self.origin.forge {
+            Forge::Github => github::merge(t, repo, pr.number, sha, method),
+            Forge::Gitlab => gitlab::merge(t, repo, pr, sha, method, false),
+        }
+    }
+
+    fn disable_auto(&self, pr: &Pr) -> Result<()> {
+        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
+        match self.origin.forge {
+            Forge::Github => github::disable_auto(t, pr),
+            Forge::Gitlab => gitlab::disable_auto(t, repo, pr.number),
+        }
+    }
+
     /// The open PR/MR of `branch`, else the newest of any state.
     fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
         let mut found = self.list(Some(branch), State::All, false)?;
@@ -276,7 +316,7 @@ impl Remote {
                 if !pr.merge_queue
                     && matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable")
                 {
-                    return github::merge(t, repo, pr.number, sha, Some(how));
+                    return self.merge(pr, sha, Some(how));
                 }
                 github::enable_auto(t, pr, sha, how)
             }
@@ -351,7 +391,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
     Offline::current().forbid("agt pr")?;
     let repo = Repo::discover()?;
     let remote = Remote::connect(&repo)?;
-    let (t, slug) = (remote.service.transport(), remote.origin.repo.as_str());
+    let slug = remote.origin.repo.as_str();
     let shown = |pr: Pr| Ok(Output::Json(pr.json()));
     match command {
         Command::View {
@@ -405,10 +445,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
                     crate::git::branch_name(&full).to_owned()
                 }
             };
-            let made = match remote.origin.forge {
-                Forge::Github => github::create(t, slug, &branch, &base, &title, &body, draft),
-                Forge::Gitlab => gitlab::create(t, slug, &branch, &base, &title, &body, draft),
-            }?;
+            let made = remote.create(&branch, &base, &title, &body, draft)?;
             shown(remote.view(made)?)
         }
         Command::Update {
@@ -438,10 +475,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
             }
             let at = number(&given, &remote)?;
             let current = remote.view(at)?;
-            match remote.origin.forge {
-                Forge::Github => github::update(t, slug, &current, &changes),
-                Forge::Gitlab => gitlab::update(t, slug, &current, &changes),
-            }?;
+            remote.update(&current, &changes)?;
             shown(remote.view(at)?)
         }
         Command::Merge {
@@ -461,12 +495,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
             if auto || current.merge_queue {
                 remote.enable_auto(&current, &current.head_sha, method)?;
             } else {
-                match remote.origin.forge {
-                    Forge::Github => github::merge(t, slug, at, &current.head_sha, method),
-                    Forge::Gitlab => {
-                        gitlab::merge(t, slug, &current, &current.head_sha, method, false)
-                    }
-                }?;
+                remote.merge(&current, &current.head_sha, method)?;
             }
             let after = remote.view(at)?;
             if after.state == ReviewState::Merged {
@@ -517,11 +546,7 @@ fn pause(remote: &Remote, pr: &Pr, key: &str) -> Result<bool> {
         return Ok(false);
     };
     memo::record(key, method)?;
-    let (t, repo) = (remote.service.transport(), remote.origin.repo.as_str());
-    match remote.origin.forge {
-        Forge::Github => github::disable_auto(t, pr),
-        Forge::Gitlab => gitlab::disable_auto(t, repo, pr.number),
-    }?;
+    remote.disable_auto(pr)?;
     Ok(true)
 }
 
