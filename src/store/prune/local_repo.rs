@@ -11,17 +11,15 @@ use super::stray::{StrayLock, lock_target_gone};
 use super::{PRUNE_AFTER_SECS, Removal, remove_if_present};
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::try_lock_file;
+use crate::core::local::{read_dir_opt, try_lock_file};
 use crate::store::model::Target;
 
 impl Store {
     /// What a `local/` repository directory holds, or `None` when it holds anything `prune` may
     /// not delete: a subdirectory, a link, or a file that is not a target, cache or lock.
     pub fn scan_local_repo(&self, dir: &Path, now: i64) -> Result<Option<LocalRepo>> {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return fail(format!("read {}: {error}", dir.display())),
+        let Some(entries) = read_dir_opt(dir)? else {
+            return Ok(None);
         };
         let (mut extras, mut stray_locks, mut documents) = (Vec::new(), Vec::new(), 0);
         for entry in entries {
@@ -161,10 +159,8 @@ fn last_write(dir: &Path, extras: &[PathBuf]) -> i64 {
 
 /// Whether every entry of `dir` is one of `paths`.
 pub(super) fn only_holds(dir: &Path, paths: &[PathBuf]) -> Result<bool> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
-        Err(error) => return fail(format!("read {}: {error}", dir.display())),
+    let Some(entries) = read_dir_opt(dir)? else {
+        return Ok(true);
     };
     for entry in entries {
         let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;

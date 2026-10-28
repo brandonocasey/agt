@@ -6,6 +6,8 @@ mod local_repo;
 mod presence;
 mod stray;
 
+pub use stray::remove_lock_if;
+
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;

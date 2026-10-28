@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::super::Store;
 use super::Removal;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{is_current, try_lock};
+use crate::core::local::{is_current, read_dir_opt, try_lock};
 
 impl Store {
     /// Lock files (`.<key>.lock`, `.<key>.publish.lock`) under the namespace whose document is
@@ -16,10 +16,8 @@ impl Store {
         let mut found = Vec::new();
         let mut pending = vec![self.root.clone()];
         while let Some(dir) = pending.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => return fail(format!("read {}: {error}", dir.display())),
+            let Some(entries) = read_dir_opt(&dir)? else {
+                continue;
             };
             for entry in entries {
                 let entry = entry.map_err(ctx(format!("read {}", dir.display())))?;
@@ -42,21 +40,38 @@ impl Store {
     /// Deletes a lock file from [`Store::stray_locks`] unless it is held or its document came
     /// back.
     pub fn remove_stray_lock(&self, path: &Path) -> Result<Removal> {
-        match self.lock_stray(path)? {
-            StrayLock::Held(file) => delete_stray(&file, path),
-            StrayLock::Busy => Ok(Removal::Busy),
-            StrayLock::Kept => Ok(Removal::Kept),
-        }
+        remove_lock_if(path, lock_target_gone_at)
     }
 
     /// Takes the lock of a stray lock file without waiting. Opening without `create`, so a lock
     /// that vanished stays vanished.
     pub(super) fn lock_stray(&self, path: &Path) -> Result<StrayLock> {
-        match fs::OpenOptions::new().read(true).write(true).open(path) {
-            Ok(file) => lock_stray_file(file, path),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(StrayLock::Kept),
-            Err(error) => fail(format!("open {}: {error}", path.display())),
-        }
+        lock_stray_if(path, lock_target_gone_at)
+    }
+}
+
+/// Deletes the lock file at `path` while holding its lock, unless another process holds it, it
+/// was replaced, or `still_stray` says its document came back. Opening without `create` keeps a
+/// lock that vanished gone.
+pub fn remove_lock_if(
+    path: &Path,
+    still_stray: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<Removal> {
+    match lock_stray_if(path, still_stray)? {
+        StrayLock::Held(file) => delete_stray(&file, path),
+        StrayLock::Busy => Ok(Removal::Busy),
+        StrayLock::Kept => Ok(Removal::Kept),
+    }
+}
+
+fn lock_stray_if(
+    path: &Path,
+    still_stray: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<StrayLock> {
+    match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => lock_stray_file_if(file, path, still_stray),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(StrayLock::Kept),
+        Err(error) => fail(format!("open {}: {error}", path.display())),
     }
 }
 
@@ -70,17 +85,30 @@ pub(super) enum StrayLock {
 /// Locks an opened lock file and checks that it is still the one at `path` and still stray. A
 /// lock file replaced since the open is a different inode, and deleting it would break the
 /// lock its holder believes it has.
+#[cfg(test)]
 pub(super) fn lock_stray_file(file: fs::File, path: &Path) -> Result<StrayLock> {
+    lock_stray_file_if(file, path, lock_target_gone_at)
+}
+
+fn lock_stray_file_if(
+    file: fs::File,
+    path: &Path,
+    still_stray: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<StrayLock> {
     if !try_lock(&file, path)? {
         return Ok(StrayLock::Busy);
     }
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-        return Ok(StrayLock::Kept);
-    };
-    if !is_current(&file, path)? || !lock_target_gone(dir, &name.to_string_lossy()) {
+    if !is_current(&file, path)? || !still_stray(path)? {
         return Ok(StrayLock::Kept);
     }
     Ok(StrayLock::Held(file))
+}
+
+fn lock_target_gone_at(path: &Path) -> Result<bool> {
+    Ok(path
+        .parent()
+        .zip(path.file_name())
+        .is_some_and(|(dir, name)| lock_target_gone(dir, &name.to_string_lossy())))
 }
 
 fn delete_stray(file: &fs::File, path: &Path) -> Result<Removal> {

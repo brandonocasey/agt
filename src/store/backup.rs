@@ -1,16 +1,15 @@
 //! The backup of a namespace taken before its first document is overwritten by a newer schema.
 
 use std::fs::{self, File};
-use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
 use super::{Store, create_dir};
-use crate::core::error::{Result, ctx, fail};
-use crate::core::local::read_json;
+use crate::core::error::{Result, ctx};
 use crate::core::local::{lock_file, sync_dir};
+use crate::core::local::{read_dir_opt, read_json};
 
 impl Store {
     /// Copies the namespace to `backups/<namespace>-v<old version>-<timestamp>/` before the first
@@ -84,10 +83,8 @@ impl Store {
 /// files and anything that is not a plain file or directory.
 pub(super) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     create_dir(to)?;
-    let entries = match fs::read_dir(from) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return fail(format!("read {}: {error}", from.display())),
+    let Some(entries) = read_dir_opt(from)? else {
+        return Ok(());
     };
     for entry in entries {
         let entry = entry.map_err(ctx(format!("read {}", from.display())))?;

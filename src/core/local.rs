@@ -21,6 +21,15 @@ pub fn create_dirs(path: &Path, mode: u32) -> Result<()> {
         .map_err(ctx(format!("create {}", path.display())))
 }
 
+/// Opens the directory `path`, or returns `None` when it does not exist.
+pub fn read_dir_opt(path: &Path) -> Result<Option<fs::ReadDir>> {
+    match fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => fail(format!("read {}: {error}", path.display())),
+    }
+}
+
 /// Creates `path` and its parents with mode 0700 and makes `path` itself 0700.
 pub fn private_dir(path: &Path) -> Result<()> {
     create_dirs(path, 0o700)?;

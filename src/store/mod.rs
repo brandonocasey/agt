@@ -9,7 +9,6 @@ mod schema;
 pub mod sidecars;
 
 use std::fs::{self, DirBuilder, File};
-use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -234,11 +233,11 @@ impl Store {
             None => fail(message),
         };
         while let Some(dir) = pending.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            let entries = match local::read_dir_opt(&dir) {
+                Ok(Some(entries)) => entries,
+                Ok(None) => continue,
                 Err(error) => {
-                    note(&mut warnings, format!("read {}: {error}", dir.display()))?;
+                    note(&mut warnings, error.0)?;
                     continue;
                 }
             };

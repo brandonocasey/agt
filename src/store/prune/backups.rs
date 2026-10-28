@@ -8,7 +8,7 @@ use super::super::{Namespace, Store};
 use super::Removal;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
-use crate::core::local::try_lock_file;
+use crate::core::local::{read_dir_opt, try_lock_file};
 
 /// A backup directory made by `agt` itself: `<namespace>-v<version>-<stamp>[-<n>]`, or the
 /// hidden `.<name>.partial` copy of one that did not finish.
@@ -26,10 +26,8 @@ impl Store {
     /// The backups `agt` made, finished and partial, oldest first. Anything else in the backups
     /// directory belongs to another tool and is not listed.
     pub fn agt_backups(&self) -> Result<Vec<Backup>> {
-        let entries = match fs::read_dir(&self.backups) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return fail(format!("read {}: {error}", self.backups.display())),
+        let Some(entries) = read_dir_opt(&self.backups)? else {
+            return Ok(Vec::new());
         };
         let mut found = Vec::new();
         for entry in entries {

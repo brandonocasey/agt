@@ -1,7 +1,6 @@
 //! Which task records `agt cleanup` may drop, taking the same lock file as a task update.
 
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -9,9 +8,9 @@ use serde_json::Value;
 use super::files;
 use super::records::{is_id, read_task, task_path};
 use crate::core::clock;
-use crate::core::error::{Result, ctx, fail};
-use crate::core::local::{is_current, lock_file_within, try_lock};
-use crate::store::prune::{Removal, past_retention};
+use crate::core::error::{Result, ctx};
+use crate::core::local::{lock_file_within, read_dir_opt};
+use crate::store::prune::{Removal, past_retention, remove_lock_if};
 
 /// A finished task record that is old enough to drop.
 pub struct Expired {
@@ -35,10 +34,8 @@ fn is_expired(task: &Value, now: i64) -> bool {
 /// The expired task records, by id. A record that cannot be read is left alone.
 pub fn expired(now: i64) -> Result<Vec<Expired>> {
     let root = files::root()?;
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return fail(format!("read {}: {error}", root.display())),
+    let Some(entries) = read_dir_opt(&root)? else {
+        return Ok(Vec::new());
     };
     let mut found = Vec::new();
     for entry in entries {
@@ -87,23 +84,17 @@ pub fn remove(task: &Expired, now: i64) -> Result<Removal> {
 /// Task lock files whose record does not exist, sorted.
 pub fn orphan_locks() -> Result<Vec<PathBuf>> {
     let root = files::root()?;
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return fail(format!("read {}: {error}", root.display())),
+    let Some(entries) = read_dir_opt(&root)? else {
+        return Ok(Vec::new());
     };
     let mut found = Vec::new();
     for entry in entries {
         let entry = entry.map_err(ctx(format!("read {}", root.display())))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(id) = name
-            .strip_prefix('.')
-            .and_then(|name| name.strip_suffix(".flock"))
-            .filter(|id| is_id(id))
-        else {
+        let Some(id) = orphan_id(&name) else {
             continue;
         };
-        if entry.file_type().is_ok_and(|kind| kind.is_file()) && !task_path(id)?.exists() {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) && !task_path(&id)?.exists() {
             found.push(entry.path());
         }
     }
@@ -115,26 +106,21 @@ pub fn orphan_locks() -> Result<Vec<PathBuf>> {
 /// holds it, it was replaced, or its record came back. Opening without `create` keeps a lock
 /// that vanished gone.
 pub fn remove_orphan_lock(path: &Path) -> Result<Removal> {
-    let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Removal::Kept),
-        Err(error) => return fail(format!("open {}: {error}", path.display())),
-    };
-    if !try_lock(&file, path)? {
-        return Ok(Removal::Busy);
-    }
-    let id = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix('.')?.strip_suffix(".flock"))
-        .filter(|id| is_id(id));
-    let Some(id) = id else {
-        return Ok(Removal::Kept);
-    };
-    if !is_current(&file, path)? || task_path(id)?.exists() {
-        return Ok(Removal::Kept);
-    }
-    let bytes = file.metadata().map_or(0, |meta| meta.len());
-    fs::remove_file(path).map_err(ctx(format!("remove {}", path.display())))?;
-    Ok(Removal::Removed(bytes))
+    remove_lock_if(path, |path| {
+        let id = path
+            .file_name()
+            .and_then(|name| orphan_id(&name.to_string_lossy()));
+        match id {
+            Some(id) => Ok(!task_path(&id)?.exists()),
+            None => Ok(false),
+        }
+    })
+}
+
+/// The task id of a task lock file name (`.<id>.flock`).
+fn orphan_id(name: &str) -> Option<String> {
+    name.strip_prefix('.')?
+        .strip_suffix(".flock")
+        .filter(|id| is_id(id))
+        .map(str::to_owned)
 }

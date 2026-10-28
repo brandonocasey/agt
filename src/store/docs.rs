@@ -14,8 +14,8 @@ use super::prune::{Removal, remove_with_lock};
 use super::schema::{lost_field_of, parse_versioned, refuse_lost_field};
 use super::{Store, create_dir, ctx, fail, lock_path, validate_key};
 use crate::core::error::Result;
-use crate::core::local::read_json;
 use crate::core::local::{lock_file, try_lock_file};
+use crate::core::local::{read_dir_opt, read_json};
 
 /// A document [`Store::docs_intact_by_name`] left out.
 pub struct DocLeftOut {
@@ -28,10 +28,8 @@ pub struct DocLeftOut {
 
 /// The entries of `dir` in name order; a missing directory has none.
 pub(super) fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
-    let found = match std::fs::read_dir(dir) {
-        Ok(found) => found,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return fail(format!("read {}: {error}", dir.display())),
+    let Some(found) = read_dir_opt(dir)? else {
+        return Ok(Vec::new());
     };
     let mut entries = found
         .collect::<std::io::Result<Vec<_>>>()
