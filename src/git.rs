@@ -873,6 +873,40 @@ impl Repo {
         Ok(written.and_then(|url| split_remote(&url)))
     }
 
+    /// The host and `owner/repo` path of every remote whose URL names a repository, as
+    /// [`Repo::origin_location`] reads `origin`: `origin` first, then `upstream`, then the rest
+    /// by name.
+    pub fn remote_locations(&self) -> Result<Vec<RemoteLocation>> {
+        let mut names: Vec<String> = self
+            .git_opt(&["remote"])?
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        names.sort_by_key(|name| {
+            let rank = match name.as_str() {
+                "origin" => 0,
+                "upstream" => 1,
+                _ => 2,
+            };
+            (rank, name.clone())
+        });
+        let mut found = Vec::new();
+        for name in names {
+            let expanded = self.git_opt(&["remote", "get-url", &name])?;
+            let location = match expanded.and_then(|url| split_remote(&url)) {
+                Some(location) => Some(location),
+                None => self
+                    .git_opt(&["config", "--get", &format!("remote.{name}.url")])?
+                    .and_then(|url| split_remote(&url)),
+            };
+            if let Some((host, repo)) = location {
+                found.push(RemoteLocation { name, host, repo });
+            }
+        }
+        Ok(found)
+    }
+
     /// The absolute git common dir, which names a `local/` repository.
     pub fn common_dir(&self) -> Result<String> {
         self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -1013,6 +1047,16 @@ pub fn text(bytes: Vec<u8>) -> Result<String> {
     Ok(text.trim_end_matches('\n').to_owned())
 }
 
+/// A git remote whose URL names a repository on a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLocation {
+    pub name: String,
+    /// Lowercase.
+    pub host: String,
+    /// `owner/repo`, or a GitLab project path.
+    pub repo: String,
+}
+
 /// Splits a remote URL into its lowercase host and its `owner/repo` path (GitLab subgroups kept).
 pub fn split_remote(url: &str) -> Option<(String, String)> {
     let (authority, path) = match url.split_once("://") {
@@ -1097,6 +1141,40 @@ mod tests {
             Some("/srv/mirror/owner/repo.git")
         );
         assert_eq!(repo.origin_location().unwrap(), expected);
+    }
+
+    #[test]
+    fn remote_locations_list_every_remote_that_names_a_repository() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        let repo = sandboxed(&sandbox);
+        sandbox.git(&root, &["init", "-q"]);
+        assert!(repo.remote_locations().unwrap().is_empty());
+        for (name, url) in [
+            ("zeta", "git@gitlab.com:team/zeta.git"),
+            ("upstream", "https://github.com/up/stream.git"),
+            ("local", "/srv/mirror"),
+            ("origin", "https://GitHub.com/me/fork.git"),
+        ] {
+            sandbox.git(&root, &["remote", "add", name, url]);
+        }
+        let found: Vec<(String, String, String)> = repo
+            .remote_locations()
+            .unwrap()
+            .into_iter()
+            .map(|remote| (remote.name, remote.host, remote.repo))
+            .collect();
+        let expect = |name: &str, host: &str, repo: &str| {
+            (name.to_owned(), host.to_owned(), repo.to_owned())
+        };
+        assert_eq!(
+            found,
+            [
+                expect("origin", "github.com", "me/fork"),
+                expect("upstream", "github.com", "up/stream"),
+                expect("zeta", "gitlab.com", "team/zeta"),
+            ]
+        );
     }
 
     #[test]
