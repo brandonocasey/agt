@@ -30,7 +30,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ForgeConfig {
     /// `false` refuses every comment, approval and issue change agt would send, even from an
-    /// explicit `publish` or `push`; a dry run still works. Read from the global file only.
+    /// explicit `publish` or `push`; a dry run still works.
     #[serde(default)]
     pub post: bool,
 }
@@ -142,19 +142,12 @@ impl Config {
 
     fn load_paths(global: &Path, local: &Path) -> Result<Self> {
         let mut merged = read_value(global)?;
-        // A repository's committed file must not opt the user into posting.
-        let post = merged
-            .get("forge")
-            .and_then(|forge| forge.get("post"))
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false);
         let overrides = read_value(local)?;
         merge_values(&mut merged, overrides);
-        let mut config: Self = merged.try_into().map_err(|error: toml::de::Error| {
+        let config: Self = merged.try_into().map_err(|error: toml::de::Error| {
             Error(format!("parse {}: {}", local.display(), error.message()))
         })?;
         config.validate(local)?;
-        config.forge.post = post;
         Ok(config)
     }
 
@@ -287,15 +280,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_global_file_turns_posting_on() {
+    fn posting_is_off_until_either_file_turns_it_on() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("global.toml");
         let local = dir.path().join("local.toml");
         std::fs::write(&global, "").unwrap();
-        std::fs::write(&local, "[forge]\npost = true\n").unwrap();
+        std::fs::write(&local, "").unwrap();
         assert!(!Config::load_paths(&global, &local).unwrap().forge.post);
+        std::fs::write(&local, "[forge]\npost = true\n").unwrap();
+        assert!(Config::load_paths(&global, &local).unwrap().forge.post);
         std::fs::write(&global, "[forge]\npost = true\n").unwrap();
-        std::fs::write(&local, "[forge]\npost = false\n").unwrap();
+        std::fs::write(&local, "").unwrap();
         assert!(Config::load_paths(&global, &local).unwrap().forge.post);
     }
 

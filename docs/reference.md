@@ -677,7 +677,7 @@ local reads continue.
 
 ## Publish
 
-- Only with `[forge] post = true` in the global configuration ([Issues](#issues));
+- Only with `[forge] post = true` in the global or repository configuration ([Issues](#issues));
   otherwise only `--dry-run` works.
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
@@ -1478,8 +1478,8 @@ since_days = 90             # first sync only; later syncs use the watermark
 # push = false              # explicitly prohibit writes for this tracker
 ```
 
-agt sends no comments, approvals or issue changes until the global file sets
-`[forge] post = true`; a repository's `.config/agt.toml` cannot turn it on. Without it,
+agt sends no comments, approvals or issue changes until the global file or the
+repository's `.config/agt.toml` sets `[forge] post = true`. Without it,
 `review publish`, `qa publish` and `issue push` fail with an error, and `auto_push` sends
 nothing and prints a skipped line. Their `--dry-run` previews still work. `agt pr` commands
 are not affected. With posting on, `push = true` permits a tracker's writes;

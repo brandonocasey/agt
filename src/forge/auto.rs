@@ -117,7 +117,7 @@ pub fn push_config(repo: &crate::git::Repo, offline: Offline) -> Option<Config> 
     Some(config)
 }
 
-/// Refuses `what` unless the global configuration sets `[forge] post = true`.
+/// Refuses `what` unless the configuration sets `[forge] post = true`.
 pub fn require_post(config: &Config, what: &str) -> Result<()> {
     if config.forge.post {
         return Ok(());
@@ -126,7 +126,8 @@ pub fn require_post(config: &Config, what: &str) -> Result<()> {
         .map_or_else(|_| "config.toml".into(), |path| path.display().to_string());
     fail(format!(
         "{what} is off: agt sends no comments, approvals or issue changes to GitHub or GitLab \
-         until `[forge] post = true` is set in {global}; --dry-run shows what would be sent"
+         until `[forge] post = true` is set in {global} or the repository's .config/agt.toml; \
+         --dry-run shows what would be sent"
     ))
 }
 
