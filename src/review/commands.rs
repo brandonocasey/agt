@@ -230,6 +230,10 @@ pub fn run(cli: Cli) -> Result<Output> {
             if !approval.approve && (approval.author.is_set()) {
                 return fail("author flags on publish need --approve");
             }
+            // A refused publish records no approval either.
+            if !dry_run {
+                publish::require_post(&ctx)?;
+            }
             if approval.approve {
                 let approved = approve(&ctx, &approval)?;
                 approval_id = approved["thread"]["id"].as_str().map(str::to_owned);

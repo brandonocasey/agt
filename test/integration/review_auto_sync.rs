@@ -23,9 +23,8 @@ fn review_now(env: &Env, now: i64, args: &[&str], more: &[(&str, &str)]) -> Outp
     let mut vars = vec![("AGT_NOW", now.as_str())];
     vars.extend_from_slice(more);
     let config = env.path("config").join("agt/config.toml");
-    if !config.exists() {
-        fs::create_dir_all(config.parent().unwrap()).unwrap();
-        fs::write(&config, "[sync]\nauto_pull = true\n").unwrap();
+    if !fs::read_to_string(&config).unwrap().contains("[sync]") {
+        env.write_config("[sync]\nauto_pull = true\n");
     }
     env.exec(args, None, &vars)
 }
@@ -457,9 +456,7 @@ fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() 
 }
 
 fn auto_push(env: &Env) {
-    let config = env.path("config").join("agt/config.toml");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(config, "[sync]\nauto_push = true\n").unwrap();
+    env.write_config("[sync]\nauto_push = true\n");
 }
 
 #[test]
@@ -765,6 +762,18 @@ fn offline_run_end_saves_without_automatic_publication() {
     ));
     assert!(ended["ended_at"].is_string());
     assert!(setup.env.forge_calls().is_empty());
+}
+
+#[test]
+fn auto_push_without_forge_post_publishes_nothing() {
+    let setup = Setup::reviewed(ORIGIN);
+    let env = &setup.env;
+    github::login(env);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+    env.write_config("[sync]\nauto_push = true\n[forge]\npost = false\n");
+    let ended = review_json(&env.exec(&["run", "end", "--run", &setup.run], None, &[]));
+    assert!(ended["ended_at"].is_string());
+    assert!(env.forge_calls().is_empty(), "{:?}", env.forge_calls());
 }
 
 #[test]

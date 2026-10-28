@@ -65,6 +65,7 @@ impl Env {
             offline: false,
         };
         env.git(&["init", "-q", "-b", "main"]);
+        env.write_config("");
         env
     }
 
@@ -338,10 +339,16 @@ impl Env {
             .success()
     }
 
-    /// Writes the global `$XDG_CONFIG_HOME/agt/config.toml`.
+    /// Writes the global `$XDG_CONFIG_HOME/agt/config.toml`. Posting to the fake forge is on
+    /// unless `text` has its own `[forge]` table.
     pub fn write_config(&self, text: &str) {
         let dir = self.path("config").join("agt");
         fs::create_dir_all(&dir).unwrap();
+        let text = if text.contains("[forge]") {
+            text.to_owned()
+        } else {
+            format!("{text}\n[forge]\npost = true\n")
+        };
         fs::write(dir.join("config.toml"), text).unwrap();
     }
 

@@ -105,7 +105,7 @@ Issues can also use an explicitly configured tracker.
 
 Read [review sync and publication](reference.md#sync) or [issue sync](reference.md#issues) before sharing records.
 Both offer previews of outgoing changes: `review publish --dry-run` and `issue push --dry-run`.
-These previews can read remote data but do not publish it.
+These previews can read remote data but do not publish it. Sending needs `[forge] post = true` in `~/.config/agt/config.toml`.
 
 Automatic syncing is optional; [the sync settings](reference.md#issues) control pulls and pushes separately.
 Use only the parts of `agt` that fit your work.

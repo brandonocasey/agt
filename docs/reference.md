@@ -49,7 +49,7 @@ Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
 
 | File | Keys and defaults | Described in |
 | --- | --- | --- |
-| `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
+| `$XDG_CONFIG_HOME/agt/config.toml` | `[forge]` `post = false`; `[sync]` `auto_pull = false`, `auto_push = false`, `max_age_secs = 300`; `[[issues.tracker]]` `forge`, `host`, `repo`, `scope = "involved"`, `since_days = 90`, `push` (unset); `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
 | `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
 | `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}` | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
 | `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model | [Sessions](#sessions) |
@@ -388,7 +388,7 @@ agt qa publish --dry-run            # as agt review publish
   `sync` reads to mark the run's record posted. A QA finding is headed
   `**🐛 bug (high)**` on its own line, with the check in the footer
   `> <sub>🧪 agt QA · <check name> · <model></sub>`; it follows the same posting rules as a review
-  finding, so on GitHub, where a general comment cannot be resolved, only the summary lists it. With `sync.auto_push = true`, `run end`
+  finding, so on GitHub, where a general comment cannot be resolved, only the summary lists it. With `sync.auto_push = true` and `forge.post = true`, `run end`
   publishes the ended QA run, as `agt review run end` does.
 
 ## Cleanup
@@ -1458,6 +1458,9 @@ arrays replace inherited arrays. Linked worktrees read the main checkout's confi
 No configuration file is required. Unknown keys and invalid values name their file and key.
 
 ```toml
+[forge]
+post = false                # allow comments, approvals and issue changes on GitHub/GitLab
+
 [sync]
 auto_pull = false           # fetch stale remote data before reads
 auto_push = false           # send changed issues and newly completed review runs
@@ -1473,7 +1476,9 @@ since_days = 90             # first sync only; later syncs use the watermark
 # push = false              # explicitly prohibit writes for this tracker
 ```
 
-`push = true` permits writes;
+agt posts nothing to GitHub or GitLab until `[forge] post = true`: `review publish`,
+`qa publish` and `issue push` fail with an error, and `auto_push` sends nothing. Their
+`--dry-run` previews still work. With posting on, `push = true` permits a tracker's writes;
 it never enables automatic publication. Omitted push permissions permit explicit
 commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching
 tracker or supported `origin`. Unrelated global trackers do not participate automatically.
@@ -1496,7 +1501,7 @@ Reads (`list`, `show`, `status`) stay local unless
 or at least `max_age_secs` old. Failures back off for that interval and print
 `agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
 
-With `sync.auto_push = true`, mutations with a remote representation send only
+With `sync.auto_push = true` and `forge.post = true`, mutations with a remote representation send only
 the changed issue after saving it. Its pending content is eligible; untouched
 issues remain local. Notes and local links never trigger publication or get sent.
 Automatic failures preserve queued changes. Private data is never included in remote bodies.

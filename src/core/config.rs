@@ -21,6 +21,18 @@ pub struct Config {
     pub worktree: Worktree,
     #[serde(default)]
     pub sync: SyncConfig,
+    #[serde(default)]
+    pub forge: ForgeConfig,
+}
+
+/// What agt may write to GitHub or GitLab.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgeConfig {
+    /// `false` refuses every comment, approval and issue change agt would send, even from an
+    /// explicit `publish` or `push`; a dry run still works.
+    #[serde(default)]
+    pub post: bool,
 }
 
 /// When a read pulls from the forge first.

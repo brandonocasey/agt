@@ -69,6 +69,9 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Discard { key } => local::discard(&store, filter, key)?,
         Command::Push { dry_run, force } => {
             let mut config = Config::load_for_repo(&repo)?;
+            if !dry_run {
+                crate::forge::auto::require_post(&config, "issue push")?;
+            }
             trackers::destinations(&mut config, &repo, filter, false)?;
             if !dry_run {
                 auto::attach_pending(&store, &config, filter)?;

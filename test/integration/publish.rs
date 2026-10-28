@@ -14,6 +14,31 @@ use crate::support::{Env, args, executable, fixture, numbered, strs};
 
 // GitHub
 
+/// Without `[forge] post = true` a publish, with or without `--approve`, sends nothing and
+/// records no approval; a dry run still shows the payloads.
+#[test]
+fn publish_refuses_without_forge_post() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    env.write_config("[forge]\npost = false\n");
+    let calls = env.forge_calls().len();
+    let error = env.fail(&["publish", "--pr", "42"], None);
+    assert!(error.contains("[forge] post = true"), "{error}");
+    let error = env.fail(&["publish", "--pr", "42", "--approve"], None);
+    assert!(error.contains("[forge] post = true"), "{error}");
+    assert_eq!(env.forge_calls().len(), calls);
+    assert!(!env.run(&["list"]).to_string().contains("approval"));
+    let preview = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    assert_eq!(preview["dry_run"], true);
+    assert!(
+        !preview["writes"].as_array().unwrap().is_empty(),
+        "{preview}"
+    );
+    assert_never_posted(env);
+}
+
 /// A comment marked `posting` is stored and shown without a `began_at` key: agent-review 0.4.0
 /// refuses to write documents with fields it does not know.
 #[test]

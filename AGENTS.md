@@ -35,7 +35,8 @@ import a domain module and domain modules never import each other;
 `agt issue` and `agt review` stay local by default. Global TOML configuration lives in
 `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's `.config/agt.toml` overrides fields.
 `[sync] auto_pull = true` enables stale reads; `auto_push = true` enables publication
-of the changed issue or newly completed review run.
+of the changed issue or newly completed review run. Nothing is posted, automatic or explicit,
+until `[forge] post = true`; dry runs stay allowed.
 
 `src/forge/auto.rs` holds shared policy and the 15-second automatic-call deadline.
 `src/issue/auto.rs` and `src/review/commands/auto.rs` choose the eligible records.

@@ -99,7 +99,7 @@ Most commands return JSON for agents and scripts.
 Activity and diagnostic commands also provide readable tables or text.
 
 Issues and reviews stay local by default.
-Syncing reads remote data; publishing or pushing sends eligible local changes.
+Syncing reads remote data; publishing or pushing sends eligible local changes, only after `[forge] post = true` is set in the configuration.
 Automatic pulls and pushes are separate settings, both off by default.
 `--offline` (also `AGT_OFFLINE=1`) is a global flag that blocks network access: the issue and review commands stay local, `agt pr`, `agt ci` and the remote checks refuse to run, and `agt branch check` and `agt worktree` skip the remote refresh. The reference lists each command's behavior.
 

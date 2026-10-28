@@ -108,7 +108,20 @@ pub fn skipped(reason: &str) {
 /// The configuration when auto-push is on and the command is not offline; otherwise `None`,
 /// with a configuration that cannot be read left as a skipped-sync line on stderr.
 pub fn push_config(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {
-    load_unless_offline(repo, offline).filter(|config| config.sync.auto_push)
+    load_unless_offline(repo, offline).filter(|config| config.sync.auto_push && config.forge.post)
+}
+
+/// Refuses `what` unless the configuration sets `[forge] post = true`.
+pub fn require_post(config: &Config, what: &str) -> Result<()> {
+    if config.forge.post {
+        return Ok(());
+    }
+    let global = crate::core::config::path()
+        .map_or_else(|_| "config.toml".into(), |path| path.display().to_string());
+    fail(format!(
+        "{what} is off: agt posts nothing to GitHub or GitLab until `[forge] post = true` is set \
+         in {global} or the repository's .config/agt.toml; --dry-run shows what would be sent"
+    ))
 }
 
 fn load_unless_offline(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {

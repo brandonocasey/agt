@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 
 use super::sync::{self, Connection};
 use super::{Ctx, random_id};
+use crate::core::config::Config;
 use crate::core::error::{Error, Result, fail};
+use crate::forge::auto;
 use crate::forge::service::Capabilities;
 use crate::store::model::{PostState, RemoteKind, RemoteThread, Target};
 use exec::run_writes;
@@ -31,6 +33,9 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
     let Options {
         dry_run, not_own, ..
     } = *options;
+    if !dry_run {
+        require_post(ctx)?;
+    }
     let connection = sync::connect(ctx, pr)?;
     let _publish_lock = if dry_run {
         None
@@ -96,6 +101,12 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
         "skipped": skipped.iter().map(Skipped::view).collect::<Vec<_>>(),
         "sync": synced,
     }))
+}
+
+/// Refuses a publish that would post while the configuration does not allow posting.
+pub(super) fn require_post(ctx: &Ctx) -> Result<()> {
+    let config = Config::load_for_repo(&ctx.repo)?;
+    auto::require_post(&config, "publish")
 }
 
 /// Marks the completed run `selected` as published to the PR/MR at `url`.
