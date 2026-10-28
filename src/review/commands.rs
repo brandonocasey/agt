@@ -94,6 +94,10 @@ fn sync_first_for(selection: &Selection, command: &Command, first: &SyncFirst) -
     let mut writer = Ctx::new(selection.clone(), false, false, false)?;
     let mut pr = first.pr.clone();
     if let Command::Status { report: args, .. } = command {
+        report::check_flags(
+            selection.target.is_some() || selection.range.is_some(),
+            args,
+        )?;
         if args.all {
             return fail("--sync syncs one PR/MR and cannot be combined with --all");
         }
@@ -175,6 +179,9 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
         )
     {
         auto::sync_stale(&ctx, crate::forge::auto::Offline::current())?;
+        if let Command::Status { report, .. } = &cli.command {
+            report::reselect(&mut ctx, report)?;
+        }
     }
     let status_selection = ctx.selection.clone();
     let value = match cli.command {

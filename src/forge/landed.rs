@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::core::error::{Error, Result};
 use crate::forge::service::{self, Pagination, Request, Var};
-use crate::forge::transport::Transport;
+use crate::forge::transport::{Transport, TransportError};
 use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
@@ -13,6 +13,8 @@ use crate::store::model::{Forge, ReviewState};
 const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository createdAt author{login} isDraft}}}}";
 
 const GITHUB_OPEN_QUERY: &str = "query OpenPulls($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(states:[OPEN],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository createdAt author{login} isDraft}}}}";
+
+const GITHUB_ONE_QUERY: &str = "query OnePull($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository createdAt author{login} isDraft}}}";
 
 /// The forge repository `origin` points at.
 pub struct Origin {
@@ -82,6 +84,46 @@ impl Origin {
         match self.forge {
             Forge::Github => self.github(transport, None),
             Forge::Gitlab => self.gitlab(transport, None),
+        }
+    }
+
+    /// PR/MR `number` in any state; `None` when the repository has no such number.
+    pub fn pull(&self, number: u64) -> Result<Option<Pull>> {
+        let service = (forge::service::kind(self.forge).connect)(&self.host);
+        let transport = service.transport();
+        let missing = |error: &TransportError| {
+            error.status == Some(404) || error.message.contains("Could not resolve to a")
+        };
+        match self.forge {
+            Forge::Github => {
+                let (owner, name) = forge::split_repo(&self.repo);
+                let vars = vec![
+                    Var::text("owner", owner),
+                    Var::text("name", name),
+                    Var::typed("number", number.to_string()),
+                    Var::text("query", GITHUB_ONE_QUERY),
+                ];
+                match transport.json(&Request::graphql(vars)) {
+                    Ok(response) => response
+                        .pointer("/data/repository/pullRequest")
+                        .filter(|node| !node.is_null())
+                        .map(github_pull)
+                        .transpose(),
+                    Err(error) if missing(&error) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            }
+            Forge::Gitlab => {
+                let path = format!(
+                    "{}/merge_requests/{number}",
+                    forge::gitlab::project_path(&self.repo)
+                );
+                match transport.json(&Request::get(path)) {
+                    Ok(node) => gitlab_pull(&node).map(Some),
+                    Err(error) if missing(&error) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            }
         }
     }
 

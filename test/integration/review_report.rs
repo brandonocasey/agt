@@ -400,13 +400,32 @@ fn all_takes_no_name_and_no_target() {
     assert!(error.contains("--all"), "{error}");
 }
 
-fn respond_open_pulls(env: &Env, nodes: &[Value]) {
+/// The one-PR lookup of a name, for `owner/app`; `None` answers that the number does not exist.
+fn respond_one_pull(env: &Env, owner: &str, number: u64, node: Option<Value>) {
     env.respond(
         &[
             "api",
             "graphql",
             "-f",
-            "owner=acme",
+            &format!("owner={owner}"),
+            "-f",
+            "name=app",
+            "-F",
+            &format!("number={number}"),
+            "-f",
+            "query=OnePull",
+        ],
+        &json!({"data": {"repository": {"pullRequest": node}}}).to_string(),
+    );
+}
+
+fn respond_open_pulls_of(env: &Env, owner: &str, nodes: &[Value]) {
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("owner={owner}"),
             "-f",
             "name=app",
             "-f",
@@ -441,7 +460,7 @@ fn a_fork_pull_does_not_resolve_to_a_same_named_local_branch() {
     env.git(&["switch", "-q", "main"]);
     let mut fork = gh_pull(9, "feat", "2026-10-20T08:00:00Z");
     fork["isCrossRepository"] = json!(true);
-    respond_open_pulls(&env, &[fork]);
+    respond_one_pull(&env, "acme", 9, Some(fork));
     let error = failure(&agt(&env, &["status"], &["9"], &[]));
     assert!(error.contains("9 is no known PR/MR"), "{error}");
 }
@@ -451,7 +470,12 @@ fn a_url_for_another_repository_is_not_origins_number() {
     let (env, _, _) = reviewed_on(Env::with_branch());
     env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
     env.git(&["switch", "-q", "main"]);
-    respond_open_pulls(&env, &[gh_pull(9, "feat", "2026-10-20T08:00:00Z")]);
+    respond_one_pull(
+        &env,
+        "acme",
+        9,
+        Some(gh_pull(9, "feat", "2026-10-20T08:00:00Z")),
+    );
     let error = failure(&agt(
         &env,
         &["status"],
@@ -544,7 +568,12 @@ fn a_url_matches_origin_in_any_case() {
     let (env, _, _) = reviewed_on(Env::with_branch());
     env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
     env.git(&["switch", "-q", "main"]);
-    respond_open_pulls(&env, &[gh_pull(9, "feat", "2026-10-20T08:00:00Z")]);
+    respond_one_pull(
+        &env,
+        "acme",
+        9,
+        Some(gh_pull(9, "feat", "2026-10-20T08:00:00Z")),
+    );
     let url = "https://github.com/Acme/App/pull/9";
     let status = success(&agt(&env, &["status"], &[url], &[]));
     assert_eq!(status["branch"], "feat");
@@ -581,4 +610,112 @@ fn sync_refuses_another_branch_target_without_a_pr() {
             "{error}"
         );
     }
+}
+
+#[test]
+fn a_named_status_survives_the_auto_pull_renaming_its_target() {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    env.write_config("[sync]\nauto_pull = true\n");
+    env.git(&["switch", "-q", "main"]);
+    for command in [&["status"][..], &["qa", "status"]] {
+        let status = success(&agt(env, command, &["feat"], &[]));
+        assert_eq!(status["target"], "gh-42", "{status}");
+    }
+}
+
+/// A synced review of `me/repo` #42 on `feat`, with origin then pointed at the fork `me/app`.
+fn parent_review_in_a_fork() -> Setup {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    github::sync_fixtures(&setup);
+    setup.env.run(&["sync"]);
+    setup
+        .env
+        .git(&["remote", "set-url", "origin", "git@github.com:me/app.git"]);
+    setup
+}
+
+#[test]
+fn a_fork_summary_keeps_the_open_reviews_of_the_parent_repository() {
+    let setup = parent_review_in_a_fork();
+    respond_open_pulls_of(&setup.env, "me", &[]);
+    let summary = success(&agt(&setup.env, &["status"], &["--all"], &[]));
+    let rows = summary["targets"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["mr"] == 42), "{summary}");
+}
+
+#[test]
+fn a_pull_number_never_takes_the_target_of_another_repository() {
+    let setup = parent_review_in_a_fork();
+    let mut pull = gh_pull(42, "elsewhere", "2026-10-20T08:00:00Z");
+    pull["url"] = json!("https://github.com/me/app/pull/42");
+    respond_open_pulls_of(&setup.env, "me", &[pull]);
+    let summary = success(&agt(&setup.env, &["status"], &["--all"], &[]));
+    let rows = summary["targets"].as_array().unwrap();
+    let own = rows
+        .iter()
+        .find(|row| row["branch"] == "elsewhere")
+        .unwrap();
+    assert_eq!(own["target"], Value::Null, "{summary}");
+}
+
+#[test]
+fn a_pull_resolved_to_its_branch_does_not_report_another_pulls_review() {
+    let setup = parent_review_in_a_fork();
+    let env = &setup.env;
+    env.git(&["switch", "-q", "main"]);
+    let mut pull = gh_pull(43, "feat", "2026-10-20T08:00:00Z");
+    pull["url"] = json!("https://github.com/me/app/pull/43");
+    respond_one_pull(env, "me", 43, Some(pull));
+    let error = failure(&agt(env, &["status"], &["43"], &[]));
+    assert!(
+        error.contains("43 is PR/MR 43 of branch feat, which has no review or QA records here"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_name_and_target_conflict_is_refused_before_the_sync() {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    let key = top(env, &["--json"])["target"].as_str().unwrap().to_owned();
+    let error = failure(&agt(
+        env,
+        &["status"],
+        &["42", "--target", &key, "--sync"],
+        &[],
+    ));
+    assert!(
+        error.contains("NAME cannot be combined with --target or --range"),
+        "{error}"
+    );
+    let after = success(&agt(env, &["status"], &["--target", &key], &[]));
+    assert_eq!(after["target"], key.as_str());
+    let missing = failure(&agt(env, &["status"], &["--target", "gh-42"], &[]));
+    assert!(missing.contains("does not exist"), "{missing}");
+}
+
+#[test]
+fn a_closed_pull_resolves_to_its_branch_by_name() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    let mut pull = gh_pull(9, "feat", "2026-10-20T08:00:00Z");
+    pull["state"] = json!("CLOSED");
+    pull["closedAt"] = json!("2026-10-21T08:00:00Z");
+    respond_one_pull(&env, "acme", 9, Some(pull));
+    let status = top(&env, &["9"]);
+    assert_eq!(status["branch"], "feat");
+}
+
+#[test]
+fn a_missing_pull_number_is_unknown() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    respond_one_pull(&env, "acme", 9, None);
+    let error = failure(&agt(&env, &["status"], &["9"], &[]));
+    assert!(error.contains("9 is no known PR/MR"), "{error}");
 }

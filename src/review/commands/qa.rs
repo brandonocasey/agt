@@ -52,6 +52,9 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
     }
     if reading && !listing {
         auto::sync_stale(&ctx, Offline::current())?;
+        if let QaCommand::Status { report, .. } = &cli.command {
+            report::reselect(&mut ctx, report)?;
+        }
     }
     let value = match cli.command {
         QaCommand::Run {

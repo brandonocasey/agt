@@ -563,7 +563,8 @@ impl Adoption {
 enum Named {
     /// A stored target that already holds the PR/MR.
     Target(String),
-    Branch(String),
+    /// A branch, and the PR/MR number that named it when the forge resolved one.
+    Branch { branch: String, pr: Option<u64> },
 }
 
 impl Ctx {
@@ -590,12 +591,12 @@ impl Ctx {
                 "{name} is no known PR/MR, worktree or branch with review or QA records{note}"
             ));
         };
-        let branch = match named {
+        let (branch, pr) = match named {
             Named::Target(key) => {
                 self.selection.target = Some(key);
                 return Ok(());
             }
-            Named::Branch(branch) => branch,
+            Named::Branch { branch, pr } => (branch, pr),
         };
         if self.repo.current_branch()?.as_deref() == Some(&branch) {
             return Ok(());
@@ -603,18 +604,31 @@ impl Ctx {
         let newest = targets
             .iter()
             .filter(|target| {
-                target.kind == TargetKind::Branch && target.branch.as_deref() == Some(&branch)
+                target.kind == TargetKind::Branch
+                    && target.branch.as_deref() == Some(&branch)
+                    // A target holding another PR/MR's review is that one's.
+                    && pr.is_none_or(|number| {
+                        target
+                            .review
+                            .as_ref()
+                            .is_none_or(|review| review.number == number)
+                    })
             })
             .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
-        match newest {
-            Some(target) => self.selection.target = Some(target.key.clone()),
-            None => return fail(format!("branch {branch} has no review or QA records")),
+        match (newest, pr) {
+            (Some(target), _) => self.selection.target = Some(target.key.clone()),
+            (None, Some(number)) => {
+                return fail(format!(
+                    "{name} is PR/MR {number} of branch {branch}, which has no review or QA records here"
+                ));
+            }
+            (None, None) => return fail(format!("branch {branch} has no review or QA records")),
         }
         Ok(())
     }
 
     /// The stored target that holds PR/MR `pr`, else its head branch as the forge reports it
-    /// (open PRs/MRs only, and not when offline).
+    /// (in any state, and not when offline).
     fn named_pr(&self, pr: &crate::forge::PrRef, targets: &[Target]) -> Result<Option<Named>> {
         let holder = targets
             .iter()
@@ -653,10 +667,12 @@ impl Ctx {
         };
         // A fork's head branch name says nothing about local branches of the same name.
         Ok(origin
-            .open_pulls()?
-            .into_iter()
-            .find(|pull| pull.number == pr.number && pull.same_repo)
-            .map(|pull| Named::Branch(pull.head_branch)))
+            .pull(pr.number)?
+            .filter(|pull| pull.same_repo)
+            .map(|pull| Named::Branch {
+                branch: pull.head_branch,
+                pr: Some(pull.number),
+            }))
     }
 
     /// The branch a worktree name or a branch name stands for; two different branches are an
@@ -691,7 +707,10 @@ impl Ctx {
         branches.dedup();
         match branches.as_slice() {
             [] => Ok(None),
-            [branch] => Ok(Some(Named::Branch(branch.clone()))),
+            [branch] => Ok(Some(Named::Branch {
+                branch: branch.clone(),
+                pr: None,
+            })),
             many => fail(format!(
                 "{name} names more than one branch ({}); pass a branch name",
                 many.join(", ")
@@ -702,7 +721,7 @@ impl Ctx {
 
 /// Whether two `(host, repo)` pairs name one repository: forges ignore case in both, and a URL
 /// may carry a port the remote leaves out.
-fn same_location(a: (&str, &str), b: (&str, &str)) -> bool {
+pub(super) fn same_location(a: (&str, &str), b: (&str, &str)) -> bool {
     let host = |host: &str| host.split(':').next().unwrap_or(host).to_ascii_lowercase();
     host(a.0) == host(b.0) && a.1.eq_ignore_ascii_case(b.1)
 }

@@ -50,16 +50,39 @@ impl Section {
     }
 }
 
-/// Applies `NAME` to the selection, and refuses it beside `--target`, `--range` or `--all`.
-pub(super) fn select(ctx: &mut Ctx, report: &ReportArgs) -> Result<()> {
-    let pinned = ctx.selection.target.is_some() || ctx.selection.range.is_some();
+/// Refuses `NAME` or `--all` beside `--target`, `--range` or each other.
+pub(super) fn check_flags(pinned: bool, report: &ReportArgs) -> Result<()> {
     match (&report.name, report.all) {
         (Some(_), true) => fail("--all lists every target and takes no NAME"),
         (None, true) if pinned => fail("--all cannot be combined with --target or --range"),
         (Some(_), false) if pinned => fail("NAME cannot be combined with --target or --range"),
-        (Some(name), false) => ctx.resolve_name(name),
-        (None, _) => Ok(()),
+        _ => Ok(()),
     }
+}
+
+/// Applies `NAME` to the selection, and refuses it beside `--target`, `--range` or `--all`.
+pub(super) fn select(ctx: &mut Ctx, report: &ReportArgs) -> Result<()> {
+    check_flags(
+        ctx.selection.target.is_some() || ctx.selection.range.is_some(),
+        report,
+    )?;
+    match &report.name {
+        Some(name) if !report.all => ctx.resolve_name(name),
+        _ => Ok(()),
+    }
+}
+
+/// Selects `NAME` again when the pull that just ran renamed the selected target (`K` to
+/// `gh-N`), which deleted the key `select` chose.
+pub(super) fn reselect(ctx: &mut Ctx, report: &ReportArgs) -> Result<()> {
+    let (Some(name), Some(key)) = (&report.name, ctx.selection.target.clone()) else {
+        return Ok(());
+    };
+    if report.all || ctx.store.load(&ctx.dir, &key)?.is_some() {
+        return Ok(());
+    }
+    ctx.selection.target = None;
+    ctx.resolve_name(name)
 }
 
 pub(super) fn run(
@@ -520,7 +543,7 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
             Some(origin) => origin.open_pulls().map(|pulls| Some((origin, pulls))),
             None => Ok(None),
         }) {
-            Ok(Some((origin, pulls))) => (Some((origin.forge, pulls)), None),
+            Ok(Some((origin, pulls))) => (Some((origin, pulls)), None),
             Ok(None) => (
                 None,
                 Some("no GitHub or GitLab origin: PRs/MRs come from stored reviews".to_owned()),
@@ -536,14 +559,22 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
     let mut mrs: Vec<Row> = Vec::new();
     let mut local: Vec<Row> = Vec::new();
     match pulls {
-        Some((forge, pulls)) => {
+        Some((origin, pulls)) => {
+            let here = |review: &crate::store::model::Review| {
+                review.forge == origin.forge
+                    && super::scope::same_location(
+                        (review.host.as_str(), review.repo.as_str()),
+                        (origin.host.as_str(), origin.repo.as_str()),
+                    )
+            };
             for pull in pulls {
                 let position = stored
                     .iter()
                     .position(|target| {
-                        target.review.as_ref().is_some_and(|review| {
-                            review.forge == forge && review.number == pull.number
-                        })
+                        target
+                            .review
+                            .as_ref()
+                            .is_some_and(|review| here(review) && review.number == pull.number)
                     })
                     .or_else(|| {
                         // A fork's branch name proves nothing, and a target with another
@@ -569,12 +600,19 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
                     target: position.map(|index| stored.remove(index)),
                 });
             }
-            local.extend(
-                stored
-                    .into_iter()
-                    .filter(|target| target.review.is_none() && on_local_branch(ctx, target))
-                    .map(stored_row),
-            );
+            // Reviews of another repository (a fork's parent) are not in origin's list.
+            for target in stored {
+                match target.review.as_ref() {
+                    None if on_local_branch(ctx, &target) => local.push(stored_row(target)),
+                    Some(review)
+                        if review.state == crate::store::model::ReviewState::Open
+                            && !here(review) =>
+                    {
+                        mrs.push(stored_row(target));
+                    }
+                    _ => {}
+                }
+            }
         }
         None => {
             for target in stored {
