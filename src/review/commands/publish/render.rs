@@ -5,9 +5,7 @@ use crate::store::model::{
     Anchor, Author, Comment, FindingInfo, Pass, Resolution, Run, Side, Target, Thread, ThreadType,
 };
 
-pub(super) fn short(sha: &str) -> &str {
-    sha.get(..7).unwrap_or(sha)
-}
+pub(super) use crate::core::text::short;
 
 /// `2m30s`, `45s`, `14m`: exact, so the parts add up to the total.
 pub(super) fn duration(secs: i64) -> String {

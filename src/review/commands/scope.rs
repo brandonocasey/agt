@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
+use crate::core::text::prefix;
 use crate::git::{CommitInfo, Repo};
 use crate::store::model::{Author, CommitPatch, Target, TargetKind, VERSION};
 use crate::store::{Namespace, Store};
@@ -120,10 +121,7 @@ impl Ctx {
                     Ok(head) => Some(head),
                     // Reading commands still work: anchors map to the last reviewed head, or
                     // nowhere when nothing was reviewed.
-                    Err(_) if self.read_only => target
-                        .runs
-                        .iter()
-                        .flat_map(|run| &run.passes)
+                    Err(_) if self.read_only => passes(&target)
                         .max_by(|a, b| a.started_at.cmp(&b.started_at))
                         .map(|pass| pass.head.clone()),
                     Err(why) => {
@@ -242,7 +240,7 @@ impl Ctx {
         let (base, key_base) = self.branch_base(&branch, &head, default_branch.as_deref())?;
         let mut key = format!("branch-{}-{key_base}", self.branch_key(&branch)?);
         if let Some((time, sha)) = birth.as_ref().and_then(|birth| birth.split_once(' ')) {
-            let short = sha.get(..12).unwrap_or(sha);
+            let short = prefix(sha, 12);
             let _ = write!(key, "-{time}-{short}");
         }
         let existing = match same_birth {
@@ -279,11 +277,7 @@ impl Ctx {
             cut -= 1;
         }
         let hash = self.repo.hash_text(branch)?;
-        Ok(format!(
-            "{}-{}",
-            &encoded[..cut],
-            hash.get(..12).unwrap_or(&hash)
-        ))
+        Ok(format!("{}-{}", &encoded[..cut], prefix(&hash, 12)))
     }
 
     /// The head of a branch target: `HEAD` when on its branch, or when detached on top of the

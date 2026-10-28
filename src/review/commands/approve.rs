@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::core::error::{Result, fail};
+use crate::core::text::prefix;
 use crate::review::cli::ApprovalArgs;
 use crate::store::model::{Approval, Target, Thread, ThreadType};
 
@@ -24,7 +25,7 @@ pub(super) fn approve(ctx: &Ctx, args: &ApprovalArgs) -> Result<Value> {
     }
     let body = match &args.body {
         Some(body) => read_body(body)?,
-        None => format!("Approved at {}.", &head[..head.len().min(12)]),
+        None => format!("Approved at {}.", prefix(&head, 12)),
     };
     let default = ctx.default_author()?;
     let formal = args.formal;

@@ -12,7 +12,7 @@ use crate::store::model::{CommitPatch, Pass, PassKind, Reveal, Reviewer, RoleUsa
 use super::findings::{FindingInput, add_findings, parse_findings};
 use super::prune::prune_dir;
 use super::usage::{UsageInput, run_spend};
-use super::{Ctx, find_pass_mut, find_run_mut, major_found, random_id};
+use super::{Ctx, find_pass_mut, find_run_mut, fresh_id, major_found, random_id};
 
 pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
     let scope = ctx.scope()?;
@@ -24,12 +24,11 @@ pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
         .flat_map(|target| target.runs.into_iter().map(|run| run.id))
         .collect();
     let run = ctx.update(&scope, |target, now| {
-        let id = loop {
-            let id = random_id();
-            if !taken.contains(&id) && !target.runs.iter().any(|run| run.id == id) {
-                break id;
-            }
-        };
+        let id = fresh_id(
+            &taken,
+            |id| target.runs.iter().any(|run| run.id == id),
+            random_id,
+        );
         target.runs.push(Run {
             id: id.clone(),
             started_at: now.to_owned(),

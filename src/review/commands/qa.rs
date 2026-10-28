@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::approve::is_open;
 use super::findings::{self, NewThread, author, issue_key, local_thread};
 use super::input::{limited, read_body};
-use super::{Ctx, Selection, auto, publish, usage, view};
+use super::{Ctx, Selection, auto, fresh_id, publish, run_not_found, usage, view};
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::Output;
 use crate::core::text::argument_or_stdin;
@@ -320,12 +320,11 @@ fn run_start(ctx: &Ctx, env: Vec<String>, tester: &AuthorArgs) -> Result<Value> 
         .flat_map(|target| target.qa_runs.into_iter().map(|run| run.id))
         .collect();
     let run = ctx.update(&scope, |target, now| {
-        let id = loop {
-            let id = crate::core::random::token(QA_ID_PREFIX, QA_ID_CHARS);
-            if !taken.contains(&id) && !target.qa_runs.iter().any(|run| run.id == id) {
-                break id;
-            }
-        };
+        let id = fresh_id(
+            &taken,
+            |id| target.qa_runs.iter().any(|run| run.id == id),
+            || crate::core::random::token(QA_ID_PREFIX, QA_ID_CHARS),
+        );
         let run = QaRun {
             tester: qa_author(tester, target, default, Some(&id))?,
             id,
@@ -345,27 +344,17 @@ fn run_start(ctx: &Ctx, env: Vec<String>, tester: &AuthorArgs) -> Result<Value> 
 }
 
 fn find_qa_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut QaRun> {
-    let open: Vec<String> = target
-        .qa_runs
-        .iter()
-        .filter(|run| run.ended_at.is_none())
-        .map(|run| run.id.clone())
-        .collect();
-    let key = target.key.clone();
-    target
-        .qa_runs
-        .iter_mut()
-        .find(|run| run.id == id)
-        .ok_or_else(|| {
-            Error(format!(
-                "QA run {id} not found in target {key}; open QA runs: {}",
-                if open.is_empty() {
-                    "none".to_owned()
-                } else {
-                    open.join(", ")
-                }
-            ))
-        })
+    match target.qa_runs.iter().position(|run| run.id == id) {
+        Some(index) => Ok(&mut target.qa_runs[index]),
+        None => {
+            let open = target
+                .qa_runs
+                .iter()
+                .filter(|run| run.ended_at.is_none())
+                .map(|run| run.id.as_str());
+            Err(run_not_found("QA run", id, target, open))
+        }
+    }
 }
 
 fn run_end(ctx: &Ctx, id: &str, usage: Vec<crate::store::model::RoleUsage>) -> Result<Value> {

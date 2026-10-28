@@ -11,15 +11,13 @@ use crate::core::clock;
 use crate::core::config::Config;
 use crate::core::error::{Result, fail};
 use crate::core::random;
-use crate::core::text::{argument_or_stdin, bounded, within};
+use crate::core::text::{MAX_TEXT, argument_or_stdin, bounded, within};
 use crate::forge::{self, service};
 use crate::store::Store;
 use crate::store::issues::{Category, Fields, Issue, LinkSource, Links, Note, PrLink, VERSION};
 use crate::store::model::{Author, Comment, Delivery, PostState, last_number};
 use crate::store::prune::Removal;
 use serde_json::json;
-
-const MAX_TEXT: usize = 65_536;
 
 /// `text`, or stdin when it is `-`; never empty unless `allow_empty`.
 fn read_text(text: &str, what: &str, allow_empty: bool) -> Result<String> {

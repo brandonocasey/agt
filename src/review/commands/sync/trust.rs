@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use crate::forge::CommentData;
 use crate::forge::markers::{agent_id, is_landed_as};
 use crate::forge::service::{Capabilities, ReviewService};
+use crate::review::commands::killed;
 use crate::store::model::{Comment, Target};
 
 /// Trust rule: the author is the authenticated user and nobody else edited the comment.
@@ -52,13 +53,7 @@ impl<'a> Trust<'a> {
                 )
             })
             .map(String::as_str);
-        let killed = target
-            .runs
-            .iter()
-            .flat_map(|run| &run.passes)
-            .flat_map(|pass| &pass.killed)
-            .map(|killed| killed.id.clone())
-            .collect();
+        let killed = killed(target).map(|killed| killed.id.clone()).collect();
         Self::new(login, service, comments.chain(records), killed)
     }
 

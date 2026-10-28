@@ -13,6 +13,7 @@ use super::Options;
 use super::render::{body, location, paragraph, record_head};
 use super::summary::{Covered, Links, QaSummary, summary_texts};
 use crate::core::error::{Error, Result};
+use crate::core::text::cut;
 use crate::forge::anchors;
 use crate::forge::markers;
 use crate::forge::service::{Capabilities, DraftPoster, Inline, Position, Request, ReviewService};
@@ -431,10 +432,8 @@ impl<'a> Planner<'a> {
         Some(if self.foreign().is_some() {
             // One alone cannot pass the size limit of the body it goes in.
             let mut text = paragraph(target, thread, first, location);
-            if text.chars().count() > MAX_REVIEW_BODY - REVIEW_MARKER {
-                text = text.chars().take(MAX_REVIEW_BODY - REVIEW_MARKER).collect();
-                text.push('…');
-            }
+            let keep = MAX_REVIEW_BODY - REVIEW_MARKER;
+            text = cut(&text, keep, keep);
             let marker = markers::agent(&first.id, Some(self.attempt));
             Ok(Paragraph {
                 id: first.id.clone(),

@@ -1,8 +1,6 @@
 use crate::core::error::{Result, fail};
-use crate::core::text::{argument_or_stdin, bounded};
+use crate::core::text::{MAX_TEXT, argument_or_stdin, bounded};
 use crate::store::model::{Anchor, Side};
-
-use super::MAX_TEXT;
 
 pub(super) fn limited(text: String, name: &str) -> Result<String> {
     bounded(&text, name, MAX_TEXT, true)?;

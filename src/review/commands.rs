@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::core::error::{Error, Result, fail};
@@ -6,7 +7,7 @@ use crate::git::Repo;
 use crate::review::cli::{AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction};
 use crate::store::Store;
 use crate::store::model::{
-    Pass, PassKind, Reveal, Run, Severity, Target, TargetKind, Thread, ThreadType,
+    KilledFinding, Pass, PassKind, Reveal, Run, Severity, Target, TargetKind, Thread, ThreadType,
 };
 
 mod approve;
@@ -28,8 +29,6 @@ pub use self::qa::run_qa;
 use self::run::{pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::view::{list, show};
-
-const MAX_TEXT: usize = 65_536;
 
 #[derive(Clone)]
 struct Selection {
@@ -290,6 +289,10 @@ fn passes(target: &Target) -> impl Iterator<Item = &Pass> {
     target.runs.iter().flat_map(|run| run.passes.iter())
 }
 
+fn killed(target: &Target) -> impl Iterator<Item = &KilledFinding> {
+    passes(target).flat_map(|pass| pass.killed.iter())
+}
+
 fn pass_patch_ids(pass: &Pass) -> impl Iterator<Item = &String> {
     pass.commits
         .iter()
@@ -298,36 +301,60 @@ fn pass_patch_ids(pass: &Pass) -> impl Iterator<Item = &String> {
         .chain(pass.head_patch_id.as_ref())
 }
 
+/// A joined list of `names`, or `none` when there are none.
+fn list_or_none<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let names: Vec<&str> = names.collect();
+    if names.is_empty() {
+        "none".to_owned()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// A fresh id from `make` that is neither in `taken` nor already in the target (`in_target`).
+fn fresh_id(
+    taken: &HashSet<String>,
+    in_target: impl Fn(&str) -> bool,
+    make: impl Fn() -> String,
+) -> String {
+    loop {
+        let id = make();
+        if !taken.contains(&id) && !in_target(&id) {
+            return id;
+        }
+    }
+}
+
+/// Names the open runs of kind `kind` (`run`, `QA run`), so a wrong id costs no second lookup.
+fn run_not_found<'a>(
+    kind: &str,
+    id: &str,
+    target: &Target,
+    open: impl Iterator<Item = &'a str>,
+) -> Error {
+    Error(format!(
+        "{kind} {id} not found in target {}; open {kind}s: {}",
+        target.key,
+        list_or_none(open)
+    ))
+}
+
 /// Names the open runs, so a wrong id costs no second lookup.
 fn run_missing(target: &Target, id: &str) -> Error {
-    let open: Vec<&str> = target
+    let open = target
         .runs
         .iter()
         .filter(|run| run.ended_at.is_none())
-        .map(|run| run.id.as_str())
-        .collect();
-    Error(format!(
-        "run {id} not found in target {}; open runs: {}",
-        target.key,
-        if open.is_empty() {
-            "none".to_owned()
-        } else {
-            open.join(", ")
-        }
-    ))
+        .map(|run| run.id.as_str());
+    run_not_found("run", id, target, open)
 }
 
 /// Names the run's passes, so a wrong id costs no second lookup.
 fn pass_missing(run: &Run, pass: &str) -> Error {
-    let known: Vec<&str> = run.passes.iter().map(|pass| pass.id.as_str()).collect();
     Error(format!(
         "pass {}.{pass} not found; its passes: {}",
         run.id,
-        if known.is_empty() {
-            "none".to_owned()
-        } else {
-            known.join(", ")
-        }
+        list_or_none(run.passes.iter().map(|pass| pass.id.as_str()))
     ))
 }
 

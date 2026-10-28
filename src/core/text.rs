@@ -20,6 +20,30 @@ pub fn within(text: &str, name: &str, max: usize) -> Result<()> {
     Ok(())
 }
 
+/// The first `len` bytes of `text`, or all of it when it is shorter.
+pub fn prefix(text: &str, len: usize) -> &str {
+    text.get(..len).unwrap_or(text)
+}
+
+/// The short form of a commit hash.
+pub fn short(hash: &str) -> &str {
+    prefix(hash, 7)
+}
+
+/// `text` unchanged while it has at most `limit` characters, else its first `keep` characters
+/// and `…`.
+pub fn cut(text: &str, limit: usize, keep: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(keep).collect();
+    cut.push('…');
+    cut
+}
+
+/// The longest free text, in bytes, that a review or an issue stores.
+pub const MAX_TEXT: usize = 65_536;
+
 /// Fails when `text` is empty (or only whitespace when `trimmed`) or longer than `max` bytes.
 pub fn bounded(text: &str, name: &str, max: usize, trimmed: bool) -> Result<()> {
     let empty = if trimmed {

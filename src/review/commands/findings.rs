@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::text::short;
 use crate::forge;
 use crate::review::cli::{AuthorArgs, CommentArgs, ReplyArgs, ResolveArgs};
 use crate::store::issues::{Issue, parse_ref};
@@ -13,7 +14,7 @@ use crate::store::{Namespace, Store};
 
 use super::input::{AnchorInput, build_anchor, limited, read_body};
 use super::qa::{check_run, qa_author};
-use super::{Ctx, find_pass, find_pass_mut, find_thread_mut, major_found, passes};
+use super::{Ctx, find_pass, find_pass_mut, find_thread_mut, killed, major_found};
 
 /// A comment written here, numbered after the thread's other local comments.
 pub(super) fn local_comment(
@@ -306,7 +307,7 @@ pub(super) fn add_findings(
             .threads
             .iter()
             .map(|thread| thread.id.clone())
-            .chain(passes(target).flat_map(|pass| pass.killed.iter().map(|f| f.id.clone())));
+            .chain(killed(target).map(|finding| finding.id.clone()));
         let mut number = last_number(ids, &prefix);
         let mut threads = Vec::new();
         let mut killed = Vec::new();
@@ -537,7 +538,7 @@ pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs, qa: bool) -> Result<Value> {
 /// `✅ Fixed in [<sha> <subject>](<commit URL>).`; the link text alone before the target is
 /// linked to a PR/MR.
 fn fixed_reply(sha: &str, subject: &str, review: Option<&Review>) -> String {
-    let mut text = format!("{} ", &sha[..sha.len().min(7)]);
+    let mut text = format!("{} ", short(sha));
     for char in subject.chars() {
         if matches!(char, '\\' | '[' | ']') {
             text.push('\\');

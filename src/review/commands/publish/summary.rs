@@ -7,6 +7,7 @@
 use std::fmt::Write as _;
 
 use super::render::{duration, kind_emoji, location, outcome, short};
+use crate::core::text::cut;
 use crate::forge::markers;
 use crate::git::CommitInfo;
 use crate::review::commands::approve::{blocking_threads, is_open};
@@ -787,12 +788,7 @@ fn gist(body: &str) -> String {
 
 /// `text` cut to `max` characters, ending in `…` when cut.
 fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(max - 1).collect();
-    cut.push('…');
-    cut
+    cut(text, max, max - 1)
 }
 
 /// Text that stays in one table cell.
