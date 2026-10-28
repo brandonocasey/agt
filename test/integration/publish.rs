@@ -14,22 +14,39 @@ use crate::support::{Env, args, executable, fixture, numbered, strs};
 
 // GitHub
 
-/// Without `[forge] post = true` a publish, with or without `--approve`, sends nothing and
-/// records no approval; a dry run still shows the payloads.
+/// Without `[forge] post = true` a publish succeeds locally: it sends nothing, says why, and
+/// `--approve` still records the approval; a dry run still shows the payloads.
 #[test]
-fn publish_refuses_without_forge_post() {
+fn publish_stays_local_without_forge_post() {
     let svc = Github::new();
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     svc.link(&setup);
     env.write_config("[forge]\npost = false\n");
     let calls = env.forge_calls().len();
-    let error = env.fail(&["publish", "--pr", "42"], None);
-    assert!(error.contains("[forge] post = true"), "{error}");
-    let error = env.fail(&["publish", "--pr", "42", "--approve"], None);
-    assert!(error.contains("[forge] post = true"), "{error}");
+    let output = env.exec(&["publish", "--pr", "42"], None, &[]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[forge] post = true"), "{stderr}");
+    let kept: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(kept["posted"], json!([]));
+    assert!(
+        kept["kept_local"]
+            .as_str()
+            .unwrap()
+            .contains("posting is off")
+    );
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    let output = env.exec(&["publish", "--pr", "42", "--approve"], None, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let approved: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(approved["approval"].is_string(), "{approved}");
     assert_eq!(env.forge_calls().len(), calls);
-    assert!(!env.run(&["list"]).to_string().contains("approval"));
     let preview = env.run(&["publish", "--pr", "42", "--dry-run"]);
     assert_eq!(preview["dry_run"], true);
     assert!(

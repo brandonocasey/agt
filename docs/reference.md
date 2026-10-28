@@ -677,8 +677,9 @@ local reads continue.
 
 ## Publish
 
-- Only with `[forge] post = true` in the global or repository configuration ([Issues](#issues));
-  otherwise only `--dry-run` works.
+- Sends only with `[forge] post = true` in the global or repository configuration
+  ([Issues](#issues)). Otherwise it stays local: it exits 0, posts nothing, prints why on
+  stderr and returns `kept_local`; `--approve` still records the approval.
 - Only on a PR/MR authored by the authenticated login, unless `--not-own`. On
   someone else's PR/MR, `--not-own` posts only replies, resolves and reopens on
   threads imported from the host (other people's threads); our findings, local
@@ -1481,8 +1482,8 @@ since_days = 90             # first sync only; later syncs use the watermark
 agt sends no comments, approvals or issue changes until the global file or the
 repository's `.config/agt.toml` sets `[forge] post = true`; a `false` in one file never
 overrides a `true` in the other. Without it,
-`review publish`, `qa publish` and `issue push` fail with an error, and `auto_push` sends
-nothing and prints a skipped line. Their `--dry-run` previews still work. `agt pr` commands
+`review publish`, `qa publish` and `issue push` keep everything local, exit 0 and print
+why on stderr, and `auto_push` sends nothing and prints a skipped line. Their `--dry-run` previews still work. `agt pr` commands
 are not affected. With posting on, `push = true` permits a tracker's writes;
 it never enables automatic publication. Omitted push permissions permit explicit
 commands. `--tracker` selects a destination explicitly; otherwise agt uses a matching

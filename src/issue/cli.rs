@@ -43,7 +43,7 @@ pub enum Command {
         /// `owner/repo#12`, `#12`, `12` or `local-xxxx`.
         key: String,
     },
-    /// Send queued changes; needs `[forge] post = true`, and explicit `push = false` denies a
+    /// Send queued changes; only with `[forge] post = true` (otherwise local), and explicit `push = false` denies a
     /// tracker.
     Push {
         /// Show the requests without sending anything.

@@ -44,7 +44,7 @@ matrix!(
     a_killed_create_is_not_sent_again_despite_an_old_create_error,
     a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_conflict,
     push_refuses_a_tracker_with_push_false,
-    push_refuses_without_forge_post,
+    push_stays_local_without_forge_post,
     no_token_reaches_a_call_a_file_or_the_output,
 );
 
@@ -544,13 +544,15 @@ fn push_refuses_a_tracker_with_push_false(fake: Fake) {
     assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
 }
 
-fn push_refuses_without_forge_post(fake: Fake) {
+fn push_stays_local_without_forge_post(fake: Fake) {
     let env = pushable(fake, &[issue()]);
     env.issue(&["comment", "1", "Thanks"]);
     env.write_config(&format!("{}\n[forge]\npost = false\n", fake.config(true)));
     let calls = env.forge_calls().len();
-    let error = env.issue_fail(&["push", "--tracker", fake.repo()]);
-    assert!(error.contains("[forge] post = true"), "{error}");
+    let output = env.issue_exec(&["push", "--tracker", fake.repo()], "", &[]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[forge] post = true"), "{stderr}");
     assert_eq!(env.forge_calls().len(), calls);
     // A preview may read the host, as with posting on, but sends nothing.
     let preview = env.issue(&["push", "--dry-run", "--tracker", fake.repo()]);

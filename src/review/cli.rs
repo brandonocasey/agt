@@ -63,8 +63,8 @@ pub enum Command {
         #[arg(long)]
         pr: Option<String>,
     },
-    /// Post local findings, replies, resolves and final records to an own PR/MR. Needs
-    /// `[forge] post = true` in the configuration.
+    /// Post local findings, replies, resolves and final records to an own PR/MR. Sends
+    /// only with `[forge] post = true` in the configuration; otherwise stays local.
     Publish {
         /// Print every payload without posting anything. With `--approve` the approval is still
         /// recorded locally.

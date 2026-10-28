@@ -69,8 +69,13 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Discard { key } => local::discard(&store, filter, key)?,
         Command::Push { dry_run, force } => {
             let mut config = Config::load_for_repo(&repo)?;
-            if !dry_run {
-                crate::forge::auto::require_post(&config, "issue push")?;
+            if !dry_run && let Some(reason) = crate::forge::auto::kept_local(&config, "issue push")
+            {
+                return Ok(Output::Json(serde_json::json!({
+                    "dry_run": false,
+                    "trackers": [],
+                    "kept_local": reason,
+                })));
             }
             trackers::destinations(&mut config, &repo, filter, false)?;
             if !dry_run {

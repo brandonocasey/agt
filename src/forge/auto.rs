@@ -117,18 +117,20 @@ pub fn push_config(repo: &crate::git::Repo, offline: Offline) -> Option<Config> 
     Some(config)
 }
 
-/// Refuses `what` unless the configuration sets `[forge] post = true`.
-pub fn require_post(config: &Config, what: &str) -> Result<()> {
+/// Why `what` stays local: `None` when the configuration sets `[forge] post = true`. The reason
+/// also goes to stderr, so a command that kept its work local says so.
+pub fn kept_local(config: &Config, what: &str) -> Option<String> {
     if config.forge.post {
-        return Ok(());
+        return None;
     }
     let global = crate::core::config::path()
         .map_or_else(|_| "config.toml".into(), |path| path.display().to_string());
-    fail(format!(
-        "{what} is off: agt sends no comments, approvals or issue changes to GitHub or GitLab \
-         until `[forge] post = true` is set in {global} or the repository's .config/agt.toml; \
-         --dry-run shows what would be sent"
-    ))
+    let reason = format!(
+        "{what} kept local: posting is off; set `[forge] post = true` in {global} or the \
+         repository's .config/agt.toml to send"
+    );
+    eprintln!("agt: {reason}");
+    Some(reason)
 }
 
 fn load_unless_offline(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {
