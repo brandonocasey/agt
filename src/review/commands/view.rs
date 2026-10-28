@@ -361,6 +361,8 @@ pub(super) fn thread_views(target: Option<&Target>, locator: &mut Locator) -> Th
             "type": thread.kind,
             "severity": thread.severity,
             "triage": thread.triage,
+            "check": thread.check,
+            "summary": super::report::summary_line(thread),
             "held": thread.held,
             "current": current,
             "post": thread.comments.first().map(|first| first.delivery.post),

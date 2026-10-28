@@ -35,8 +35,9 @@ fn review_help_lists_the_v0_4_0_commands() {
 fn unknown_top_level_command_is_a_usage_error() {
     let output = agt(&["frobnicate"]);
     assert_eq!(output.status.code(), Some(2));
-    // The bare 0.4.0 form is gone: the commands live under `review`.
-    assert_eq!(agt(&["status"]).status.code(), Some(2));
+    // The bare 0.4.0 forms are gone: the commands live under `review`. `status` is back as the
+    // combined review and QA report.
+    assert_eq!(agt(&["show"]).status.code(), Some(2));
 }
 
 #[test]

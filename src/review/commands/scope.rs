@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::Path;
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, fail};
@@ -555,5 +556,112 @@ impl Adoption {
             }
         }
         recorded
+    }
+}
+
+/// What a name given to a status command stands for.
+enum Named {
+    /// A stored target that already holds the PR/MR.
+    Target(String),
+    Branch(String),
+}
+
+impl Ctx {
+    /// Points the selection at the stored target of `name`: a PR/MR (`12`, `#12`, `!12` or its
+    /// URL), a worktree (its directory name or path) or a branch. A name that is the current
+    /// branch leaves the selection alone, so the current work tree is still evaluated.
+    pub(super) fn resolve_name(&mut self, name: &str) -> Result<()> {
+        let targets = self.store.targets(&self.dir)?;
+        let named = match crate::forge::parse_pr(name) {
+            Ok(pr) => match self.named_pr(&pr, &targets)? {
+                Some(named) => Some(named),
+                None => self.named_local(name, &targets)?,
+            },
+            Err(_) => self.named_local(name, &targets)?,
+        };
+        let Some(named) = named else {
+            return fail(format!(
+                "{name} is no known PR/MR, worktree or branch with review or QA records"
+            ));
+        };
+        let branch = match named {
+            Named::Target(key) => {
+                self.selection.target = Some(key);
+                return Ok(());
+            }
+            Named::Branch(branch) => branch,
+        };
+        if self.repo.current_branch()?.as_deref() == Some(&branch) {
+            return Ok(());
+        }
+        let newest = targets
+            .iter()
+            .filter(|target| {
+                target.kind == TargetKind::Branch && target.branch.as_deref() == Some(&branch)
+            })
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        match newest {
+            Some(target) => self.selection.target = Some(target.key.clone()),
+            None => return fail(format!("branch {branch} has no review or QA records")),
+        }
+        Ok(())
+    }
+
+    /// The stored target that holds PR/MR `pr`, else its head branch as the forge reports it
+    /// (open PRs/MRs only, and not when offline).
+    fn named_pr(&self, pr: &crate::forge::PrRef, targets: &[Target]) -> Result<Option<Named>> {
+        let holder = targets
+            .iter()
+            .filter(|target| {
+                target.review.as_ref().is_some_and(|review| {
+                    review.number == pr.number && pr.forge.is_none_or(|forge| forge == review.forge)
+                })
+            })
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        if let Some(target) = holder {
+            return Ok(Some(Named::Target(target.key.clone())));
+        }
+        if crate::forge::auto::Offline::current().is_set() {
+            return Ok(None);
+        }
+        let Some(origin) = crate::forge::landed::Origin::of(&self.repo)? else {
+            return Ok(None);
+        };
+        Ok(origin
+            .open_pulls()?
+            .into_iter()
+            .find(|pull| pull.number == pr.number)
+            .map(|pull| Named::Branch(pull.head_branch)))
+    }
+
+    /// The branch a worktree name or a branch name stands for; two different branches are an
+    /// error that names both.
+    fn named_local(&self, name: &str, targets: &[Target]) -> Result<Option<Named>> {
+        let mut branches: Vec<String> = Vec::new();
+        for worktree in self.repo.worktrees()? {
+            let named = !worktree.bare
+                && (worktree.path == Path::new(name)
+                    || worktree.path.file_name().is_some_and(|base| base == name));
+            if let (true, Some(branch)) = (named, worktree.branch) {
+                branches.push(branch);
+            }
+        }
+        if self.repo.commit(&format!("refs/heads/{name}")).is_ok()
+            || targets.iter().any(|target| {
+                target.kind == TargetKind::Branch && target.branch.as_deref() == Some(name)
+            })
+        {
+            branches.push(name.to_owned());
+        }
+        branches.sort();
+        branches.dedup();
+        match branches.as_slice() {
+            [] => Ok(None),
+            [branch] => Ok(Some(Named::Branch(branch.clone()))),
+            many => fail(format!(
+                "{name} names more than one branch ({}); pass a branch name",
+                many.join(", ")
+            )),
+        }
     }
 }

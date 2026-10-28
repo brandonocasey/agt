@@ -10,7 +10,9 @@ use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
-const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository}}}}";
+const GITHUB_QUERY: &str = "query LandedPulls($owner:String!,$name:String!,$branch:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(headRefName:$branch,states:[OPEN,CLOSED,MERGED],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository createdAt author{login} isDraft}}}}";
+
+const GITHUB_OPEN_QUERY: &str = "query OpenPulls($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){pullRequests(states:[OPEN],first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository createdAt author{login} isDraft}}}}";
 
 /// The forge repository `origin` points at.
 pub struct Origin {
@@ -32,6 +34,9 @@ pub struct Pull {
     pub head_sha: String,
     /// The head branch lives in the repository itself, not in a fork.
     pub same_repo: bool,
+    pub created_at: Option<String>,
+    pub author: Option<String>,
+    pub draft: bool,
 }
 
 impl Origin {
@@ -65,8 +70,18 @@ impl Origin {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();
         match self.forge {
-            Forge::Github => self.github(transport, branch),
-            Forge::Gitlab => self.gitlab(transport, branch),
+            Forge::Github => self.github(transport, Some(branch)),
+            Forge::Gitlab => self.gitlab(transport, Some(branch)),
+        }
+    }
+
+    /// Every open PR/MR of the repository, all pages.
+    pub fn open_pulls(&self) -> Result<Vec<Pull>> {
+        let service = (forge::service::kind(self.forge).connect)(&self.host);
+        let transport = service.transport();
+        match self.forge {
+            Forge::Github => self.github(transport, None),
+            Forge::Gitlab => self.gitlab(transport, None),
         }
     }
 
@@ -78,17 +93,20 @@ impl Origin {
         )
     }
 
-    fn github(&self, transport: &dyn Transport, branch: &str) -> Result<Vec<Pull>> {
+    /// `branch` limits the list to one source branch in every state; `None` lists the open ones.
+    fn github(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
         let (owner, name) = forge::split_repo(&self.repo);
         let mut pulls = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let mut vars = vec![
-                Var::text("owner", owner),
-                Var::text("name", name),
-                Var::text("branch", branch),
-                Var::text("query", GITHUB_QUERY),
-            ];
+            let mut vars = vec![Var::text("owner", owner), Var::text("name", name)];
+            match branch {
+                Some(branch) => {
+                    vars.push(Var::text("branch", branch));
+                    vars.push(Var::text("query", GITHUB_QUERY));
+                }
+                None => vars.push(Var::text("query", GITHUB_OPEN_QUERY)),
+            }
             if let Some(cursor) = &cursor {
                 vars.push(Var::text("cursor", cursor.clone()));
             }
@@ -108,12 +126,15 @@ impl Origin {
         }
     }
 
-    fn gitlab(&self, transport: &dyn Transport, branch: &str) -> Result<Vec<Pull>> {
-        let path = format!(
-            "{}/merge_requests?source_branch={}&state=all&per_page=100",
-            forge::gitlab::project_path(&self.repo),
-            encode(branch)
-        );
+    fn gitlab(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
+        let project = forge::gitlab::project_path(&self.repo);
+        let path = match branch {
+            Some(branch) => format!(
+                "{project}/merge_requests?source_branch={}&state=all&per_page=100",
+                encode(branch)
+            ),
+            None => format!("{project}/merge_requests?state=opened&per_page=100"),
+        };
         transport
             .items(&Request::get(path), &Pagination::CliPaginate)?
             .iter()
@@ -148,5 +169,8 @@ fn pull(node: PullNode, no_number: &str) -> Result<Pull> {
         head_branch: node.head_branch,
         head_sha: node.head_sha,
         same_repo: node.same_repo == Some(true),
+        created_at: node.created_at,
+        author: node.author,
+        draft: node.draft,
     })
 }

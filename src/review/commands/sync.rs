@@ -214,6 +214,7 @@ pub(super) fn plan(ctx: &Ctx, connection: &Connection) -> Result<Plan> {
         login: connection.login.clone(),
         synced_at: now.clone(),
         attached_at: Some(now.clone()),
+        created_at: fetched.pr.created_at.clone(),
     };
     Ok(Plan {
         scope,

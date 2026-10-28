@@ -32,6 +32,8 @@ enum Command {
     Review(Box<review::cli::Cli>),
     /// What was tested, where, and what came up: QA checks and threads beside the review.
     Qa(Box<review::cli::QaCli>),
+    /// Review and QA state of a PR/MR, worktree or branch, or of every open PR/MR (`--all`).
+    Status(Box<review::cli::StatusCli>),
     /// Durable task records.
     Task(task::cli::Cli),
     /// Pushed and landable checks for a branch (`check`).
@@ -69,6 +71,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     match cli.command {
         Command::Review(args) => review::commands::run(*args),
         Command::Qa(args) => review::commands::run_qa(*args),
+        Command::Status(args) => review::commands::run_status(*args),
         Command::Task(args) => task::cli::run(args),
         Command::Branch(args) => branch::run(args),
         Command::Check(args) => check::run(args),

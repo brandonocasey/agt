@@ -56,6 +56,8 @@ pub enum Command {
         full: bool,
         #[command(flatten)]
         sync: SyncFirst,
+        #[command(flatten)]
+        report: ReportArgs,
     },
     /// Import the PR/MR of this branch (or `--pr`) from GitHub or GitLab. Read-only on the forge.
     Sync {
@@ -82,6 +84,45 @@ pub enum Command {
         #[command(flatten)]
         approval: ApprovalArgs,
     },
+}
+
+/// Which target a status report covers and how it prints.
+#[derive(Args)]
+pub struct ReportArgs {
+    /// A PR/MR (`12`, `#12`, `!12` or its URL), a worktree (directory name or path) or a branch
+    /// [default: the current branch].
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+    /// List every open PR/MR, and local targets with no PR/MR, instead of one target.
+    #[arg(long)]
+    pub all: bool,
+    /// Print JSON even at a terminal; piped output is always JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `agt status`: review and QA state of a PR/MR, worktree or branch, or of every open PR/MR.
+#[derive(Args)]
+pub struct StatusCli {
+    /// Use this stored target key instead of the current branch.
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Report a commit (`<rev>`) or a range (`<from>..<to>`) instead of the current branch.
+    #[arg(long)]
+    pub range: Option<String>,
+    /// Branch the merge-base is taken against [default: origin/HEAD, then main or master].
+    #[arg(long, value_name = "REF")]
+    pub default_branch: Option<String>,
+    /// Commit to evaluate instead of the current head and work tree.
+    #[arg(long)]
+    pub head: Option<String>,
+    /// Also print every commit, run and imported record.
+    #[arg(long)]
+    pub full: bool,
+    #[command(flatten)]
+    pub sync: SyncFirst,
+    #[command(flatten)]
+    pub report: ReportArgs,
 }
 
 /// Import the PR/MR before a read, so the report is not stale.
@@ -403,6 +444,8 @@ pub enum QaCommand {
         /// Commit to evaluate instead of the current head and work tree.
         #[arg(long)]
         head: Option<String>,
+        #[command(flatten)]
+        report: ReportArgs,
     },
     /// Approve the head for QA. Refused with no checks, a failing, blocked or stale check, or an
     /// open bug, requirement or question found by a check. Sends no host approval.

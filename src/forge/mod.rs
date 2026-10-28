@@ -172,6 +172,9 @@ pub struct PullNode {
     pub head_sha: String,
     /// Whether the head branch lives in the repository itself; `None` when the node does not say.
     pub same_repo: Option<bool>,
+    pub created_at: Option<String>,
+    pub author: Option<String>,
+    pub draft: bool,
 }
 
 pub struct PrInfo {
@@ -184,6 +187,7 @@ pub struct PrInfo {
     pub base_sha: Option<String>,
     pub start_sha: Option<String>,
     pub author: Option<String>,
+    pub created_at: Option<String>,
 }
 
 pub struct CommentData {

@@ -149,6 +149,9 @@ pub struct Review {
     /// ended earlier. Absent in stores written before it existed.
     #[serde(default)]
     pub attached_at: Option<String>,
+    /// When the forge opened the PR/MR. Absent in stores written before it existed.
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]

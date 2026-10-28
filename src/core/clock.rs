@@ -93,6 +93,22 @@ pub fn latest<'a>(stamps: impl IntoIterator<Item = &'a str>) -> Result<Option<i6
     Ok(latest)
 }
 
+/// A duration as its largest whole unit: `45s`, `12m`, `3h`, `2d`.
+pub fn age(secs: i64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / SECS_PER_DAY),
+    }
+}
+
+/// How long before `now` the instant `then` was, as `3d ago`; a `then` in the future reads
+/// `0s ago`.
+pub fn ago(now: i64, then: i64) -> String {
+    format!("{} ago", age((now - then).max(0)))
+}
+
 /// Parses an RFC 3339 timestamp (`T` separator, optional fraction, `Z` or `±HH:MM`) into Unix
 /// seconds.
 pub fn parse(text: &str) -> Result<i64> {
@@ -298,6 +314,16 @@ mod tests {
         assert!(parse("2026-02-29T12:00:00Z").is_err());
         assert!(parse("2024-02-29T12:00:00Z").is_ok());
         assert!(parse("2026-10-16T12:00:00").is_err());
+    }
+
+    #[test]
+    fn ago_names_the_largest_whole_unit() {
+        assert_eq!(ago(100, 100), "0s ago");
+        assert_eq!(ago(100, 41), "59s ago");
+        assert_eq!(ago(300, 0), "5m ago");
+        assert_eq!(ago(3 * 3600 + 59, 0), "3h ago");
+        assert_eq!(ago(9 * SECS_PER_DAY + 5, 0), "9d ago");
+        assert_eq!(ago(0, 50), "0s ago");
     }
 
     #[test]

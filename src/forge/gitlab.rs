@@ -64,6 +64,9 @@ pub fn pull_node(node: &Value) -> PullNode {
             (Some(source), Some(target)) => Some(source == target),
             _ => None,
         },
+        created_at: forge::text(node, "/created_at"),
+        author: forge::text(node, "/author/username"),
+        draft: node["draft"].as_bool() == Some(true),
     }
 }
 
@@ -553,6 +556,9 @@ fn fetch(glab: &dyn Transport, project: &str, iid: u64) -> Result<Fetched> {
         base_sha: forge::text(&mr, "/diff_refs/base_sha"),
         start_sha: forge::text(&mr, "/diff_refs/start_sha"),
         author: forge::text(&mr, "/author/username"),
+        created_at: forge::text(&mr, "/created_at")
+            .map(|time| clock::normalize(&time))
+            .transpose()?,
         url: url.clone(),
     };
     let threads = discussions(glab, &base, &url)?;
@@ -694,6 +700,7 @@ mod tests {
             login: "me".to_owned(),
             synced_at: String::new(),
             attached_at: None,
+            created_at: None,
         };
         let request = gitlab()
             .file_thread(subject(), &review, "old.txt", "new.txt", "text")

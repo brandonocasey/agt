@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::approve::is_open;
 use super::findings::{self, NewThread, author, issue_key, local_thread};
 use super::input::{limited, read_body};
+use super::report::{self, Section};
 use super::{
     Ctx, Selection, auto, fresh_id, open_ctx, publish, run_not_found, run_of_id, usage, view,
 };
@@ -45,7 +46,11 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
         (reading || preview, reading || publishing, preview),
         run_hint(&cli.command),
     )?;
-    if reading {
+    let listing = matches!(&cli.command, QaCommand::Status { report, .. } if report.all);
+    if let QaCommand::Status { report, .. } = &cli.command {
+        report::select(&mut ctx, report)?;
+    }
+    if reading && !listing {
         auto::sync_stale(&ctx, Offline::current())?;
     }
     let value = match cli.command {
@@ -69,7 +74,9 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
         QaCommand::Reply(args) => findings::reply(&ctx, &args, true)?,
         QaCommand::List => list(&ctx)?,
         QaCommand::Show { id } => view::show(&ctx, &id)?,
-        QaCommand::Status { head } => status(&ctx, head.as_deref())?,
+        QaCommand::Status { head, report } => {
+            return report::run(&mut ctx, &report, Section::Qa, head.as_deref(), false);
+        }
         QaCommand::Approve => approve(&ctx)?,
         QaCommand::Publish {
             dry_run,
@@ -470,18 +477,25 @@ fn evaluated(ctx: &Ctx, head: Option<&str>) -> Result<Option<(String, String)>> 
     Ok(Some((scope.head, tree)))
 }
 
-fn status(ctx: &Ctx, head: Option<&str>) -> Result<Value> {
+pub(super) fn status(ctx: &Ctx, head: Option<&str>) -> Result<Value> {
     let scope = ctx.scope()?;
     let evaluated = evaluated(ctx, head)?;
     let (head, tree) = match &evaluated {
         Some((head, tree)) => (head.as_str(), Some(tree.as_str())),
         None => ("", None),
     };
-    Ok(json!({
+    let history = if head.is_empty() {
+        Vec::new()
+    } else {
+        ctx.repo.log(scope.base.as_deref(), head)?
+    };
+    let mut status = json!({
         "target": scope.existing.as_ref().map(|_| &scope.key),
         "head": (!head.is_empty()).then_some(head),
         "qa": qa_state(scope.existing.as_ref(), head, tree),
-    }))
+    });
+    report::extend(&mut status, ctx, scope.existing.as_ref(), &history);
+    Ok(status)
 }
 
 fn list(ctx: &Ctx) -> Result<Value> {

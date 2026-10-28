@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
-use crate::review::cli::{AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction};
+use crate::review::cli::{
+    AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction, StatusCli,
+};
 use crate::store::Store;
 use crate::store::model::{
     KilledFinding, Pass, PassKind, Reveal, Run, Severity, Target, TargetKind, Thread, ThreadType,
@@ -17,6 +19,7 @@ mod input;
 pub mod prune;
 mod publish;
 mod qa;
+mod report;
 mod run;
 mod scope;
 mod status;
@@ -26,6 +29,7 @@ mod view;
 use self::approve::approve;
 use self::findings::{comment, finding_kill, reply, resolve};
 pub use self::qa::run_qa;
+use self::report::Section;
 use self::run::{pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::view::{list, show};
@@ -63,6 +67,28 @@ struct Scope {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
+    run_with(cli, Section::Review)
+}
+
+/// `agt status`: the review command's status over review and QA together.
+pub fn run_status(cli: StatusCli) -> Result<Output> {
+    run_with(
+        Cli {
+            target: cli.target,
+            range: cli.range,
+            default_branch: cli.default_branch,
+            command: Command::Status {
+                head: cli.head,
+                full: cli.full,
+                sync: cli.sync,
+                report: cli.report,
+            },
+        },
+        Section::All,
+    )
+}
+
+fn run_with(cli: Cli, section: Section) -> Result<Output> {
     let selection = Selection {
         target: cli.target,
         range: cli.range,
@@ -102,11 +128,17 @@ pub fn run(cli: Cli) -> Result<Output> {
         (read_only, scratch_git, preview),
         run_hint(&cli.command),
     )?;
+    let listing = matches!(&cli.command, Command::Status { report, .. } if report.all);
+    if let Command::Status { report, .. } = &cli.command {
+        report::select(&mut ctx, report)?;
+    }
     // Pure reads pull the PR/MR first when the local copy is stale.
-    if matches!(
-        cli.command,
-        Command::Status { .. } | Command::List(_) | Command::Show { .. }
-    ) {
+    if !listing
+        && matches!(
+            cli.command,
+            Command::Status { .. } | Command::List(_) | Command::Show { .. }
+        )
+    {
         auto::sync_stale(&ctx, crate::forge::auto::Offline::current())?;
     }
     let status_selection = ctx.selection.clone();
@@ -211,10 +243,9 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Resolve(args) => resolve(&ctx, &args)?,
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,
-        Command::Status { head, full, .. } => {
-            let status = status(&ctx, head.as_deref())?;
-            if full { status } else { brief_status(status) }
-        }
+        Command::Status {
+            head, full, report, ..
+        } => return report::run(&mut ctx, &report, section, head.as_deref(), full),
         Command::Sync { pr } => sync::sync(&ctx, pr.as_deref())?,
         Command::Publish {
             dry_run,

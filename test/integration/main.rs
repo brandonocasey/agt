@@ -20,6 +20,7 @@ mod publish_gitlab_outside;
 mod qa;
 mod review_auto_sync;
 mod review_issue;
+mod review_report;
 mod reviewed;
 mod secrets;
 mod session_index;

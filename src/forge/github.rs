@@ -83,6 +83,9 @@ pub fn pull_node(node: &Value) -> PullNode {
         head_branch: text("/headRefName"),
         head_sha: text("/headRefOid"),
         same_repo: node["isCrossRepository"].as_bool().map(|cross| !cross),
+        created_at: forge::text(node, "/createdAt"),
+        author: forge::text(node, "/author/login"),
+        draft: node["isDraft"].as_bool() == Some(true),
     }
 }
 
@@ -564,7 +567,7 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         PULL,
         "PullRequest",
         &format!(
-            "number url state closedAt author{{login}} headRefName headRefOid baseRefOid baseRepository{{nameWithOwner}} reviewThreads(first:50,after:$cursor){{pageInfo{{hasNextPage endCursor}} nodes{{id isResolved isOutdated path line originalLine startLine originalStartLine diffSide subjectType comments(first:50){{pageInfo{{hasNextPage endCursor}} nodes{{{COMMENT_FIELDS}}}}}}}}}"
+            "number url state closedAt createdAt author{{login}} headRefName headRefOid baseRefOid baseRepository{{nameWithOwner}} reviewThreads(first:50,after:$cursor){{pageInfo{{hasNextPage endCursor}} nodes{{id isResolved isOutdated path line originalLine startLine originalStartLine diffSide subjectType comments(first:50){{pageInfo{{hasNextPage endCursor}} nodes{{{COMMENT_FIELDS}}}}}}}}}"
         ),
     );
     let (first, thread_nodes) = pager.pages(&threads_query, "reviewThreads")?;
@@ -583,6 +586,9 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         base_sha: forge::text(pull, "/baseRefOid"),
         start_sha: None,
         author: forge::text(pull, "/author/login"),
+        created_at: forge::text(pull, "/createdAt")
+            .map(|time| clock::normalize(&time))
+            .transpose()?,
     };
     let mut threads = thread_nodes
         .iter()

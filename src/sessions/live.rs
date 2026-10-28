@@ -407,16 +407,6 @@ fn place(cwd: &Path) -> Place {
     place
 }
 
-/// A duration as its largest whole unit: `45s`, `12m`, `3h`, `2d`.
-fn age(secs: i64) -> String {
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m", secs / 60),
-        3600..=86399 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / clock::SECS_PER_DAY),
-    }
-}
-
 /// `place` with a leading `home` directory written `~`. Only whole path components match, so
 /// `/home/alice/x` is not under `/home/al`.
 fn tilde(place: &str, home: &Path) -> String {
@@ -454,7 +444,7 @@ fn render(rows: &[Row], home: &Path) -> String {
                 row.pid.to_string(),
                 cell(row.name.as_deref()),
                 cell(row.status.as_deref()),
-                row.status_secs.map_or("-".into(), age),
+                row.status_secs.map_or("-".into(), clock::age),
                 cell(row.place.as_ref().and_then(|place| place.branch.as_deref())),
                 tilde(place, home),
                 cell(spend.model.as_deref()),

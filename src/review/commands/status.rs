@@ -440,7 +440,7 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let local = count(&covered);
     // Without a pass covering the whole head, each commit since the merge-base must be reviewed.
     let every_commit = !commit_views.is_empty() && unreviewed.is_empty();
-    Ok(json!({
+    let mut status = json!({
         "repo": ctx.repo_key,
         "target": target.map(|_| &scope.key),
         "review": target.and_then(|target| target.review.as_ref()),
@@ -468,7 +468,9 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
             &head,
             Some(worktree["tree"].as_str().unwrap_or(&head_tree)),
         ),
-    }))
+    });
+    super::report::extend(&mut status, ctx, target, &history);
+    Ok(status)
 }
 
 /// `status` without the per-commit list, runs, imported records and tree ids; `--full`
@@ -497,7 +499,7 @@ pub(super) fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
             diffs: HashMap::new(),
         },
     );
-    json!({
+    let mut status = json!({
         "repo": ctx.repo_key,
         "target": target.map(|_| &scope.key),
         "review": target.and_then(|target| target.review.as_ref()),
@@ -520,7 +522,9 @@ pub(super) fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
         "held_questions": threads.held,
         "runs": run_views(target),
         "qa": super::qa::qa_state(target, "", None),
-    })
+    });
+    super::report::extend(&mut status, ctx, target, &[]);
+    status
 }
 
 /// The reviewed head nearest to `head` among its ancestors: whole-branch pass heads and
