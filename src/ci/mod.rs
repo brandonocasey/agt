@@ -52,6 +52,10 @@ enum Command {
         /// Default-branch pipelines to compare.
         #[arg(long, default_value_t = 10)]
         limit: i64,
+        /// Tracker for an MR given as a bare id or !id: a git remote name or `host/repo`;
+        /// default: origin's tracker, else the only one.
+        #[arg(long, value_name = "NAME|HOST/REPO")]
+        remote: Option<String>,
     },
     /// Poll PRs, MRs and pipelines until their checks finish, fail or change.
     ///
@@ -77,6 +81,10 @@ enum Command {
         /// The longest wait between polls, in seconds.
         #[arg(long, value_name = "SEC", default_value_t = 120.0, value_parser = positive)]
         max_interval: f64,
+        /// Tracker for a target that names no repository (#PR, !IID, a pipeline id): a git
+        /// remote name or `host/repo`; default: origin's tracker, else the only one.
+        #[arg(long, value_name = "NAME|HOST/REPO")]
+        remote: Option<String>,
     },
 }
 
@@ -127,11 +135,20 @@ fn execute(cli: Cli) -> Result<u8> {
     Offline::current().forbid("agt ci")?;
     let out = Out;
     let code = match cli.command {
-        Command::Failures { target, limit } => {
+        Command::Failures {
+            target,
+            limit,
+            remote,
+        } => {
             if limit < 1 {
                 return fail("--limit must be at least 1");
             }
-            let target = parse_target(&target)?;
+            let mut target = parse_target(&target)?;
+            if remote.is_some() && target.repo.is_none() {
+                let located = target::resolve(target.clone(), remote.as_deref())?;
+                target.host = Some(located.host);
+                target.repo = Some(located.repo);
+            }
             let gitlab = connect(&target)?;
             if target.pipeline {
                 return fail("failures takes an MR, not a pipeline");
@@ -149,18 +166,25 @@ fn execute(cli: Cli) -> Result<u8> {
             timeout,
             interval,
             max_interval,
-        } => return wait_targets(&targets, timeout, interval, max_interval),
+            remote,
+        } => return wait_targets(&targets, timeout, interval, max_interval, remote.as_deref()),
     };
     Ok(code)
 }
 
-fn wait_targets(targets: &[String], timeout: f64, interval: f64, max_interval: f64) -> Result<u8> {
+fn wait_targets(
+    targets: &[String],
+    timeout: f64,
+    interval: f64,
+    max_interval: f64,
+    remote: Option<&str>,
+) -> Result<u8> {
     if interval > max_interval {
         return fail("--interval cannot exceed --max-interval");
     }
     let resolved = targets
         .iter()
-        .map(|arg| target::parse(arg).and_then(target::resolve))
+        .map(|arg| target::parse(arg).and_then(|parsed| target::resolve(parsed, remote)))
         .collect::<Result<Vec<_>>>()?;
     let mut seen = HashSet::new();
     if let Some(duplicate) = resolved.iter().find(|target| !seen.insert(&target.key)) {

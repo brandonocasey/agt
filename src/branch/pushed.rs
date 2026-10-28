@@ -3,13 +3,17 @@
 use serde_json::{Value, json};
 
 use super::{NOT_PUSHED, tip};
+use crate::core::config::{Config, Kind, RemoteSet};
 use crate::core::error::{Result, fail};
 use crate::forge;
-use crate::forge::landed::Origin;
+use crate::forge::landed::Source;
+use crate::forge::select::{Selected, select_tracker};
 use crate::git::Repo;
 use crate::store::model::ReviewState;
 
-pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
+pub fn run(repo: &Repo, branch: &str, remote: Option<&str>) -> Result<(Value, u8)> {
+    let (remote, selected) = choose(repo, remote)?;
+    let remote = remote.as_str();
     let local = tip(repo, branch)?;
     let remote_commit = fetch(repo, remote, branch)?;
     let (state, ahead, behind) = match &remote_commit {
@@ -27,7 +31,7 @@ pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
         }
     };
     // The git comparison stands without the forge: a failed lookup leaves `pr` null.
-    let pr = pull_report(repo, branch, &local).unwrap_or_else(|error| {
+    let pr = pull_report(selected.as_ref(), branch, &local).unwrap_or_else(|error| {
         eprintln!("warning: PR/MR lookup failed, `pr` is null: {error}");
         None
     });
@@ -51,6 +55,36 @@ pub fn run(repo: &Repo, branch: &str, remote: &str) -> Result<(Value, u8)> {
         NOT_PUSHED
     };
     Ok((value, code))
+}
+
+/// The git remote to compare with and the tracker whose PR/MR is reported. `--remote` names a
+/// git remote or a `host/repo`; without it the tracker is chosen as `agt pr` does, and the git
+/// remote is its own, else `origin`. A git remote no tracker serves has no PR/MR to report.
+fn choose(repo: &Repo, remote: Option<&str>) -> Result<(String, Option<Selected>)> {
+    let config = Config::load_for_repo(repo)?;
+    if let Some(name) = remote
+        && repo.has_remote(name)?
+        && !config
+            .trackers_from(
+                Kind::PullRequests,
+                &repo.remote_locations()?,
+                RemoteSet::All,
+            )
+            .iter()
+            .any(|tracker| tracker.remote.as_deref() == Some(name))
+    {
+        return Ok((name.to_owned(), None));
+    }
+    let selected = select_tracker(repo, &config, Kind::PullRequests, remote, None)?;
+    let named = selected
+        .as_ref()
+        .and_then(|selected| selected.tracker.as_ref())
+        .and_then(|tracker| tracker.remote.clone());
+    match (named, remote) {
+        (Some(named), _) => Ok((named, selected)),
+        (None, Some(name)) => fail(format!("{name} is no git remote of this repository")),
+        (None, None) => Ok(("origin".to_owned(), selected)),
+    }
 }
 
 /// The pinned commit of `refs/heads/<branch>` on `remote`; `None` when the remote lacks it.
@@ -80,8 +114,9 @@ fn uncommitted(repo: &Repo, branch: &str) -> Result<Option<usize>> {
 }
 
 /// The open PR/MR of `branch` in this repository, if any, with its head and pipeline.
-fn pull_report(repo: &Repo, branch: &str, local: &str) -> Result<Option<Value>> {
-    let Some(origin) = Origin::of(repo)? else {
+fn pull_report(selected: Option<&Selected>, branch: &str, local: &str) -> Result<Option<Value>> {
+    // A host agt cannot identify has no PRs/MRs to report.
+    let Some(origin) = selected.and_then(|selected| Source::of(selected).ok()) else {
         return Ok(None);
     };
     let Some(pull) = origin

@@ -11,9 +11,10 @@ use super::idle::{Allow, Cwds, blocker};
 use super::landed::{Finding, Scene, Verdict};
 use super::remove::removal;
 use super::{info, roots};
+use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::forge::auto::Offline;
-use crate::forge::landed::Origin;
+use crate::forge::landed::Source;
 use crate::git::{Repo, Worktree};
 
 /// The `agt cleanup` flags of the `worktrees` kind; each needs `--only worktrees`.
@@ -166,10 +167,19 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
         report.warnings.push("no default branch found".into());
         return Ok(report);
     };
-    let origin = if Offline::current().is_set() {
-        None
+    let sources = if Offline::current().is_set() {
+        Vec::new()
     } else {
-        Origin::of(repo)?
+        match Config::load_for_repo(repo) {
+            Ok(config) => Source::trackers(repo, &config)?,
+            // A bad config is reported per row by the hooks; the plan goes on with local evidence only.
+            Err(error) => {
+                report
+                    .warnings
+                    .push(format!("no forge evidence checked: {error}"));
+                Vec::new()
+            }
+        }
     };
     let main = info::real(&scene.main().path)?;
     let shared = Repo::at(&main);
@@ -214,7 +224,7 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
             continue;
         }
         report.hit.extend(named);
-        let finding = scene.judge(repo, origin.as_ref(), &branch, &tip)?;
+        let finding = scene.judge(repo, &sources, &branch, &tip)?;
         let subject = Subject {
             branch: Some(&branch),
             tip: &tip,

@@ -1,3 +1,4 @@
+mod all;
 pub(super) mod merge;
 mod records;
 mod trust;
@@ -9,7 +10,9 @@ use super::prune::prune_dir;
 use super::scope::Adoption;
 use super::{Ctx, Scope};
 use crate::core::clock;
+use crate::core::config::{Config, Kind};
 use crate::core::error::{Error, Result, fail};
+use crate::forge::select::{Selected, at_location, require_tracker, select_tracker};
 use crate::forge::service::{self, ReviewService, ReviewSubject};
 use crate::forge::{self, Fetched};
 use crate::forge::{anchors, hosts};
@@ -73,14 +76,46 @@ impl Connection {
     }
 }
 
-pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
+/// The PR/MR a command works on, and the tracker and modes that govern it, found without calling
+/// the forge.
+pub(super) struct Chosen {
+    pub selected: Selected,
+    place: Place,
+}
+
+enum Place {
+    /// The PR/MR a `--target` was synced with.
+    Stored(Box<Review>),
+    /// A PR/MR number, or the PR/MR of the current branch when `None`.
+    Number(Option<u64>),
+}
+
+/// Picks the tracker for `pr` or `remote`, see [`select_tracker`]. A target already synced with a
+/// PR/MR keeps it, so a detached HEAD needs no `--pr`.
+pub(super) fn choose(
+    ctx: &Ctx,
+    config: &Config,
+    pr: Option<&str>,
+    remote: Option<&str>,
+) -> Result<Chosen> {
     if pr.is_none()
+        && remote.is_none()
         && let Some(key) = &ctx.selection.target
         && let Some(target) = ctx.store.load(&ctx.dir, key)?
     {
         // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`.
-        if let Some(review) = &target.review {
-            return connection_of(review);
+        if let Some(review) = target.review {
+            let selected = at_location(
+                &ctx.repo,
+                config,
+                Kind::PullRequests,
+                &review.host,
+                &review.repo,
+            )?;
+            return Ok(Chosen {
+                selected,
+                place: Place::Stored(Box::new(review)),
+            });
         }
         // Without one, the current branch's PR/MR would be imported into another branch's
         // records.
@@ -91,31 +126,65 @@ pub(super) fn connect(ctx: &Ctx, pr: Option<&str>) -> Result<Connection> {
         }
     }
     let pr_ref = pr.map(forge::parse_pr).transpose()?;
-    let origin = ctx.repo.origin_location()?;
-    let location = pr_ref
-        .as_ref()
-        .and_then(|pr| pr.location.clone())
-        .or(origin);
-    let Some((host, origin_repo)) = location else {
-        return fail("sync needs a GitHub or GitLab origin remote, or --pr <url>");
-    };
-    let forge = detect(ctx, &host)?;
-    let (service, login) = authenticate(forge, &host)?;
-    let (repo, number) = match &pr_ref {
-        Some(pr) => (origin_repo, pr.number),
-        None => {
-            let branch = ctx
-                .repo
-                .current_branch()?
-                .ok_or_else(|| Error("HEAD is detached; pass --pr <number|url>".into()))?;
-            service.find_review(&origin_repo, &branch)?.ok_or_else(|| {
-                Error(format!(
-                    "no PR/MR found for branch {branch} in {origin_repo}"
-                ))
-            })?
+    let selected = require_tracker(
+        &ctx.repo,
+        config,
+        Kind::PullRequests,
+        remote,
+        pr_ref.as_ref(),
+    )?;
+    Ok(Chosen {
+        selected,
+        place: Place::Number(pr_ref.map(|pr| pr.number)),
+    })
+}
+
+/// Connects to the PR/MR of `chosen`.
+pub(super) fn connect_chosen(ctx: &Ctx, chosen: Chosen) -> Result<Connection> {
+    let Chosen { selected, place } = chosen;
+    match place {
+        Place::Stored(review) => connection_of(&review),
+        Place::Number(number) => {
+            let forge = match &selected.tracker {
+                Some(tracker) => tracker.forge,
+                None => detect(ctx, &selected.host)?,
+            };
+            let (service, login) = authenticate(forge, &selected.host)?;
+            let (repo, number) = match number {
+                Some(number) => (selected.repo.clone(), number),
+                None => {
+                    let branch = ctx
+                        .repo
+                        .current_branch()?
+                        .ok_or_else(|| Error("HEAD is detached; pass --pr <number|url>".into()))?;
+                    service
+                        .find_review(&selected.repo, &branch)?
+                        .ok_or_else(|| {
+                            Error(format!(
+                                "no PR/MR found for branch {branch} in {}",
+                                selected.repo
+                            ))
+                        })?
+                }
+            };
+            Ok(Connection::with(
+                service,
+                login,
+                &selected.host,
+                &repo,
+                number,
+            ))
         }
-    };
-    Ok(Connection::with(service, login, &host, &repo, number))
+    }
+}
+
+pub(super) fn connect(
+    ctx: &Ctx,
+    config: &Config,
+    pr: Option<&str>,
+    remote: Option<&str>,
+) -> Result<Connection> {
+    connect_chosen(ctx, choose(ctx, config, pr, remote)?)
 }
 
 /// The store key of the PR/MR `review` is.
@@ -128,13 +197,18 @@ pub(super) fn connection_of(review: &Review) -> Result<Connection> {
     Connection::open(review.forge, &review.host, &review.repo, review.number)
 }
 
-/// The forge and repository of `origin`, or `None` when there is no origin or its host is not a
-/// forge this build knows. Neither is an error to a caller that only wants to try.
-pub(super) fn locate(ctx: &Ctx) -> Result<Option<(Forge, String, String)>> {
-    let Some((host, repo)) = ctx.repo.origin_location()? else {
+/// The forge, host and repository of the tracker `agt` picks without being told, whether it
+/// pulls on its own, or `None` when there is none or its host is not a forge this build knows.
+/// Neither is an error to a caller that only wants to try.
+pub(super) fn locate(ctx: &Ctx, config: &Config) -> Result<Option<(Forge, Selected)>> {
+    let Some(selected) = select_tracker(&ctx.repo, config, Kind::PullRequests, None, None)? else {
         return Ok(None);
     };
-    Ok(known_forge(ctx, &host)?.map(|forge| (forge, host, repo)))
+    let forge = match &selected.tracker {
+        Some(tracker) => Some(tracker.forge),
+        None => known_forge(ctx, &selected.host)?,
+    };
+    Ok(forge.map(|forge| (forge, selected)))
 }
 
 /// The connection to the PR/MR of `branch` in `repo` on `host`, or `None` when it has none.
@@ -276,8 +350,14 @@ impl Plan {
     }
 }
 
-pub(super) fn sync(ctx: &Ctx, pr: Option<&str>) -> Result<Value> {
-    let connection = connect(ctx, pr)?;
+/// `agt review sync`: see [`all::run`].
+pub(super) fn sync_command(ctx: &Ctx, pr: Option<&str>, remote: Option<&str>) -> Result<Value> {
+    all::run(ctx, pr, remote)
+}
+
+pub(super) fn sync(ctx: &Ctx, pr: Option<&str>, remote: Option<&str>) -> Result<Value> {
+    let config = Config::load_for_repo(&ctx.repo)?;
+    let connection = connect(ctx, &config, pr, remote)?;
     sync_with(ctx, &connection)
 }
 

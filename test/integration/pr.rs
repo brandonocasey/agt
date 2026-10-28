@@ -998,3 +998,141 @@ fn offline_refuses_every_pr_command() {
     }
     assert!(env.forge_calls().is_empty());
 }
+
+/// A fork: `origin` is the user's copy, `upstream` the project it came from.
+fn fork() -> Env {
+    let env = setup("https://github.com/me/r.git");
+    env.git(&["remote", "add", "upstream", "https://github.com/o/r.git"]);
+    env
+}
+
+fn gh_view_in(env: &Env, owner: &str, number: u64) {
+    let url = format!("https://github.com/{owner}/r/pull/{number}");
+    let reply = format!(
+        r#"{{"data":{{"repository":{{"pullRequest":{}}}}}}}"#,
+        node(number, &json!({ "url": url }))
+    );
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=PrView",
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            "name=r",
+            "-F",
+            &format!("number={number}"),
+        ],
+        &reply,
+    );
+}
+
+#[test]
+fn a_fork_uses_origin_and_remote_switches_to_upstream() {
+    let env = fork();
+    env.write_config("[sync]\nremotes = \"all\"\n");
+    gh_view_in(&env, "me", 7);
+    gh_view_in(&env, "o", 7);
+    assert_eq!(
+        ok(&env, &["view", "7"])["url"],
+        "https://github.com/me/r/pull/7"
+    );
+    assert_eq!(
+        ok(&env, &["--remote", "upstream", "view", "7"])["url"],
+        "https://github.com/o/r/pull/7"
+    );
+    // The repository can be named instead of the remote.
+    assert_eq!(
+        ok(&env, &["view", "7", "--remote", "github.com/o/r"])["url"],
+        "https://github.com/o/r/pull/7"
+    );
+    // A PR URL picks its own tracker.
+    assert_eq!(
+        ok(&env, &["view", "https://github.com/o/r/pull/7"])["url"],
+        "https://github.com/o/r/pull/7"
+    );
+}
+
+#[test]
+fn remote_names_any_remote_even_when_only_origin_is_a_tracker() {
+    let env = fork();
+    gh_view_in(&env, "o", 7);
+    assert_eq!(
+        ok(&env, &["--remote", "upstream", "view", "7"])["url"],
+        "https://github.com/o/r/pull/7"
+    );
+    let message = err(&env, &["--remote", "nowhere", "view", "7"]);
+    assert!(message.contains("--remote nowhere"), "{message}");
+    assert!(message.contains("`origin` (github.com/me/r)"), "{message}");
+}
+
+#[test]
+fn several_trackers_without_origin_ask_for_remote() {
+    let env = setup("https://example.invalid/me/r.git");
+    env.git(&["remote", "add", "one", "https://github.com/o/r.git"]);
+    env.git(&["remote", "add", "two", "https://gitlab.com/g/p.git"]);
+    env.write_config("[sync]\nremotes = \"all\"\n");
+    let message = err(&env, &["view", "7"]);
+    assert!(message.contains("pass --remote"), "{message}");
+    assert!(message.contains("`one` (github.com/o/r)"), "{message}");
+    assert!(message.contains("`two` (gitlab.com/g/p)"), "{message}");
+    assert!(
+        !env.forge_calls()
+            .iter()
+            .any(|call| call.contains("graphql")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn a_pull_requests_push_of_off_blocks_every_write_and_no_call_is_made() {
+    let env = github();
+    env.write_config("[pull_requests]\npush = \"off\"\n");
+    for args in [
+        vec!["create", "--title", "T"],
+        vec!["update", "7", "--title", "T"],
+        vec!["merge", "7", "--sha", SHA],
+        vec!["auto-merge", "off", "7"],
+    ] {
+        let message = err(&env, &args);
+        assert!(
+            message.contains("refused: push is off for github.com/o/r"),
+            "{args:?}: {message}"
+        );
+        assert!(message.contains("`[pull_requests]`"), "{message}");
+    }
+    assert!(env.forge_calls().is_empty());
+    // Reads are never gated.
+    gh_view(&env, 7, &json!({}));
+    assert_eq!(ok(&env, &["view", "7"])["number"], 7);
+}
+
+#[test]
+fn a_tracker_push_of_off_blocks_writes_to_that_tracker_only() {
+    let env = fork();
+    env.write_config(
+        "[sync]\nremotes = \"all\"\n[[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\npush = \"off\"\n",
+    );
+    let message = err(
+        &env,
+        &["--remote", "upstream", "update", "7", "--title", "T"],
+    );
+    assert!(
+        message.contains("push is off for github.com/o/r"),
+        "{message}"
+    );
+    // The tracker of origin is not blocked: the call reaches the forge, which has no answer.
+    let message = err(&env, &["update", "7", "--title", "T"]);
+    assert!(!message.contains("refused"), "{message}");
+}
+
+#[test]
+fn an_unset_push_leaves_pr_writes_allowed() {
+    let env = github();
+    env.write_config("");
+    let message = err(&env, &["update", "7", "--title", "T"]);
+    assert!(!message.contains("refused"), "{message}");
+}

@@ -652,6 +652,68 @@ fn a_local_reference_for_the_other_forge_than_origin_is_a_usage_error() {
     }
 }
 
+/// A repository with the remotes `(name, url)`, and one merged PR #5 answered for `name`.
+fn local_target(remotes: &[(&str, &str)], name: &str, extra: &[&str]) -> Outcome {
+    let scenario = Scenario::new(&[step(
+        &format!("name={name}"),
+        &pull(json!({"state": "MERGED", "mergedAt": "x"}), &[]),
+    )]);
+    for (remote, url) in remotes {
+        scenario.env.git(&["remote", "add", remote, url]);
+    }
+    let mut args = vec!["#5"];
+    args.extend(extra);
+    args.extend(FAST);
+    let output = scenario.command(&args, &[]).output().unwrap();
+    Outcome {
+        status: output.status.code().unwrap(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        events: events(&output.stdout),
+    }
+}
+
+const TWO_REMOTES: [(&str, &str); 2] = [
+    ("origin", "https://github.com/o/r.git"),
+    ("upstream", "https://github.com/o/up.git"),
+];
+
+#[test]
+fn a_local_reference_uses_the_origin_tracker_among_several() {
+    let outcome = local_target(&TWO_REMOTES, "r", &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["target"], "o/r#5");
+}
+
+#[test]
+fn remote_picks_the_tracker_of_a_local_reference() {
+    let outcome = local_target(&TWO_REMOTES, "up", &["--remote", "upstream"]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["target"], "o/up#5");
+    let outcome = local_target(&TWO_REMOTES, "up", &["--remote", "github.com/o/up"]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+}
+
+#[test]
+fn several_trackers_without_origin_need_remote() {
+    let remotes = [
+        ("upstream", "https://github.com/o/up.git"),
+        ("fork", "https://github.com/me/fork.git"),
+    ];
+    let outcome = local_target(&remotes, "up", &[]);
+    let stderr = &outcome.stderr;
+    assert_eq!(outcome.status, 2, "{stderr}");
+    assert!(outcome.events.is_empty());
+    assert!(stderr.contains("pass --remote with"), "{stderr}");
+    assert!(stderr.contains("`upstream` (github.com/o/up)"), "{stderr}");
+    assert!(stderr.contains("`fork` (github.com/me/fork)"), "{stderr}");
+    let outcome = local_target(&remotes, "fork", &["--remote", "fork"]);
+    assert_eq!(
+        outcome.events[0]["target"], "me/fork#5",
+        "{}",
+        outcome.stderr
+    );
+}
+
 fn mr_path(suffix: &str) -> String {
     format!("{GITLAB_PROJECT}/{suffix}")
 }

@@ -13,7 +13,7 @@ use crate::core::error::{Result, fail};
 use crate::core::output::Output;
 use crate::core::table::table;
 use crate::forge::auto::Offline;
-use crate::forge::landed::Origin;
+use crate::forge::landed::Source;
 use crate::git::LogEntry;
 use crate::review::cli::ReportArgs;
 use crate::store::model::{Check, Forge, Outcome, Resolution, Target, TargetKind, Thread};
@@ -539,7 +539,7 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
             Some("offline: PRs/MRs come from stored reviews".to_owned()),
         )
     } else {
-        match Origin::of(&ctx.repo).and_then(|origin| match origin {
+        match Source::origin(&ctx.repo).and_then(|origin| match origin {
             Some(origin) => origin.open_pulls().map(|pulls| Some((origin, pulls))),
             None => Ok(None),
         }) {

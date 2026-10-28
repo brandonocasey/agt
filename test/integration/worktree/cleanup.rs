@@ -116,14 +116,31 @@ impl Site {
     }
 
     fn pages(&self, branch: &str, after: Option<&str>, nodes: &[Value], next: Option<&str>) {
+        self.pages_of("app", branch, after, nodes, next);
+    }
+
+    /// Answers the fake `gh` for the PRs of `branch` in the repository `acme/<name>`.
+    fn pulls_of(&self, name: &str, branch: &str, nodes: &[Value]) {
+        self.pages_of(name, branch, None, nodes, None);
+    }
+
+    fn pages_of(
+        &self,
+        name: &str,
+        branch: &str,
+        after: Option<&str>,
+        nodes: &[Value],
+        next: Option<&str>,
+    ) {
         let branch = format!("branch={branch}");
+        let name = format!("name={name}");
         let mut args = vec![
             "api",
             "graphql",
             "-f",
             "owner=acme",
             "-f",
-            "name=app",
+            &name,
             "-f",
             &branch,
             "-f",
@@ -259,6 +276,50 @@ fn an_ancestor_merged_branch_loses_its_clean_worktree_and_branch() {
     assert_eq!(site.branches(), ["main"]);
     // Local ancestry needs no forge.
     assert_eq!(site.env.forge_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn a_pull_request_merged_on_another_remote_lands_the_branch() {
+    let site = Site::new();
+    let wt = site.branch("sq");
+    let tip = site.tip("sq");
+    site.squash("sq");
+    site.env
+        .git(&["remote", "add", "upstream", "git@github.com:acme/up.git"]);
+    site.pulls("sq", &[]);
+    site.pulls_of("up", "sq", &[merged(9, "sq", &tip)]);
+
+    let report = site.run(&["--yes"]);
+    assert!(!wt.exists());
+    assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
+    assert!(
+        report["deleted"][0]["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("merged PR #9"),
+        "{report}"
+    );
+    let calls = site.env.forge_calls().join("\n");
+    assert!(calls.contains("name=app"), "{calls}");
+    assert!(calls.contains("name=up"), "{calls}");
+}
+
+#[test]
+fn remotes_origin_looks_the_branch_up_on_origin_only() {
+    let site = Site::new();
+    site.env.write_config("[sync]\nremotes = \"origin\"\n");
+    site.branch("sq");
+    let tip = site.tip("sq");
+    site.squash("sq");
+    site.env
+        .git(&["remote", "add", "upstream", "git@github.com:acme/up.git"]);
+    site.pulls("sq", &[]);
+    site.pulls_of("up", "sq", &[merged(9, "sq", &tip)]);
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "sq")["verdict"], "unmerged");
+    let calls = site.env.forge_calls().join("\n");
+    assert!(!calls.contains("name=up"), "{calls}");
 }
 
 #[test]

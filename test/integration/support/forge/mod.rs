@@ -356,7 +356,7 @@ pub trait FakeService {
     /// end after the target is linked.
     fn link(&self, setup: &Setup) {
         self.sync(setup, &Remote::new());
-        setup.env.run(&["sync", "--pr", self.number()]);
+        setup.env.pull(&["sync", "--pr", self.number()]);
         setup.env.run(&["run", "end", "--run", &setup.run]);
     }
 

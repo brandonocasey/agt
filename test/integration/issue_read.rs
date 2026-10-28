@@ -419,17 +419,20 @@ fn involved_scope_lists_each_way_a_user_is_involved_and_dedupes() {
 fn a_missing_config_or_unknown_tracker_is_an_error_naming_the_file() {
     let env = Env::new();
     let error = env.issue_fail(&["sync"]);
-    assert!(
-        error.contains("no [[issues.tracker]] is configured"),
-        "{error}"
-    );
+    assert!(error.contains("no tracker serves issues"), "{error}");
     assert!(error.contains("config.toml"), "{error}");
-    env.write_config("[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\nbogus = 1\n");
-    let error = env.issue_fail(&["sync"]);
-    assert!(
-        error.contains("config.toml") && error.contains("bogus"),
-        "{error}"
-    );
+    for text in [
+        "[[tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\nbogus = 1\n",
+        // The old key loads through the mapping, so its mistakes are named too.
+        "[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\nbogus = 1\n",
+    ] {
+        env.write_config(text);
+        let error = env.issue_fail(&["sync"]);
+        assert!(
+            error.contains("config.toml") && error.contains("bogus"),
+            "{error}"
+        );
+    }
     assert_eq!(env.issue(&["list"])["count"], 0, "reading needs no config");
 }
 
@@ -456,7 +459,7 @@ fn tracker_identity_collisions_preserve_documents_and_avoid_forge_calls() {
         env.write_config(
             &config
                 .replace("a-b/c", "a/b-c")
-                .replace("push = true", "push = false"),
+                .replace("\"manual\"", "\"off\""),
         );
         let error = env.issue_fail(&args);
         assert!(
@@ -495,7 +498,7 @@ fn tracker_identity_accepts_case_changes_and_rejects_corrupt_empty_hosts() {
             .replace("github.com", "GITHUB.COM")
             .replace("o/r", "O/R"),
     );
-    env.issue(&["push", "--dry-run"]);
+    // Push is off for this tracker: it is skipped without a call, after its identity matched.
     env.issue(&["push"]);
     let path = env.issue_state().join("gh-github.com-o-r/tracker.json");
     let mut doc = env.issue_doc("gh-github.com-o-r", "tracker");

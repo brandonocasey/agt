@@ -19,11 +19,54 @@ pub use fixes::close_fixed;
 
 use cli::Command;
 
-use crate::core::config::Config;
+use crate::core::config::{Config, Mode};
 use crate::core::error::Result;
 use crate::core::output::Output;
 use crate::git::Repo;
 use crate::store::{Namespace, Store};
+
+/// The push half of `sync`: send the queued changes of every tracker whose push is manual or
+/// auto, the way `push` does. When none sends, the changes stay local and the report says so.
+fn push_after_pull(
+    store: &Store,
+    destinations: &[crate::core::config::Tracker],
+    filter: Option<&str>,
+) -> Result<serde_json::Value> {
+    let sending: Vec<crate::core::config::Tracker> = trackers::configured(destinations, filter)?
+        .into_iter()
+        .filter(|tracker| tracker.push_mode() != Mode::Off)
+        .cloned()
+        .collect();
+    if sending.is_empty() {
+        let names = trackers::configured(destinations, filter)?
+            .iter()
+            .map(|tracker| tracker.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut report = serde_json::json!({ "dry_run": false, "trackers": [] });
+        if let Some(reason) = crate::forge::auto::kept_local(
+            "issue sync",
+            crate::core::config::Kind::Issues,
+            &names,
+            None,
+        ) {
+            report["kept_local"] = serde_json::json!(reason);
+        }
+        return Ok(report);
+    }
+    if sending.len() == 1 {
+        auto::attach_pending(store, &sending, None)?;
+    }
+    push::run(
+        store,
+        &sending,
+        None,
+        &push::Options {
+            dry_run: false,
+            force: false,
+        },
+    )
+}
 
 pub fn run(cli: Cli) -> Result<Output> {
     let repo = Repo::discover()?;
@@ -46,9 +89,11 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
     let mut value = match &cli.command {
         Command::Sync => {
-            let mut config = Config::load_for_repo(&repo)?;
-            trackers::destinations(&mut config, &repo, filter, false)?;
-            sync::run(&store, &config, filter)?
+            let config = Config::load_for_repo(&repo)?;
+            let destinations = trackers::destinations(&config, &repo, filter, false)?;
+            let mut value = sync::run(&store, &destinations, filter)?;
+            value["push"] = push_after_pull(&store, &destinations, filter)?;
+            value
         }
         Command::List(args) => view::list(&store, filter, args)?,
         Command::Show { key } => view::show(&store, filter, key)?,
@@ -58,32 +103,28 @@ pub fn run(cli: Cli) -> Result<Output> {
             local::comment(&store, filter, key, text, *private)?
         }
         Command::Create(args) => {
-            let config = if filter.is_some() && filter != Some("local") {
-                Config::load_for_repo(&repo)?
+            let destinations = if filter.is_some() && filter != Some("local") {
+                let config = Config::load_for_repo(&repo)?;
+                trackers::destinations(&config, &repo, filter, false)?
             } else {
-                Config::default()
+                Vec::new()
             };
-            local::create(&store, &config, filter, args)?
+            local::create(&store, &destinations, filter, args)?
         }
         Command::Edit(args) => local::edit(&store, filter, args)?,
         Command::Discard { key } => local::discard(&store, filter, key)?,
         Command::Push { dry_run, force } => {
-            let mut config = Config::load_for_repo(&repo)?;
-            if !dry_run && let Some(reason) = crate::forge::auto::kept_local(&config, "issue push")
-            {
-                return Ok(Output::Json(serde_json::json!({
-                    "dry_run": false,
-                    "trackers": [],
-                    "kept_local": reason,
-                })));
-            }
-            trackers::destinations(&mut config, &repo, filter, false)?;
-            if !dry_run {
-                auto::attach_pending(&store, &config, filter)?;
+            let config = Config::load_for_repo(&repo)?;
+            let destinations = trackers::destinations(&config, &repo, filter, false)?;
+            let sends = trackers::configured(&destinations, filter)?
+                .iter()
+                .any(|tracker| tracker.push_mode() != Mode::Off);
+            if !dry_run && sends {
+                auto::attach_pending(&store, &destinations, filter)?;
             }
             push::run(
                 &store,
-                &config,
+                &destinations,
                 filter,
                 &push::Options {
                     dry_run: *dry_run,

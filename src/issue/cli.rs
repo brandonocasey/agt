@@ -11,7 +11,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Fetch what changed on the configured trackers. Writes nothing to a host.
+    /// Pull what changed on every issue tracker (each with its `scope`, `involved` by default),
+    /// then push queued changes to each tracker whose `push` is `manual` or `auto`. With `push`
+    /// `off`, the default, only the pull happens and the changes stay local.
     Sync,
     /// List the local issues.
     List(ListArgs),
@@ -43,8 +45,8 @@ pub enum Command {
         /// `owner/repo#12`, `#12`, `12` or `local-xxxx`.
         key: String,
     },
-    /// Send queued changes; only with `[forge] post = true` (otherwise local), and explicit `push = false` denies a
-    /// tracker.
+    /// Only push: send queued changes to each tracker whose `push` is `manual` or `auto`
+    /// (`[issues]`, `[sync]` or the `[[tracker]]`); with `off`, the default, they stay local.
     Push {
         /// Show the requests without sending anything.
         #[arg(long)]

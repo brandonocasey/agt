@@ -41,9 +41,10 @@ enum Command {
             default_value = "pushed,landable"
         )]
         checks: Vec<Check>,
-        /// Remote used by the pushed check.
-        #[arg(long, default_value = "origin")]
-        remote: String,
+        /// Remote used by the pushed check, as a git remote name or `host/repo`; default: the
+        /// tracker `agt pr` would pick (origin's, else the only one), else `origin`.
+        #[arg(long, value_name = "NAME|HOST/REPO")]
+        remote: Option<String>,
         /// Base branch used by the landable check; default: the newest default base.
         #[arg(long)]
         base: Option<String>,
@@ -68,7 +69,7 @@ impl Check {
         self,
         repo: &Repo,
         branch: &str,
-        remote: &str,
+        remote: Option<&str>,
         base: Option<&str>,
     ) -> Result<(Value, u8)> {
         match self {
@@ -99,7 +100,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         if !checks.contains(&check) {
             continue;
         }
-        let result = check.run(&repo, &branch, &remote, base.as_deref());
+        let result = check.run(&repo, &branch, remote.as_deref(), base.as_deref());
         let (report, code) = match result {
             Ok((value, code)) => (json!({"status": code, "report": value}), code),
             Err(error) => (json!({"status": 1, "error": error.to_string()}), 1),

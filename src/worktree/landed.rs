@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::info;
 use crate::core::clock;
 use crate::core::error::Result;
-use crate::forge::landed::Origin;
+use crate::forge::landed::Source;
 use crate::git::{Repo, Worktree, nul_fields};
 use crate::store::model::ReviewState;
 
@@ -25,6 +25,18 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// How strongly the verdict keeps a branch: lower keeps it more.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Merged | Self::SquashMerged => 0,
+            Self::Open => 1,
+            Self::Unknown => 2,
+            Self::Diverged => 3,
+            Self::Closed => 4,
+            Self::Unmerged => 5,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Merged => "merged",
@@ -178,7 +190,7 @@ impl Scene {
             let finding = match &entry.branch {
                 None => self.detached(repo, &entry.head)?,
                 Some(branch) if self.protected(branch) => continue,
-                Some(branch) => self.judge(repo, None, branch, &entry.head)?,
+                Some(branch) => self.judge(repo, &[], branch, &entry.head)?,
             };
             found.push(Local {
                 branch: entry.branch.clone(),
@@ -188,7 +200,7 @@ impl Scene {
         }
         for (branch, tip) in self.branches(repo)? {
             if self.worktree_of(&branch).is_none() {
-                let finding = self.judge(repo, None, &branch, &tip)?;
+                let finding = self.judge(repo, &[], &branch, &tip)?;
                 found.push(Local {
                     branch: Some(branch),
                     worktree: None,
@@ -199,12 +211,13 @@ impl Scene {
         Ok(found)
     }
 
-    /// The verdict for `branch` at `tip`: local ancestry first, then, with an `origin`, its
-    /// PRs/MRs for the branch.
+    /// The verdict for `branch` at `tip`: local ancestry first, then the PRs/MRs for the branch
+    /// on each of `sources`. A merged PR/MR on any source lands the branch; otherwise the
+    /// strongest evidence wins (open, then unknown, diverged, closed, unmerged).
     pub fn judge(
         &self,
         repo: &Repo,
-        origin: Option<&Origin>,
+        sources: &[Source],
         branch: &str,
         tip: &str,
     ) -> Result<Finding> {
@@ -214,15 +227,38 @@ impl Scene {
                 format!("tip is an ancestor of {}", self.name),
             ));
         }
-        let Some(origin) = origin else {
-            return Ok(finding(
+        let mut best: Option<Finding> = None;
+        for source in sources {
+            let found = self.judge_source(repo, source, branch, tip)?;
+            if found.verdict.landed() {
+                return Ok(found);
+            }
+            if best
+                .as_ref()
+                .is_none_or(|kept| found.verdict.rank() < kept.verdict.rank())
+            {
+                best = Some(found);
+            }
+        }
+        Ok(best.unwrap_or_else(|| {
+            finding(
                 Verdict::Unmerged,
                 format!(
                     "not an ancestor of {}; no forge evidence checked",
                     self.name
                 ),
-            ));
-        };
+            )
+        }))
+    }
+
+    /// The verdict from the PRs/MRs of `branch` on one source, for a tip that is not an ancestor.
+    fn judge_source(
+        &self,
+        repo: &Repo,
+        origin: &Source,
+        branch: &str,
+        tip: &str,
+    ) -> Result<Finding> {
         let pulls = match origin.pulls(branch) {
             Ok(pulls) => pulls,
             Err(error) => return Ok(finding(Verdict::Unknown, format!("forge lookup: {error}"))),
@@ -313,7 +349,7 @@ impl Scene {
     fn fetch_head(
         &self,
         repo: &Repo,
-        origin: &Origin,
+        origin: &Source,
         number: u64,
         sha: &str,
     ) -> std::result::Result<(), String> {
@@ -321,9 +357,15 @@ impl Scene {
         if repo.object_exists(&spec).map_err(|e| e.to_string())? {
             return Ok(());
         }
+        let Some(remote) = &origin.remote else {
+            return Err(format!(
+                "{}/{} has no git remote to fetch the head of PR #{number} from",
+                origin.host, origin.repo
+            ));
+        };
         let reference = origin.head_ref(number);
         let fetched = repo
-            .fetch_commit("origin", &reference)
+            .fetch_commit(remote, &reference)
             .map_err(|error| error.to_string())?;
         if fetched == sha {
             Ok(())

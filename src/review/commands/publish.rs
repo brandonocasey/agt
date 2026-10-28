@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::sync::{self, Connection};
 use super::{Ctx, random_id};
-use crate::core::config::Config;
+use crate::core::config::{Config, Kind, Mode};
 use crate::core::error::{Error, Result, fail};
 use crate::forge::auto;
 use crate::forge::service::Capabilities;
@@ -29,13 +29,29 @@ pub(super) struct Options {
     pub run: Option<String>,
 }
 
-pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Result<Value> {
+pub(super) fn publish(
+    ctx: &mut Ctx,
+    pr: Option<&str>,
+    remote: Option<&str>,
+    options: &Options,
+) -> Result<Value> {
     let Options {
         dry_run, not_own, ..
     } = *options;
+    let config = Config::load_for_repo(&ctx.repo)?;
+    let chosen = sync::choose(ctx, &config, pr, remote)?;
     if !dry_run {
-        let config = Config::load_for_repo(&ctx.repo)?;
-        if let Some(reason) = auto::kept_local(&config, "publish") {
+        let selected = &chosen.selected;
+        // An automatic publish runs only where `push` is `auto`; it stays quiet elsewhere.
+        if options.run.is_some() && selected.push_mode() != Mode::Auto {
+            return Ok(json!({"dry_run": false, "posted": []}));
+        }
+        if let Some(reason) = auto::kept_local(
+            "publish",
+            Kind::PullRequests,
+            &selected.name(),
+            selected.push,
+        ) {
             return Ok(json!({
                 "dry_run": false,
                 "posted": [],
@@ -44,7 +60,7 @@ pub(super) fn publish(ctx: &mut Ctx, pr: Option<&str>, options: &Options) -> Res
             }));
         }
     }
-    let connection = sync::connect(ctx, pr)?;
+    let connection = sync::connect_chosen(ctx, chosen)?;
     let _publish_lock = if dry_run {
         None
     } else if options.run.is_some() {

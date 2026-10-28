@@ -313,7 +313,7 @@ impl FakeService for Github {
         );
         remote.reviews.push(own_review(&setup.head));
         self.sync(setup, &remote);
-        env.run(&["sync", "--pr", "42"]);
+        env.pull(&["sync", "--pr", "42"]);
         self.restore(env, Call::PostInline);
         remote
     }
@@ -324,7 +324,7 @@ impl FakeService for Github {
         // resolved), so the general comment is one of mine that sync imports.
         remote.general("601", Comment::new(601, "me", "A general remark of mine."));
         self.sync(setup, &remote);
-        setup.env.run(&["sync", "--pr", "42"]);
+        setup.env.pull(&["sync", "--pr", "42"]);
         (remote, "601".to_owned())
     }
 

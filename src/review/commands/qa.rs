@@ -86,9 +86,11 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
             not_own,
             only,
             pr,
+            remote,
         } => publish::publish(
             &mut ctx,
             pr.as_deref(),
+            remote.as_deref(),
             &publish::Options {
                 dry_run,
                 not_own,

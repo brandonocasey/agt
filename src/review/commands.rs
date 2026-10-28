@@ -124,7 +124,7 @@ fn sync_first_for(selection: &Selection, command: &Command, first: &SyncFirst) -
             }
         }
     }
-    sync::sync(&writer, pr.as_deref())?;
+    sync::sync(&writer, pr.as_deref(), first.remote.as_deref())?;
     Ok(())
 }
 
@@ -288,12 +288,13 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
         Command::Status {
             head, full, report, ..
         } => return report::run(&mut ctx, &report, section, head.as_deref(), full),
-        Command::Sync { pr } => sync::sync(&ctx, pr.as_deref())?,
+        Command::Sync { pr, remote } => sync::sync_command(&ctx, pr.as_deref(), remote.as_deref())?,
         Command::Publish {
             dry_run,
             not_own,
             only,
             pr,
+            remote,
             approval,
         } => {
             let mut approval_id = None;
@@ -307,6 +308,7 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
             publish::publish(
                 &mut ctx,
                 pr.as_deref(),
+                remote.as_deref(),
                 &publish::Options {
                     dry_run,
                     not_own,

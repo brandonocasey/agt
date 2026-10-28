@@ -74,6 +74,12 @@ impl Site {
 
     /// Answers the fake `gh` for the PRs of `topic`.
     fn pulls(&self, nodes: &[Value]) {
+        self.pulls_in("app", nodes);
+    }
+
+    /// Answers the fake `gh` for the PRs of `topic` in the repository `acme/<name>`.
+    fn pulls_in(&self, name: &str, nodes: &[Value]) {
+        let name = format!("name={name}");
         let body = json!({"data": {"repository": {"pullRequests": {
             "pageInfo": {"hasNextPage": false, "endCursor": null},
             "nodes": nodes,
@@ -85,7 +91,7 @@ impl Site {
                 "-f",
                 "owner=acme",
                 "-f",
-                "name=app",
+                &name,
                 "-f",
                 "branch=topic",
                 "-f",
@@ -97,6 +103,11 @@ impl Site {
 
     /// Answers the fake `gh` for the checks of PR 7; `rollup` entries make a check run exist.
     fn checks(&self, head: &str, rollup: usize) {
+        self.checks_in("app", head, rollup);
+    }
+
+    fn checks_in(&self, name: &str, head: &str, rollup: usize) {
+        let name = format!("name={name}");
         let nodes: Vec<Value> = (0..rollup)
             .map(|_| json!({"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "isRequired": true}))
             .collect();
@@ -115,7 +126,7 @@ impl Site {
                 "-f",
                 "owner=acme",
                 "-f",
-                "name=app",
+                &name,
                 "-F",
                 "number=7",
                 "-f",
@@ -381,6 +392,58 @@ fn check_defaults_to_both_and_matches_each_selected_alone() {
         report["checks"]["landable"],
         json!({"status": 0, "report": landable})
     );
+}
+
+/// Adds the remote `name` for the GitHub repository `acme/<repo>`, backed by a bare repository
+/// that has `topic`.
+fn add_tracker_remote(site: &Site, name: &str, repo: &str) {
+    let bare = site.env.path(&format!("{name}.git"));
+    let url = format!("git@github.com:acme/{repo}.git");
+    site.env
+        .git(&["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
+    site.env.git(&["remote", "add", name, &url]);
+    site.env
+        .git(&["config", &format!("url.{}.insteadOf", bare.display()), &url]);
+    site.env.git(&["push", "-q", name, "main", "topic"]);
+}
+
+#[test]
+fn remote_picks_the_remote_and_the_tracker_the_pull_request_is_read_from() {
+    let site = Site::new();
+    add_tracker_remote(&site, "upstream", "up");
+    let head = site.env.git(&["rev-parse", "topic"]);
+    site.pulls(&[]);
+    site.pulls_in("up", &[pull(&head)]);
+    site.checks_in("up", &head, 1);
+    let (report, code) = site.pushed(&["--remote", "upstream"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["remote"], "upstream");
+    assert_eq!(report["pr"]["number"], 7);
+    let (report, _) = site.pushed(&["--remote", "github.com/acme/up"]);
+    assert_eq!(report["remote"], "upstream");
+    assert_eq!(report["pr"]["number"], 7);
+    // Without --remote the origin tracker, which has no PR, is the one asked.
+    let (report, _) = site.pushed(&[]);
+    assert_eq!(report["remote"], "origin");
+    assert_eq!(report["pr"], Value::Null);
+}
+
+#[test]
+fn several_trackers_without_origin_need_remote_for_the_pushed_check() {
+    let site = Site::new();
+    add_tracker_remote(&site, "upstream", "up");
+    add_tracker_remote(&site, "fork", "fork");
+    site.env.git(&["remote", "remove", "origin"]);
+    let output = site.agt(&["check", "--checks", "pushed"]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = report["checks"]["pushed"]["error"].as_str().unwrap();
+    assert!(error.contains("pass --remote with"), "{error}");
+    assert!(error.contains("`upstream` (github.com/acme/up)"), "{error}");
+    assert!(error.contains("`fork` (github.com/acme/fork)"), "{error}");
+    site.pulls_in("fork", &[]);
+    let (report, code) = site.pushed(&["--remote", "fork"]);
+    assert_eq!((code, report["remote"].clone()), (0, json!("fork")));
 }
 
 #[test]

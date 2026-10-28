@@ -266,7 +266,7 @@ impl FakeService for Gitlab {
             vec![Comment::new(5001, "me", "{{LAST_NOTE}}")],
         );
         self.sync(setup, &remote);
-        env.run(&["sync", "--pr", "3"]);
+        env.pull(&["sync", "--pr", "3"]);
         remote
     }
 
@@ -298,7 +298,7 @@ impl FakeService for Gitlab {
         });
         self.sync(setup, &remote);
         self.restore(env, Call::PostThread);
-        env.run(&["sync", "--pr", "3"]);
+        env.pull(&["sync", "--pr", "3"]);
         (remote, "d-f2".to_owned())
     }
 

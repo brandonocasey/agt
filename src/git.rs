@@ -857,6 +857,13 @@ impl Repo {
         Ok(String::from_utf8_lossy(&diff).into_owned())
     }
 
+    /// Whether the repository has a remote called `name`, whatever its URL.
+    pub fn has_remote(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .git_opt(&["remote"])?
+            .is_some_and(|names| names.lines().any(|line| line == name)))
+    }
+
     /// The URL of `origin` as git expands it, `None` without an origin.
     pub fn origin_url(&self) -> Result<Option<String>> {
         self.git_opt(&["remote", "get-url", "origin"])

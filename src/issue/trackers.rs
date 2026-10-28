@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::config::{self, Config};
+use crate::core::config::{self, Config, Kind};
 use crate::core::error::{Result, fail};
 use crate::forge::service;
 use crate::store::Store;
@@ -23,22 +23,20 @@ pub fn tracker_key(forge: Forge, host: &str, repo: &str) -> String {
         .replace('/', "-")
 }
 
-/// The configured trackers `filter` names (by tracker key or `owner/repo`), or all of them.
+/// The trackers `filter` names (by tracker key or `owner/repo`), or all of them.
 pub fn configured<'a>(
-    config: &'a Config,
+    trackers: &'a [config::Tracker],
     filter: Option<&str>,
 ) -> Result<Vec<&'a config::Tracker>> {
-    for (index, tracker) in config.issues.tracker.iter().enumerate() {
+    for (index, tracker) in trackers.iter().enumerate() {
         let key = tracker_key(tracker.forge, &tracker.host, &tracker.repo);
-        for other in &config.issues.tracker[..index] {
+        for other in &trackers[..index] {
             if key == tracker_key(other.forge, &other.host, &other.repo) {
                 check_identity(&TrackerDoc::new(key.clone(), other), tracker)?;
             }
         }
     }
-    let found: Vec<&config::Tracker> = config
-        .issues
-        .tracker
+    let found: Vec<&config::Tracker> = trackers
         .iter()
         .filter(|tracker| {
             filter.is_none_or(|filter| {
@@ -54,7 +52,7 @@ pub fn configured<'a>(
         return match filter {
             Some(filter) => fail(format!("no configured tracker matches {filter}")),
             None => fail(format!(
-                "no [[issues.tracker]] is configured in {}",
+                "no tracker serves issues: add a supported origin remote or a [[tracker]] in {}",
                 config::path()?.display()
             )),
         };
@@ -155,42 +153,20 @@ pub fn local(store: &Store) -> Result<Tracker> {
     Ok(Tracker { dir, doc })
 }
 
+/// The trackers that serve issues for a command. A command that runs by itself (`automatic`)
+/// and names no tracker works on the tracker of `origin` alone.
 pub fn destinations(
-    config: &mut Config,
+    config: &Config,
     repo: &crate::git::Repo,
     filter: Option<&str>,
     automatic: bool,
-) -> Result<()> {
-    let origin = repo.origin_location()?;
+) -> Result<Vec<config::Tracker>> {
+    let mut trackers = config.trackers_for(repo, Kind::Issues)?;
     if automatic && filter.is_none() {
-        config.issues.tracker.retain(|tracker| {
-            origin.as_ref().is_some_and(|(host, path)| {
-                tracker.host.eq_ignore_ascii_case(host) && tracker.repo.eq_ignore_ascii_case(path)
-            })
-        });
+        trackers.retain(|tracker| tracker.remote.as_deref() == Some("origin"));
     }
-    if !config.issues.tracker.is_empty() {
-        if automatic && configured(config, filter)?.len() > 1 {
-            return fail("several automatic issue destinations; pass --tracker");
-        }
-        return Ok(());
+    if automatic && configured(&trackers, filter)?.len() > 1 {
+        return fail("several automatic issue destinations; pass --tracker");
     }
-    let Some((host, path)) = origin else {
-        return fail(format!(
-            "no [[issues.tracker]] is configured in {}; configure a tracker or a supported origin",
-            config::path()?.display()
-        ));
-    };
-    let Some(forge) = service::detect_known(&host, None, None) else {
-        return fail("origin has no known issue service; configure a tracker");
-    };
-    config.issues.tracker.push(config::Tracker {
-        forge,
-        host,
-        repo: path,
-        scope: config::Scope::Involved,
-        since_days: 90,
-        push: None,
-    });
-    Ok(())
+    Ok(trackers)
 }

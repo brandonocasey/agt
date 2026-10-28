@@ -8,6 +8,7 @@ pub mod hosts;
 pub mod issue;
 pub mod landed;
 pub mod markers;
+pub mod select;
 pub mod service;
 pub mod transport;
 

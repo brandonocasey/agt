@@ -666,7 +666,7 @@ impl Ctx {
         {
             return Ok(None);
         }
-        let Some(origin) = crate::forge::landed::Origin::of(&self.repo)? else {
+        let Some(origin) = crate::forge::landed::Source::origin(&self.repo)? else {
             return Ok(None);
         };
         // A fork's head branch name says nothing about local branches of the same name.

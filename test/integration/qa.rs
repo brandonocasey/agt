@@ -392,7 +392,7 @@ fn a_qa_finding_in_a_review_body_names_its_check_in_the_footer() {
     );
     let env = &setup.env;
     svc.sync(&setup, &Remote::by("alice"));
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let run = start(env, &["--model", "m1", "--harness", "claude-code"]);
     let k1 = check(env, &run, "pay with a card", "fail", &[]);
     let thread = qa(
@@ -512,7 +512,7 @@ fn sync_claims_the_qa_record_of_its_own_summary() {
     let mut remote = Remote::new();
     remote.general("9001", Comment::new(9001, "me", &sent));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let record = &qa(env, &["show", &run])["run"]["record"];
     assert_eq!(record["post"], "posted", "{record}");
     assert_eq!(record["remote_id"], "9001");
@@ -535,7 +535,7 @@ fn sync_claims_the_qa_record_of_its_own_summary() {
 fn auto_publish_of_a_qa_run_carries_its_human_findings() {
     let svc = Github::new();
     let (setup, run) = published_setup(&svc, true, |env| {
-        env.write_config("[sync]\nauto_push = true\n");
+        env.write_config("[sync]\npush = \"auto\"\n");
         github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
         svc.accept(env, Call::PostNote, 802);
     });

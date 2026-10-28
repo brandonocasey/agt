@@ -34,7 +34,7 @@ fn github_sync_imports_threads_reviews_and_comments() {
     let branch_key = env.run(&["status", "--full"])["target"].clone();
     github::sync_fixtures(&setup);
 
-    let synced = env.run(&["sync"]);
+    let synced = env.pull(&["sync", "--pr", "42"]);
     assert_eq!(synced["target"], "gh-42");
     assert_eq!(synced["renamed_from"], branch_key);
     assert_eq!(synced["login"], "me");
@@ -70,7 +70,7 @@ fn github_sync_imports_threads_reviews_and_comments() {
 
     assert_imported_list(&setup);
 
-    let again = env.run(&["sync"]);
+    let again = env.pull(&["sync"]);
     assert_eq!(again["threads"]["imported"], 0);
     assert_eq!(again["threads"]["total"], synced["threads"]["total"]);
     assert!(again["renamed_from"].is_null());
@@ -83,7 +83,7 @@ fn github_sync_remote_state_wins_and_local_fields_stay() {
     let f1 = format!("{}.c1p0.r1.f1", setup.run);
     env.run(&["resolve", &f1, "--triage", "valid"]);
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    env.pull(&["sync", "--pr", "42"]);
 
     let shown = &env.run(&["show", &f1])["thread"];
     assert_eq!(shown["resolved"], true, "remote resolved state wins");
@@ -132,7 +132,7 @@ fn github_sync_ignores_untrusted_markers() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     let all = ids(&list);
     for number in ["f9", "f8", "f7"] {
@@ -151,7 +151,7 @@ fn prompt_hides_other_authors_and_author_defaults_to_login() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    env.pull(&["sync", "--pr", "42"]);
 
     let prompt = env.text(&["list", "--format", "prompt"]);
     for hidden in [
@@ -204,7 +204,7 @@ fn github_fork_pr_found_in_parent() {
         &setup.head,
         &setup.base,
     );
-    let synced = env.run(&["sync"]);
+    let synced = env.pull(&["sync", "--pr", "https://github.com/up/repo/pull/8"]);
     assert_eq!(synced["target"], "gh-8");
     assert_eq!(synced["review"]["repo"], "up/repo");
     assert_eq!(env.run(&["status"])["target"], "gh-8");
@@ -229,7 +229,7 @@ fn reviews_expire_ninety_days_after_close() {
     let closed: u64 = 1_767_225_600;
     let day = 86_400;
     let at = |days: u64| (closed + days * day).to_string();
-    let synced = env.run_with(&["sync", "--pr", "5"], None, &[("AGT_NOW", &at(59))]);
+    let synced = env.pull_with(&["sync", "--pr", "5"], &[("AGT_NOW", &at(59))]);
     assert_eq!(synced["review"]["state"], "merged");
     assert_eq!(synced["review"]["closed_at"], "2026-01-01T00:00:00Z");
 
@@ -296,7 +296,10 @@ fn gitlab_sync_does_not_claim_an_unsent_legacy_marker() {
         .to_string(),
     );
 
-    env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
+    env.pull_with(
+        &["sync", "--pr", "3"],
+        &[("GITLAB_HOST", "gitlab.example.com")],
+    );
     let list = env.run(&["list"]);
     let local = thread(&list, &f1);
     assert_unsent_finding(local);
@@ -311,7 +314,7 @@ fn hosts_file_names_the_service_of_an_unknown_host() {
     let env = &setup.env;
     let old = env.git(&["rev-parse", "HEAD~1"]);
     gitlab::sync_fixtures(&setup, &old);
-    let refused = env.fail(&["sync"], None);
+    let refused = env.fail(&["sync", "--pr", "3"], None);
     assert!(
         refused.contains("unsupported forge gitlab.example.com"),
         "{refused}"
@@ -324,7 +327,7 @@ fn hosts_file_names_the_service_of_an_unknown_host() {
     )
     .unwrap();
     let probed = env.forge_calls().len();
-    let synced = env.run(&["sync"]);
+    let synced = env.pull(&["sync", "--pr", "3"]);
     assert_eq!(synced["target"], "gl-3");
     for call in &env.forge_calls()[probed..] {
         assert!(call.starts_with("gitlab.example.com\t"), "{call}");
@@ -345,14 +348,14 @@ fn an_unknown_service_in_the_hosts_file_only_matters_for_its_own_host() {
         r#"{"git.example.org": {"service": "forgejo"}, "gitlab.example.com": {"service": "gitlab"}}"#,
     )
     .unwrap();
-    assert_eq!(env.run(&["sync"])["target"], "gl-3");
+    assert_eq!(env.pull(&["sync", "--pr", "3"])["target"], "gl-3");
 
     std::fs::write(
         dir.join("hosts.json"),
         r#"{"gitlab.example.com": {"service": "forgejo"}}"#,
     )
     .unwrap();
-    let refused = env.fail(&["sync"], None);
+    let refused = env.fail(&["sync", "--pr", "3"], None);
     assert!(
         refused.contains("gitlab.example.com") && refused.contains("forgejo"),
         "{refused}"
@@ -365,8 +368,11 @@ fn a_host_synced_before_is_remembered_without_asking_the_cli() {
     let env = &setup.env;
     let old = env.git(&["rev-parse", "HEAD~1"]);
     gitlab::sync_fixtures(&setup, &old);
-    env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
-    let again = env.run(&["sync"]);
+    env.pull_with(
+        &["sync", "--pr", "3"],
+        &[("GITLAB_HOST", "gitlab.example.com")],
+    );
+    let again = env.pull(&["sync"]);
     assert_eq!(again["target"], "gl-3");
 }
 
@@ -379,7 +385,10 @@ fn gitlab_self_hosted_sync() {
     env.run(&["resolve", &f1, "--answered"]);
     gitlab::sync_fixtures(&setup, &old);
 
-    let synced = env.run_with(&["sync"], None, &[("GITLAB_HOST", "gitlab.example.com")]);
+    let synced = env.pull_with(
+        &["sync", "--pr", "3"],
+        &[("GITLAB_HOST", "gitlab.example.com")],
+    );
     assert_eq!(synced["target"], "gl-3");
     assert_eq!(synced["drafts"], 1);
     assert_eq!(synced["threads"]["imported"], 4);
@@ -436,7 +445,12 @@ fn gitlab_self_hosted_sync() {
 #[test]
 fn sync_errors_without_forge_or_pr() {
     let env = Env::with_branch();
-    let error = env.fail(&["sync"], None);
+    // `sync` alone refreshes what is stored, which is nothing: it asks no forge and imports no PR.
+    let nothing = env.run(&["sync"]);
+    assert_eq!(nothing["synced"], json!([]), "{nothing}");
+    let error = env.fail(&["sync", "--pr", "99"], None);
+    assert!(error.contains("origin remote"), "{error}");
+    let error = env.fail(&["status", "--sync"], None);
     assert!(error.contains("origin remote"), "{error}");
     env.git(&["remote", "add", "origin", "git@github.com:me/repo.git"]);
     github::login(&env);
@@ -445,11 +459,15 @@ fn sync_errors_without_forge_or_pr() {
         &["api", "--method", "GET", "repos/me/repo"],
         r#"{"fork":false}"#,
     );
-    let missing = env.fail(&["sync"], None);
+    let missing = env.fail(&["status", "--sync"], None);
     assert!(
         missing.contains("no PR/MR found for branch feat"),
         "{missing}"
     );
+    let calls = env.forge_calls().len();
+    let still_nothing = env.run(&["sync"]);
+    assert_eq!(still_nothing["synced"], json!([]), "{still_nothing}");
+    assert_eq!(env.forge_calls().len(), calls);
     let unexpected = env.fail(&["sync", "--pr", "99"], None);
     assert!(unexpected.contains("unexpected call"), "{unexpected}");
 }
@@ -533,7 +551,7 @@ fn github_malformed_pages_preserve_synced_threads() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    env.pull(&["sync", "--pr", "42"]);
     let before = env.run(&["list"]);
     let target_path = env.state().join("gh-42.json");
     let stored_before = std::fs::read(&target_path).unwrap();
@@ -613,7 +631,7 @@ fn github_malformed_pages_preserve_synced_threads() {
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             &page.to_string(),
         );
-        let error = env.fail(&["sync"], None);
+        let error = env.fail(&["sync", "--pr", "42"], None);
         assert!(
             error.contains("GitHub") || error.contains("returned errors"),
             "{case}: {error}"

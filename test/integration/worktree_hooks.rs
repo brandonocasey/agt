@@ -502,7 +502,7 @@ fn global_hooks_run_when_the_repository_hooks_are_untrusted() {
 #[test]
 fn a_repository_without_hooks_reports_nothing_untrusted() {
     let env = repo();
-    env.write_repo_config("[sync]\nauto_pull = false\n");
+    env.write_repo_config("[sync]\npull = \"manual\"\n");
     let report = json(&agt(&env, &env.repo, &["create", "feature"]));
     assert!(report.get("hooks").is_none());
 }
@@ -585,7 +585,7 @@ fn trust_list_reports_a_config_replaced_by_a_symlink() {
 fn trust_errors_without_a_file_or_hooks() {
     let env = repo();
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());
-    env.write_repo_config("[sync]\nauto_pull = false\n");
+    env.write_repo_config("[sync]\npull = \"manual\"\n");
     assert!(!agt(&env, &env.repo, &["trust"]).status.success());
 }
 

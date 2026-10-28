@@ -3,7 +3,9 @@
 
 use serde_json::Value;
 
+use crate::core::config::{Config, Kind};
 use crate::core::error::{Error, Result};
+use crate::forge::select::Selected;
 use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::{Transport, TransportError};
 use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
@@ -16,11 +18,13 @@ const GITHUB_OPEN_QUERY: &str = "query OpenPulls($owner:String!,$name:String!,$c
 
 const GITHUB_ONE_QUERY: &str = "query OnePull($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){number url title state mergedAt closedAt baseRefName headRefName headRefOid isCrossRepository createdAt author{login} isDraft}}}";
 
-/// The forge repository `origin` points at.
-pub struct Origin {
+/// A forge repository that serves pull requests, and the git remote that fetches from it.
+pub struct Source {
     pub forge: Forge,
     pub host: String,
     pub repo: String,
+    /// `None` for a tracker no git remote points at.
+    pub remote: Option<String>,
 }
 
 pub struct Pull {
@@ -41,10 +45,31 @@ pub struct Pull {
     pub draft: bool,
 }
 
-impl Origin {
-    /// The forge `origin` is on, with the hosts file as the first hint; `None` when there is no
-    /// origin or it is no GitHub or GitLab host that agt can identify.
-    pub fn of(repo: &Repo) -> Result<Option<Self>> {
+impl Source {
+    /// The repository a selected tracker names, on the forge of its tracker or, for a repository
+    /// no tracker names, the forge agt identifies from its host.
+    pub fn of(selected: &Selected) -> Result<Self> {
+        let forge = match &selected.tracker {
+            Some(tracker) => tracker.forge,
+            None => service::detect(&selected.host, hosts::named(&selected.host)?, None)
+                .ok_or_else(|| {
+                    Error(format!(
+                        "origin is not a GitHub or GitLab host that gh or glab is logged in to ({} is an unknown forge, or gh/glab is not authenticated for it)",
+                        selected.host
+                    ))
+                })?,
+        };
+        Ok(Self {
+            forge,
+            host: selected.host.clone(),
+            repo: selected.repo.clone(),
+            remote: selected.tracker.as_ref().and_then(|t| t.remote.clone()),
+        })
+    }
+
+    /// The repository of `origin`, with the hosts file as the first hint; `None` when there is
+    /// no origin or it is no GitHub or GitLab host that agt can identify.
+    pub fn origin(repo: &Repo) -> Result<Option<Self>> {
         let Some((host, path)) = repo.origin_location()? else {
             return Ok(None);
         };
@@ -53,18 +78,23 @@ impl Origin {
                 forge,
                 host,
                 repo: path,
+                remote: Some("origin".into()),
             }),
         )
     }
 
-    /// Like [`Origin::of`], but a repository without a usable `origin` is an error.
-    pub fn require(repo: &Repo) -> Result<Self> {
-        Self::of(repo)?.ok_or_else(|| {
-            Error(
-                "origin is not a GitHub or GitLab host that gh or glab is logged in to (no origin remote, an unknown forge, or gh/glab not authenticated for it)"
-                    .into(),
-            )
-        })
+    /// Every tracker that serves pull requests, one source each.
+    pub fn trackers(repo: &Repo, config: &Config) -> Result<Vec<Self>> {
+        Ok(config
+            .trackers_for(repo, Kind::PullRequests)?
+            .into_iter()
+            .map(|tracker| Self {
+                forge: tracker.forge,
+                host: tracker.host,
+                repo: tracker.repo,
+                remote: tracker.remote,
+            })
+            .collect())
     }
 
     /// Every PR/MR of the repository whose source branch is `branch`, all states, all pages.
@@ -130,7 +160,7 @@ impl Origin {
         }
     }
 
-    /// The ref on `origin` that holds the head of PR/MR `number`.
+    /// The ref on its git remote that holds the head of PR/MR `number`.
     pub fn head_ref(&self, number: u64) -> String {
         format!(
             "{}{number}/head",

@@ -9,6 +9,7 @@
 use super::sync::{self, Connection};
 use super::{Ctx, Scope};
 use crate::core::clock;
+use crate::core::config::{Kind, Mode};
 use crate::core::error::{Error, Result};
 use crate::forge::auto::{self, Offline, Policy};
 use crate::store::model::{ReviewState, TargetKind};
@@ -18,7 +19,7 @@ use crate::store::sidecars::Lookups;
 const SYNC_LOCK: &str = "auto-sync";
 
 pub(super) fn sync_stale(ctx: &Ctx, offline: Offline) -> Result<()> {
-    let Some(policy) = Policy::resolve_for_repo(&ctx.repo, offline) else {
+    let Some(policy) = Policy::resolve_for_repo(&ctx.repo, offline, Kind::PullRequests) else {
         return Ok(());
     };
     // A scope that cannot be worked out is the read's own error to report.
@@ -43,7 +44,8 @@ pub(super) fn sync_stale(ctx: &Ctx, offline: Offline) -> Result<()> {
     };
     let sync_due = match known {
         Some(review) => {
-            policy.is_stale(Some(&review.synced_at))?
+            policy.pulls_automatically(&review.host, &review.repo)
+                && policy.is_stale(Some(&review.synced_at))?
                 && !policy.backed_off(
                     &ctx.store,
                     &ctx.dir,
@@ -60,7 +62,7 @@ pub(super) fn sync_stale(ctx: &Ctx, offline: Offline) -> Result<()> {
     auto::attempt(|| {
         let mut first: Option<Error> = None;
         if let (true, Some(branch)) = (look_up_due, look) {
-            match look_up(ctx, branch, known.map(|review| review.number)) {
+            match look_up(ctx, &policy, branch, known.map(|review| review.number)) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(error) => first = Some(error),
@@ -103,14 +105,19 @@ fn lookup_due(ctx: &Ctx, policy: &Policy, branch: &str) -> Result<bool> {
 
 /// Looks the branch's PR/MR up and syncs it; whether there was one. Finding only the PR/MR
 /// `known` is nothing new, so it counts as a miss.
-fn look_up(ctx: &Ctx, branch: &str, known: Option<u64>) -> Result<bool> {
-    // No origin or no known forge is skipped before anything is locked or written.
-    let located = sync::locate(ctx).inspect_err(|_| {
+fn look_up(ctx: &Ctx, policy: &Policy, branch: &str, known: Option<u64>) -> Result<bool> {
+    // No tracker, no known forge or a tracker that does not pull on its own is skipped before
+    // anything is locked or written.
+    let located = sync::locate(ctx, &policy.config).inspect_err(|_| {
         auto::record_failure(&ctx.store, &ctx.dir, &lookup_failure(branch));
     })?;
-    let Some((forge, host, repo)) = located else {
+    let Some((forge, selected)) = located else {
         return Ok(false);
     };
+    if selected.pull != Mode::Auto {
+        return Ok(false);
+    }
+    let (host, repo) = (selected.host, selected.repo);
     locked(ctx, None, &lookup_failure(branch), |ctx| {
         let found = sync::find_for_branch(forge, &host, &repo, branch)?;
         if found
@@ -159,12 +166,13 @@ fn remember_miss(ctx: &Ctx, branch: &str) -> Result<()> {
 }
 
 pub(super) fn publish_ended(ctx: &mut Ctx, run: &str, offline: Offline) {
-    if auto::push_config(&ctx.repo, offline).is_none() {
+    if auto::push_config(&ctx.repo, offline, Kind::PullRequests).is_none() {
         return;
     }
     auto::attempt(|| {
         super::publish::publish(
             ctx,
+            None,
             None,
             &super::publish::Options {
                 dry_run: false,

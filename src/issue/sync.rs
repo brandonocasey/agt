@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::merge;
 use super::trackers::{self, Tracker};
 use crate::core::clock;
-use crate::core::config::Config;
+use crate::core::config;
 use crate::core::error::{Error, Result};
 use crate::forge::issue::{IssueData, ListQuery};
 use crate::forge::markers::is_landed_as;
@@ -28,9 +28,10 @@ pub fn connect(tracker: &Tracker) -> Result<(Box<dyn IssueService>, String)> {
     Ok((service, login))
 }
 
-pub fn run(store: &Store, config: &Config, filter: Option<&str>) -> Result<Value> {
+pub fn run(store: &Store, destinations: &[config::Tracker], filter: Option<&str>) -> Result<Value> {
     let mut reports = Vec::new();
-    for configured in trackers::configured(config, filter)? {
+    let targets = trackers::configured(destinations, filter)?;
+    for configured in targets {
         let tracker = trackers::ensure(store, configured)?;
         reports.push(sync_tracker(store, tracker)?);
     }

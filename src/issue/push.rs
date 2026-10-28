@@ -9,7 +9,7 @@ use super::merge::{self, pending_changes, unsent_comments};
 use super::sync::{self, connect};
 use super::trackers::{self, Tracker};
 use crate::core::clock;
-use crate::core::config::Config;
+use crate::core::config::{self, Kind, Mode};
 use crate::core::error::{Error, Result, fail};
 use crate::core::random;
 use crate::forge::issue::{Changes, IssueData, ListQuery, NewIssue};
@@ -36,21 +36,25 @@ pub struct Options {
 
 pub fn run(
     store: &Store,
-    config: &Config,
+    destinations: &[config::Tracker],
     filter: Option<&str>,
     options: &Options,
 ) -> Result<Value> {
     let mut reports = Vec::new();
-    for configured in trackers::configured(config, filter)? {
+    let reached = trackers::configured(destinations, filter)?;
+    let mut kept = Vec::new();
+    for configured in &reached {
         let tracker = trackers::ensure_mode(store, configured, options.dry_run)?;
-        if configured.push == Some(false) {
-            if filter.is_some() {
+        // A dry run sends nothing, so it stays allowed.
+        if configured.push_mode() == Mode::Off && !options.dry_run {
+            if filter.is_some() && configured.push_pinned {
                 return fail(format!(
-                    "tracker {} has push = false in the configuration; set it to true to send changes",
+                    "tracker {} has push off; set `push = \"manual\"` under `[issues]`, `[sync]` or the tracker to send changes",
                     tracker.doc.key
                 ));
             }
-            reports.push(json!({"tracker": tracker.doc.key, "skipped": "push = false"}));
+            kept.push(configured.name());
+            reports.push(json!({"tracker": tracker.doc.key, "skipped": "push is off"}));
             continue;
         }
         reports.push(push_tracker(store, &tracker, options)?);
@@ -61,7 +65,20 @@ pub fn run(
             }
         }
     }
-    Ok(json!({ "dry_run": options.dry_run, "trackers": reports }))
+    let mut report = json!({ "dry_run": options.dry_run, "trackers": reports });
+    // Every tracker kept its changes local: say so, as `review publish` does.
+    if !kept.is_empty()
+        && kept.len() == reached.len()
+        && let Some(reason) = crate::forge::auto::kept_local(
+            "issue push",
+            Kind::Issues,
+            &kept.join(", "),
+            reached.iter().find_map(|tracker| tracker.push),
+        )
+    {
+        report["kept_local"] = json!(reason);
+    }
+    Ok(report)
 }
 
 fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<Value> {

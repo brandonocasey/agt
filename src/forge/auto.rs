@@ -10,7 +10,7 @@ use std::time::Duration;
 use clap::Args;
 
 use crate::core::clock;
-use crate::core::config::Config;
+use crate::core::config::{Config, Kind, Mode, Tracker};
 use crate::core::env;
 use crate::core::error::{Result, fail};
 use crate::forge::transport;
@@ -26,19 +26,44 @@ const CAP_OVERRIDE: &str = "AGT_SYNC_CAP_MS";
 /// What a read syncs by: the configuration, resolved against `--offline` and `AGT_OFFLINE`.
 pub struct Policy {
     pub config: Config,
+    pub kind: Kind,
+    /// The trackers that serve `kind`.
+    pub trackers: Vec<Tracker>,
     pub max_age_secs: u64,
 }
 
 impl Policy {
-    pub fn resolve_for_repo(repo: &crate::git::Repo, offline: Offline) -> Option<Self> {
+    /// The policy for reads of `kind`; `None` when offline, or when no tracker pulls
+    /// automatically.
+    pub fn resolve_for_repo(repo: &crate::git::Repo, offline: Offline, kind: Kind) -> Option<Self> {
         let config = load_unless_offline(repo, offline)?;
-        if !config.sync.auto_pull {
+        if !config.may_be_automatic(kind, true) {
             return None;
         }
-        Some(Self {
+        let trackers = match config.trackers_for(repo, kind) {
+            Ok(trackers) => trackers,
+            Err(error) => {
+                skipped(&error.0);
+                return None;
+            }
+        };
+        let pulls = trackers.iter().any(|tracker| tracker.pull == Mode::Auto)
+            || (trackers.is_empty() && config.pull_for(kind) == Mode::Auto);
+        pulls.then_some(Self {
             max_age_secs: config.sync.max_age_secs,
+            kind,
+            trackers,
             config,
         })
+    }
+
+    /// Whether reads of the repository `repo` on `host` pull on their own.
+    pub fn pulls_automatically(&self, host: &str, repo: &str) -> bool {
+        self.trackers
+            .iter()
+            .find(|tracker| tracker.is_at(host, repo))
+            .map_or_else(|| self.config.pull_for(self.kind), |tracker| tracker.pull)
+            == Mode::Auto
     }
 
     /// Whether something last synced at `synced_at` is due for another sync. A time that cannot
@@ -105,32 +130,56 @@ pub fn skipped(reason: &str) {
     eprintln!("agt: sync skipped ({reason}); showing local data");
 }
 
-/// The configuration when auto-push and posting are on and the command is not offline;
-/// otherwise `None`, with a configuration that cannot be read, or auto-push without posting,
-/// left as a skipped-sync line on stderr.
-pub fn push_config(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {
-    let config = load_unless_offline(repo, offline).filter(|config| config.sync.auto_push)?;
-    if !config.forge.post {
-        skipped("auto_push needs `[forge] post = true`");
+/// The configuration when the command is not offline and some tracker of `kind` pushes
+/// automatically; otherwise `None`, with a configuration that cannot be read left as a
+/// skipped-sync line on stderr.
+pub fn push_config(repo: &crate::git::Repo, offline: Offline, kind: Kind) -> Option<Config> {
+    let config = load_unless_offline(repo, offline)?;
+    if !config.may_be_automatic(kind, false) {
         return None;
     }
-    Some(config)
+    let trackers = match config.trackers_for(repo, kind) {
+        Ok(trackers) => trackers,
+        Err(error) => {
+            skipped(&error.0);
+            return None;
+        }
+    };
+    let pushes = trackers
+        .iter()
+        .any(|tracker| tracker.push_mode() == Mode::Auto)
+        || (trackers.is_empty() && config.push_for(kind) == Some(Mode::Auto));
+    pushes.then_some(config)
 }
 
-/// Why `what` stays local: `None` when the configuration sets `[forge] post = true`. The reason
-/// also goes to stderr, so a command that kept its work local says so.
-pub fn kept_local(config: &Config, what: &str) -> Option<String> {
-    if config.forge.post {
+/// Why `what` stays local: `None` unless `push` is `off`, which is also what an unset `push`
+/// means here. The reason names the key to change and also goes to stderr, so a command that kept
+/// its work local says so.
+pub fn kept_local(what: &str, kind: Kind, target: &str, push: Option<Mode>) -> Option<String> {
+    if push.is_some_and(|push| push != Mode::Off) {
         return None;
     }
     let global = crate::core::config::path()
         .map_or_else(|_| "config.toml".into(), |path| path.display().to_string());
     let reason = format!(
-        "{what} kept local: posting is off; set `[forge] post = true` in {global} or the \
-         repository's .config/agt.toml to send"
+        "{what} kept local: push is off for {target}; set `push = \"manual\"` under `[{}]`, \
+         `[sync]` or the tracker in {global} or the repository's .config/agt.toml to send",
+        kind.section()
     );
     eprintln!("agt: {reason}");
     Some(reason)
+}
+
+/// Refuses `what`, a write of `agt pr`, when the tracker's `push` was set to `off`. Unset allows
+/// it.
+pub fn pr_write_allowed(what: &str, target: &str, push: Option<Mode>) -> Result<()> {
+    if push != Some(Mode::Off) {
+        return Ok(());
+    }
+    fail(format!(
+        "{what} refused: push is off for {target}; set `push = \"manual\"` under \
+         `[pull_requests]`, `[sync]` or the tracker to allow it"
+    ))
 }
 
 fn load_unless_offline(repo: &crate::git::Repo, offline: Offline) -> Option<Config> {
@@ -223,6 +272,8 @@ mod tests {
     fn policy(max_age_secs: u64) -> Policy {
         Policy {
             config: Config::default(),
+            kind: Kind::Issues,
+            trackers: Vec::new(),
             max_age_secs,
         }
     }

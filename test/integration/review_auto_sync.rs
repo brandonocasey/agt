@@ -23,8 +23,10 @@ fn review_now(env: &Env, now: i64, args: &[&str], more: &[(&str, &str)]) -> Outp
     let mut vars = vec![("AGT_NOW", now.as_str())];
     vars.extend_from_slice(more);
     let config = env.path("config").join("agt/config.toml");
-    if !fs::read_to_string(&config).unwrap().contains("[sync]") {
-        env.write_config("[sync]\nauto_pull = true\n");
+    // A test that wrote its own configuration keeps it; the new environment's default gets
+    // automatic pulls.
+    if fs::read_to_string(&config).unwrap() == "[sync]\npush = \"manual\"\n" {
+        env.write_config("[sync]\npull = \"auto\"\npush = \"manual\"\n");
     }
     env.exec(args, None, &vars)
 }
@@ -77,7 +79,7 @@ fn a_synced_review_is_read_again_only_when_stale() {
     let setup = unsynced_pr();
     let env = &setup.env;
     let at = NOW;
-    review_json(&review_now(env, at, &["sync"], &[]));
+    env.pull_with(&["sync", "--pr", "42"], &[("AGT_NOW", &at.to_string())]);
     let synced = env.forge_calls().len();
     // Fresh: nothing is called.
     let fresh = review_now(env, NOW + 299, &["status"], &[]);
@@ -87,7 +89,7 @@ fn a_synced_review_is_read_again_only_when_stale() {
     let stale = review_now(env, NOW + 301, &["status"], &[]);
     assert_eq!(String::from_utf8_lossy(&stale.stderr), "");
     assert!(env.forge_calls().len() > synced);
-    assert_eq!(lookups(env), 1);
+    assert_eq!(lookups(env), 0);
     let target = env.run_with(&["status", "--full"], None, &[("AGT_OFFLINE", "1")]);
     assert_eq!(target["target"], "gh-42");
 }
@@ -107,7 +109,7 @@ fn offline_keeps_review_reads_local() {
     fs::create_dir_all(env.path("config").join("agt")).unwrap();
     fs::write(
         env.path("config").join("agt").join("config.toml"),
-        "[sync]\nauto_pull = false\n",
+        "[sync]\npull = \"manual\"\n",
     )
     .unwrap();
     let output = review_now(env, at, &["list"], &[]);
@@ -282,7 +284,7 @@ fn a_failed_lookup_pauses_the_next_reads_for_the_max_age() {
 fn a_failed_sync_of_a_known_pr_pauses_and_a_success_clears_it() {
     let setup = unsynced_pr();
     let env = &setup.env;
-    review_json(&review_now(env, NOW, &["sync"], &[]));
+    env.pull_with(&["sync", "--pr", "42"], &[("AGT_NOW", &NOW.to_string())]);
     // Stale, and the host now fails: the PR queries are answered by nothing.
     let pull = github::graphql("me", "repo", "42", "PullRequest");
     let pull: Vec<&str> = pull.iter().map(String::as_str).collect();
@@ -336,7 +338,7 @@ fn a_newer_pr_of_the_branch_is_found_when_the_stored_one_is_closed() {
         &setup.base,
     );
     assert_eq!(
-        review_json(&review_now(env, NOW, &["sync"], &[]))["target"],
+        env.pull_with(&["sync", "--pr", "42"], &[("AGT_NOW", &NOW.to_string())])["target"],
         "gh-42"
     );
     // The branch gets a new PR.
@@ -381,7 +383,7 @@ fn a_closed_pr_with_nothing_newer_is_looked_up_once_per_window() {
         &setup.head,
         &setup.base,
     );
-    review_json(&review_now(env, NOW, &["sync"], &[]));
+    env.pull_with(&["sync", "--pr", "42"], &[("AGT_NOW", &NOW.to_string())]);
     let before = lookups(env);
     for at in [NOW + 1, NOW + 60, NOW + 299] {
         let output = review_now(env, at, &["status"], &[]);
@@ -418,7 +420,7 @@ fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() 
         &setup.head,
         &setup.base,
     );
-    review_json(&review_now(env, NOW, &["sync"], &[]));
+    env.pull_with(&["sync", "--pr", "42"], &[("AGT_NOW", &NOW.to_string())]);
     // Past the max age both the branch lookup and the sync of PR 42 are due.
     let (tool, pid) = slow_tool(env);
     let calls = env.path("slow-calls");
@@ -456,7 +458,7 @@ fn a_slow_forge_costs_one_cap_and_one_line_for_a_closed_pr_that_is_also_stale() 
 }
 
 fn auto_push(env: &Env) {
-    env.write_config("[sync]\nauto_push = true\n");
+    env.write_config("[sync]\npush = \"auto\"\n");
 }
 
 #[test]
@@ -610,7 +612,7 @@ fn auto_publish_remote_reply(published_finding: bool) {
         fs::write(path, serde_json::to_vec_pretty(&target).unwrap()).unwrap();
         (setup.finding(1), "PRRT_f1")
     } else {
-        env.run(&["sync"]);
+        env.pull(&["sync", "--pr", "42"]);
         ("gh-t301".to_owned(), "PRRT_old")
     };
     let current = env.run(&["pass", "start", "--kind", "full"])["run"]
@@ -765,12 +767,12 @@ fn offline_run_end_saves_without_automatic_publication() {
 }
 
 #[test]
-fn auto_push_without_forge_post_publishes_nothing() {
+fn auto_push_with_push_off_publishes_nothing() {
     let setup = Setup::reviewed(ORIGIN);
     let env = &setup.env;
     github::login(env);
     github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
-    env.write_config("[sync]\nauto_push = true\n[forge]\npost = false\n");
+    env.write_config("[sync]\npush = \"off\"\n[pull_requests]\npull = \"auto\"\n");
     let ended = review_json(&env.exec(&["run", "end", "--run", &setup.run], None, &[]));
     assert!(ended["ended_at"].is_string());
     assert!(env.forge_calls().is_empty(), "{:?}", env.forge_calls());

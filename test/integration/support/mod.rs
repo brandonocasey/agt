@@ -65,7 +65,7 @@ impl Env {
             offline: false,
         };
         env.git(&["init", "-q", "-b", "main"]);
-        env.write_config("");
+        env.write_config("[sync]\npush = \"manual\"\n");
         env
     }
 
@@ -339,16 +339,11 @@ impl Env {
             .success()
     }
 
-    /// Writes the global `$XDG_CONFIG_HOME/agt/config.toml`. Posting to the fake forge is on
-    /// unless `text` has its own `[forge]` table.
+    /// Writes the global `$XDG_CONFIG_HOME/agt/config.toml`, as given. A new environment starts
+    /// with `[sync] push = "manual"`, so posting to the fake forge is on until a test replaces it.
     pub fn write_config(&self, text: &str) {
         let dir = self.path("config").join("agt");
         fs::create_dir_all(&dir).unwrap();
-        let text = if text.contains("[forge]") {
-            text.to_owned()
-        } else {
-            format!("{text}\n[forge]\npost = true\n")
-        };
         fs::write(dir.join("config.toml"), text).unwrap();
     }
 
@@ -396,6 +391,30 @@ impl Env {
 
     pub fn run(&self, args: &[&str]) -> Value {
         self.run_with(args, None, &[])
+    }
+
+    /// Runs a `sync` as a pull only: it reads its configuration from a directory whose `[sync]`
+    /// keeps `push` off, so nothing is published and no write call is needed.
+    pub fn pull(&self, args: &[&str]) -> Value {
+        self.pull_with(args, &[])
+    }
+
+    /// [`Env::pull`] with extra environment variables.
+    pub fn pull_with(&self, args: &[&str], extra: &[(&str, &str)]) -> Value {
+        let config = self.root.join("pull-only");
+        fs::create_dir_all(config.join("agt")).unwrap();
+        fs::write(
+            config.join("agt").join("config.toml"),
+            "[sync]\npush = \"off\"\n",
+        )
+        .unwrap();
+        let hosts = self.path("config").join("agt").join("hosts.json");
+        if hosts.exists() {
+            fs::copy(hosts, config.join("agt").join("hosts.json")).unwrap();
+        }
+        let mut envs = vec![("XDG_CONFIG_HOME", config.to_str().unwrap())];
+        envs.extend_from_slice(extra);
+        self.run_with(args, None, &envs)
     }
 
     /// Runs agt review from another directory, such as a linked worktree.

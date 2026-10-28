@@ -1,6 +1,7 @@
 //! `agt pr`: one GitHub/GitLab-neutral command for the PR/MR of the current repository: view,
 //! list, create, update, merge behind a head-sha guard, and pause or restore auto-merge. The
-//! forge comes from the origin remote. Output is JSON.
+//! forge comes from the tracker of the origin remote, or the one `--remote` or a PR/MR URL
+//! names; writes are refused where `push` is `off`. Output is JSON.
 
 mod github;
 mod gitlab;
@@ -9,10 +10,12 @@ mod memo;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
+use crate::core::config::{Config, Kind};
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{self, Output};
-use crate::forge::auto::Offline;
-use crate::forge::landed::Origin;
+use crate::forge::auto::{Offline, pr_write_allowed};
+use crate::forge::landed::Source;
+use crate::forge::select::{Selected, require_tracker};
 use crate::forge::service::{ReviewService, SERVICES, kind};
 use crate::forge::{PrRef, parse_pr};
 use crate::git::Repo;
@@ -21,6 +24,10 @@ use crate::store::model::{Forge, ReviewState};
 /// View, list, create, update and merge the PRs/MRs of this repository, on GitHub or GitLab.
 #[derive(Args)]
 pub struct Cli {
+    /// Tracker to use: a git remote name or `host/repo` [default: the repository of a PR/MR
+    /// URL, else the tracker of `origin`].
+    #[arg(long, global = true)]
+    remote: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -204,10 +211,11 @@ impl Pr {
     }
 }
 
-/// The repository `origin` names, with the service that talks to its forge.
+/// The repository of the selected tracker, with the service that talks to its forge.
 struct Remote {
-    origin: Origin,
+    origin: Source,
     service: Box<dyn ReviewService>,
+    selected: Selected,
 }
 
 fn number(text: &str, remote: &Remote) -> Result<u64> {
@@ -226,10 +234,25 @@ fn number(text: &str, remote: &Remote) -> Result<u64> {
 }
 
 impl Remote {
-    fn connect(repo: &Repo) -> Result<Self> {
-        let origin = Origin::require(repo)?;
+    fn connect(
+        repo: &Repo,
+        config: &Config,
+        remote: Option<&str>,
+        pr: Option<&PrRef>,
+    ) -> Result<Self> {
+        let selected = require_tracker(repo, config, Kind::PullRequests, remote, pr)?;
+        let origin = Source::of(&selected)?;
         let service = (kind(origin.forge).connect)(&origin.host);
-        Ok(Self { origin, service })
+        Ok(Self {
+            origin,
+            service,
+            selected,
+        })
+    }
+
+    /// Refuses `what` when the tracker's `push` is `off`.
+    fn allow_write(&self, what: &str) -> Result<()> {
+        pr_write_allowed(what, &self.selected.name(), self.selected.push)
     }
 
     fn key(&self, number: u64) -> String {
@@ -383,17 +406,26 @@ fn explain(error: Error) -> Error {
 /// Runs the command. Also returns the title and body of a PR/MR that this call merged.
 pub fn run(cli: Cli) -> Result<(Output, Option<String>)> {
     let mut merged_text = None;
-    let output = execute(cli.command, &mut merged_text).map_err(explain)?;
+    let output = execute(cli, &mut merged_text).map_err(explain)?;
     Ok((output, merged_text))
 }
 
-fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output> {
+fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
     Offline::current().forbid("agt pr")?;
     let repo = Repo::discover()?;
-    let remote = Remote::connect(&repo)?;
+    let config = Config::load_for_repo(&repo)?;
+    let given = match &cli.command {
+        Command::Update { number, .. }
+        | Command::Merge { number, .. }
+        | Command::AutoMerge { number, .. } => Some(number.as_str()),
+        Command::View { number, .. } => number.as_deref(),
+        Command::List { .. } | Command::Create { .. } => None,
+    };
+    let pr_ref = given.map(parse_pr).transpose()?;
+    let remote = Remote::connect(&repo, &config, cli.remote.as_deref(), pr_ref.as_ref())?;
     let slug = remote.origin.repo.as_str();
     let shown = |pr: Pr| Ok(Output::Json(pr.json()));
-    match command {
+    match cli.command {
         Command::View {
             number: given,
             branch,
@@ -424,6 +456,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
             base,
             draft,
         } => {
+            remote.allow_write("agt pr create")?;
             let branch = branch_of(&repo, None)?;
             if let Some(open) = remote
                 .list(Some(&branch), State::Open, false)?
@@ -456,6 +489,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
             remove_label,
             draft,
         } => {
+            remote.allow_write("agt pr update")?;
             let changes = Changes {
                 title,
                 body,
@@ -484,6 +518,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
             method,
             auto,
         } => {
+            remote.allow_write("agt pr merge")?;
             let at = number(&given, &remote)?;
             let current = remote.view(at)?;
             guard(&current, &sha)?;
@@ -508,6 +543,7 @@ fn execute(command: Command, merged_text: &mut Option<String>) -> Result<Output>
             number: given,
             sha,
         } => {
+            remote.allow_write("agt pr auto-merge")?;
             let at = number(&given, &remote)?;
             let key = remote.key(at);
             let current = remote.view(at)?;

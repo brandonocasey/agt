@@ -228,7 +228,7 @@ impl TrackerDoc {
     pub fn refresh(&mut self, tracker: &config::Tracker) {
         self.scope = tracker.scope;
         self.since_days = tracker.since_days;
-        self.push = tracker.push != Some(false);
+        self.push = tracker.push_mode() != config::Mode::Off;
     }
 }
 

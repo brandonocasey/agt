@@ -17,25 +17,21 @@ use crate::support::{Env, args, executable, fixture, numbered, strs};
 /// Without `[forge] post = true` a publish succeeds locally: it sends nothing, says why, and
 /// `--approve` still records the approval; a dry run still shows the payloads.
 #[test]
-fn publish_stays_local_without_forge_post() {
+fn publish_stays_local_while_push_is_off() {
     let svc = Github::new();
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     svc.link(&setup);
-    env.write_config("[forge]\npost = false\n");
+    env.write_config("[sync]\npush = \"off\"\n");
     let calls = env.forge_calls().len();
     let output = env.exec(&["publish", "--pr", "42"], None, &[]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("[forge] post = true"), "{stderr}");
+    assert!(stderr.contains("push is off for"), "{stderr}");
+    assert!(stderr.contains("`[pull_requests]`"), "{stderr}");
     let kept: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(kept["posted"], json!([]));
-    assert!(
-        kept["kept_local"]
-            .as_str()
-            .unwrap()
-            .contains("posting is off")
-    );
+    assert!(kept["kept_local"].as_str().unwrap().contains("push is off"));
     env.run(&["resolve", &setup.finding(1), "--stale"]);
     env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
     let output = env.exec(&["publish", "--pr", "42", "--approve"], None, &[]);
@@ -58,6 +54,72 @@ fn publish_stays_local_without_forge_post() {
 
 /// A comment marked `posting` is stored and shown without a `began_at` key: agent-review 0.4.0
 /// refuses to write documents with fields it does not know.
+#[test]
+fn an_issues_push_of_off_keeps_issues_local_while_publish_sends() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--stale"]);
+    }
+    svc.link(&setup);
+    svc.accept(env, Call::PostNote, 604);
+    env.write_config("[sync]\npush = \"manual\"\n[issues]\npush = \"off\"\n");
+    let made = env.issue(&["create", "--title", "Stays here"]);
+    let key = made["key"].as_str().unwrap().to_owned();
+    let calls = env.forge_calls().len();
+    let output = env.issue_exec(&["push"], "", &[]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("issue push kept local"), "{stderr}");
+    assert!(stderr.contains("`[issues]`"), "{stderr}");
+    assert_eq!(env.forge_calls().len(), calls);
+    assert_eq!(
+        env.issue_doc("local", &key)["fields"]["title"],
+        "Stays here"
+    );
+    let published = env.run(&["publish", "--pr", "42"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+}
+
+#[test]
+fn a_pull_requests_push_of_off_keeps_publish_local_while_issues_push() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    env.write_config("[sync]\npush = \"manual\"\n[pull_requests]\npush = \"off\"\n");
+    let output = env.exec(&["publish", "--pr", "42"], None, &[]);
+    assert!(output.status.success());
+    let kept: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(kept["posted"], json!([]));
+    assert!(
+        kept["kept_local"]
+            .as_str()
+            .unwrap()
+            .contains("`[pull_requests]`")
+    );
+    assert_never_posted(env);
+}
+
+#[test]
+fn the_old_post_key_still_gates_publish_and_warns() {
+    let svc = Github::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    env.write_config("[forge]\npost = false\n");
+    let output = env.exec(&["publish", "--pr", "42"], None, &[]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`[forge] post` in") && stderr.contains("is deprecated; use `[sync] push"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("publish kept local"), "{stderr}");
+    assert_never_posted(env);
+}
+
 #[test]
 fn review_documents_and_output_carry_no_began_at() {
     let svc = Github::new();
@@ -377,7 +439,7 @@ fn github_findings_without_a_diff_line_go_in_the_review_body_on_someone_elses_pr
     let (f1, f2) = (setup.finding(1), setup.finding(2));
     let mut remote = Remote::by("alice");
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let only = format!("{f1},{f2}");
     let args = [
@@ -435,7 +497,7 @@ fn github_findings_without_a_diff_line_go_in_the_review_body_on_someone_elses_pr
         .reviews
         .push(github::review(700, "me", "COMMENTED", &body));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     assert!(!ids(&list).iter().any(|id| id.starts_with("gh-")), "{list}");
     assert_eq!(thread(&list, &f2)["comments"][0]["deleted_remote"], false);
@@ -490,7 +552,7 @@ fn github_only_you_answer_a_conversation_comment() {
     let mut remote = Remote::by("me");
     remote.general("900", Comment::new(900, "alice", "Alice asks why.\nMore."));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let alice = svc.local_general(900);
     env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
@@ -635,7 +697,7 @@ fn github_a_finding_on_a_changed_file_outside_the_hunks_posts_a_file_comment() {
         vec![Comment::new(702, "me", &sent(env, &whole))],
     );
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     for (id, remote_id) in [(&line, "PRRT_line"), (&whole, "PRRT_whole")] {
         let remote = &thread(&list, id)["remote"];
@@ -655,7 +717,7 @@ fn concurrent_publish_posts_a_pending_comment_once() {
     let setup = Setup::reviewed(svc.origin());
     let env = &setup.env;
     svc.sync(&setup, &Remote::new());
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     env.run(&["comment", "--body", "Post once"]);
     env.respond(
         &strs(&svc.call(Call::PostThread)),
@@ -767,7 +829,7 @@ fn own_review_body_is_not_imported() {
     let mut remote = Remote::new();
     remote.reviews.push(github::own_review(&setup.head));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     assert!(!ids(&env.run(&["list"])).contains(&"gh-r700".to_owned()));
 }
 
@@ -794,7 +856,7 @@ fn closed_unrelated_pr_is_not_attached_or_pruned() {
         "1111111111111111111111111111111111111111",
         &base,
     );
-    let synced = env.run(&["sync"]);
+    let synced = env.pull(&["sync", "--pr", "5"]);
     assert_eq!(synced["target"], "gh-5");
     assert_eq!(synced["pruned"], json!([]), "synced just now");
     let status = env.run(&["status", "--full"]);
@@ -828,7 +890,7 @@ fn a_synced_rejected_reply_resolves_a_general_finding() {
         ),
     );
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     let synced = thread(&list, &f9);
     assert_eq!(synced["resolved"], true, "{synced}");
@@ -845,7 +907,7 @@ fn github_approve_review_claimed_by_sync_is_not_sent_again() {
     env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
     let mut remote = Remote::by("alice");
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let id = env.approve("42", &["--formal", "--not-own"]);
     env.run(&["run", "end", "--run", &setup.run]);
     // The review lands on GitHub, but its response is lost.
@@ -856,7 +918,7 @@ fn github_approve_review_claimed_by_sync_is_not_sent_again() {
         .push(github::review(701, "me", "APPROVED", &sent(env, &id)));
     svc.sync(&setup, &remote);
     // The posted review holds only the marker; the approval text stays in the store.
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     let approval = &thread(&list, &id)["comments"][0];
     assert_eq!(approval["remote"]["id"], "701", "{approval}");
@@ -906,7 +968,7 @@ fn own_github_formal_approval_posts_a_comment_review() {
         .reviews
         .push(github::review(702, "me", "COMMENTED", &sent(env, &id)));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     let approval = &thread(&list, &id)["comments"][0];
     assert_eq!(approval["remote"]["id"], "702", "{approval}");
@@ -935,7 +997,7 @@ fn github_unreviewed_commits_head_the_summary_when_nothing_is_open() {
     };
     svc.sync(&pushed, &Remote::new());
     let env = &pushed.env;
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     let summary = write_text(&dry, "body", "review-record");
     assert!(
@@ -958,7 +1020,7 @@ fn github_review_body_comments_are_claimed_by_sync_after_a_lost_response() {
     let f2 = setup.finding(2);
     let mut remote = Remote::by("alice");
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let args = ["publish", "--pr", "42", "--not-own", "--only", f2.as_str()];
     svc.lose(env, Call::PostInline);
@@ -973,7 +1035,7 @@ fn github_review_body_comments_are_claimed_by_sync_after_a_lost_response() {
         .push(github::review(700, "me", "COMMENTED", &body));
     svc.sync(&setup, &remote);
     svc.restore(env, Call::PostInline);
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let list = env.run(&["list"]);
     let comment = &thread(&list, &f2)["comments"][0];
     assert_eq!(comment["post"], "posted", "{comment}");
@@ -1004,7 +1066,7 @@ fn github_review_body_comments_are_split_across_reviews_at_the_size_limit() {
     );
     let env = &setup.env;
     svc.sync(&setup, &Remote::by("alice"));
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let only: Vec<String> = (1..=5).map(|number| setup.finding(number)).collect();
     let dry = env.run(&[
@@ -1050,7 +1112,7 @@ fn github_a_head_missing_locally_is_not_claimed_as_reviewed() {
     };
     svc.sync(&pushed, &Remote::new());
     let env = &pushed.env;
-    env.run(&["sync", "--pr", "42"]);
+    env.pull(&["sync", "--pr", "42"]);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
     let summary = write_text(&dry, "body", "review-record");
     assert!(
@@ -1178,7 +1240,7 @@ fn gitlab_a_failed_summary_edit_keeps_the_summary_trusted() {
     let put = strs(&put);
     env.fail_call_with(&put, "glab: 502 Bad Gateway (HTTP 502)");
     env.fail(&["publish", "--pr", "3"], None);
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     assert!(!ids(&env.run(&["list"])).contains(&"gl-n6002".to_owned()));
 
     // The fake host does not apply edits, so it lists the note again once it is edited.
@@ -1195,7 +1257,7 @@ fn gitlab_a_failed_summary_edit_keeps_the_summary_trusted() {
     let mut remote = Remote::new().head(head);
     remote.general("d-s", Comment::new(6002, "me", &summary_sent(env)));
     svc.sync(&setup, &remote);
-    let synced = env.run(&["sync", "--pr", "3"]);
+    let synced = env.pull(&["sync", "--pr", "3"]);
     assert_eq!(synced["records"], 1, "{synced}");
     assert!(open_ids(&env.run(&["status"])).is_empty());
 }
@@ -1245,7 +1307,7 @@ fn gitlab_a_record_from_before_the_summary_stays_trusted() {
     svc.accept(env, Call::PostNote, 6002);
     let published = env.run(&["publish", "--pr", "3"]);
     assert_eq!(kinds(&published, "posted"), ["summary"]);
-    let synced = env.run(&["sync", "--pr", "3"]);
+    let synced = env.pull(&["sync", "--pr", "3"]);
     assert_eq!(synced["records"], 1, "{synced}");
     assert!(!ids(&env.run(&["list"])).contains(&"gl-n6001".to_owned()));
 }
@@ -1259,7 +1321,7 @@ fn gitlab_crash_after_write_does_not_duplicate() {
     let env = &setup.env;
     let (f1, f2) = (setup.finding(1), setup.finding(2));
     svc.sync(&setup, &Remote::new());
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     env.run(&["run", "end", "--run", &setup.run]);
     svc.lose(env, Call::PostInline);
     env.fail(&["publish", "--pr", "3"], None);
@@ -1342,10 +1404,10 @@ fn gitlab_reply_on_general_note_keeps_one_thread() {
     let mut remote = Remote::new();
     remote.general("d-g", Comment::new(4002, "alice", "Alice general text."));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     remote.add_reply("d-g", Comment::new(4003, "bob", "Bob reply text."));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     let list = env.run(&["list"]);
     let same: Vec<String> = ids(&list)
         .into_iter()
@@ -1376,7 +1438,7 @@ fn gitlab_ranges_post_with_line_codes() {
         r#"[{"type":"nit","path":"a.txt","start_line":2,"line":3,"scenario":"Range in one hunk."}]"#,
     );
     svc.sync(&setup, &Remote::new());
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     env.run(&["run", "end", "--run", run]);
     let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
     svc.assert_range(&dry, 2, 3, "Range in one hunk.");
@@ -1409,7 +1471,7 @@ fn approved(svc: &Gitlab, kill_f2: bool, formal: bool) -> (Setup, String) {
         env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
     }
     svc.sync(&setup, &Remote::new());
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let id = if formal {
         env.approve("3", &["--formal"])
@@ -1475,7 +1537,7 @@ fn gitlab_a_refused_approve_posts_a_comment() {
     let mut remote = Remote::new();
     remote.general("d-5021", Comment::new(5021, "me", &sent(env, &id)));
     svc.sync(&setup, &remote);
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     let list = env.run(&["list"]);
     let approval = &thread(&list, &id)["comments"][0];
     assert_eq!(approval["remote"]["id"], "5021", "{approval}");
@@ -1636,7 +1698,7 @@ fn gitlab_finding_changed_by_a_fix_posts_with_its_location() {
     let env = &setup.env;
     let f1 = setup.finding(1);
     svc.sync(&setup, &Remote::new());
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     env.write("a.txt", &numbered(10, &[(3, "THREE fixed")]));
     let fixed = env.commit_all("fix");
     env.respond(
@@ -1652,7 +1714,7 @@ fn gitlab_finding_changed_by_a_fix_posts_with_its_location() {
             ],
         ),
     );
-    env.run(&["sync", "--pr", "3"]);
+    env.pull(&["sync", "--pr", "3"]);
     env.run(&["run", "end", "--run", &setup.run]);
     let dry = env.run(&["publish", "--pr", "3", "--dry-run"]);
     let write = dry["writes"]

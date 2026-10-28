@@ -4,8 +4,10 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::core::config::{Config, Kind};
 use crate::core::error::{Error, Result, fail};
-use crate::forge::landed::Origin;
+use crate::forge::landed::Source;
+use crate::forge::select::require_tracker;
 use crate::forge::{self, PrRef, github, gitlab, service};
 use crate::git::Repo;
 use crate::store::model::Forge;
@@ -115,21 +117,33 @@ fn gitlab_host() -> Result<String> {
         .ok_or_else(|| Error("no GitLab host: set GITLAB_HOST or configure glab's host".into()))
 }
 
-/// The host and repository of `origin`, which must be on the forge the target names.
-fn origin(platform: Forge) -> Result<(String, String)> {
-    let origin = Origin::require(&Repo::discover()?)?;
-    if origin.forge != platform {
+/// The host and repository of the tracker `agt pr` picks (see `--remote`), which must be on the
+/// forge the target names.
+fn tracker(platform: Forge, remote: Option<&str>) -> Result<(String, String)> {
+    let repo = Repo::discover()?;
+    let config = Config::load_for_repo(&repo)?;
+    let source = Source::of(&require_tracker(
+        &repo,
+        &config,
+        Kind::PullRequests,
+        remote,
+        None,
+    )?)?;
+    if source.forge != platform {
         return fail(format!(
-            "origin {} is {}, but the target is a {} reference",
-            origin.host,
-            service::kind(origin.forge).name,
+            "{}/{} is {}, but the target is a {} reference",
+            source.host,
+            source.repo,
+            service::kind(source.forge).name,
             service::kind(platform).name
         ));
     }
-    Ok((origin.host, origin.repo))
+    Ok((source.host, source.repo))
 }
 
-pub fn resolve(target: Target) -> Result<Resolved> {
+/// Fills in the host and repository a target leaves out; `remote` picks the tracker for a target
+/// that names no repository.
+pub fn resolve(target: Target, remote: Option<&str>) -> Result<Resolved> {
     let (host, repo) = match (target.host.clone(), target.repo.clone()) {
         (Some(host), Some(repo)) => (host, repo),
         (None, Some(repo)) => {
@@ -139,7 +153,7 @@ pub fn resolve(target: Target) -> Result<Resolved> {
             };
             (host, repo)
         }
-        (_, None) => origin(target.platform)?,
+        (_, None) => tracker(target.platform, remote)?,
     };
     let number = target.number;
     let key = match (target.platform, target.pipeline) {

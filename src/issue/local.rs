@@ -8,7 +8,7 @@ use super::merge::{pending_changes, unsent_comments};
 use super::trackers::{self, Tracker};
 use super::view::summary;
 use crate::core::clock;
-use crate::core::config::Config;
+use crate::core::config;
 use crate::core::error::{Result, fail};
 use crate::core::random;
 use crate::core::text::{MAX_TEXT, argument_or_stdin, bounded, within};
@@ -315,14 +315,14 @@ pub fn link(store: &Store, filter: Option<&str>, args: &LinkArgs) -> Result<Valu
 
 pub fn create(
     store: &Store,
-    config: &Config,
+    destinations: &[config::Tracker],
     filter: Option<&str>,
     args: &CreateArgs,
 ) -> Result<Value> {
     let tracker = if filter.is_none() || filter == Some("local") {
         trackers::local(store)?
     } else {
-        let configured = trackers::configured(config, filter)?;
+        let configured = trackers::configured(destinations, filter)?;
         let [configured] = configured.as_slice() else {
             return fail(
                 "several trackers are configured; pass --tracker to say where to create it",

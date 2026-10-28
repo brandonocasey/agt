@@ -132,7 +132,7 @@ fn dry_run(env: &Env, svc: Svc, extra: &[&str]) -> Value {
 }
 
 fn sync(env: &Env, svc: Svc) -> Value {
-    env.run(&["sync", "--pr", svc.number()])
+    env.pull(&["sync", "--pr", svc.number()])
 }
 
 /// A sync adopts the PR's key for the branch's, reads and never writes, and finds nothing new
@@ -146,7 +146,7 @@ fn sync_is_read_only_and_a_second_sync_imports_nothing(svc: Svc) {
     svc.rich_sync(&setup);
     let envs = svc.rich_env();
 
-    let synced = env.run_with(&["sync"], None, &envs);
+    let synced = env.pull_with(&["sync", "--pr", svc.number()], &envs);
     assert_eq!(synced["target"], svc.target());
     assert_eq!(synced["renamed_from"], branch_key);
     assert_eq!(synced["login"], "me");
@@ -155,7 +155,7 @@ fn sync_is_read_only_and_a_second_sync_imports_nothing(svc: Svc) {
     assert_eq!(status["target"], svc.target());
     assert_eq!(status["runs"][0]["id"], setup.run.as_str());
 
-    let again = env.run_with(&["sync"], None, &envs);
+    let again = env.pull_with(&["sync"], &envs);
     assert_eq!(again["threads"]["imported"], 0);
     assert_eq!(again["threads"]["total"], synced["threads"]["total"]);
     assert!(again["renamed_from"].is_null());
@@ -582,7 +582,7 @@ fn target_on_detached_rebased_pr_head_uses_head(svc: Svc) {
     env.write("a.txt", &numbered(10, &[(3, "THREE")]));
     let pushed = env.commit_all("force-pushed PR head");
     svc.sync(&setup, &Remote::new().head(pushed));
-    env.run(&["--target", svc.target(), "sync"]);
+    env.pull(&["--target", svc.target(), "sync"]);
     env.write("a.txt", &numbered(10, &[(3, "THREE"), (5, "five")]));
     let fix = env.commit_all("fix on the pushed head");
     assert_eq!(env.run(&["--target", svc.target(), "status"])["head"], fix);
@@ -730,9 +730,8 @@ fn runs_ended_before_the_pr_are_never_published(svc: Svc) {
     env.run(&["run", "end", "--run", &setup.run]);
     let later = unix_now() + 3600;
     svc.sync(&setup, &Remote::new());
-    env.run_with(
+    env.pull_with(
         &["sync", "--pr", svc.number()],
-        None,
         &[("AGT_NOW", &later.to_string())],
     );
     let dry = dry_run(env, svc, &[]);
@@ -1308,9 +1307,8 @@ fn qa_findings_of_runs_ended_before_the_pr_are_never_published(svc: Svc) {
     env.run(&["run", "end", "--run", &setup.run]);
     let later = unix_now() + 3600;
     svc.sync(&setup, &Remote::new());
-    env.run_with(
+    env.pull_with(
         &["sync", "--pr", svc.number()],
-        None,
         &[("AGT_NOW", &later.to_string())],
     );
     let dry = dry_run(env, svc, &[]);

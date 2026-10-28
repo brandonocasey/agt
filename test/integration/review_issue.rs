@@ -15,7 +15,11 @@ fn setup_with_issue() -> Setup {
     let setup = Setup::reviewed(Github::new().origin());
     let env = &setup.env;
     let tracker: &dyn IssueFake = &GithubIssues;
-    env.write_config(&tracker.config(false));
+    // The review's origin is a tracker too; its issues are not the ones under test.
+    env.write_config(&format!(
+        "{}\n[[tracker]]\nhost = \"github.com\"\nrepo = \"me/repo\"\nissues = false\n",
+        tracker.config(false)
+    ));
     tracker.serve(env, &[Spec::new(1, "Follow up the login race")]);
     env.issue(&["sync"]);
     setup

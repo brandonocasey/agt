@@ -358,7 +358,8 @@ impl IssueFake for Github {
 
     fn config(&self, push: bool) -> String {
         format!(
-            "[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\nscope = \"all\"\npush = {push}\n"
+            "[[tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\nissues = {{ scope = \"all\", push = \"{}\" }}\n",
+            mode(push)
         )
     }
 
@@ -516,7 +517,8 @@ impl IssueFake for Gitlab {
 
     fn config(&self, push: bool) -> String {
         format!(
-            "[[issues.tracker]]\nforge = \"gitlab\"\nhost = \"gitlab.com\"\nrepo = \"g/p\"\nscope = \"all\"\npush = {push}\n"
+            "[[tracker]]\nforge = \"gitlab\"\nhost = \"gitlab.com\"\nrepo = \"g/p\"\nissues = {{ scope = \"all\", push = \"{}\" }}\n",
+            mode(push)
         )
     }
 
@@ -644,4 +646,9 @@ impl IssueFake for Gitlab {
             );
         }
     }
+}
+
+/// The `push` mode a fake tracker's configuration sets.
+fn mode(push: bool) -> &'static str {
+    if push { "manual" } else { "off" }
 }

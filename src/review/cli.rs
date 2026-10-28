@@ -59,14 +59,22 @@ pub enum Command {
         #[command(flatten)]
         report: ReportArgs,
     },
-    /// Import the PR/MR of this branch (or `--pr`) from GitHub or GitLab. Read-only on the forge.
+    /// Refresh every review already in the local store from its tracker, then publish them where
+    /// `push` is `manual` or `auto` (with `off`, the default, work stays local). Never imports
+    /// a new PR/MR on its own: `--pr` starts a review of one, `--remote` limits the refresh to
+    /// one tracker.
     Sync {
-        /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
+        /// Sync this PR/MR (number or URL), starting a local review if there is none [default:
+        /// every stored review].
         #[arg(long)]
         pr: Option<String>,
+        /// Tracker to use: a git remote name or `host/repo` [default: the tracker of `origin`].
+        #[arg(long)]
+        remote: Option<String>,
     },
-    /// Post local findings, replies, resolves and final records to an own PR/MR. Sends
-    /// only with `[forge] post = true` in the configuration; otherwise stays local.
+    /// Only push: post local findings, replies, resolves and final records to an own PR/MR. Sends
+    /// only when `push` is `manual` or `auto` for the tracker (`[pull_requests]`, `[sync]` or
+    /// the `[[tracker]]` in the configuration); with `off`, the default, work stays local.
     Publish {
         /// Print every payload without posting anything. With `--approve` the approval is still
         /// recorded locally.
@@ -81,6 +89,9 @@ pub enum Command {
         /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
         #[arg(long)]
         pr: Option<String>,
+        /// Tracker to use: a git remote name or `host/repo` [default: the tracker of `origin`].
+        #[arg(long)]
+        remote: Option<String>,
         #[command(flatten)]
         approval: ApprovalArgs,
     },
@@ -128,12 +139,16 @@ pub struct StatusCli {
 /// Import the PR/MR before a read, so the report is not stale.
 #[derive(Args)]
 pub struct SyncFirst {
-    /// Import the PR/MR of this branch (or `--pr`) first, as `sync` does.
+    /// Pull the PR/MR of this branch (or `--pr`) first; unlike `sync`, this may start a review.
     #[arg(long)]
     pub sync: bool,
     /// With `--sync`, the PR/MR number or URL [default: the PR/MR whose head is the branch].
     #[arg(long, requires = "sync", value_name = "PR")]
     pub pr: Option<String>,
+    /// With `--sync`, the tracker: a git remote name or `host/repo` [default: the tracker of
+    /// `origin`].
+    #[arg(long, requires = "sync", value_name = "REMOTE")]
+    pub remote: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -465,6 +480,9 @@ pub enum QaCommand {
         /// PR/MR number or URL [default: the PR/MR whose head is the current branch].
         #[arg(long)]
         pr: Option<String>,
+        /// Tracker to use: a git remote name or `host/repo` [default: the tracker of `origin`].
+        #[arg(long)]
+        remote: Option<String>,
     },
 }
 

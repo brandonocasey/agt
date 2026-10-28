@@ -102,7 +102,7 @@ fn changed_on_the_host(fake: Fake) -> Env {
         &format!("https://{host}/{}.git", fake.repo()),
     ]);
     env.write_config(&format!(
-        "{}\n[sync]\nauto_pull = true\n",
+        "{}\n[sync]\npull = \"auto\"\n",
         fake.config(false)
     ));
     let renamed = Spec::new(1, "Login fails, renamed").updated("2026-10-12T10:00:00Z");
@@ -161,7 +161,7 @@ fn offline_keeps_issue_reads_local(fake: Fake) {
     assert_quiet_success(&variable);
     assert_eq!(title(&variable), "Login fails");
     env.write_config(&format!(
-        "{}\n[sync]\nauto_pull = false\n",
+        "{}\n[sync]\npull = \"manual\"\n",
         fake.config(false)
     ));
     let config = read(&env, STALE, &["show", "1"], &[]);
@@ -170,7 +170,7 @@ fn offline_keeps_issue_reads_local(fake: Fake) {
     assert_eq!(env.forge_calls().len(), before);
     // `AGT_OFFLINE=0` is not offline.
     env.write_config(&format!(
-        "{}\n[sync]\nauto_pull = true\n",
+        "{}\n[sync]\npull = \"auto\"\n",
         fake.config(false)
     ));
     let online = read(&env, STALE, &["show", "1"], &[("AGT_OFFLINE", "0")]);
@@ -284,7 +284,7 @@ fn a_tracker_filter_syncs_only_that_tracker(fake: Fake) {
     };
     let env = changed_on_the_host(fake);
     env.write_config(&format!(
-        "{}\n{}\n[sync]\nauto_pull = true\n",
+        "{}\n{}\n[sync]\npull = \"auto\"\n",
         fake.config(false),
         other_config
     ));
@@ -385,7 +385,7 @@ fn max_age_secs_sets_how_long_a_sync_stays_fresh() {
     let fake: Fake = &Github;
     let env = changed_on_the_host(fake);
     env.write_config(&format!(
-        "{}\n[sync]\nauto_pull = true\nmax_age_secs = 3600\n",
+        "{}\n[sync]\npull = \"auto\"\nmax_age_secs = 3600\n",
         fake.config(false)
     ));
     let before = env.forge_calls().len();

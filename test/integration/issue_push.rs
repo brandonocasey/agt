@@ -44,7 +44,9 @@ matrix!(
     a_killed_create_is_not_sent_again_despite_an_old_create_error,
     a_close_queued_without_a_reason_is_recorded_as_sent_and_reopens_without_conflict,
     push_refuses_a_tracker_with_push_false,
-    push_stays_local_without_forge_post,
+    push_stays_local_while_push_is_off,
+    sync_pulls_then_pushes_where_push_is_on,
+    sync_only_pulls_while_push_is_off,
     no_token_reaches_a_call_a_file_or_the_output,
 );
 
@@ -535,28 +537,71 @@ fn push_refuses_a_tracker_with_push_false(fake: Fake) {
     env.issue(&["comment", "1", "Thanks"]);
     let calls = env.forge_calls().len();
     let report = env.issue(&["push"]);
-    assert_eq!(report["trackers"][0]["skipped"], "push = false");
+    assert_eq!(report["trackers"][0]["skipped"], "push is off");
     let error = env.issue_fail(&["push", "--tracker", fake.repo()]);
-    assert!(error.contains("push = false"), "{error}");
-    let error = env.issue_fail(&["push", "--dry-run", "--tracker", fake.repo()]);
-    assert!(error.contains("push = false"), "{error}");
+    assert!(error.contains("push off"), "{error}");
     assert_eq!(env.forge_calls().len(), calls);
+    // A preview sends nothing, so it is allowed even where push is off.
+    let preview = env.issue(&["push", "--dry-run", "--tracker", fake.repo()]);
+    assert_eq!(preview["dry_run"], true);
     assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
 }
 
-fn push_stays_local_without_forge_post(fake: Fake) {
+fn push_stays_local_while_push_is_off(fake: Fake) {
     let env = pushable(fake, &[issue()]);
     env.issue(&["comment", "1", "Thanks"]);
-    env.write_config(&format!("{}\n[forge]\npost = false\n", fake.config(true)));
+    // The tracker sets no push of its own: the shared setting keeps changes local.
+    env.write_config(&format!(
+        "{}\n[sync]\npush = \"off\"\n",
+        fake.config(true).replace(", push = \"manual\"", "")
+    ));
     let calls = env.forge_calls().len();
     let output = env.issue_exec(&["push", "--tracker", fake.repo()], "", &[]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("[forge] post = true"), "{stderr}");
+    assert!(stderr.contains("push is off for"), "{stderr}");
+    assert!(stderr.contains("`[issues]`"), "{stderr}");
     assert_eq!(env.forge_calls().len(), calls);
     // A preview may read the host, as with posting on, but sends nothing.
     let preview = env.issue(&["push", "--dry-run", "--tracker", fake.repo()]);
     assert_eq!(preview["dry_run"], true);
+    assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
+}
+
+fn sync_pulls_then_pushes_where_push_is_on(fake: Fake) {
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["comment", "1", "Thanks"]);
+    env.respond_nth(&strs(&fake.comment_call(1)), 1, &fake.comment_response(100));
+    fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &[issue()]);
+    let report = env.issue(&["sync"]);
+    assert_eq!(report["trackers"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        kinds(&writes(&report["push"], "sent")),
+        ["comment"],
+        "{report}"
+    );
+    assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "posted");
+    // Nothing is queued now: a second sync sends nothing.
+    let again = env.issue(&["sync"]);
+    assert_eq!(writes(&again["push"], "sent").len(), 0, "{again}");
+}
+
+fn sync_only_pulls_while_push_is_off(fake: Fake) {
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["comment", "1", "Thanks"]);
+    env.write_config(&format!(
+        "{}\n[sync]\npush = \"off\"\n",
+        fake.config(true).replace(", push = \"manual\"", "")
+    ));
+    fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &[issue()]);
+    let output = env.issue_exec(&["sync"], "", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("kept local"), "{stderr}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["trackers"].as_array().unwrap().len(), 1, "{report}");
+    assert!(report["push"]["kept_local"].is_string(), "{report}");
+    assert!(env.forge_writes(fake).is_empty());
     assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
 }
 
@@ -741,7 +786,7 @@ fn automatic_create_attaches_one_issue_and_returns_its_canonical_key() {
     let unrelated = env.issue(&["create", "--title", "Keep local"]);
     let other = unrelated["key"].as_str().unwrap();
     env.issue(&["comment", other, "Unrelated pending comment"]);
-    env.write_config("[sync]\nauto_push = true\n");
+    env.write_config("[sync]\npush = \"auto\"\n");
     env.respond(&strs(&fake.user_call()), login_body(fake));
     env.respond(
         &strs(&fake.create_call()),
@@ -786,21 +831,18 @@ fn automatic_create_attaches_one_issue_and_returns_its_canonical_key() {
 }
 
 #[test]
-fn auto_push_without_forge_post_sends_nothing() {
+fn auto_push_sends_nothing_while_the_tracker_push_is_off() {
     let fake: Fake = &crate::support::issue::Github;
     let env = pushable(fake, &[issue()]);
     env.write_config(&format!(
-        "{}\n[sync]\nauto_push = true\n[forge]\npost = false\n",
-        fake.config(true)
+        "{}\n[sync]\npush = \"auto\"\n",
+        fake.config(false)
     ));
     let calls = env.forge_calls().len();
     let output = env.issue_exec(&["comment", "1", "Thanks"], "", &[]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("auto_push needs `[forge] post = true`"),
-        "{stderr}"
-    );
+    assert!(!stderr.contains("skipped"), "{stderr}");
     assert_eq!(env.forge_calls().len(), calls);
     assert_eq!(doc(&env, fake, "1")["comments"][0]["post"], "pending");
 }
@@ -810,7 +852,7 @@ fn automatic_failure_preserves_local_save_and_explicit_false_denies_network() {
     let fake: Fake = &crate::support::issue::Github;
     let env = Env::new();
     env.write_config(&format!(
-        "{}\n[sync]\nauto_push = true\n",
+        "{}\n[sync]\npush = \"auto\"\n",
         fake.config(false)
     ));
     env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
@@ -818,7 +860,7 @@ fn automatic_failure_preserves_local_save_and_explicit_false_denies_network() {
     let key = made["key"].as_str().unwrap();
     assert_eq!(env.issue_doc("local", key)["fields"]["title"], "Keep me");
     assert!(env.forge_calls().is_empty());
-    env.write_config("[sync]\nauto_push = true\n");
+    env.write_config("[sync]\npush = \"auto\"\n");
     env.respond(&strs(&fake.user_call()), login_body(fake));
     env.fail_call(&strs(&fake.create_call()));
     let edited = env.issue(&["edit", key, "--title", "Saved despite failure"]);
@@ -870,7 +912,7 @@ fn an_automatic_create_returns_its_identity_when_a_followup_write_fails() {
     let fake: Fake = &crate::support::issue::Github;
     let env = Env::new();
     env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
-    env.write_config("[sync]\nauto_push = true\n");
+    env.write_config("[sync]\npush = \"auto\"\n");
     env.respond(&strs(&fake.user_call()), login_body(fake));
     env.respond(
         &strs(&fake.create_call()),
@@ -1029,10 +1071,10 @@ fn automatic_push_rejects_colliding_policy_and_attachment_destinations() {
         };
         let before = env.issue_doc("gh-github.com-a-b-c", "tracker");
         env.write_config(&format!(
-            "{}\n[sync]\nauto_push = true\n",
+            "{}\n[sync]\npush = \"auto\"\n",
             config
                 .replace("a-b/c", "a/b-c")
-                .replace("push = false", "push = true")
+                .replace(", push = \"off\"", "")
         ));
         env.git(&["remote", "add", "origin", "https://github.com/a/b-c.git"]);
         let output = env.issue_exec(&["edit", key, "--title", "Saved locally"], "", &[]);
