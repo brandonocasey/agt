@@ -625,7 +625,7 @@ impl Ctx {
                         && pr
                             .location
                             .as_ref()
-                            .is_none_or(|(host, repo)| *host == review.host && *repo == review.repo)
+                            .is_none_or(|(host, repo)| same_location((host.as_str(), repo.as_str()), (review.host.as_str(), review.repo.as_str())))
                 })
             })
             .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
@@ -636,8 +636,13 @@ impl Ctx {
             return Ok(None);
         }
         // A URL for another repository than origin names a number origin does not own.
-        if let Some(location) = &pr.location
-            && self.repo.origin_location()?.as_ref() != Some(location)
+        if let Some((host, repo)) = &pr.location
+            && !self
+                .repo
+                .origin_location()?
+                .is_some_and(|(origin_host, origin_repo)| {
+                    same_location((host.as_str(), repo.as_str()), (&origin_host, &origin_repo))
+                })
         {
             return Ok(None);
         }
@@ -690,5 +695,24 @@ impl Ctx {
                 many.join(", ")
             )),
         }
+    }
+}
+
+/// Whether two `(host, repo)` pairs name one repository: forges ignore case in both, and a URL
+/// may carry a port the remote leaves out.
+fn same_location(a: (&str, &str), b: (&str, &str)) -> bool {
+    let host = |host: &str| host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    host(a.0) == host(b.0) && a.1.eq_ignore_ascii_case(b.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_location;
+
+    #[test]
+    fn locations_match_without_case_or_port() {
+        assert!(same_location(("github.com", "Acme/App"), ("github.com", "acme/app")));
+        assert!(same_location(("gitlab.example.com:8443", "g/p"), ("gitlab.example.com", "g/p")));
+        assert!(!same_location(("github.com", "acme/app"), ("github.com", "acme/other")));
     }
 }

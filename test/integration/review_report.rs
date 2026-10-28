@@ -538,3 +538,25 @@ fn sync_refuses_all_and_status_target_conflicts_with_range() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
 }
+
+#[test]
+fn a_url_matches_origin_in_any_case() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    respond_open_pulls(&env, &[gh_pull(9, "feat", "2026-10-20T08:00:00Z")]);
+    let url = "https://github.com/Acme/App/pull/9";
+    let status = success(&agt(&env, &["status"], &[url], &[]));
+    assert_eq!(status["branch"], "feat");
+}
+
+#[test]
+fn sync_with_an_mr_name_imports_that_mr() {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    env.git(&["switch", "-q", "main"]);
+    let status = success(&agt(env, &["status"], &["42", "--sync"], &[]));
+    assert_eq!(status["target"], "gh-42");
+    assert_eq!(status["branch"], "feat");
+}

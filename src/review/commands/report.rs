@@ -16,7 +16,7 @@ use crate::forge::auto::Offline;
 use crate::forge::landed::Origin;
 use crate::git::LogEntry;
 use crate::review::cli::ReportArgs;
-use crate::store::model::{Check, Outcome, Resolution, Target, TargetKind, Thread};
+use crate::store::model::{Check, Forge, Outcome, Resolution, Target, TargetKind, Thread};
 
 use super::status::{brief_status, status};
 use super::{Ctx, qa};
@@ -409,16 +409,34 @@ fn fixed_text(out: &mut String, status: &Value, section: Section, now: i64) {
     if threads.is_empty() && checks.is_empty() {
         out.push_str("  nothing yet\n");
     }
-    for thread in threads {
-        let _ = writeln!(
-            out,
-            "  {}  {}  {}  fixed in {} {}",
-            thread["id"].as_str().unwrap_or("?"),
-            label(thread),
-            thread["summary"].as_str().unwrap_or(""),
-            short(thread["sha"].as_str().unwrap_or("")),
-            thread["subject"].as_str().unwrap_or("")
-        );
+    // One heading per fix commit, in the order the threads list them, so a commit that fixed
+    // several threads names its subject once.
+    let mut shas: Vec<&str> = Vec::new();
+    for thread in &threads {
+        let sha = thread["sha"].as_str().unwrap_or("");
+        if !shas.contains(&sha) {
+            shas.push(sha);
+        }
+    }
+    for sha in shas {
+        let mut fixed = threads
+            .iter()
+            .filter(|thread| thread["sha"].as_str().unwrap_or("") == sha)
+            .peekable();
+        let subject = fixed
+            .peek()
+            .and_then(|thread| thread["subject"].as_str())
+            .unwrap_or("");
+        let _ = writeln!(out, "  fixed in {} {subject}", short(sha));
+        for thread in fixed {
+            let _ = writeln!(
+                out,
+                "    {}  {}  {}",
+                thread["id"].as_str().unwrap_or("?"),
+                label(thread),
+                thread["summary"].as_str().unwrap_or("")
+            );
+        }
     }
     for check in checks {
         let failed = since(check["failed_at"].as_str(), now).unwrap_or_default();
@@ -464,7 +482,8 @@ fn local_targets(ctx: &Ctx) -> Result<Vec<Target>> {
         .collect())
 }
 
-/// Whether the target's branch still exists, so merged and deleted branches drop out.
+/// Whether the target's branch still exists, so deleted branches drop out. A merged branch
+/// that is still a local branch stays listed.
 fn on_local_branch(ctx: &Ctx, target: &Target) -> bool {
     target
         .branch
@@ -700,8 +719,10 @@ fn summary_text(summary: &Value, section: Section) -> String {
                     || "-".to_owned(),
                     |number| {
                         // GitHub says `#12`, GitLab `!12`.
+                        // From the URL's path, so GitHub Enterprise hosts count as GitHub.
                         let github = entry["url"].as_str().is_some_and(|url| {
-                            url.contains("github.com/") && url.contains("/pull/")
+                            crate::forge::parse_pr(url).ok().and_then(|pr| pr.forge)
+                                == Some(Forge::Github)
                         });
                         format!("{}{number}", if github { '#' } else { '!' })
                     },
@@ -942,8 +963,16 @@ mod tests {
                 .lines()
                 .any(|line| line.starts_with("#4"))
         );
-        let other =
-            json!({"targets": [{"mr": 5, "url": "https://git.example/o/pull/5", "branch": "x"}]});
+        let enterprise =
+            json!({"targets": [{"mr": 6, "url": "https://ghe.example/o/r/pull/6", "branch": "e"}]});
+        assert!(
+            summary_text(&enterprise, Section::All)
+                .lines()
+                .any(|line| line.starts_with("#6"))
+        );
+        let other = json!({"targets": [
+            {"mr": 5, "url": "https://git.example/o/pull/-/merge_requests/5", "branch": "x"}
+        ]});
         assert!(
             summary_text(&other, Section::All)
                 .lines()

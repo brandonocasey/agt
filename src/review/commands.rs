@@ -5,7 +5,7 @@ use crate::core::error::{Error, Result, fail};
 use crate::core::output::Output;
 use crate::git::Repo;
 use crate::review::cli::{
-    AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction, StatusCli,
+    AuthorArgs, Cli, Command, FindingAction, PassAction, RunAction, StatusCli, SyncFirst,
 };
 use crate::store::Store;
 use crate::store::model::{
@@ -88,6 +88,42 @@ pub fn run_status(cli: StatusCli) -> Result<Output> {
     )
 }
 
+/// `--sync` before a read: imports the PR/MR that `--pr`, a NAME that is a PR/MR, or the NAME's
+/// target names, through its own writable repository so the read itself stays read-only.
+fn sync_first_for(selection: &Selection, command: &Command, first: &SyncFirst) -> Result<()> {
+    let mut writer = Ctx::new(selection.clone(), false, false, false)?;
+    let mut pr = first.pr.clone();
+    if let Command::Status { report: args, .. } = command {
+        if args.all {
+            return fail("--sync syncs one PR/MR and cannot be combined with --all");
+        }
+        // A NAME that is a PR/MR is the one to import, as `sync --pr` would, even before
+        // its branch has a target here.
+        let name_pr = args
+            .name
+            .as_deref()
+            .filter(|name| pr.is_none() && crate::forge::parse_pr(name).is_ok());
+        if let Some(name) = name_pr {
+            pr = Some(name.to_owned());
+        } else if args.name.is_some() {
+            report::select(&mut writer, args)?;
+            let pinned = writer.selection.target.clone();
+            let has_review = match &pinned {
+                Some(key) => writer
+                    .store
+                    .load(&writer.dir, key)?
+                    .is_some_and(|target| target.review.is_some()),
+                None => true,
+            };
+            if !has_review && first.pr.is_none() {
+                return fail("--sync needs a NAME whose target has a PR/MR; pass --pr");
+            }
+        }
+    }
+    sync::sync(&writer, pr.as_deref())?;
+    Ok(())
+}
+
 fn run_with(cli: Cli, section: Section) -> Result<Output> {
     let selection = Selection {
         target: cli.target,
@@ -120,27 +156,7 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
     let preview = matches!(cli.command, Command::Publish { dry_run: true, .. }) && !approving;
     // `--sync` writes through its own repository so the read itself stays read-only.
     if let Some(first) = sync_first {
-        let mut writer = Ctx::new(selection.clone(), false, false, false)?;
-        if let Command::Status { report: args, .. } = &cli.command {
-            if args.all {
-                return fail("--sync syncs one PR/MR and cannot be combined with --all");
-            }
-            if args.name.is_some() {
-                report::select(&mut writer, args)?;
-                let pinned = writer.selection.target.clone();
-                let has_review = match &pinned {
-                    Some(key) => writer
-                        .store
-                        .load(&writer.dir, key)?
-                        .is_some_and(|target| target.review.is_some()),
-                    None => true,
-                };
-                if !has_review && first.pr.is_none() {
-                    return fail("--sync needs a NAME whose target has a PR/MR; pass --pr");
-                }
-            }
-        }
-        sync::sync(&writer, first.pr.as_deref())?;
+        sync_first_for(&selection, &cli.command, first)?;
     }
     let mut ctx = open_ctx(
         selection,
