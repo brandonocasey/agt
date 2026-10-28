@@ -247,7 +247,6 @@ pub fn run(cli: Cli) -> Result<Output> {
     Ok(Output::Json(value))
 }
 
-/// The run a command names, through `--run` or an id that starts with one (`rv-xxxx...`).
 /// A [`Ctx`] on `selection` as `(read_only, scratch_git, preview)` say, on the target of `run`
 /// when one is given.
 fn open_ctx(
@@ -268,6 +267,7 @@ fn run_of_id(id: &str, is_run: fn(&str) -> bool) -> Option<String> {
     is_run(run).then(|| run.to_owned())
 }
 
+/// The run a command names, through `--run` or an id that starts with one (`rv-xxxx...`).
 fn run_hint(command: &Command) -> Option<String> {
     let from_id = |id: &str| run_of_id(id, is_run_id);
     match command {

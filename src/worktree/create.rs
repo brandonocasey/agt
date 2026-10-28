@@ -72,7 +72,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         .is_some_and(|resolved| !resolved.is_empty(hooks::Kind::Create));
     let mut value = match checked_out {
         Some(entry) => {
-            let commit = Repo::at(&entry.path).head()?;
+            let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
             json!({"path": entry.path, "branch": branch, "commit": commit, "reused": true})
         }
         None => {
@@ -259,7 +259,7 @@ fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
     value["warnings"] = json!(warnings);
     value["path"] = json!(dir);
     value["branch"] = json!(branch);
-    value["commit"] = json!(inside.head()?);
+    value["commit"] = json!(inside.git(&["rev-parse", "HEAD"])?);
     value["submodules"] = json!(submodules);
     Ok(value)
 }

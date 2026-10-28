@@ -39,12 +39,12 @@ pub fn run_spend(run: &Run) -> Value {
     })
 }
 
-/// The main session's spend by role, as `run end --usage` reads it from a file or `-` (stdin).
 /// The usage of `source`, none when there is no source.
 pub(super) fn read_role_usage_opt(source: Option<&Path>) -> Result<Vec<RoleUsage>> {
     source.map_or_else(|| Ok(Vec::new()), read_role_usage)
 }
 
+/// The main session's spend by role, as `run end --usage` reads it from a file or `-` (stdin).
 pub(super) fn read_role_usage(source: &Path) -> Result<Vec<RoleUsage>> {
     let inputs: Vec<UsageInput> = serde_json::from_str(&read_source(source, "usage")?)
         .map_err(ctx("parse usage (expected a JSON array)"))?;

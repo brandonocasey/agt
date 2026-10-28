@@ -124,13 +124,13 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         }
         Action::Check { root, name } => {
             Store::at_root(Namespace::Checks, root.clone())?
-                .try_remove_doc_if::<crate::check::Entry>(root, name, |entry| {
+                .try_remove_doc_if::<crate::check::prune::Entry>(root, name, |entry| {
                     entry.expired(now, OUTPUT_DAYS)
                 })
         }
         Action::UnreadableCheck { root, name } => {
             Store::at_root(Namespace::Checks, root.clone())?
-                .remove_unreadable_doc::<crate::check::Entry>(root, name)
+                .remove_unreadable_doc::<crate::check::prune::Entry>(root, name)
         }
         Action::Task(task) => crate::task::prune::remove(task, now),
         Action::TaskLock(path) => crate::task::prune::remove_orphan_lock(path),

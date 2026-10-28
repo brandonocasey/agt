@@ -4,6 +4,7 @@
 //! moves nothing) hits. Only a pass is recorded; a dirty work tree always runs and records
 //! nothing. Entries live in the main checkout's `.agt/checks/`, shared by linked worktrees.
 
+pub mod prune;
 mod run;
 
 use std::ffi::OsString;

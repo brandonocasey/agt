@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use super::files::{self, OUTPUT_DAYS, SCRATCH_DAYS};
 use super::procs;
-use crate::check::Entry;
+use crate::check::prune::Entry;
 use crate::core::agents::Proc;
 use crate::core::clock;
 use crate::core::error::Result;
