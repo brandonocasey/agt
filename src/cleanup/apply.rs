@@ -4,7 +4,6 @@ use serde_json::{Map, Value, json};
 
 use super::files::OUTPUT_DAYS;
 use super::plan::{Action, Item, Plan};
-use crate::check::prune::expired as expired_check;
 use crate::core::error::Result;
 use crate::issue::prune::prunable;
 use crate::review::commands::prune::expired;
@@ -125,13 +124,13 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
         }
         Action::Check { root, name } => {
             Store::at_root(Namespace::Checks, root.clone())?
-                .try_remove_doc_if::<crate::check::prune::Entry>(root, name, |entry| {
-                    expired_check(entry, now, OUTPUT_DAYS)
+                .try_remove_doc_if::<crate::check::Entry>(root, name, |entry| {
+                    entry.expired(now, OUTPUT_DAYS)
                 })
         }
         Action::UnreadableCheck { root, name } => {
             Store::at_root(Namespace::Checks, root.clone())?
-                .remove_unreadable_doc::<crate::check::prune::Entry>(root, name)
+                .remove_unreadable_doc::<crate::check::Entry>(root, name)
         }
         Action::Task(task) => crate::task::prune::remove(task, now),
         Action::TaskLock(path) => crate::task::prune::remove_orphan_lock(path),

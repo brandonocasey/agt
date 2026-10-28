@@ -31,7 +31,7 @@ pub fn is_waiting(state: &State) -> bool {
     reason(state) == "waiting_for_pipeline"
 }
 
-fn with(status: &str, reason: &str, more: Value) -> State {
+pub(super) fn with(status: &str, reason: &str, more: Value) -> State {
     let mut state = Map::new();
     state.insert("status".to_owned(), status.into());
     state.insert("reason".to_owned(), reason.into());

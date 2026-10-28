@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use super::approve::is_open;
 use super::findings::{self, NewThread, author, issue_key, local_thread};
 use super::input::{limited, read_body};
-use super::{Ctx, Selection, auto, fresh_id, publish, run_not_found, usage, view};
+use super::{
+    Ctx, Selection, auto, fresh_id, open_ctx, publish, run_not_found, run_of_id, usage, view,
+};
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::Output;
 use crate::core::text::argument_or_stdin;
@@ -38,15 +40,11 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
         Offline::current().forbid("qa publish")?;
     }
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
-    let mut ctx = Ctx::new(
+    let mut ctx = open_ctx(
         selection,
-        reading || preview,
-        reading || publishing,
-        preview,
+        (reading || preview, reading || publishing, preview),
+        run_hint(&cli.command),
     )?;
-    if let Some(run) = run_hint(&cli.command) {
-        ctx.select_run_target(&run)?;
-    }
     if reading {
         auto::sync_stale(&ctx, Offline::current())?;
     }
@@ -57,10 +55,7 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
         QaCommand::Run {
             action: QaRunAction::End { run, usage },
         } => {
-            let usage = match usage {
-                Some(source) => usage::read_role_usage(&source)?,
-                None => Vec::new(),
-            };
+            let usage = usage::read_role_usage_opt(usage.as_deref())?;
             let mut ended = run_end(&ctx, &run, usage)?;
             auto::publish_ended(&mut ctx, &run, Offline::current());
             ended["status"] = status(&ctx, None)?;
@@ -98,10 +93,7 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
 
 /// The QA run a command names, through `--run` or an id that starts with one (`qa-xxxx...`).
 fn run_hint(command: &QaCommand) -> Option<String> {
-    let from_id = |id: &str| {
-        let run = id.split('.').next()?;
-        is_qa_run_id(run).then(|| run.to_owned())
-    };
+    let from_id = |id: &str| run_of_id(id, is_qa_run_id);
     match command {
         QaCommand::Run {
             action: QaRunAction::End { run, .. },

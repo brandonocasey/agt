@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use super::files::{self, OUTPUT_DAYS, SCRATCH_DAYS};
 use super::procs;
-use crate::check::prune::{Entry, expired as expired_check};
+use crate::check::Entry;
 use crate::core::agents::Proc;
 use crate::core::clock;
 use crate::core::error::Result;
@@ -122,6 +122,19 @@ impl Plan {
         });
     }
 
+    /// Adds the file at `path`, sized as it is now.
+    fn add_doc(
+        &mut self,
+        category: &'static str,
+        path: PathBuf,
+        key: String,
+        reason: String,
+        action: Action,
+    ) {
+        let bytes = size(&path);
+        self.add(category, path, key, reason, bytes, action);
+    }
+
     /// The value, or `None` after recording a warning, so one unreadable place does not stop
     /// the rest of the pass.
     fn attempt<T>(&mut self, place: &std::path::Path, result: Result<T>) -> Option<T> {
@@ -176,12 +189,11 @@ impl Plan {
             } else {
                 format!("{repository}/{}", target.key)
             };
-            self.add(
+            self.add_doc(
                 "reviews",
-                path.clone(),
+                path,
                 key,
                 review_reason(&target),
-                size(&path),
                 Action::Review {
                     root: store.root().to_path_buf(),
                     dir: dir.to_path_buf(),
@@ -277,15 +289,14 @@ impl Plan {
                         }
                         let name = issue.doc_name();
                         let path = doc_path(&dir, &name);
-                        self.add(
+                        self.add_doc(
                         "issues",
-                        path.clone(),
+                        path,
                         issue.key.clone(),
                         format!(
                             "closed, last updated {}; nothing queued, no notes, conflicts or unsent comments",
                             issue.updated_at
                         ),
-                        size(&path),
                         Action::Issue {
                             root: store.root().to_path_buf(),
                             dir: dir.clone(),
@@ -314,12 +325,11 @@ impl Plan {
                     }
                     // A cache entry nothing can read is only ever replaced by a run of its exact key.
                     let path = doc_path(store.root(), &left.name);
-                    self.add(
+                    self.add_doc(
                         "checks",
-                        path.clone(),
+                        path,
                         left.name.clone(),
                         format!("cannot be read: {}", left.reason),
-                        size(&path),
                         Action::UnreadableCheck {
                             root: store.root().to_path_buf(),
                             name: left.name,
@@ -327,20 +337,19 @@ impl Plan {
                     );
                 }
                 for entry in entries {
-                    if !expired_check(&entry, now, OUTPUT_DAYS) {
+                    if !entry.expired(now, OUTPUT_DAYS) {
                         continue;
                     }
                     let name = entry.key.clone();
                     let path = doc_path(store.root(), &name);
-                    self.add(
+                    self.add_doc(
                         "checks",
-                        path.clone(),
+                        path,
                         name.clone(),
                         format!(
                             "ran {}, older than the {OUTPUT_DAYS}-day output logs",
                             entry.ran_at
                         ),
-                        size(&path),
                         Action::Check {
                             root: store.root().to_path_buf(),
                             name,
@@ -372,7 +381,7 @@ impl Plan {
         }
         let locks = orphan_locks();
         for path in self.attempt(&root, locks).unwrap_or_default() {
-            self.add(
+            self.add_doc(
                 "locks",
                 path.clone(),
                 path.file_name()
@@ -380,7 +389,6 @@ impl Plan {
                     .to_string_lossy()
                     .into_owned(),
                 "task lock file whose record no longer exists".into(),
-                size(&path),
                 Action::TaskLock(path),
             );
         }
@@ -399,7 +407,7 @@ impl Plan {
             if inside {
                 continue;
             }
-            self.add(
+            self.add_doc(
                 "locks",
                 path.clone(),
                 path.file_name()
@@ -407,7 +415,6 @@ impl Plan {
                     .to_string_lossy()
                     .into_owned(),
                 "lock file whose document no longer exists".into(),
-                size(&path),
                 Action::Lock {
                     root: store.root().to_path_buf(),
                     namespace,

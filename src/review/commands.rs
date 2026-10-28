@@ -97,10 +97,11 @@ pub fn run(cli: Cli) -> Result<Output> {
         let writer = Ctx::new(selection.clone(), false, false, false)?;
         sync::sync(&writer, first.pr.as_deref())?;
     }
-    let mut ctx = Ctx::new(selection, read_only, scratch_git, preview)?;
-    if let Some(run) = run_hint(&cli.command) {
-        ctx.select_run_target(&run)?;
-    }
+    let mut ctx = open_ctx(
+        selection,
+        (read_only, scratch_git, preview),
+        run_hint(&cli.command),
+    )?;
     // Pure reads pull the PR/MR first when the local copy is stale.
     if matches!(
         cli.command,
@@ -123,10 +124,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             let reveal = reveal_agree
                 .zip(reveal_disagree)
                 .map(|(agree, disagree)| Reveal { agree, disagree });
-            let usage = match usage {
-                Some(source) => usage::read_role_usage(&source)?,
-                None => Vec::new(),
-            };
+            let usage = usage::read_role_usage_opt(usage.as_deref())?;
             let mut ended = run_end(&ctx, &run, reveal, head.as_deref(), usage)?;
             auto::publish_ended(&mut ctx, &run, crate::forge::auto::Offline::current());
             // The status the caller would check next, from a read-only repository so
@@ -250,11 +248,28 @@ pub fn run(cli: Cli) -> Result<Output> {
 }
 
 /// The run a command names, through `--run` or an id that starts with one (`rv-xxxx...`).
+/// A [`Ctx`] on `selection` as `(read_only, scratch_git, preview)` say, on the target of `run`
+/// when one is given.
+fn open_ctx(
+    selection: Selection,
+    (read_only, scratch_git, preview): (bool, bool, bool),
+    run: Option<String>,
+) -> Result<Ctx> {
+    let mut ctx = Ctx::new(selection, read_only, scratch_git, preview)?;
+    if let Some(run) = run {
+        ctx.select_run_target(&run)?;
+    }
+    Ok(ctx)
+}
+
+/// The run an id `<run>` or `<run>.<rest>` names, when `is_run` accepts the run.
+fn run_of_id(id: &str, is_run: fn(&str) -> bool) -> Option<String> {
+    let run = id.split('.').next()?;
+    is_run(run).then(|| run.to_owned())
+}
+
 fn run_hint(command: &Command) -> Option<String> {
-    let from_id = |id: &str| {
-        let run = id.split('.').next()?;
-        is_run_id(run).then(|| run.to_owned())
-    };
+    let from_id = |id: &str| run_of_id(id, is_run_id);
     match command {
         Command::Run {
             action: RunAction::End { run, .. },

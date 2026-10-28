@@ -4,7 +4,6 @@
 //! moves nothing) hits. Only a pass is recorded; a dirty work tree always runs and records
 //! nothing. Entries live in the main checkout's `.agt/checks/`, shared by linked worktrees.
 
-pub mod prune;
 mod run;
 
 use std::ffi::OsString;
@@ -14,6 +13,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::core::clock;
 use crate::core::error::{Result, fail};
 use crate::core::hash::sha256_hex;
 use crate::core::output::Output;
@@ -64,6 +64,15 @@ pub(crate) struct Entry {
     pub(crate) ran_at: String,
     duration_ms: u64,
     log: PathBuf,
+}
+
+impl Entry {
+    /// Whether the pass ran `days` or more before `now`. `days` MUST be the retention of the
+    /// output logs, so a hit never points at a pruned log. A timestamp that cannot be read keeps
+    /// the entry.
+    pub fn expired(&self, now: i64, days: i64) -> bool {
+        clock::parse(&self.ran_at).is_ok_and(|ran| now - ran >= days * clock::SECS_PER_DAY)
+    }
 }
 
 pub fn run(cli: Cli) -> Result<Output> {

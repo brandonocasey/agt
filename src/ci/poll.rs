@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use super::classify::{
-    Head, State, blocked, classify, classify_gitlab, classify_pipeline, present,
+    Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, with,
 };
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
@@ -114,13 +114,15 @@ fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
         let caught_up =
             mr["sha"] == expected && gitlab.pipeline_runs(&base, &mr["head_pipeline"], expected)?;
         if !caught_up {
-            let state = json!({
-                "status": "pending",
-                "reason": "waiting_for_pipeline",
-                "expectedHead": expected,
-                "observedHead": mr["sha"],
-                "mergeStatus": mr["detailed_merge_status"],
-            });
+            let state = with(
+                "pending",
+                "waiting_for_pipeline",
+                json!({
+                    "expectedHead": expected,
+                    "observedHead": mr["sha"],
+                    "mergeStatus": mr["detailed_merge_status"],
+                }),
+            );
             return Ok((state, head));
         }
     }
@@ -139,13 +141,15 @@ fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
     let latest = gitlab.merge_request(&base, target.target.number)?;
     let latest_id = &latest["head_pipeline"]["id"];
     if latest["state"] == "opened" && latest["sha"] == expected && latest_id != id {
-        let state = json!({
-            "status": "pending",
-            "reason": "pipeline_changed",
-            "expectedPipeline": id,
-            "observedPipeline": latest_id,
-            "mergeStatus": latest["detailed_merge_status"],
-        });
+        let state = with(
+            "pending",
+            "pipeline_changed",
+            json!({
+                "expectedPipeline": id,
+                "observedPipeline": latest_id,
+                "mergeStatus": latest["detailed_merge_status"],
+            }),
+        );
         return Ok((state, head));
     }
     Ok((classify_gitlab(&pending, &latest, Some(&jobs)), head))

@@ -150,15 +150,14 @@ fn unfilled_submodules(roots: &[PathBuf]) -> Result<()> {
             };
             let mut names: Vec<String> = entries
                 .flatten()
-                .map(|entry| {
+                .filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     let dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-                    if dir { format!("{name}/") } else { name }
+                    // Only a file the operating system recreates (a Finder `.DS_Store`) is no
+                    // loss: nothing here is ignored, so `build/` or `vendor/` may hold real
+                    // work.
+                    (dir || !is_os_junk(&name)).then_some(name)
                 })
-                // Only a file the operating system recreates (a Finder `.DS_Store`) is no loss:
-                // nothing here is ignored, so `build/` or `vendor/` may hold real work.
-                .filter(|name| !is_os_junk(name))
-                .map(|name| name.trim_end_matches('/').to_owned())
                 .collect();
             names.sort();
             if !names.is_empty() {
