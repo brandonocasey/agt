@@ -1578,7 +1578,7 @@ lists the `--remote` choices. An `origin` on a host only a `gh` or `glab` login 
 (GitHub Enterprise, a self-hosted GitLab), with no `[[tracker]]` for it, still counts as the
 tracker of `origin` and wins over the other trackers. `agt ci` and `agt branch check` choose their tracker
 the same way and take `--remote`. `agt cleanup` instead asks every pull request tracker, plus such an `origin`, for the PRs/MRs of a branch, and a PR/MR merged on any of them counts as landed. `--tracker` on `agt issue` selects an issue
-destination by key or `owner/repo`; `issue sync` pulls every issue tracker; automatic issue work uses only the tracker of `origin` unless `--tracker` is given.
+destination by key or `owner/repo`; `issue sync` pulls every issue tracker; automatic issue work uses only the tracker of `origin` unless `--tracker` is given. With several issue trackers (a fork's `origin` and `upstream`, by default), `issue push` sends a new local issue only with `--tracker`; without it, it fails and sends nothing.
 
 The repository's `.config/agt.toml` can raise a `push` mode but never lower the global one:
 where both files set the same `push`, the higher of `off`, `manual`, `auto` wins. A
