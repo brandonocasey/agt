@@ -38,15 +38,21 @@ impl Gitlab {
                 }
                 return Ok(None);
             };
-            result.task = item
+            let kind = item
                 .pointer("/workItemType/name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| Error("GitLab work item has no type".into()))?
-                == "Task";
-            let widget = item["widgets"]
+                .filter(|kind| !kind.is_empty())
+                .ok_or_else(|| Error("GitLab work item has no type".into()))?;
+            result.task = kind == "Task";
+            let widgets = item["widgets"]
                 .as_array()
-                .and_then(|widgets| widgets.iter().find(|widget| widget["type"] == "HIERARCHY"))
                 .ok_or_else(|| Error("GitLab work item has no hierarchy widget".into()))?;
+            let Some(widget) = widgets.iter().find(|widget| widget["type"] == "HIERARCHY") else {
+                if !matches!(kind, "Issue" | "Task") && cursor.is_none() {
+                    return Ok(Some(result));
+                }
+                return fail("GitLab work item has no hierarchy widget");
+            };
             result.parent = if !result.task || widget["parent"].is_null() {
                 None
             } else {

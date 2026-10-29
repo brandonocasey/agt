@@ -1056,3 +1056,95 @@ fn github_lost_child_create_is_claimed_with_missing_parent() {
 fn gitlab_lost_child_create_is_claimed_with_missing_parent() {
     lost_child_create_is_claimed_after_parent_disappears(&Gitlab);
 }
+
+fn gitlab_without_hierarchy(env: &Env, kind: &str, widgets: Value) {
+    env.respond(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "path=g/p",
+            "-f",
+            "iid=1",
+            "-f",
+            "query=IssueHierarchy",
+        ],
+        &json!({"data":{"project":{"workItems":{"nodes":[{
+            "id":"gid://gitlab/WorkItem/1001", "iid":"1",
+            "webUrl":"https://gitlab.com/g/p/-/issues/1",
+            "workItemType":{"name":kind}, "widgets":widgets
+        }]}}}})
+        .to_string(),
+    );
+}
+
+#[test]
+fn gitlab_test_case_without_hierarchy_does_not_block_sync() {
+    let env = Env::new();
+    let fake = &Gitlab as &dyn IssueFake;
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[Spec::new(2, "Normal issue")]);
+    env.issue(&["sync"]);
+    env.issue(&["edit", "2", "--title", "Queued title"]);
+    fake.serve_since(
+        &env,
+        "2026-10-10T09%3A55%3A00Z",
+        &[Spec::new(1, "Test case"), Spec::new(3, "Further issue")],
+    );
+    let mut test_case = fake.issue_json(&Spec::new(1, "Test case"));
+    test_case["issue_type"] = json!("test_case");
+    env.respond(
+        &crate::support::strs(&fake.list_call("2026-10-10T09%3A55%3A00Z")),
+        &json!([
+            test_case.clone(),
+            fake.issue_json(&Spec::new(3, "Further issue"))
+        ])
+        .to_string(),
+    );
+    env.respond(
+        &crate::support::strs(&fake.issue_call(1)),
+        &test_case.to_string(),
+    );
+    gitlab_without_hierarchy(&env, "Test Case", json!([{"type":"DESCRIPTION"}]));
+    fake.accept_update(&env, 2);
+    env.write_config(&fake.config(true));
+    let report = env.issue(&["sync"]);
+    assert_eq!(report["trackers"][0]["unavailable"], json!([]), "{report}");
+    assert_eq!(env.issue(&["show", "1"])["title"], "Test case");
+    assert_eq!(env.issue(&["show", "1"])["parent"], Value::Null);
+    assert_eq!(env.issue(&["show", "1"])["sub_issues"], json!([]));
+    assert_eq!(env.issue(&["show", "3"])["title"], "Further issue");
+    assert_eq!(
+        report["push"]["trackers"][0]["sent"][0]["kind"], "update",
+        "{report}"
+    );
+    assert_eq!(fake.count(&env, &fake.update_call(2)), 1);
+}
+
+#[test]
+fn gitlab_missing_issue_or_task_hierarchy_widget_still_errors() {
+    for kind in ["Issue", "Task"] {
+        let env = Env::new();
+        let fake = &Gitlab as &dyn IssueFake;
+        env.write_config(&fake.config(false));
+        fake.serve(&env, &[Spec::new(1, "Malformed issue")]);
+        gitlab_without_hierarchy(&env, kind, json!([]));
+        assert!(
+            env.issue_fail(&["sync"])
+                .contains("GitLab work item has no hierarchy widget")
+        );
+    }
+}
+
+#[test]
+fn gitlab_test_case_malformed_widgets_still_errors() {
+    let env = Env::new();
+    let fake = &Gitlab as &dyn IssueFake;
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[Spec::new(1, "Malformed test case")]);
+    gitlab_without_hierarchy(&env, "Test Case", Value::Null);
+    assert!(
+        env.issue_fail(&["sync"])
+            .contains("GitLab work item has no hierarchy widget")
+    );
+}
