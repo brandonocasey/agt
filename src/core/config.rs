@@ -654,6 +654,17 @@ fn read_value(path: &Path) -> Result<(toml::Value, Legacy)> {
     };
     let mut value: toml::Value = toml::from_str(&text)
         .map_err(|error| Error(format!("parse {}: {error}", path.display())))?;
+    // Only the `[[issues.tracker]]` migration sets this flag; it is not a key of the file.
+    if let Some(toml::Value::Array(entries)) = value.get("tracker")
+        && entries
+            .iter()
+            .any(|entry| entry.get("legacy_issues_only").is_some())
+    {
+        return fail(format!(
+            "{}: unknown field `legacy_issues_only` in [[tracker]]",
+            path.display()
+        ));
+    }
     let legacy = migrate(&mut value, path)?;
     check_choices(&value, path)?;
     let config: Config = value.clone().try_into().map_err(|error: toml::de::Error| {
@@ -1212,6 +1223,22 @@ mod tests {
         assert_eq!(issues[1].scope, Scope::Involved);
         assert_eq!(issues[1].push, None);
         assert!(config.trackers(Kind::PullRequests, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_migration_flag_is_not_a_key_of_the_file() {
+        let (_dir, result) =
+            load("[[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\nlegacy_issues_only = true\n");
+        let error = result.unwrap_err().0;
+        assert!(
+            error.contains("unknown field `legacy_issues_only`"),
+            "{error}"
+        );
+        // The old key still sets it.
+        let config = parse(
+            "[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\n",
+        );
+        assert!(config.tracker[0].legacy_issues_only);
     }
 
     #[test]
