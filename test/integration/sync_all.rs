@@ -16,8 +16,9 @@ fn review_sync_without_pr_never_imports_a_new_pr() {
     assert_eq!(report["synced"].as_array().unwrap().len(), 0, "{report}");
     assert_eq!(env.run(&["status", "--full"])["target"], before);
     assert!(env.forge_calls().is_empty(), "{:?}", env.forge_calls());
-    // `--pr` still starts the review.
-    let imported = env.run(&["sync", "--pr", "42"]);
+    // `--pr` still starts the review. A pull only: the ended run must not publish when the link
+    // lands in the same second.
+    let imported = env.pull(&["sync", "--pr", "42"]);
     assert_eq!(imported["target"], "gh-42");
     assert_eq!(env.run(&["status", "--full"])["target"], "gh-42");
 }
