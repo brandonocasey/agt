@@ -82,6 +82,8 @@ pub(super) fn sync_tracker(
     let claimed = claim_created(store, &tracker, &listed, &login)?;
     let (mut new, mut updated, mut unchanged, mut conflicts) = (0, 0, 0, 0);
     let index = Index::load(store, &tracker)?;
+    let mut refreshed_numbers = std::collections::HashSet::new();
+    let mut hierarchy_refreshed = 0;
     for data in &listed {
         let name = data.number.to_string();
         let existing = store.load_doc::<Issue>(&tracker.dir, &name)?;
@@ -91,6 +93,12 @@ pub(super) fn sync_tracker(
                 .as_ref()
                 .is_some_and(|remote| remote.updated_at == data.updated_at)
         });
+        if current {
+            unchanged += 1;
+            if hierarchy_budget.is_some() {
+                continue;
+            }
+        }
         let mut hierarchy = service
             .hierarchy(IssueSubject {
                 repo: &tracker.doc.repo,
@@ -111,7 +119,8 @@ pub(super) fn sync_tracker(
                 Ok(count)
             })?;
             conflicts += count;
-            unchanged += 1;
+            refreshed_numbers.insert(data.number);
+            hierarchy_refreshed += 1;
             continue;
         }
         let mut fetched = service.fetch_issue(IssueSubject {
@@ -130,6 +139,8 @@ pub(super) fn sync_tracker(
                 Ok(merge::apply(issue, &fetched, &login, &now))
             },
         )?;
+        refreshed_numbers.insert(data.number);
+        hierarchy_refreshed += 1;
         conflicts += merged.conflicts;
         if existing.is_some() {
             updated += 1;
@@ -137,16 +148,13 @@ pub(super) fn sync_tracker(
             new += 1;
         }
     }
-    let listed_numbers: std::collections::HashSet<_> =
-        listed.iter().map(|data| data.number).collect();
-    let mut hierarchy_refreshed = listed.len();
     let mut unavailable = Vec::new();
     let mut cached: Vec<_> = index
         .issues()
         .filter(|issue| {
             issue
                 .number
-                .is_some_and(|number| !listed_numbers.contains(&number))
+                .is_some_and(|number| !refreshed_numbers.contains(&number))
         })
         .collect();
     cached.sort_unstable_by_key(|issue| issue.number.unwrap());

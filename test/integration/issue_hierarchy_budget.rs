@@ -100,7 +100,7 @@ fn automatic_hierarchy_progress_survives_failure_and_skips_unavailable_records()
 }
 
 #[test]
-fn automatic_budget_does_not_limit_unchanged_listed_issues() {
+fn automatic_budget_rotates_unchanged_listed_and_unlisted_issues() {
     let env = seeded_cache();
     let fake: &dyn IssueFake = &Github;
     let listed: Vec<_> = (1..=12)
@@ -109,16 +109,94 @@ fn automatic_budget_does_not_limit_unchanged_listed_issues() {
     fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &listed);
     env.issue_at(NOW + 600, &["list"]);
     assert_eq!(
+        env.issue_doc(fake.tracker(), "10")["sub_issues"],
+        json!(["o/r#300"])
+    );
+    assert_eq!(env.issue_doc(fake.tracker(), "11")["sub_issues"], json!([]));
+    assert_eq!(env.issue_doc(fake.tracker(), "23")["sub_issues"], json!([]));
+    assert_eq!(
+        env.issue_doc(fake.tracker(), "tracker")["hierarchy_cursor"],
+        10
+    );
+    env.issue_at(NOW + 1200, &["list"]);
+    assert_eq!(
+        env.issue_doc(fake.tracker(), "tracker")["hierarchy_cursor"],
+        20
+    );
+    assert_eq!(
         env.issue_doc(fake.tracker(), "12")["sub_issues"],
         json!(["o/r#300"])
     );
     assert_eq!(
-        env.issue_doc(fake.tracker(), "22")["sub_issues"],
+        env.issue_doc(fake.tracker(), "20")["sub_issues"],
         json!(["o/r#200"])
     );
-    assert_eq!(env.issue_doc(fake.tracker(), "23")["sub_issues"], json!([]));
+    assert_eq!(env.issue_doc(fake.tracker(), "21")["sub_issues"], json!([]));
+}
+
+#[test]
+fn automatic_same_timestamp_overlap_stays_bounded_and_rotates() {
+    let env = seeded_cache();
+    let fake: &dyn IssueFake = &Github;
+    let listed: Vec<_> = (1..=100)
+        .map(|number| Spec::new(number, "Seed").children(&[300]))
+        .collect();
+    fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &listed);
+    for batch in 1..=10 {
+        let before = env.forge_calls().len();
+        env.issue_at(NOW + batch * 600, &["list"]);
+        let calls = env.forge_calls().len() - before;
+        assert!(calls <= 32, "batch {batch} made {calls} requests");
+        let end = batch * 10;
+        assert_eq!(
+            env.issue_doc(fake.tracker(), &end.to_string())["sub_issues"],
+            json!(["o/r#300"])
+        );
+        let cursor = env.issue_doc(fake.tracker(), "tracker")["hierarchy_cursor"].clone();
+        assert_eq!(cursor, if batch == 10 { json!(null) } else { json!(end) });
+        if batch < 10 {
+            assert_eq!(
+                env.issue_doc(fake.tracker(), &(end + 1).to_string())["sub_issues"],
+                json!([])
+            );
+        }
+    }
+    let report = env.issue(&["sync"]);
+    assert_eq!(report["trackers"][0]["unchanged"], 100);
+    assert_eq!(report["trackers"][0]["hierarchy_refreshed"], 100);
+}
+
+#[test]
+fn automatic_changed_and_new_listed_issues_merge_beyond_cached_budget() {
+    let env = seeded_cache();
+    let fake: &dyn IssueFake = &Github;
+    let listed = [
+        Spec::new(100, "Updated")
+            .updated("2026-10-10T10:01:00Z")
+            .children(&[300]),
+        Spec::new(101, "New").children(&[300]),
+    ];
+    fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &listed);
+    let before = env.forge_calls().len();
+    env.issue_at(NOW + 600, &["list"]);
+    assert!(env.forge_calls().len() - before <= 46);
     assert_eq!(
         env.issue_doc(fake.tracker(), "tracker")["hierarchy_cursor"],
-        22
+        10
     );
+    for (number, title) in [(100, "Updated"), (101, "New")] {
+        let issue = env.issue_doc(fake.tracker(), &number.to_string());
+        assert_eq!(issue["fields"]["title"], title);
+        assert_eq!(issue["fields"]["body"], format!("Body of {title}"));
+        assert_eq!(issue["sub_issues"], json!(["o/r#300"]));
+        assert_eq!(
+            fake.count(
+                &env,
+                &crate::support::forge::argv::gh_paginate(&format!(
+                    "repos/o/r/issues/{number}/sub_issues?per_page=100"
+                ))
+            ),
+            1
+        );
+    }
 }
