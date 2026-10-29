@@ -240,8 +240,8 @@ impl Push<'_> {
                 return Ok(());
             }
         }
-        if !fresh {
-            self.refetch(&name, &mut doc)?;
+        if !fresh && matches!(self.refetch(&name, &mut doc)?, Step::Stopped) {
+            return Ok(());
         }
         if self.options.force {
             self.mutate(&name, &mut doc, |issue| {
@@ -281,12 +281,32 @@ impl Push<'_> {
         })
     }
 
-    fn refetch(&mut self, name: &str, doc: &mut Issue) -> Result<()> {
+    fn parent_available(&mut self, doc: &Issue) -> Result<bool> {
+        let Some(parent) = &doc.fields.parent else {
+            return Ok(true);
+        };
+        let subject = match crate::forge::issue::parent_subject(parent, self.repo()) {
+            Ok(subject) => subject,
+            Err(_) if self.options.dry_run => return Ok(true),
+            Err(error) => {
+                self.deferred
+                    .push(json!({"issue": doc.key, "what": "parent", "reason": error.to_string()}));
+                return Ok(false);
+            }
+        };
+        if self.service().hierarchy(subject)?.is_none() {
+            self.deferred.push(json!({"issue": doc.key, "what": "parent", "reason": format!("parent {parent} is no longer available; the child remains queued")}));
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn refetch(&mut self, name: &str, doc: &mut Issue) -> Result<Step> {
+        let Some(hierarchy) = self.service().hierarchy(self.subject(doc)?)? else {
+            self.deferred.push(json!({"issue": doc.key, "what": "issue", "reason": "the issue is no longer available; its changes remain queued"}));
+            return Ok(Step::Stopped);
+        };
         let mut fetched = self.service().fetch_issue(self.subject(doc)?)?;
-        let hierarchy = self
-            .service()
-            .hierarchy(self.subject(doc)?)?
-            .ok_or_else(|| Error(format!("issue {} is no longer available", doc.key)))?;
         fetched.issue.parent = hierarchy
             .parent
             .map(|key| self.index.canonical(&key).to_owned());
@@ -296,7 +316,8 @@ impl Push<'_> {
         self.mutate(name, doc, |issue| {
             issue.sub_issues.clone_from(&hierarchy.children);
             merge::apply(issue, &fetched, &me, &now);
-        })
+        })?;
+        Ok(Step::Done)
     }
 
     /// Records a failed write on the issue and in the report. A refusal is final until the
@@ -392,6 +413,9 @@ impl Push<'_> {
                 "what": "create",
                 "reason": "a create was sent moments ago and the host's listing may not show it yet; push again later",
             }));
+            return Ok(Step::Stopped);
+        }
+        if !self.parent_available(doc)? {
             return Ok(Step::Stopped);
         }
         let marker = markers::agent(&doc.key, Some(&self.attempt));

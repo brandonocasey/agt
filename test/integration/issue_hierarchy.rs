@@ -843,13 +843,20 @@ fn gitlab_explicit_detach_replaces_a_conflict() {
     an_explicit_parent_edit_replaces_a_saved_conflict(&Gitlab, true);
 }
 
-fn unavailable_stored_issue_does_not_block_sync(fake: &dyn IssueFake) {
+fn unavailable_stored_issue_does_not_block_sync(
+    fake: &dyn IssueFake,
+    hierarchy_status: u16,
+    issue_status: u16,
+    parent_route: bool,
+) {
     use crate::support::forge::argv::gh_get;
     use crate::support::strs;
     let env = Env::new();
     env.write_config(&fake.config(false));
     fake.serve(&env, &[Spec::new(1, "Unavailable"), Spec::new(2, "Other")]);
     env.issue(&["sync"]);
+    env.issue(&["edit", "1", "--title", "Pending unavailable title"]);
+    let child = env.issue(&["create", "--title", "Queued child", "--parent", "1"]);
     let before = env.issue_doc(fake.tracker(), "1");
     env.issue(&["edit", "2", "--title", "Queued title"]);
     fake.serve_since(
@@ -859,13 +866,20 @@ fn unavailable_stored_issue_does_not_block_sync(fake: &dyn IssueFake) {
     );
     if fake.name() == "github" {
         use crate::support::forge::argv::gh_paginate;
-        env.fail_call_with(
-            &strs(&gh_paginate("repos/o/r/issues/1/sub_issues?per_page=100")),
-            "gh: Not Found (HTTP 404)",
-        );
+        if parent_route {
+            env.fail_call_with(
+                &strs(&gh_get("repos/o/r/issues/1/parent")),
+                &format!("gh: Gone (HTTP {hierarchy_status})"),
+            );
+        } else {
+            env.fail_call_with(
+                &strs(&gh_paginate("repos/o/r/issues/1/sub_issues?per_page=100")),
+                &format!("gh: Gone (HTTP {hierarchy_status})"),
+            );
+        }
         env.fail_call_with(
             &strs(&gh_get("repos/o/r/issues/1")),
-            "gh: Not Found (HTTP 404)",
+            &format!("gh: Gone (HTTP {issue_status})"),
         );
     } else {
         env.respond(
@@ -902,14 +916,38 @@ fn unavailable_stored_issue_does_not_block_sync(fake: &dyn IssueFake) {
         json!([format!("{}#1", fake.repo())])
     );
     assert_eq!(fake.count(&env, &fake.update_call(2)), 1);
+    assert_eq!(fake.count(&env, &fake.update_call(1)), 0);
+    assert_eq!(
+        fake.count(&env, &fake.create_call()),
+        0,
+        "known unavailable parent defers a child create"
+    );
+    assert!(env.issue(&["show", key(&child)])["number"].is_null());
+    assert_eq!(
+        env.issue(&["show", "1"])["queued"]["title"],
+        "Pending unavailable title"
+    );
 }
 #[test]
 fn github_unavailable_issue_does_not_block_sync() {
-    unavailable_stored_issue_does_not_block_sync(&Github);
+    unavailable_stored_issue_does_not_block_sync(&Github, 404, 404, false);
 }
 #[test]
 fn gitlab_unavailable_issue_does_not_block_sync() {
-    unavailable_stored_issue_does_not_block_sync(&Gitlab);
+    unavailable_stored_issue_does_not_block_sync(&Gitlab, 404, 404, false);
+}
+
+#[test]
+fn github_gone_parent_does_not_block_sync() {
+    unavailable_stored_issue_does_not_block_sync(&Github, 410, 410, true);
+}
+#[test]
+fn github_gone_issue_after_missing_hierarchy_does_not_block_sync() {
+    unavailable_stored_issue_does_not_block_sync(&Github, 404, 410, false);
+}
+#[test]
+fn github_gone_children_endpoint_does_not_block_sync() {
+    unavailable_stored_issue_does_not_block_sync(&Github, 410, 410, false);
 }
 
 fn broken_hierarchy_routes_are_not_treated_as_missing_issues(fake: &dyn IssueFake) {
@@ -951,4 +989,70 @@ fn github_unsupported_hierarchy_endpoint_is_not_a_missing_issue() {
 #[test]
 fn gitlab_malformed_hierarchy_is_not_a_missing_issue() {
     broken_hierarchy_routes_are_not_treated_as_missing_issues(&Gitlab);
+}
+
+fn lost_child_create_is_claimed_after_parent_disappears(fake: &dyn IssueFake) {
+    use crate::support::forge::argv::{gh_get, gh_paginate};
+    use crate::support::strs;
+    use std::fs;
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[Spec::new(1, "Parent")]);
+    env.issue(&["sync"]);
+    let child = env.issue(&["create", "--title", "Child", "--parent", "1"]);
+    let marker = format!("<!-- agent-review id={} attempt=lost -->", key(&child));
+    let mut saved = env.issue_doc(fake.tracker(), key(&child));
+    saved["create"]["post"] = json!("posting");
+    saved["create"]["attempt"] = json!("lost");
+    saved["create"]["sent"] = json!(marker);
+    saved["create"]["began_at"] = json!("2026-10-17T11:00:00Z");
+    fs::write(
+        env.issue_state()
+            .join(fake.tracker())
+            .join(format!("{}.json", key(&child))),
+        saved.to_string(),
+    )
+    .unwrap();
+    let mut landed = Spec::new(2, "Child");
+    landed.body = marker;
+    landed.author = "me";
+    landed.task = fake.name() == "gitlab";
+    fake.serve_since(&env, "2026-10-17T11%3A55%3A00Z", &[landed]);
+    if fake.name() == "github" {
+        env.fail_call_with(
+            &strs(&gh_paginate("repos/o/r/issues/1/sub_issues?per_page=100")),
+            "gh: Not Found (HTTP 404)",
+        );
+        env.fail_call_with(&strs(&gh_get("repos/o/r/issues/1")), "gh: Gone (HTTP 410)");
+    } else {
+        env.respond(
+            &[
+                "api",
+                "graphql",
+                "-f",
+                "path=g/p",
+                "-f",
+                "iid=1",
+                "-f",
+                "query=IssueHierarchy",
+            ],
+            r#"{"data":{"project":{"workItems":{"nodes":[]}}}}"#,
+        );
+    }
+    env.write_config(&fake.config(true));
+    let report = env.issue(&["push"]);
+    assert_eq!(
+        report["trackers"][0]["sent"][0]["kind"], "claim",
+        "{report}"
+    );
+    assert_eq!(env.issue(&["show", key(&child)])["number"], 2);
+    assert_eq!(fake.count(&env, &fake.create_call()), 0);
+}
+#[test]
+fn github_lost_child_create_is_claimed_with_missing_parent() {
+    lost_child_create_is_claimed_after_parent_disappears(&Github);
+}
+#[test]
+fn gitlab_lost_child_create_is_claimed_with_missing_parent() {
+    lost_child_create_is_claimed_after_parent_disappears(&Gitlab);
 }

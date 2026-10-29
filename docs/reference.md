@@ -1689,6 +1689,7 @@ Private notes and local PR/branch links remain private.
 Unpublished ancestors are created before children; a failed parent create leaves its children queued.
 Original local keys still resolve after publication.
 Unavailable stored issues keep their cached records and appear in sync's `unavailable` list.
+Push defers their queued edits and child creates while continuing other issues.
 An explicit parent edit after a conflict replaces that saved parent choice.
 Parent changes use three-way merging, conflicts, `push --force`, and `discard` like other scalar fields.
 A lost parent-update response is reconciled against the remote relationship before retrying.

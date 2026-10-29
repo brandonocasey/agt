@@ -14,6 +14,12 @@ impl Github {
         {
             Ok(item) => Some(related_key(&item, "/html_url", "number", "/issues/")?),
             Err(error) if error.status == Some(404) => None,
+            Err(error) if error.status == Some(410) => {
+                if self.issue_unavailable(&path)? {
+                    return Ok(None);
+                }
+                return Err(error.into());
+            }
             Err(error) => return Err(error.into()),
         };
         let items = match self.transport().items(
@@ -21,12 +27,11 @@ impl Github {
             &Pagination::CliPaginate,
         ) {
             Ok(items) => items,
-            Err(error) if error.status == Some(404) => {
-                return match self.transport().json(&Request::get(&path)) {
-                    Err(missing) if missing.status == Some(404) => Ok(None),
-                    Err(other) => Err(other.into()),
-                    Ok(_) => Err(error.into()),
-                };
+            Err(error) if matches!(error.status, Some(404 | 410)) => {
+                if self.issue_unavailable(&path)? {
+                    return Ok(None);
+                }
+                return Err(error.into());
             }
             Err(error) => return Err(error.into()),
         };
@@ -39,6 +44,14 @@ impl Github {
             children,
             task: false,
         }))
+    }
+
+    fn issue_unavailable(&self, path: &str) -> Result<bool> {
+        match self.transport().json(&Request::get(path)) {
+            Err(error) if matches!(error.status, Some(404 | 410)) => Ok(true),
+            Err(error) => Err(error.into()),
+            Ok(_) => Ok(false),
+        }
     }
 
     pub(super) fn parent_request(
