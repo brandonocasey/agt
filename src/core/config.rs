@@ -736,16 +736,16 @@ fn migrate(value: &mut toml::Value, path: &Path) -> Result<Legacy> {
     {
         legacy.post = flag(forge, "post", "forge.post")?;
         forge.remove("post");
-        let mapped = match (legacy.post, auto_push) {
-            (Some(true), true) => "auto",
-            (Some(true), false) => "manual",
-            _ => "off",
-        };
-        deprecated(
-            path,
-            "`[forge] post`",
-            &format!("`[sync] push = \"{mapped}\"`"),
-        );
+        match (legacy.post, auto_push) {
+            (Some(true), true) => deprecated(path, "`[forge] post`", "`[sync] push = \"auto\"`"),
+            (Some(true), false) => {
+                deprecated(path, "`[forge] post`", "`[sync] push = \"manual\"`");
+            }
+            _ => warn_once(format!(
+                "agt: config: `[forge] post` in {} is deprecated; remove it, pushing is off by default",
+                path.display()
+            )),
+        }
         if forge.is_empty() {
             root.remove("forge");
         }
@@ -834,19 +834,14 @@ fn upgrade_tracker(entry: toml::Value, path: &Path) -> Result<toml::Value> {
 }
 
 /// Sets `[sync] push` from the old keys when no file sets it. Posting was on when either file
-/// turned it on, and `auto_push` took the repository's value over the global one.
+/// turned it on, and `auto_push` took the repository's value over the global one. Without
+/// posting nothing is set: `push` stays at its default, which never gated `agt pr`.
 fn apply_legacy_push(merged: &mut toml::Value, global: &Legacy, local: &Legacy) {
-    let known = [global.post, local.post, global.auto_push, local.auto_push];
-    if known.iter().all(Option::is_none) {
+    if global.post != Some(true) && local.post != Some(true) {
         return;
     }
-    let posts = global.post == Some(true) || local.post == Some(true);
     let auto = local.auto_push.or(global.auto_push) == Some(true);
-    let mode = match (posts, auto) {
-        (false, _) => "off",
-        (true, false) => "manual",
-        (true, true) => "auto",
-    };
+    let mode = if auto { "auto" } else { "manual" };
     let Some(root) = merged.as_table_mut() else {
         return;
     };
@@ -1172,8 +1167,9 @@ mod tests {
 
     #[test]
     fn old_keys_map_to_the_new_ones() {
+        // Unset, not `off`: an explicit `off` would refuse `agt pr` writes, which `post` never did.
         let config = parse("[forge]\npost = false\n");
-        assert_eq!(config.sync.push, Some(Mode::Off));
+        assert_eq!(config.sync.push, None);
         let config = parse("[forge]\npost = true\n");
         assert_eq!(config.sync.push, Some(Mode::Manual));
         let config = parse("[forge]\npost = true\n[sync]\nauto_push = false\n");
@@ -1181,7 +1177,7 @@ mod tests {
         let config = parse("[forge]\npost = true\n[sync]\nauto_push = true\n");
         assert_eq!(config.sync.push, Some(Mode::Auto));
         let config = parse("[sync]\nauto_push = true\n");
-        assert_eq!(config.sync.push, Some(Mode::Off));
+        assert_eq!(config.sync.push, None);
         let config = parse("[sync]\nauto_pull = true\n");
         assert_eq!(config.sync.pull, Some(Mode::Auto));
         let config = parse("[sync]\nauto_pull = false\n");

@@ -942,6 +942,49 @@ fn an_automatic_create_returns_its_identity_when_a_followup_write_fails() {
 }
 
 #[test]
+fn a_local_issue_goes_to_the_origin_tracker_when_every_remote_is_one() {
+    let github: Fake = &crate::support::issue::Github;
+    let env = Env::new();
+    let made = env.issue(&[
+        "create",
+        "--title",
+        "Brand new",
+        "--body",
+        "Text",
+        "--label",
+        "bug",
+    ]);
+    let key = made["key"].as_str().unwrap();
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    env.git(&["remote", "add", "upstream", "https://gitlab.com/g/p.git"]);
+    env.write_config("[sync]\npush = \"manual\"\n");
+    env.respond(&strs(&github.user_call()), login_body(github));
+    env.respond(
+        &strs(&github.create_call()),
+        &github.issue_json(&created()).to_string(),
+    );
+    env.issue(&["push"]);
+    assert!(
+        !env.issue_state()
+            .join("local")
+            .join(format!("{key}.json"))
+            .exists()
+    );
+    assert_eq!(
+        env.issue_doc(github.tracker(), "5")["create"]["post"],
+        "posted"
+    );
+    // The upstream GitLab project is a tracker too, but gets no call.
+    assert!(
+        !env.forge_calls()
+            .iter()
+            .any(|call| call.contains("projects/g%2Fp")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
 fn empty_local_tracker_does_not_require_an_attachment_destination() {
     let github: Fake = &crate::support::issue::Github;
     let gitlab: Fake = &crate::support::issue::Gitlab;

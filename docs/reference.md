@@ -1589,10 +1589,10 @@ line on stderr per key and file:
 
 | Old | New |
 | --- | --- |
-| `[forge] post = false` | `[sync] push = "off"` |
+| `[forge] post = false` | nothing; remove it, since `push` is off by default (an explicit `push = "off"` would also refuse `agt pr` writes) |
 | `post = true` | `[sync] push = "manual"`, or `"auto"` with `[sync] auto_push = true` |
 | `[sync] auto_pull = true` or `false` | `[sync] pull = "auto"` or `"manual"` |
-| `[[issues.tracker]]` | `[[tracker]]` with `pull_requests = false`; `scope` and `since_days` move into `issues = { ... }` |
+| `[[issues.tracker]]` | `[[tracker]]` for issues only; `scope` and `since_days` move into `issues = { ... }`. A remote it names stays a pull request tracker |
 | `push = false` on an issue tracker | `issues = { push = "off" }` |
 
 An old key and its new key in one file are an error that names both.

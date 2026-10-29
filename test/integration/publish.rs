@@ -114,7 +114,7 @@ fn the_old_post_key_still_gates_publish_and_warns() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("`[forge] post` in")
-            && stderr.contains("is deprecated; use `[sync] push = \"off\"`"),
+            && stderr.contains("is deprecated; remove it, pushing is off by default"),
         "{stderr}"
     );
     assert!(stderr.contains("publish kept local"), "{stderr}");
