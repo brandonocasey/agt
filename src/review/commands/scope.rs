@@ -655,18 +655,20 @@ impl Ctx {
         if crate::forge::auto::Offline::current().is_set() {
             return Ok(None);
         }
-        // A URL for another repository than origin names a number origin does not own.
-        if let Some((host, repo)) = &pr.location
-            && !self
-                .repo
-                .origin_location()?
-                .is_some_and(|(origin_host, origin_repo)| {
-                    same_location((host.as_str(), repo.as_str()), (&origin_host, &origin_repo))
-                })
-        {
-            return Ok(None);
-        }
-        let Some(origin) = crate::forge::landed::Source::origin(&self.repo)? else {
+        // A URL names its tracker, which must be one of the repository's; a bare number is the
+        // chosen tracker's, as for `agt pr`.
+        let source = match &pr.location {
+            Some((host, repo)) => {
+                let config = crate::core::config::Config::load_for_repo(&self.repo)?;
+                crate::forge::landed::Source::trackers(&self.repo, &config)?
+                    .into_iter()
+                    .find(|source| {
+                        same_location((host.as_str(), repo.as_str()), (&source.host, &source.repo))
+                    })
+            }
+            None => crate::forge::landed::Source::chosen(&self.repo)?,
+        };
+        let Some(origin) = source else {
             return Ok(None);
         };
         // A fork's head branch name says nothing about local branches of the same name.

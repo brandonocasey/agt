@@ -311,6 +311,33 @@ fn gh_pull(number: u64, branch: &str, created: &str) -> Value {
 }
 
 #[test]
+fn the_summary_asks_the_chosen_tracker_not_origin() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:me/app.git"]);
+    env.git(&["remote", "add", "upstream", "git@github.com:acme/app.git"]);
+    // Origin is turned off for pull requests, so upstream is the only tracker.
+    env.write_config(
+        "[[tracker]]\nhost = \"github.com\"\nrepo = \"me/app\"\npull_requests = false\n",
+    );
+    respond_open_pulls_of(
+        &env,
+        "acme",
+        &[gh_pull(7, "elsewhere", "2026-10-20T08:00:00Z")],
+    );
+    let summary = success(&agt(&env, &["status"], &["--all"], &[]));
+    assert_eq!(summary["note"], Value::Null, "{summary}");
+    let rows = summary["targets"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["mr"] == 7), "{summary}");
+    assert!(
+        !env.forge_calls()
+            .iter()
+            .any(|call| call.contains("owner=me ")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
 fn the_summary_lists_open_mrs_oldest_first_then_local_targets() {
     let (env, _, _) = reviewed_on(Env::with_branch());
     env.git(&["remote", "add", "origin", "git@github.com:acme/app.git"]);
@@ -618,6 +645,38 @@ fn sync_refuses_another_branch_target_without_a_pr() {
             "{error}"
         );
     }
+}
+
+#[test]
+fn a_stored_review_takes_a_fork_remote_but_not_another_project() {
+    let setup = Setup::synced_branch("git@github.com:me/repo.git");
+    let env = &setup.env;
+    github::sync_fixtures(&setup);
+    env.write_config("[sync]\npush = \"off\"\n");
+    env.run(&["sync", "--pr", "42"]);
+    env.git(&["remote", "add", "fork", "git@github.com:you/repo.git"]);
+    env.git(&["remote", "add", "other", "git@github.com:me/unrelated.git"]);
+    let synced = agt(
+        env,
+        &["review", "--target", "gh-42", "sync", "--remote", "fork"],
+        &[],
+        &[],
+    );
+    assert!(
+        synced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&synced.stderr)
+    );
+    let error = failure(&agt(
+        env,
+        &["review", "--target", "gh-42", "sync", "--remote", "other"],
+        &[],
+        &[],
+    ));
+    assert!(
+        error.contains("is synced with github.com/me/repo"),
+        "{error}"
+    );
 }
 
 #[test]

@@ -115,8 +115,13 @@ pub(super) fn choose(
             if let Some(remote) = remote {
                 let named =
                     require_tracker(&ctx.repo, config, Kind::PullRequests, Some(remote), None)?;
+                // A fork's PR/MR is often stored under its parent, which keeps the project name
+                // on the same host; that remote still names this PR/MR's tracker.
+                let project =
+                    |repo: &str| repo.rsplit('/').next().unwrap_or(repo).to_ascii_lowercase();
                 if !named.host.eq_ignore_ascii_case(&review.host)
-                    || !named.repo.eq_ignore_ascii_case(&review.repo)
+                    || (!named.repo.eq_ignore_ascii_case(&review.repo)
+                        && project(&named.repo) != project(&review.repo))
                 {
                     return fail(format!(
                         "target {key} is synced with {}/{}; --remote {remote} names {}/{}",

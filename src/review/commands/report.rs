@@ -539,14 +539,14 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
             Some("offline: PRs/MRs come from stored reviews".to_owned()),
         )
     } else {
-        match Source::origin(&ctx.repo).and_then(|origin| match origin {
+        match Source::chosen(&ctx.repo).and_then(|origin| match origin {
             Some(origin) => origin.open_pulls().map(|pulls| Some((origin, pulls))),
             None => Ok(None),
         }) {
             Ok(Some((origin, pulls))) => (Some((origin, pulls)), None),
             Ok(None) => (
                 None,
-                Some("no GitHub or GitLab origin: PRs/MRs come from stored reviews".to_owned()),
+                Some("no pull request tracker: PRs/MRs come from stored reviews".to_owned()),
             ),
             Err(why) => (
                 None,

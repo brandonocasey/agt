@@ -67,20 +67,16 @@ impl Source {
         })
     }
 
-    /// The repository of `origin`, with the hosts file as the first hint; `None` when there is
-    /// no origin or it is no GitHub or GitLab host that agt can identify.
-    pub fn origin(repo: &Repo) -> Result<Option<Self>> {
-        let Some((host, path)) = repo.origin_location()? else {
+    /// The pull request tracker a command picks with no `--remote` or PR/MR URL, as `agt pr`
+    /// does (`origin` by default); `None` when no tracker serves pull requests or its host is no
+    /// GitHub or GitLab host that agt can identify.
+    pub fn chosen(repo: &Repo) -> Result<Option<Self>> {
+        let config = Config::load_for_repo(repo)?;
+        let Some(selected) = select::select_tracker(repo, &config, Kind::PullRequests, None, None)?
+        else {
             return Ok(None);
         };
-        Ok(
-            service::detect(&host, hosts::named(&host)?, None).map(|forge| Self {
-                forge,
-                host,
-                repo: path,
-                remote: Some("origin".into()),
-            }),
-        )
+        Ok(Self::of(&selected).ok())
     }
 
     /// Every tracker that serves pull requests, one source each.
