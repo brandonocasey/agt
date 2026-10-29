@@ -89,7 +89,9 @@ fn sync_one(store: &Store, configured: &Tracker, dir: &std::path::Path) -> Resul
     .map_err(Stop::Failed)?
     .map_err(busy)?;
     let tracker = trackers::ensure(store, configured).map_err(Stop::Failed)?;
-    sync_tracker(store, tracker).map(drop).map_err(Stop::Failed)
+    sync_tracker(store, tracker, Some(10))
+        .map(drop)
+        .map_err(Stop::Failed)
 }
 
 fn destination<'a>(trackers: &'a [Tracker], filter: Option<&str>) -> Result<&'a Tracker> {

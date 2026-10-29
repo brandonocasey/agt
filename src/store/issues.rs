@@ -193,6 +193,8 @@ pub struct TrackerDoc {
     pub watermark: Option<String>,
     pub login: Option<String>,
     pub synced_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy_cursor: Option<u64>,
 }
 
 impl TrackerDoc {
@@ -210,6 +212,7 @@ impl TrackerDoc {
             watermark: None,
             login: None,
             synced_at: None,
+            hierarchy_cursor: None,
         };
         doc.refresh(tracker);
         doc
@@ -229,6 +232,7 @@ impl TrackerDoc {
             watermark: None,
             login: None,
             synced_at: None,
+            hierarchy_cursor: None,
         }
     }
 

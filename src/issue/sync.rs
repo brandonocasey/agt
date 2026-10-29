@@ -44,8 +44,8 @@ pub fn run(
     let mut failed = Vec::new();
     let targets = trackers::configured(destinations, filter)?;
     for configured in targets {
-        let outcome =
-            trackers::ensure(store, configured).and_then(|tracker| sync_tracker(store, tracker));
+        let outcome = trackers::ensure(store, configured)
+            .and_then(|tracker| sync_tracker(store, tracker, None));
         match outcome {
             Ok(report) => reports.push(report),
             Err(error) => {
@@ -60,7 +60,11 @@ pub fn run(
     })
 }
 
-pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
+pub(super) fn sync_tracker(
+    store: &Store,
+    tracker: Tracker,
+    hierarchy_budget: Option<usize>,
+) -> Result<Value> {
     let (service, login) = connect(&tracker)?;
     let now = clock::now()?;
     let since = match &tracker.doc.watermark {
@@ -137,31 +141,60 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
         listed.iter().map(|data| data.number).collect();
     let mut hierarchy_refreshed = listed.len();
     let mut unavailable = Vec::new();
-    for existing in index.issues().filter(|issue| {
-        issue
-            .number
-            .is_some_and(|number| !listed_numbers.contains(&number))
-    }) {
-        let Some(hierarchy) = service.hierarchy(IssueSubject {
+    let mut cached: Vec<_> = index
+        .issues()
+        .filter(|issue| {
+            issue
+                .number
+                .is_some_and(|number| !listed_numbers.contains(&number))
+        })
+        .collect();
+    cached.sort_unstable_by_key(|issue| issue.number.unwrap());
+    if hierarchy_budget.is_some() {
+        cached.retain(|issue| {
+            tracker
+                .doc
+                .hierarchy_cursor
+                .is_none_or(|cursor| issue.number.unwrap() > cursor)
+        });
+    }
+    let remaining = cached.len();
+    let limit = hierarchy_budget.unwrap_or(remaining);
+    for (position, existing) in cached.into_iter().take(limit).enumerate() {
+        let hierarchy = service.hierarchy(IssueSubject {
             repo: &tracker.doc.repo,
             number: existing.number.unwrap(),
-        })?
-        else {
+        })?;
+        if let Some(hierarchy) = hierarchy {
+            let parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
+            conflicts += store.update_existing_doc(
+                &tracker.dir,
+                &existing.doc_name(),
+                |issue: &mut Issue| {
+                    index.normalize(issue);
+                    let count = merge::apply_parent(issue, &parent, hierarchy.task, &now);
+                    issue.sub_issues.clone_from(&hierarchy.children);
+                    Ok(count)
+                },
+            )?;
+            hierarchy_refreshed += 1;
+        } else {
             unavailable.push(existing.key.clone());
-            continue;
-        };
-        let parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
-        conflicts += store.update_existing_doc(
-            &tracker.dir,
-            &existing.doc_name(),
-            |issue: &mut Issue| {
-                index.normalize(issue);
-                let count = merge::apply_parent(issue, &parent, hierarchy.task, &now);
-                issue.sub_issues.clone_from(&hierarchy.children);
-                Ok(count)
-            },
-        )?;
-        hierarchy_refreshed += 1;
+        }
+        if hierarchy_budget.is_some() {
+            store.update_existing_doc(
+                &tracker.dir,
+                TRACKER_FILE,
+                |doc: &mut crate::store::issues::TrackerDoc| {
+                    doc.hierarchy_cursor = if position + 1 == remaining {
+                        None
+                    } else {
+                        existing.number
+                    };
+                    Ok(())
+                },
+            )?;
+        }
     }
     unavailable.sort();
     let newest = listed.iter().map(|data| data.updated_at.clone()).max();
@@ -170,6 +203,9 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
         TRACKER_FILE,
         || tracker.doc.clone(),
         |doc| {
+            if hierarchy_budget.is_none() || remaining == 0 {
+                doc.hierarchy_cursor = None;
+            }
             doc.login = Some(login.clone());
             doc.synced_at = Some(now.clone());
             if newest > doc.watermark {

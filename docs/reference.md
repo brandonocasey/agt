@@ -1644,6 +1644,10 @@ Related local queues follow their parent into the selected tracker, without bein
 Other untouched issues remain local. Notes and local links never trigger publication or get sent.
 Automatic failures preserve queued changes. Private data is never included in remote bodies.
 
+Automatic reads refresh hierarchy for all listed issues and at most ten other cached remote
+issues per tracker. A persisted numeric cursor rotates through the cache on stale reads;
+each successful lookup (including unavailable issues) saves progress before the next request.
+A completed sweep resets the cursor. Explicit `sync` refreshes the entire cache and clears it.
 Automatic work has a 15-second aggregate limit. Explicit `sync` and `push`
 opt into remote access independently of automatic settings. `--offline` and
 `AGT_OFFLINE=1` block automatic and explicit issue network operations.
