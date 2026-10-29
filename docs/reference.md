@@ -1574,9 +1574,10 @@ previews still work.
 Commands that act on one PR/MR choose the tracker in this order: `--remote <name|host/repo>`,
 the repository of the PR/MR URL given, the tracker a synced review target stores, the tracker
 of `origin`, the only tracker. When several remain and none is `origin`, the command fails and
-lists the `--remote` choices. Without any tracker for a repository whose `origin` names a host
-agt cannot identify, `origin` is used as before. `agt ci` and `agt branch check` choose their tracker
-the same way and take `--remote`. `agt cleanup` instead asks every pull request tracker for the PRs/MRs of a branch, and a PR/MR merged on any of them counts as landed. `--tracker` on `agt issue` selects an issue
+lists the `--remote` choices. An `origin` on a host only a `gh` or `glab` login identifies
+(GitHub Enterprise, a self-hosted GitLab), with no `[[tracker]]` for it, still counts as the
+tracker of `origin` and wins over the other trackers. `agt ci` and `agt branch check` choose their tracker
+the same way and take `--remote`. `agt cleanup` instead asks every pull request tracker, plus such an `origin`, for the PRs/MRs of a branch, and a PR/MR merged on any of them counts as landed. `--tracker` on `agt issue` selects an issue
 destination by key or `owner/repo`; `issue sync` pulls every issue tracker; automatic issue work uses only the tracker of `origin` unless `--tracker` is given.
 
 The repository's `.config/agt.toml` can raise a `push` mode but never lower the global one:

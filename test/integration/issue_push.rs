@@ -942,7 +942,7 @@ fn an_automatic_create_returns_its_identity_when_a_followup_write_fails() {
 }
 
 #[test]
-fn a_local_issue_goes_to_the_origin_tracker_when_every_remote_is_one() {
+fn a_local_issue_waits_for_tracker_when_every_remote_is_one() {
     let github: Fake = &crate::support::issue::Github;
     let env = Env::new();
     let made = env.issue(&[
@@ -963,7 +963,19 @@ fn a_local_issue_goes_to_the_origin_tracker_when_every_remote_is_one() {
         &strs(&github.create_call()),
         &github.issue_json(&created()).to_string(),
     );
-    env.issue(&["push"]);
+    // Two remotes are two destinations: nothing is sent until one is named.
+    assert!(
+        env.issue_fail(&["push"])
+            .contains("several issue destinations")
+    );
+    assert!(
+        !env.forge_calls()
+            .iter()
+            .any(|call| call.contains("--method POST")),
+        "{:?}",
+        env.forge_calls()
+    );
+    env.issue(&["push", "--tracker", "o/r"]);
     assert!(
         !env.issue_state()
             .join("local")
@@ -974,7 +986,6 @@ fn a_local_issue_goes_to_the_origin_tracker_when_every_remote_is_one() {
         env.issue_doc(github.tracker(), "5")["create"]["post"],
         "posted"
     );
-    // The upstream GitLab project is a tracker too, but gets no call.
     assert!(
         !env.forge_calls()
             .iter()

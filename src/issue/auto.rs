@@ -94,15 +94,10 @@ fn sync_one(store: &Store, configured: &Tracker, dir: &std::path::Path) -> Resul
 
 fn destination<'a>(trackers: &'a [Tracker], filter: Option<&str>) -> Result<&'a Tracker> {
     let targets = trackers::configured(trackers, filter)?;
-    // Without `--tracker`, a new issue goes to the tracker of `origin`, as before remotes were
-    // trackers.
-    let origin = targets
-        .iter()
-        .find(|tracker| filter.is_none() && tracker.remote.as_deref() == Some("origin"));
-    let target = match (targets.as_slice(), origin) {
-        ([one], _) | (_, Some(one)) => *one,
-        _ => return crate::core::error::fail("several issue destinations; pass --tracker"),
+    let [target] = targets.as_slice() else {
+        return crate::core::error::fail("several issue destinations; pass --tracker");
     };
+    let target = *target;
     if target.push_mode() == Mode::Off {
         return crate::core::error::fail(format!(
             "push is off for {}; set `push = \"manual\"` under `[issues]`, `[sync]` or the tracker",

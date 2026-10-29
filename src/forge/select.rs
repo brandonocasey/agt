@@ -143,7 +143,13 @@ fn origin_only(config: &Config, kind: Kind, locations: &[RemoteLocation]) -> Opt
         return None;
     }
     let origin = locations.iter().find(|remote| remote.name == "origin")?;
-    if forge_of(&origin.host).is_some() {
+    // A configured `[[tracker]]` for origin decides for itself, including turning it off.
+    if forge_of(&origin.host).is_some()
+        || config.tracker.iter().any(|entry| {
+            entry.host.eq_ignore_ascii_case(&origin.host)
+                && entry.repo.eq_ignore_ascii_case(&origin.repo)
+        })
+    {
         return None;
     }
     Some(Selected::bare(config, kind, &origin.host, &origin.repo))
