@@ -45,7 +45,7 @@ for the tracker; dry runs stay allowed. `agt pr` writes are refused only when `p
 explicitly. The repository file can raise a `push` mode, never lower the global one. The old
 `[forge] post`, `[sync] auto_pull`/`auto_push` and `[[issues.tracker]]` keys still load, map to the
 new ones and warn once. `src/forge/select.rs` picks the tracker for one PR/MR (`--remote`, PR URL,
-stored review, `origin`, the only one); `agt ci` and `agt branch check` use it too (`--remote`), while
+stored review, `origin`, the only one; a stored review wins and `--remote` may only confirm it); `agt ci` and `agt branch check` use it too (`--remote`), while
 `agt cleanup` asks every pull request tracker for a branch's PR/MR (`forge::landed::Source`) and a PR merged on any counts as landed.
 
 `src/forge/auto.rs` holds shared policy and the 15-second automatic-call deadline.

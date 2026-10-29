@@ -1574,7 +1574,9 @@ previews still work.
 
 Commands that act on one PR/MR choose the tracker in this order: `--remote <name|host/repo>`,
 the repository of the PR/MR URL given, the tracker a synced review target stores, the tracker
-of `origin`, the only tracker. When several remain and none is `origin`, the command fails and
+of `origin`, the only tracker. A review target already synced with a PR/MR keeps it: `--remote`
+must name that PR/MR's repository or the command fails, and a PR/MR URL with a `--remote` for
+another repository also fails. When several remain and none is `origin`, the command fails and
 lists the `--remote` choices. An `origin` on a host only a `gh` or `glab` login identifies
 (GitHub Enterprise, a self-hosted GitLab), with no `[[tracker]]` for it, still counts as the
 tracker of `origin` and wins over the other trackers. `agt ci` and `agt branch check` choose their tracker
