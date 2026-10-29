@@ -609,6 +609,8 @@ fn sync_refuses_another_branch_target_without_a_pr() {
     for command in [
         &["status", "--target", &key, "--sync"][..],
         &["review", "--target", &key, "sync"],
+        // Naming the tracker never lifts the guard.
+        &["review", "--target", &key, "sync", "--remote", "origin"],
     ] {
         let error = failure(&agt(&env, command, &[], &[]));
         assert!(

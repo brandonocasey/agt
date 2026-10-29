@@ -319,8 +319,9 @@ locally or by the authenticated forge user; every other comment shows as
 people's comments. A posted thread also shows its forge URL on a `URL:` line.
 `--head <rev>` maps anchors to that commit instead of the target's head, such
 as a fix after a range target's end. `status` and `list` never write, unless `--sync`
-(with `--pr <number|url>` to name the PR/MR) first imports the PR/MR of this branch as
-`sync` does; `--offline` refuses it.
+(with `--pr <number|url>` to name the PR/MR, and `--remote` to pick its tracker) first
+syncs the PR/MR of this branch. Unlike a bare `sync`, it may import one the store does not
+have yet; `--offline` refuses it.
 
 `status` never writes: not to the store, not to the git index or object
 database. By default it leaves out `commits`, `runs` and tree ids; `--full`

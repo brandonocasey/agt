@@ -99,11 +99,11 @@ pub(super) fn choose(
     remote: Option<&str>,
 ) -> Result<Chosen> {
     if pr.is_none()
-        && remote.is_none()
         && let Some(key) = &ctx.selection.target
         && let Some(target) = ctx.store.load(&ctx.dir, key)?
     {
-        // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`.
+        // The PR/MR a `--target` was synced with, so a detached HEAD needs no `--pr`. `--remote`
+        // can only confirm it: a target never moves to another repository's PR/MR.
         if let Some(review) = target.review {
             let selected = at_location(
                 &ctx.repo,
@@ -112,6 +112,18 @@ pub(super) fn choose(
                 &review.host,
                 &review.repo,
             )?;
+            if let Some(remote) = remote {
+                let named =
+                    require_tracker(&ctx.repo, config, Kind::PullRequests, Some(remote), None)?;
+                if !named.host.eq_ignore_ascii_case(&review.host)
+                    || !named.repo.eq_ignore_ascii_case(&review.repo)
+                {
+                    return fail(format!(
+                        "target {key} is synced with {}/{}; --remote {remote} names {}/{}",
+                        review.host, review.repo, named.host, named.repo
+                    ));
+                }
+            }
             return Ok(Chosen {
                 selected,
                 place: Place::Stored(Box::new(review)),
@@ -133,6 +145,19 @@ pub(super) fn choose(
         remote,
         pr_ref.as_ref(),
     )?;
+    // A PR/MR URL names its repository; `--remote` naming another one is a mistake, not a
+    // request for the same number elsewhere.
+    if let Some((host, repo)) = pr_ref.as_ref().and_then(|pr| pr.location.as_ref())
+        && (!host.eq_ignore_ascii_case(&selected.host)
+            || !repo.eq_ignore_ascii_case(&selected.repo))
+    {
+        return fail(format!(
+            "{} is not in {}/{}, the repository --remote names",
+            pr.unwrap_or_default(),
+            selected.host,
+            selected.repo
+        ));
+    }
     Ok(Chosen {
         selected,
         place: Place::Number(pr_ref.map(|pr| pr.number)),
