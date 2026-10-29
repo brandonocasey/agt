@@ -275,7 +275,9 @@ fn an_mr_number_or_url_finds_the_synced_target() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    // The report tests read what sync pulled; nothing is published.
+    env.write_config("[sync]\npush = \"off\"\n");
+    env.run(&["sync", "--pr", "42"]);
     env.git(&["switch", "-q", "main"]);
     for name in ["42", "#42", "!42", "https://github.com/me/repo/pull/42"] {
         let status = success(&agt(env, &["status"], &[name], &[("AGT_OFFLINE", "1")]));
@@ -374,7 +376,9 @@ fn the_offline_summary_uses_stored_reviews() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    // The report tests read what sync pulled; nothing is published.
+    env.write_config("[sync]\npush = \"off\"\n");
+    env.run(&["sync", "--pr", "42"]);
     local_only(env, "scratch");
     let summary = success(&agt(env, &["status"], &["--all"], &[("AGT_OFFLINE", "1")]));
     assert_eq!(summary["offline"], true);
@@ -518,7 +522,9 @@ fn a_pull_does_not_take_a_target_that_holds_another_review() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;
     github::sync_fixtures(&setup);
-    env.run(&["sync"]);
+    // The report tests read what sync pulled; nothing is published.
+    env.write_config("[sync]\npush = \"off\"\n");
+    env.run(&["sync", "--pr", "42"]);
     let mut pull = gh_pull(77, "feat", "2026-10-20T08:00:00Z");
     pull["url"] = json!("https://github.com/me/repo/pull/77");
     env.respond(
@@ -629,7 +635,9 @@ fn a_named_status_survives_the_auto_pull_renaming_its_target() {
 fn parent_review_in_a_fork() -> Setup {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     github::sync_fixtures(&setup);
-    setup.env.run(&["sync"]);
+    // The report tests read what sync pulled; nothing is published.
+    setup.env.write_config("[sync]\npush = \"off\"\n");
+    setup.env.run(&["sync", "--pr", "42"]);
     setup
         .env
         .git(&["remote", "set-url", "origin", "git@github.com:me/app.git"]);
