@@ -17,7 +17,10 @@ pub struct Proc {
     /// The start time in the OS's own finest unit, to tell a reused pid apart.
     pub start_key: u64,
     pub comm: String,
+    /// The command line cut to 80 characters, for display.
     pub cmd: String,
+    /// The whole command line, to match markers that sit far along it.
+    pub args: String,
     pub claude_pid: Option<i32>,
 }
 
@@ -97,7 +100,11 @@ mod os {
         let start = boot_time()? + i64::try_from(ticks / per_sec).ok()?;
         let environ = fs::read(format!("{dir}/environ")).unwrap_or_default();
         let claude_pid = super::claude_pid(environ.split(|byte| *byte == 0));
-        let cmd = fs::read(format!("{dir}/cmdline")).unwrap_or_default();
+        let args = super::command_line(
+            fs::read(format!("{dir}/cmdline"))
+                .unwrap_or_default()
+                .split(|byte| *byte == 0),
+        );
         Some(Proc {
             pid,
             ppid,
@@ -107,7 +114,8 @@ mod os {
                 .unwrap_or_default()
                 .trim_end()
                 .to_owned(),
-            cmd: super::command_line(cmd.split(|byte| *byte == 0)),
+            cmd: super::shorten(&args),
+            args,
             claude_pid,
         })
     }
@@ -306,6 +314,7 @@ mod os {
         }
         let (argv, env) = args(pid);
         let claude_pid = super::claude_pid(env.iter().map(Vec::as_slice));
+        let line = super::command_line(argv.iter().map(Vec::as_slice));
         let comm = unsafe { CStr::from_ptr(info.pbi_comm.as_ptr()) }
             .to_string_lossy()
             .into_owned();
@@ -315,7 +324,8 @@ mod os {
             start: i64::try_from(info.pbi_start_tvsec).ok()?,
             start_key: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
             comm,
-            cmd: super::command_line(argv.iter().map(Vec::as_slice)),
+            cmd: super::shorten(&line),
+            args: line,
             claude_pid,
         })
     }
@@ -328,12 +338,15 @@ pub fn cwds_checked() -> std::io::Result<Vec<(i32, PathBuf)>> {
 }
 
 fn command_line<'a>(parts: impl Iterator<Item = &'a [u8]>) -> String {
-    let joined = parts
+    parts
         .filter(|part| !part.is_empty())
         .map(String::from_utf8_lossy)
         .collect::<Vec<_>>()
-        .join(" ");
-    joined.chars().take(80).collect()
+        .join(" ")
+}
+
+fn shorten(args: &str) -> String {
+    args.chars().take(80).collect()
 }
 
 /// The `CLAUDE_PID` among a process's `NAME=value` environment entries.
@@ -540,6 +553,7 @@ mod tests {
             start_key: 0,
             comm: String::new(),
             cmd: String::new(),
+            args: String::new(),
             claude_pid: None,
         }
     }

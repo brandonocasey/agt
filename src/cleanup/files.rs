@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::core::agents;
 use crate::core::clock;
 use crate::core::env;
 use crate::core::error::{Error, Result};
@@ -19,6 +20,28 @@ pub const SCRATCH_DAYS: i64 = 30;
 /// Test-only replacement for `/tmp`, so tests never read the real one.
 const TMP_OVERRIDE: &str = "AGT_CLEANUP_TMP";
 
+/// Temp directories a browser leaves in `/tmp` when it is killed before it can remove them,
+/// with the days each must sit untouched. A profile is named on its browser's command line, so
+/// a day is enough. Playwright keeps its artifacts and traces directories in memory: no command
+/// line names them, so a browser that wrote nothing there for a day may still use one.
+const BROWSER_DIRS: [(&str, i64); 6] = [
+    ("puppeteer_dev_chrome_profile-", 1),
+    ("playwright_chromiumdev_profile-", 1),
+    ("playwright_firefoxdev_profile-", 1),
+    ("playwright_webkitdev_profile-", 1),
+    ("playwright-artifacts-", 7),
+    ("playwright-tracing-", 7),
+];
+
+/// Days `path` must sit untouched before it is removed, when it is a browser temp directory.
+pub fn browser_dir_days(path: &Path) -> Option<i64> {
+    let name = path.file_name()?.to_str()?;
+    BROWSER_DIRS
+        .iter()
+        .find(|(prefix, _)| name.starts_with(prefix))
+        .map(|(_, days)| *days)
+}
+
 /// One entry whose whole tree is older than the cutoff.
 pub struct Stale {
     pub path: PathBuf,
@@ -29,11 +52,15 @@ pub struct Stale {
     pub bytes: u64,
 }
 
+fn tmp_dir() -> PathBuf {
+    PathBuf::from(env::value_or(TMP_OVERRIDE, "/tmp"))
+}
+
 /// Where Claude Code keeps session scratchpads: `<tmp>/claude-<uid>/<cwd-slug>/<session>`.
 /// Settings point it at `~/.cache/claude-tmp`; older sessions used `/tmp`.
 pub fn harness_roots() -> Result<Vec<PathBuf>> {
     let uid = unsafe { libc::getuid() };
-    let tmp = PathBuf::from(env::value_or(TMP_OVERRIDE, "/tmp"));
+    let tmp = tmp_dir();
     Ok(vec![local::home()?.join(harness::CLAUDE_TMP_DIR), tmp]
         .into_iter()
         .map(|base| base.join(format!("claude-{uid}")))
@@ -286,4 +313,101 @@ pub fn remove(
         let _ = fs::remove_dir(parent);
     }
     Ok(Removal::Removed(bytes))
+}
+
+/// `/tmp` itself belongs to root, so a directory is checked on its own: a real directory of
+/// this user, under a browser prefix.
+fn browser_profile(path: &Path) -> bool {
+    browser_dir_days(path).is_some() && own_dir(path)
+}
+
+/// Where browsers put temp directories: `/tmp`, and `$TMPDIR` where that differs (macOS).
+fn browser_tmp_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![tmp_dir()];
+    if std::env::var_os(TMP_OVERRIDE).is_none()
+        && let Some(tmpdir) = std::env::var_os("TMPDIR").map(PathBuf::from)
+        && !tmpdir.as_os_str().is_empty()
+        && fs::canonicalize(&tmpdir).ok() != fs::canonicalize(&dirs[0]).ok()
+    {
+        dirs.push(tmpdir);
+    }
+    dirs
+}
+
+/// Browser temp directories untouched long enough and named by no running process.
+pub fn browser_profiles(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
+    let commands: Vec<String> = agents::pids()
+        .into_iter()
+        .filter_map(agents::read)
+        .map(|proc| proc.args)
+        .collect();
+    let mut found = Vec::new();
+    for tmp in browser_tmp_dirs() {
+        let entries = match children(&tmp) {
+            Ok(entries) => entries,
+            Err(error) => {
+                warnings.push(format!("{}: {error}", tmp.display()));
+                continue;
+            }
+        };
+        for path in entries {
+            let Some(days) = browser_dir_days(&path).filter(|_| browser_profile(&path)) else {
+                continue;
+            };
+            let name = path.to_string_lossy();
+            if commands.iter().any(|cmd| cmd.contains(name.as_ref())) {
+                continue;
+            }
+            match measure(&path) {
+                Ok((newest, bytes)) if now - newest > days * clock::SECS_PER_DAY => {
+                    found.push(Stale {
+                        key: path.to_string_lossy().into_owned(),
+                        root: tmp.clone(),
+                        path,
+                        newest,
+                        bytes,
+                    })
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => warnings.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Deletes a browser temp directory if it is still old enough, still this user's own, and no
+/// running process names it.
+pub fn remove_browser_profile(path: &Path, now: i64) -> Result<Removal> {
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Ok(Removal::Kept);
+    }
+    let Some(days) = browser_dir_days(path).filter(|_| browser_profile(path)) else {
+        return Err(Error(format!(
+            "{}: not deleted, it is a link, another user's or not a browser directory",
+            path.display()
+        )));
+    };
+    let name = path.to_string_lossy();
+    if agents::pids()
+        .into_iter()
+        .filter_map(agents::read)
+        .any(|proc| proc.args.contains(name.as_ref()))
+    {
+        return Ok(Removal::Kept);
+    }
+    let (newest, bytes) = match measure(path) {
+        Ok(found) => found,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Removal::Kept),
+        Err(error) => return Err(Error(format!("{}: {error}", path.display()))),
+    };
+    if now - newest <= days * clock::SECS_PER_DAY {
+        return Ok(Removal::Kept);
+    }
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(Removal::Removed(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Removal::Kept),
+        Err(error) => Err(Error(format!("{}: {error}", path.display()))),
+    }
 }

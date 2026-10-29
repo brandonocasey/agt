@@ -154,6 +154,7 @@ fn delete(item: &Item, now: i64) -> Result<Removal> {
             days,
             harness,
         } => super::files::remove(root, &item.path, *days, now, *harness),
+        Action::BrowserProfile => super::files::remove_browser_profile(&item.path, now),
         // `run` signals processes on its own.
         Action::Process(_) => Ok(Removal::Kept),
     }

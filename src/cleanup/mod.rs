@@ -48,9 +48,12 @@ enum Only {
     /// agt's own pre-migration backups and unfinished backup copies.
     Backups,
     /// Long-output copies in `agents/output` untouched for 7 days, and `agents/scratch` and
-    /// Claude Code session scratchpads untouched for 30 days.
+    /// Claude Code session scratchpads untouched for 30 days; browser temp profiles in `/tmp`
+    /// untouched for a day (Playwright artifacts and traces: 7 days).
     Files,
-    /// Processes a gone Claude Code session started, a day or more old.
+    /// Processes a gone Claude Code session started, a day or more old; browser servers and
+    /// pipe-mode browsers after 5 minutes once their parent is gone (adopted by init), with or
+    /// without a session marker, and what they started.
     Processes,
     /// Merged worktrees and branches, other backups, old Codex releases and Playwright
     /// builds: listed, never deleted. `--yes` saves the list to a report.
@@ -106,6 +109,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     if only(Only::Files) {
         plan.output(now)?;
         plan.scratch(now)?;
+        plan.browser_profiles(now)?;
     }
     if only(Only::Processes) {
         plan.processes(now)?;

@@ -52,6 +52,8 @@ pub enum Action {
         dir: PathBuf,
         name: String,
     },
+    /// A browser's temp profile in `/tmp`, which no running process names.
+    BrowserProfile,
     /// A recorded `agt check run` pass.
     Check {
         root: PathBuf,
@@ -518,7 +520,7 @@ impl Plan {
         Ok(())
     }
 
-    /// Processes whose agent session is gone, a day or more old.
+    /// Processes whose agent session is gone, a day or more old; orphan browsers, minutes.
     pub fn processes(&mut self, now: i64) -> Result<()> {
         for orphan in procs::orphans(now)? {
             let reason = procs::reason(&orphan);
@@ -529,6 +531,26 @@ impl Plan {
                 reason,
                 0,
                 Action::Process(orphan.proc),
+            );
+        }
+        Ok(())
+    }
+
+    /// Browser temp profiles in `/tmp` untouched for a day.
+    pub fn browser_profiles(&mut self, now: i64) -> Result<()> {
+        for stale in files::browser_profiles(now, &mut self.warnings)? {
+            let reason = files::reason(
+                &stale,
+                now,
+                files::browser_dir_days(&stale.path).unwrap_or_default(),
+            );
+            self.add(
+                "scratch",
+                stale.path,
+                stale.key,
+                reason,
+                stale.bytes,
+                Action::BrowserProfile,
             );
         }
         Ok(())

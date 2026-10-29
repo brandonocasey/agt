@@ -1737,3 +1737,149 @@ fn repository_storage_reused_checkout_path_gets_a_new_identity() {
         first
     );
 }
+
+#[test]
+fn a_browser_with_a_running_parent_waits_a_day_though_its_session_is_gone() {
+    use std::os::unix::process::CommandExt;
+    let prune = Prune::new();
+    let spawn = |name: &str| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .arg0(name)
+            .args([
+                "--exact",
+                "cleanup::sleeper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("AGT_TEST_SLEEP", "1")
+            .env("CLAUDE_PID", "2000000000")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut browser = spawn("/x/chrome-devtools-mcp");
+    let listed = |child: &std::process::Child, minutes: i64| {
+        let pid = child.id().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let output = prune
+                .env
+                .bin(&prune.env.repo)
+                .args(["cleanup", "--only", "processes"])
+                .env("AGT_NOW", (unix_now() as i64 + minutes * 60).to_string())
+                .env("AGT_CLEANUP_PID", &pid)
+                .output()
+                .unwrap();
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if !keys(&report, "processes").is_empty() || std::time::Instant::now() > deadline {
+                break report;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    // The browser's parent, this test, runs: like any tool of a gone session it waits a day.
+    // (Browsers whose parent is gone wait minutes; the unit tests in `cleanup::procs` cover it.)
+    assert_eq!(
+        keys(&listed(&browser, 10), "processes"),
+        Vec::<String>::new()
+    );
+    let report = listed(&browser, 25 * 60);
+    assert_eq!(keys(&report, "processes"), [browser.id().to_string()]);
+    let reason = report["plan"]["processes"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("running 1 day(s)"), "{reason}");
+    browser.kill().unwrap();
+    browser.wait().unwrap();
+}
+
+#[test]
+fn stale_browser_profiles_in_tmp_are_removed() {
+    let prune = Prune::new();
+    let tmp = prune.env.path("tmp");
+    let profile = tmp.join("playwright_chromiumdev_profile-abc");
+    let other = tmp.join("keep-me");
+    let outside = prune.env.path("outside");
+    for dir in [&profile, &other, &outside] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(profile.join("Cookies"), b"x").unwrap();
+    std::os::unix::fs::symlink(&outside, tmp.join("puppeteer_dev_chrome_profile-link")).unwrap();
+    // A browser whose command line names a profile far past the first 80 characters.
+    let used = tmp.join("puppeteer_dev_chrome_profile-used");
+    fs::create_dir_all(&used).unwrap();
+    let mut browser = {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .arg0(format!(
+                "/x/chrome {} --user-data-dir={}",
+                "--flag ".repeat(30),
+                used.display()
+            ))
+            .args([
+                "--exact",
+                "cleanup::sleeper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("AGT_TEST_SLEEP", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let run = |now: i64, yes: bool| {
+        let mut command = prune.env.bin(&prune.env.repo);
+        command
+            .args(["cleanup", "--only", "files"])
+            .env("AGT_NOW", now.to_string());
+        if yes {
+            command.arg("--yes");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    // A fresh profile may belong to a browser that just started.
+    assert_eq!(
+        keys(&run(unix_now() as i64, false), "scratch"),
+        Vec::<String>::new()
+    );
+    // The browser's command line is readable a moment after the spawn, once it has exec'd.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let stale = loop {
+        let report = run(later(), false);
+        if keys(&report, "scratch").len() == 1 || std::time::Instant::now() > deadline {
+            break report;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(
+        keys(&stale, "scratch"),
+        [profile.to_string_lossy().into_owned()]
+    );
+    // Playwright's artifacts directory is named on no command line, so it waits a week.
+    let artifacts = tmp.join("playwright-artifacts-abc");
+    fs::create_dir_all(&artifacts).unwrap();
+    let three_days = unix_now() as i64 + 3 * DAY;
+    assert_eq!(
+        keys(&run(three_days, false), "scratch"),
+        [profile.to_string_lossy().into_owned()]
+    );
+    assert_eq!(
+        keys(&run(later(), false), "scratch").len(),
+        2,
+        "artifacts go after a week"
+    );
+    run(later(), true);
+    assert!(used.exists(), "a profile a running browser names is kept");
+    browser.kill().unwrap();
+    browser.wait().unwrap();
+    assert!(!profile.exists());
+    assert!(other.exists());
+    assert!(outside.exists());
+    assert!(tmp.join("puppeteer_dev_chrome_profile-link").exists());
+}

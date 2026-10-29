@@ -68,7 +68,7 @@ Environment variables agt reads, or sets for programs it runs:
 | `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
 | `AGT_GH_BIN`, `AGT_GLAB_BIN` | everything that calls a forge | Program to run instead of `gh` or `glab` | test only |
 | `AGT_GIT_BIN`, `AGT_MISE_BIN` | `doctor` | Program to run instead of `git` or `mise` for its version checks; other commands still run `git` | test only |
-| `AGT_CLEANUP_TMP` | `cleanup` | Directory standing in for `/tmp` when looking for session scratch files | test only |
+| `AGT_CLEANUP_TMP` | `cleanup` | Directory standing in for `/tmp` when looking for session scratch files and browser temp profiles | test only |
 | `AGT_CLEANUP_PID` | `cleanup` | Limits the orphan-process sweep to this pid; `0` looks at none | test only |
 
 ## Targets
@@ -489,9 +489,16 @@ for the whole period, so a task that is still writing keeps all of its files:
   user's is skipped with a warning, and nothing is deleted unless every directory above it,
   up to its root, is a real directory of this user. `agents/output` and `agents/scratch`
   themselves may be links (say, to a bigger disk); they are in the user's own cache.
+- `scratch` category, browser temp directories: `puppeteer_dev_chrome_profile-*` and the
+  `playwright_{chromium,firefox,webkit}dev_profile-*` profiles untouched for 1 day, and
+  `playwright-artifacts-*` and `playwright-tracing-*` untouched for 7 days, in `/tmp` (and
+  `$TMPDIR` where that differs). A browser killed before it could clean up leaves them behind.
+  Only real directories of this user are listed, and none that a running process's command line
+  names. Playwright's artifacts and traces directories are named on no command line, hence the
+  longer wait.
 
 `processes` lists the user's own processes that carry `CLAUDE_PID` and are a day or more
-old, whose Claude Code session is gone. A session is gone when its pid no longer runs, or
+old (browser servers: see below), whose Claude Code session is gone. A session is gone when its pid no longer runs, or
 when every `<pid>.json` record in `~/.claude*/sessions` (and `$CLAUDE_CONFIG_DIR/sessions`)
 names a process that started at another time, by its `procStart` (clock ticks on Linux,
 `ps` `lstart` text on macOS). A pid that runs with no record, or with a record that cannot
@@ -500,6 +507,16 @@ tell (no `procStart`, or a time inside a daylight saving shift), is left alone. 
 still running 10 seconds later, each only while its pid still has the planned start time.
 Linux reads `/proc`. macOS hides the environment of Apple's own binaries, such as
 `/bin/sleep`, so those are never found there.
+
+A browser-MCP server (`chrome-devtools-mcp`, `firefox-devtools-mcp`) or a browser driven over a pipe
+(`--remote-debugging-pipe`, `-juggler-pipe`, `--inspector-pipe`) whose parent is gone (adopted by init,
+pid 1) is listed after 5 minutes, with or without `CLAUDE_PID`, so a process a Codex session started
+is found too. Whatever such a process started is listed with it. A browser with a running parent waits
+a day like any other tool: the `chrome-devtools` daemon's Chrome carries the `CLAUDE_PID` of the session
+that started the daemon, though other sessions may still drive it. A command line holding `daemon`
+never counts as a browser server. A parent that is a `systemd --user` manager rather than init is not
+treated as gone. A program that init or a launchd agent runs on purpose with one of these markers
+and no `CLAUDE_PID` would be listed too, so read the dry run before `--yes`.
 
 `manual` lists what cleanup never deletes, in `manual` by section: `branches` (local branches in
 the default branch, not protected and not checked out, as `git -C <repo> branch -d <name>`), for
