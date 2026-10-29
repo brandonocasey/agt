@@ -133,6 +133,32 @@ fn view_reads_the_pr_of_the_current_branch() {
 }
 
 #[test]
+fn an_old_issue_tracker_for_origin_leaves_origin_for_pull_requests() {
+    let env = github();
+    env.write_config(
+        "[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"o/r\"\n",
+    );
+    gh_list(&env, "feat", &[node(7, &json!({}))]);
+    gh_view(&env, 7, &json!({}));
+    assert_eq!(ok(&env, &["view"])["number"], 7);
+}
+
+#[test]
+fn an_origin_only_the_login_identifies_wins_over_a_known_host_remote() {
+    let env = setup("https://ghe.example.org/o/r.git");
+    env.git(&[
+        "remote",
+        "add",
+        "upstream",
+        "https://github.com/org/other.git",
+    ]);
+    env.respond(&["auth", "status", "--hostname", "ghe.example.org"], "");
+    gh_list(&env, "feat", &[node(7, &json!({}))]);
+    gh_view(&env, 7, &json!({}));
+    assert_eq!(ok(&env, &["view"])["number"], 7);
+}
+
+#[test]
 fn view_without_a_pr_names_the_branch() {
     let env = github();
     gh_list(&env, "feat", &[]);

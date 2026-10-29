@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::core::config::{Config, Kind};
 use crate::core::error::{Error, Result};
-use crate::forge::select::Selected;
+use crate::forge::select::{self, Selected};
 use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::{Transport, TransportError};
 use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
@@ -84,8 +84,11 @@ impl Source {
     }
 
     /// Every tracker that serves pull requests, one source each.
+    ///
+    /// Besides them, `origin` when only a CLI login identifies its host (GitHub Enterprise, a
+    /// self-hosted GitLab), as for every other command acting on pull requests.
     pub fn trackers(repo: &Repo, config: &Config) -> Result<Vec<Self>> {
-        Ok(config
+        let mut sources: Vec<Self> = config
             .trackers_for(repo, Kind::PullRequests)?
             .into_iter()
             .map(|tracker| Self {
@@ -94,7 +97,20 @@ impl Source {
                 repo: tracker.repo,
                 remote: tracker.remote,
             })
-            .collect())
+            .collect();
+        if let Some(origin) = select::origin_fallback(repo, config, Kind::PullRequests)?
+            && !sources.iter().any(|source| {
+                source.host.eq_ignore_ascii_case(&origin.host)
+                    && source.repo.eq_ignore_ascii_case(&origin.repo)
+            })
+            && let Ok(source) = Self::of(&origin)
+        {
+            sources.push(Self {
+                remote: Some("origin".into()),
+                ..source
+            });
+        }
+        Ok(sources)
     }
 
     /// Every PR/MR of the repository whose source branch is `branch`, all states, all pages.

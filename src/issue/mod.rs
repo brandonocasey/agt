@@ -104,7 +104,17 @@ pub fn run(cli: Cli) -> Result<Output> {
                 })
                 .cloned()
                 .collect();
-            value["push"] = if healthy.is_empty() {
+            // With `--tracker`, the trackers it names may all have failed: nothing is left to push.
+            let all_named_failed =
+                trackers::configured(&destinations, filter)?
+                    .iter()
+                    .all(|tracker| {
+                        synced
+                            .failed
+                            .iter()
+                            .any(|(name, _)| *name == tracker.name())
+                    });
+            value["push"] = if healthy.is_empty() || all_named_failed {
                 serde_json::json!({ "dry_run": false, "trackers": [] })
             } else {
                 push_after_pull(&store, &healthy, filter)?

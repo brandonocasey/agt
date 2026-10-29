@@ -2,7 +2,8 @@
 
 use crate::core::config::{Config, Kind, Mode, RemoteSet, Tracker, forge_of};
 use crate::core::error::{Error, Result, fail};
-use crate::forge::PrRef;
+use crate::forge::service;
+use crate::forge::{PrRef, hosts};
 use crate::git::{RemoteLocation, Repo};
 
 /// The repository a PR/MR command works on, with the modes that apply to it.
@@ -115,6 +116,14 @@ pub fn select_tracker(
     {
         return Ok(Some(Selected::of_tracker(origin)));
     }
+    // An origin only a CLI login identifies (GitHub Enterprise, a self-hosted GitLab) is still
+    // origin, and wins over other remotes.
+    if !trackers.is_empty()
+        && let Some(origin) = origin_only(config, kind, &locations)
+        && service::detect(&origin.host, hosts::named(&origin.host)?, None).is_some()
+    {
+        return Ok(Some(origin));
+    }
     match trackers.as_slice() {
         [one] => Ok(Some(Selected::of_tracker(one))),
         [] => Ok(origin_only(config, kind, &locations)),
@@ -138,6 +147,12 @@ fn origin_only(config: &Config, kind: Kind, locations: &[RemoteLocation]) -> Opt
         return None;
     }
     Some(Selected::bare(config, kind, &origin.host, &origin.repo))
+}
+
+/// `origin` as a bare selection when nothing configured it and a CLI login, not its host name,
+/// is what identifies it; see [`origin_only`].
+pub fn origin_fallback(repo: &Repo, config: &Config, kind: Kind) -> Result<Option<Selected>> {
+    Ok(origin_only(config, kind, &repo.remote_locations()?))
 }
 
 /// Like [`select_tracker`], but nothing to pick from is an error.

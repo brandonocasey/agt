@@ -83,6 +83,30 @@ fn one_failing_tracker_is_named_and_the_others_still_sync() {
 }
 
 #[test]
+fn a_named_tracker_that_fails_to_pull_is_reported_not_hidden_by_the_push_step() {
+    let env = two_remotes();
+    let github: &dyn IssueFake = &GithubIssues;
+    github.serve(&env, &[Spec::new(1, "One")]);
+    let gitlab: &dyn IssueFake = &GitlabIssues;
+    env.fail_call_with(
+        &strs(&gitlab.list_call("2026-07-12T10%3A00%3A00Z")),
+        "HTTP 500",
+    );
+    env.write_config(&both_all(""));
+    let output = env.issue_exec(&["--tracker", "g/p", "sync"], "", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("issue sync failed for 1"), "{stderr}");
+    assert!(stderr.contains("gitlab.com/g/p"), "{stderr}");
+    assert!(
+        !stderr.contains("no configured tracker matches"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["trackers"][0]["error"].is_string(), "{report}");
+}
+
+#[test]
 fn sync_reports_the_trackers_that_keep_changes_local_when_only_some_do() {
     let env = two_remotes();
     let github: &dyn IssueFake = &GithubIssues;

@@ -171,6 +171,10 @@ pub struct TrackerEntry {
     pub issues: KindSetting,
     #[serde(default)]
     pub pull_requests: KindSetting,
+    /// Set by the `[[issues.tracker]]` migration: the entry configures issues only, so it never
+    /// adds a tracker to the pull request list nor changes a remote's entry there.
+    #[serde(default)]
+    pub legacy_issues_only: bool,
 }
 
 fn enabled() -> bool {
@@ -519,6 +523,9 @@ impl Config {
             });
         }
         for entry in &self.tracker {
+            if kind == Kind::PullRequests && entry.legacy_issues_only {
+                continue;
+            }
             let remote = remotes
                 .iter()
                 .find(|remote| same(&remote.host, &remote.repo, &entry.host, &entry.repo));
@@ -822,7 +829,7 @@ fn upgrade_tracker(entry: toml::Value, path: &Path) -> Result<toml::Value> {
     if !kind.is_empty() {
         old.insert("issues".into(), toml::Value::Table(kind));
     }
-    old.insert("pull_requests".into(), toml::Value::Boolean(false));
+    old.insert("legacy_issues_only".into(), toml::Value::Boolean(true));
     Ok(toml::Value::Table(old))
 }
 
@@ -1209,6 +1216,27 @@ mod tests {
         assert_eq!(issues[1].scope, Scope::Involved);
         assert_eq!(issues[1].push, None);
         assert!(config.trackers(Kind::PullRequests, &[]).is_empty());
+    }
+
+    #[test]
+    fn an_old_issue_tracker_keeps_the_remote_entry_for_pull_requests() {
+        let config = parse(
+            "[[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"me/agt\"\n\
+             [[issues.tracker]]\nforge = \"github\"\nhost = \"github.com\"\nrepo = \"stranger/else\"\n",
+        );
+        let remotes = fork();
+        assert_eq!(
+            names(&config.trackers(Kind::PullRequests, &remotes)),
+            ["github.com/me/agt", "github.com/org/agt"]
+        );
+        assert_eq!(
+            names(&config.trackers(Kind::Issues, &remotes)),
+            [
+                "github.com/me/agt",
+                "github.com/org/agt",
+                "github.com/stranger/else"
+            ]
+        );
     }
 
     #[test]

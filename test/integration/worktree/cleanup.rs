@@ -305,6 +305,24 @@ fn a_pull_request_merged_on_another_remote_lands_the_branch() {
 }
 
 #[test]
+fn an_origin_only_the_login_identifies_is_still_looked_up() {
+    let site = Site::at("git@ghe.example.org:acme/app.git");
+    let wt = site.branch("sq");
+    let tip = site.tip("sq");
+    site.squash("sq");
+    site.env
+        .git(&["remote", "add", "upstream", "git@github.com:acme/up.git"]);
+    site.env
+        .respond(&["auth", "status", "--hostname", "ghe.example.org"], "");
+    site.pulls("sq", &[merged(7, "sq", &tip)]);
+    site.pulls_of("up", "sq", &[]);
+
+    let report = site.run(&["--yes"]);
+    assert!(!wt.exists(), "{report}");
+    assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
+}
+
+#[test]
 fn remotes_origin_looks_the_branch_up_on_origin_only() {
     let site = Site::new();
     site.env.write_config("[sync]\nremotes = \"origin\"\n");
