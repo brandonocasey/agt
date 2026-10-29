@@ -1577,7 +1577,7 @@ previews still work.
 Commands that act on one PR/MR choose the tracker in this order: `--remote <name|host/repo>`,
 the repository of the PR/MR URL given, the tracker a synced review target stores, the tracker
 of `origin`, the only tracker. A review target already synced with a PR/MR keeps it: `--remote`
-must name that PR/MR's repository, or a fork of it (same host and project name), or the
+must name that PR/MR's repository or one on the same host with the same project name (a fork or its parent; the stored PR/MR is used either way), or the
 command fails, and a PR/MR URL with a `--remote` for
 another repository also fails. When several remain and none is `origin`, the command fails and
 lists the `--remote` choices. An `origin` on a host only a `gh` or `glab` login identifies

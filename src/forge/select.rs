@@ -128,12 +128,16 @@ pub fn select_tracker(
         [one] => Ok(Some(Selected::of_tracker(one))),
         [] => Ok(origin_only(config, kind, &locations)),
         _ => fail(format!(
-            "several trackers serve {} and none is origin; pass --remote with {}",
+            "several trackers serve {} {AMBIGUOUS}; pass --remote with {}",
             kind_name(kind),
             choices(&trackers)
         )),
     }
 }
+
+/// Part of the error [`select_tracker`] gives when it cannot choose, so a caller that offers
+/// no `--remote` can say so in its own words.
+pub const AMBIGUOUS: &str = "and none is origin";
 
 /// `origin` as a tracker nothing configured, which keeps a repository on a host agt cannot
 /// identify without asking a CLI working as before. A host agt knows that has no tracker was

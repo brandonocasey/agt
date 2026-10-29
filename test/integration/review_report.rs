@@ -613,6 +613,41 @@ fn a_url_matches_origin_in_any_case() {
 }
 
 #[test]
+fn a_url_asks_the_tracker_it_names() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "origin", "git@github.com:me/app.git"]);
+    env.git(&["remote", "add", "upstream", "git@github.com:acme/app.git"]);
+    env.git(&["switch", "-q", "main"]);
+    respond_one_pull(
+        &env,
+        "acme",
+        9,
+        Some(gh_pull(9, "feat", "2026-10-20T08:00:00Z")),
+    );
+    let status = success(&agt(
+        &env,
+        &["status"],
+        &["https://github.com/acme/app/pull/9"],
+        &[],
+    ));
+    assert_eq!(status["branch"], "feat");
+}
+
+#[test]
+fn the_summary_says_when_no_tracker_can_be_chosen() {
+    let (env, _, _) = reviewed_on(Env::with_branch());
+    env.git(&["remote", "add", "upstream", "git@github.com:acme/app.git"]);
+    env.git(&["remote", "add", "fork", "git@github.com:me/app.git"]);
+    let summary = success(&agt(&env, &["status"], &["--all"], &[]));
+    let note = summary["note"].as_str().unwrap_or_default();
+    assert!(
+        note.starts_with("several pull request trackers and none is origin"),
+        "{summary}"
+    );
+    assert!(env.forge_calls().is_empty(), "{:?}", env.forge_calls());
+}
+
+#[test]
 fn sync_with_an_mr_name_imports_that_mr() {
     let setup = Setup::synced_branch("git@github.com:me/repo.git");
     let env = &setup.env;

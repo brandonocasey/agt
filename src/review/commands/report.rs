@@ -539,16 +539,29 @@ fn rows(ctx: &Ctx) -> Result<(Vec<Row>, Option<String>)> {
             Some("offline: PRs/MRs come from stored reviews".to_owned()),
         )
     } else {
-        match Source::chosen(&ctx.repo).and_then(|origin| match origin {
-            Some(origin) => origin.open_pulls().map(|pulls| Some((origin, pulls))),
-            None => Ok(None),
+        // Choosing the tracker asks no forge: failing there (several trackers and none is
+        // origin) is no forge outage, and `--remote` cannot pick one for `--all`.
+        let chosen = Source::chosen(&ctx.repo);
+        match chosen.map(|origin| {
+            origin.map(|origin| origin.open_pulls().map(|pulls| (origin, pulls)))
         }) {
-            Ok(Some((origin, pulls))) => (Some((origin, pulls)), None),
+            Err(why) if why.0.contains(crate::forge::select::AMBIGUOUS) => (
+                None,
+                Some(
+                    "several pull request trackers and none is origin: PRs/MRs come from stored reviews"
+                        .to_owned(),
+                ),
+            ),
+            Err(why) => (
+                None,
+                Some(format!("{why}: PRs/MRs come from stored reviews")),
+            ),
+            Ok(Some(Ok((origin, pulls)))) => (Some((origin, pulls)), None),
             Ok(None) => (
                 None,
                 Some("no pull request tracker: PRs/MRs come from stored reviews".to_owned()),
             ),
-            Err(why) => (
+            Ok(Some(Err(why))) => (
                 None,
                 Some(format!(
                     "forge unavailable ({why}): PRs/MRs come from stored reviews"
