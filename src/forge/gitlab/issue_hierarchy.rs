@@ -10,7 +10,7 @@ use crate::forge::service::{IssueSubject, Request, Service, Var};
 const QUERY: &str = "query IssueHierarchy($path:ID!,$iid:String!,$after:String){project(fullPath:$path){workItems(first:1,iid:$iid){nodes{id iid webUrl workItemType{name} widgets{type ... on WorkItemWidgetHierarchy{parent{id iid project{fullPath}} children(first:100,after:$after){nodes{id iid project{fullPath}} pageInfo{hasNextPage endCursor}}}}}}}}";
 
 impl Gitlab {
-    fn hierarchy_page(&self, subject: IssueSubject, cursor: Option<&str>) -> Result<Value> {
+    fn hierarchy_page(&self, subject: IssueSubject, cursor: Option<&str>) -> Result<Option<Value>> {
         let mut vars = vec![
             Var::text("path", subject.repo),
             Var::text("iid", subject.number.to_string()),
@@ -20,23 +20,24 @@ impl Gitlab {
         }
         vars.push(Var::text("query", QUERY));
         let response = self.transport().json(&Request::graphql(vars))?;
-        response
-            .pointer("/data/project/workItems/nodes/0")
-            .cloned()
-            .ok_or_else(|| {
-                Error(format!(
-                    "GitLab returned no work item {}#{}",
-                    subject.repo, subject.number
-                ))
-            })
+        let nodes = response
+            .pointer("/data/project/workItems/nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error("GitLab returned no work items list".into()))?;
+        Ok(nodes.first().cloned())
     }
 
-    pub(super) fn fetch_hierarchy(&self, subject: IssueSubject) -> Result<IssueHierarchy> {
+    pub(super) fn fetch_hierarchy(&self, subject: IssueSubject) -> Result<Option<IssueHierarchy>> {
         let mut result = IssueHierarchy::default();
         let mut cursor = None;
         let mut seen = HashSet::new();
         loop {
-            let item = self.hierarchy_page(subject, cursor.as_deref())?;
+            let Some(item) = self.hierarchy_page(subject, cursor.as_deref())? else {
+                if cursor.is_some() {
+                    return fail("GitLab work item disappeared while reading its hierarchy");
+                }
+                return Ok(None);
+            };
             result.task = item
                 .pointer("/workItemType/name")
                 .and_then(Value::as_str)
@@ -62,7 +63,7 @@ impl Gitlab {
                 .pointer("/children/pageInfo/hasNextPage")
                 .and_then(Value::as_bool)
             {
-                Some(false) => return Ok(result),
+                Some(false) => return Ok(Some(result)),
                 Some(true) => {
                     let next = widget
                         .pointer("/children/pageInfo/endCursor")
@@ -85,7 +86,9 @@ impl Gitlab {
         parent: Option<&str>,
         _previous: Option<&str>,
     ) -> Result<Request> {
-        let child = self.hierarchy_page(subject, None)?;
+        let child = self
+            .hierarchy_page(subject, None)?
+            .ok_or_else(|| Error("GitLab child is no longer available".into()))?;
         if child.pointer("/workItemType/name").and_then(Value::as_str) != Some("Task") {
             return fail(
                 "GitLab children must be Tasks; convert the Issue to a Task on GitLab, then run `agt issue sync`",
@@ -96,7 +99,9 @@ impl Gitlab {
             .ok_or_else(|| Error("GitLab work item has no id".into()))?;
         let mut vars = vec![Var::text("child", id)];
         if let Some(parent) = parent {
-            let parent = self.hierarchy_page(parent_subject(parent, subject.repo)?, None)?;
+            let parent = self
+                .hierarchy_page(parent_subject(parent, subject.repo)?, None)?
+                .ok_or_else(|| Error("GitLab parent is no longer available".into()))?;
             if parent.pointer("/workItemType/name").and_then(Value::as_str) != Some("Issue") {
                 return fail("a GitLab Task needs an Issue as its parent");
             }

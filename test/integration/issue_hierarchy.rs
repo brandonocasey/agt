@@ -144,7 +144,15 @@ fn parent_call(
     if fake.name() == "github" {
         gh_write(
             if parent.is_some() { "POST" } else { "DELETE" },
-            &format!("repos/o/r/issues/{}/sub_issues", parent.unwrap_or(previous)),
+            &format!(
+                "repos/o/r/issues/{}/{}",
+                parent.unwrap_or(previous),
+                if parent.is_some() {
+                    "sub_issues"
+                } else {
+                    "sub_issue"
+                }
+            ),
         )
     } else {
         args(&[
@@ -204,6 +212,11 @@ fn reparent_and_remove(fake: &dyn IssueFake) {
     env.issue(&["edit", "2", "--remove-parent"]);
     accept_parent(&env, fake, 2, None, 3);
     let report = env.issue(&["push"]);
+    assert_eq!(report["trackers"][0]["failed"], json!([]), "{report}");
+    assert_eq!(
+        report["trackers"][0]["sent"][0]["kind"], "parent",
+        "{report}"
+    );
     assert_eq!(
         report["trackers"][0]["sent"][0]["parent"],
         Value::Null,
@@ -699,4 +712,243 @@ fn force_publishes_an_unpublished_conflicting_parent_first() {
         "{report}"
     );
     assert_eq!(env.issue(&["show", "2"])["parent"], "o/r#4");
+}
+
+fn dry_run_refetch_preserves_queued_state(fake: &dyn IssueFake) {
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[Spec::new(1, "Original")]);
+    env.issue(&["sync"]);
+    env.issue(&["edit", "1", "--title", "Local title"]);
+    fake.serve_issue(
+        &env,
+        &Spec::new(1, "Remote title")
+            .updated("2026-10-11T12:00:00Z")
+            .comment(9, "bob", "New remote comment"),
+    );
+    env.write_config(&fake.config(true));
+    let before = env.issue_doc(fake.tracker(), "1");
+    let report = env.issue(&["push", "--dry-run"]);
+    assert_eq!(
+        report["trackers"][0]["conflicts"][0]["fields"],
+        json!(["title"])
+    );
+    assert!(env.forge_writes(fake).is_empty());
+    assert_eq!(
+        env.issue_doc(fake.tracker(), "1"),
+        before,
+        "a dry-run refetch must not persist any merge"
+    );
+}
+#[test]
+fn github_dry_run_refetch_preserves_queued_state() {
+    dry_run_refetch_preserves_queued_state(&Github);
+}
+#[test]
+fn gitlab_dry_run_refetch_preserves_queued_state() {
+    dry_run_refetch_preserves_queued_state(&Gitlab);
+}
+
+#[test]
+fn interrupted_attachment_cannot_orphan_children_by_discarding_the_parent() {
+    use std::fs;
+    let fake: &dyn IssueFake = &Github;
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[]);
+    env.issue(&["sync"]);
+    let parent = env.issue(&["create", "--title", "Parent"]);
+    let child = env.issue(&["create", "--title", "Child", "--parent", key(&parent)]);
+    let mut doc = env.issue_doc("local", key(&child));
+    doc["tracker"] = json!(fake.tracker());
+    let source = env
+        .issue_state()
+        .join("local")
+        .join(format!("{}.json", key(&child)));
+    let destination = env
+        .issue_state()
+        .join(fake.tracker())
+        .join(format!("{}.json", key(&child)));
+    fs::write(&source, doc.to_string()).unwrap();
+    fs::rename(&source, &destination).unwrap();
+    assert!(
+        env.issue_fail(&["discard", key(&parent)])
+            .contains("with children")
+    );
+    assert_eq!(env.issue(&["show", key(&parent)])["key"], parent["key"]);
+    assert!(destination.exists());
+}
+
+fn an_explicit_parent_edit_replaces_a_saved_conflict(fake: &dyn IssueFake, remove: bool) {
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(
+        &env,
+        &[
+            Spec::new(1, "Parent"),
+            Spec::new(2, "Child").parent(1),
+            Spec::new(3, "Remote parent"),
+            Spec::new(4, "Chosen parent"),
+        ],
+    );
+    env.issue(&["sync"]);
+    env.issue(&["edit", "2", "--remove-parent"]);
+    fake.serve_since(
+        &env,
+        "2026-10-10T09%3A55%3A00Z",
+        &[
+            Spec::new(1, "Parent"),
+            Spec::new(2, "Child").parent(3),
+            Spec::new(3, "Remote parent"),
+            Spec::new(4, "Chosen parent"),
+        ],
+    );
+    env.issue(&["sync"]);
+    assert_eq!(env.issue(&["show", "2"])["conflicts"][0]["field"], "parent");
+    env.issue(if remove {
+        &["edit", "2", "--remove-parent"]
+    } else {
+        &["edit", "2", "--parent", "4"]
+    });
+    env.write_config(&fake.config(true));
+    let chosen = if remove { None } else { Some(4) };
+    accept_parent(&env, fake, 2, chosen, 3);
+    let report = env.issue(&["push"]);
+    assert_eq!(report["trackers"][0]["failed"], json!([]), "{report}");
+    assert_eq!(
+        report["trackers"][0]["sent"][0]["kind"], "parent",
+        "{report}"
+    );
+    let shown = env.issue(&["show", "2"]);
+    assert_eq!(
+        shown["parent"],
+        json!(chosen.map(|number| format!("{}#{number}", fake.repo())))
+    );
+    assert_eq!(shown["conflicts"], json!([]));
+}
+#[test]
+fn github_explicit_reparent_replaces_a_conflict() {
+    an_explicit_parent_edit_replaces_a_saved_conflict(&Github, false);
+}
+#[test]
+fn gitlab_explicit_reparent_replaces_a_conflict() {
+    an_explicit_parent_edit_replaces_a_saved_conflict(&Gitlab, false);
+}
+#[test]
+fn github_explicit_detach_replaces_a_conflict() {
+    an_explicit_parent_edit_replaces_a_saved_conflict(&Github, true);
+}
+#[test]
+fn gitlab_explicit_detach_replaces_a_conflict() {
+    an_explicit_parent_edit_replaces_a_saved_conflict(&Gitlab, true);
+}
+
+fn unavailable_stored_issue_does_not_block_sync(fake: &dyn IssueFake) {
+    use crate::support::forge::argv::gh_get;
+    use crate::support::strs;
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[Spec::new(1, "Unavailable"), Spec::new(2, "Other")]);
+    env.issue(&["sync"]);
+    let before = env.issue_doc(fake.tracker(), "1");
+    env.issue(&["edit", "2", "--title", "Queued title"]);
+    fake.serve_since(
+        &env,
+        "2026-10-10T09%3A55%3A00Z",
+        &[Spec::new(2, "Other").updated("2026-10-11T12:00:00Z")],
+    );
+    if fake.name() == "github" {
+        use crate::support::forge::argv::gh_paginate;
+        env.fail_call_with(
+            &strs(&gh_paginate("repos/o/r/issues/1/sub_issues?per_page=100")),
+            "gh: Not Found (HTTP 404)",
+        );
+        env.fail_call_with(
+            &strs(&gh_get("repos/o/r/issues/1")),
+            "gh: Not Found (HTTP 404)",
+        );
+    } else {
+        env.respond(
+            &[
+                "api",
+                "graphql",
+                "-f",
+                "path=g/p",
+                "-f",
+                "iid=1",
+                "-f",
+                "query=IssueHierarchy",
+            ],
+            r#"{"data":{"project":{"workItems":{"nodes":[]}}}}"#,
+        );
+    }
+    fake.accept_update(&env, 2);
+    env.write_config(&fake.config(true));
+    let report = env.issue(&["sync"]);
+    assert_eq!(
+        report["trackers"][0]["unavailable"],
+        json!([format!("{}#1", fake.repo())]),
+        "{report}"
+    );
+    assert_eq!(
+        report["push"]["trackers"][0]["sent"][0]["kind"], "update",
+        "{report}"
+    );
+    assert_eq!(env.issue_doc(fake.tracker(), "1"), before);
+    fake.serve_since(&env, "2026-10-11T11%3A55%3A00Z", &[]);
+    let report = env.issue(&["sync"]);
+    assert_eq!(
+        report["trackers"][0]["unavailable"],
+        json!([format!("{}#1", fake.repo())])
+    );
+    assert_eq!(fake.count(&env, &fake.update_call(2)), 1);
+}
+#[test]
+fn github_unavailable_issue_does_not_block_sync() {
+    unavailable_stored_issue_does_not_block_sync(&Github);
+}
+#[test]
+fn gitlab_unavailable_issue_does_not_block_sync() {
+    unavailable_stored_issue_does_not_block_sync(&Gitlab);
+}
+
+fn broken_hierarchy_routes_are_not_treated_as_missing_issues(fake: &dyn IssueFake) {
+    use crate::support::forge::argv::gh_paginate;
+    use crate::support::strs;
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[Spec::new(1, "Visible issue")]);
+    env.issue(&["sync"]);
+    fake.serve_since(&env, "2026-10-10T09%3A55%3A00Z", &[]);
+    if fake.name() == "github" {
+        env.fail_call_with(
+            &strs(&gh_paginate("repos/o/r/issues/1/sub_issues?per_page=100")),
+            "gh: Not Found (HTTP 404)",
+        );
+    } else {
+        env.respond(
+            &[
+                "api",
+                "graphql",
+                "-f",
+                "path=g/p",
+                "-f",
+                "iid=1",
+                "-f",
+                "query=IssueHierarchy",
+            ],
+            r#"{"data":{"project":{"workItems":{"nodes":null}}}}"#,
+        );
+    }
+    let before = env.issue_doc(fake.tracker(), "1");
+    env.issue_fail(&["sync"]);
+    assert_eq!(env.issue_doc(fake.tracker(), "1"), before);
+}
+#[test]
+fn github_unsupported_hierarchy_endpoint_is_not_a_missing_issue() {
+    broken_hierarchy_routes_are_not_treated_as_missing_issues(&Github);
+}
+#[test]
+fn gitlab_malformed_hierarchy_is_not_a_missing_issue() {
+    broken_hierarchy_routes_are_not_treated_as_missing_issues(&Gitlab);
 }

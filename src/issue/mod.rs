@@ -88,10 +88,11 @@ pub fn run(cli: Cli) -> Result<Output> {
     if matches!(cli.command, Command::Sync | Command::Push { .. }) {
         crate::forge::auto::Offline::current().forbid("issue sync and push")?;
     }
-    let _hierarchy_lock = if matches!(
-        cli.command,
-        Command::Create(_) | Command::Edit(_) | Command::Discard { .. }
-    ) {
+    let publishes = matches!(
+        &cli.command,
+        Command::Create(_) | Command::Edit(_) | Command::Comment { private: false, .. }
+    ) || matches!(&cli.command, Command::Link(args) if args.comment);
+    let _hierarchy_lock = if publishes || matches!(cli.command, Command::Discard { .. }) {
         Some(store.publish_lock(store.root(), "hierarchy")?)
     } else {
         None
@@ -187,11 +188,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             )?
         }
     };
-    if matches!(
-        &cli.command,
-        Command::Create(_) | Command::Edit(_) | Command::Comment { private: false, .. }
-    ) || matches!(&cli.command, Command::Link(args) if args.comment)
-    {
+    if publishes {
         auto::push_changed(
             &store,
             &repo,

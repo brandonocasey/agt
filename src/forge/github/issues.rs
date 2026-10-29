@@ -95,7 +95,10 @@ impl IssueService for Github {
         })
     }
 
-    fn hierarchy(&self, subject: IssueSubject) -> Result<crate::forge::issue::IssueHierarchy> {
+    fn hierarchy(
+        &self,
+        subject: IssueSubject,
+    ) -> Result<Option<crate::forge::issue::IssueHierarchy>> {
         self.fetch_hierarchy(subject)
     }
 

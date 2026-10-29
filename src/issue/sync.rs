@@ -87,10 +87,17 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
                 .as_ref()
                 .is_some_and(|remote| remote.updated_at == data.updated_at)
         });
-        let mut hierarchy = service.hierarchy(IssueSubject {
-            repo: &tracker.doc.repo,
-            number: data.number,
-        })?;
+        let mut hierarchy = service
+            .hierarchy(IssueSubject {
+                repo: &tracker.doc.repo,
+                number: data.number,
+            })?
+            .ok_or_else(|| {
+                Error(format!(
+                    "listed issue {}#{} is no longer available; retry sync",
+                    tracker.doc.repo, data.number
+                ))
+            })?;
         hierarchy.parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
         if current {
             let count = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
@@ -129,15 +136,20 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
     let listed_numbers: std::collections::HashSet<_> =
         listed.iter().map(|data| data.number).collect();
     let mut hierarchy_refreshed = listed.len();
+    let mut unavailable = Vec::new();
     for existing in index.issues().filter(|issue| {
         issue
             .number
             .is_some_and(|number| !listed_numbers.contains(&number))
     }) {
-        let hierarchy = service.hierarchy(IssueSubject {
+        let Some(hierarchy) = service.hierarchy(IssueSubject {
             repo: &tracker.doc.repo,
             number: existing.number.unwrap(),
-        })?;
+        })?
+        else {
+            unavailable.push(existing.key.clone());
+            continue;
+        };
         let parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
         conflicts += store.update_existing_doc(
             &tracker.dir,
@@ -151,6 +163,7 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
         )?;
         hierarchy_refreshed += 1;
     }
+    unavailable.sort();
     let newest = listed.iter().map(|data| data.updated_at.clone()).max();
     store.update_doc(
         &tracker.dir,
@@ -170,6 +183,7 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
         "tracker": tracker.doc.key,
         "listed": listed.len(),
         "hierarchy_refreshed": hierarchy_refreshed,
+        "unavailable": unavailable,
         "new": new,
         "updated": updated,
         "unchanged": unchanged,

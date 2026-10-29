@@ -344,7 +344,7 @@ pub trait IssueService: Service {
     fn list_changed(&self, query: &ListQuery) -> Result<Vec<IssueData>>;
     /// The issue, its comments and the PRs/MRs the host links to it.
     fn fetch_issue(&self, subject: IssueSubject) -> Result<IssueFetched>;
-    fn hierarchy(&self, subject: IssueSubject) -> Result<IssueHierarchy>;
+    fn hierarchy(&self, subject: IssueSubject) -> Result<Option<IssueHierarchy>>;
     fn set_parent(
         &self,
         subject: IssueSubject,

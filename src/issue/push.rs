@@ -283,22 +283,20 @@ impl Push<'_> {
 
     fn refetch(&mut self, name: &str, doc: &mut Issue) -> Result<()> {
         let mut fetched = self.service().fetch_issue(self.subject(doc)?)?;
-        let hierarchy = self.service().hierarchy(self.subject(doc)?)?;
+        let hierarchy = self
+            .service()
+            .hierarchy(self.subject(doc)?)?
+            .ok_or_else(|| Error(format!("issue {} is no longer available", doc.key)))?;
         fetched.issue.parent = hierarchy
             .parent
             .map(|key| self.index.canonical(&key).to_owned());
         fetched.issue.task = hierarchy.task;
         let now = clock::now()?;
         let me = self.login.clone();
-        let index = &self.index;
-        self.store
-            .update_existing_doc(&self.tracker.dir, name, |issue: &mut Issue| {
-                index.normalize(issue);
-                issue.sub_issues.clone_from(&hierarchy.children);
-                merge::apply(issue, &fetched, &me, &now);
-                *doc = issue.clone();
-                Ok(())
-            })
+        self.mutate(name, doc, |issue| {
+            issue.sub_issues.clone_from(&hierarchy.children);
+            merge::apply(issue, &fetched, &me, &now);
+        })
     }
 
     /// Records a failed write on the issue and in the report. A refusal is final until the

@@ -192,3 +192,11 @@ impl Index {
         Ok(ordered)
     }
 }
+
+pub(super) fn is_referenced(store: &Store, key: &str) -> Result<bool> {
+    let mut issues = Vec::new();
+    for dir in store.child_dirs()? {
+        issues.extend(store.docs::<Issue>(&dir, &[TRACKER_FILE])?);
+    }
+    Ok(super::prune::parents(&issues).contains(key))
+}

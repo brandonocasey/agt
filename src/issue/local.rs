@@ -231,6 +231,12 @@ pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Valu
         if args.remove_parent {
             issue.fields.parent = None;
         }
+        if args.parent.is_some() || args.remove_parent {
+            issue
+                .conflicts
+                .retain(|conflict| conflict.field != "parent");
+            issue.errors.retain(|error| error.what != "parent");
+        }
 
         if let Some(title) = title {
             issue.fields.title = title.trim().to_owned();
@@ -426,7 +432,7 @@ pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> 
     };
     let name = issue.doc_name();
     if issue.number.is_none() {
-        if Index::load(store, &tracker)?.has_children(&issue.key) {
+        if super::hierarchy::is_referenced(store, &issue.key)? {
             return fail(
                 "cannot discard an issue with children; reparent or remove its children first",
             );

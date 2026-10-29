@@ -1650,7 +1650,7 @@ opt into remote access independently of automatic settings. `--offline` and
 
 | Command | What it does |
 | --- | --- |
-| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Refreshes hierarchy for every stored remote issue, even outside the changed listing; unchanged issue fields are skipped. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts`, `hierarchy_refreshed` per tracker. |
+| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Refreshes hierarchy for every stored remote issue, even outside the changed listing; unchanged issue fields are skipped. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts`, `hierarchy_refreshed`, `unavailable` per tracker. |
 | `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending] [--parent KEY] [--text T] [--pr <n\|url>] [--branch B] [--title T]` | Summaries; `pending` is whether anything is queued for the issue. `--state` defaults to `open`, or to `all` when `--text`, `--pr`, `--branch`, `--title` or `--parent` is given. `--parent` selects direct children. `--text` is a case-insensitive match over title, body, comments and notes; `matched` says where. `--pr`, `--branch` and `--title` look issues up: issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which; an issue that matches any of the three lookups is kept. All filters combine with AND. |
 | `show <key>` | The issue, its `parent`, direct `sub_issues` keys, comments, links, notes, what is queued (`queued`), conflicts and errors. |
 | `status` | Per tracker: counts, issues with queued changes, conflicts, errors, `push` and the last sync. |
@@ -1688,6 +1688,8 @@ Parent relationships are queued and sync with other writable issue data.
 Private notes and local PR/branch links remain private.
 Unpublished ancestors are created before children; a failed parent create leaves its children queued.
 Original local keys still resolve after publication.
+Unavailable stored issues keep their cached records and appear in sync's `unavailable` list.
+An explicit parent edit after a conflict replaces that saved parent choice.
 Parent changes use three-way merging, conflicts, `push --force`, and `discard` like other scalar fields.
 A lost parent-update response is reconciled against the remote relationship before retrying.
 A dry run shows available requests; linking a new child waits for its create response's number.

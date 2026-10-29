@@ -319,6 +319,9 @@ impl dyn IssueFake + '_ {
             let path = format!("repos/{}/issues/{}", self.repo(), spec.number);
             let call = gh_get(&format!("{path}/parent"));
             if let Some(parent) = spec.parent {
+                if env.forge_file(&strs(&call), "fail").exists() {
+                    env.pass_call(&strs(&call));
+                }
                 env.respond(&strs(&call), &json!({"number":parent,"html_url":format!("https://github.com/{}/issues/{parent}",self.repo())}).to_string());
             } else {
                 env.fail_call_with(&strs(&call), "gh: Not Found (HTTP 404)");

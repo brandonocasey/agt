@@ -136,6 +136,7 @@ fn attach(
 }
 
 pub fn attach_pending(store: &Store, trackers: &[Tracker], filter: Option<&str>) -> Result<()> {
+    let _lock = store.publish_lock(store.root(), "hierarchy")?;
     let locals = trackers::stored(store, Some("local")).unwrap_or_default();
     let mut target = None;
     for source in locals {

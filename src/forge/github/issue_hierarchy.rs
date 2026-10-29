@@ -6,7 +6,7 @@ use crate::forge::issue::{IssueHierarchy, parent_subject, related_key};
 use crate::forge::service::{IssueSubject, Method, Pagination, Request, Service};
 
 impl Github {
-    pub(super) fn fetch_hierarchy(&self, subject: IssueSubject) -> Result<IssueHierarchy> {
+    pub(super) fn fetch_hierarchy(&self, subject: IssueSubject) -> Result<Option<IssueHierarchy>> {
         let path = format!("repos/{}/issues/{}", subject.repo, subject.number);
         let parent = match self
             .transport()
@@ -16,20 +16,29 @@ impl Github {
             Err(error) if error.status == Some(404) => None,
             Err(error) => return Err(error.into()),
         };
-        let children = self
-            .transport()
-            .items(
-                &Request::get(format!("{path}/sub_issues?per_page=100")),
-                &Pagination::CliPaginate,
-            )?
+        let items = match self.transport().items(
+            &Request::get(format!("{path}/sub_issues?per_page=100")),
+            &Pagination::CliPaginate,
+        ) {
+            Ok(items) => items,
+            Err(error) if error.status == Some(404) => {
+                return match self.transport().json(&Request::get(&path)) {
+                    Err(missing) if missing.status == Some(404) => Ok(None),
+                    Err(other) => Err(other.into()),
+                    Ok(_) => Err(error.into()),
+                };
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let children = items
             .iter()
             .map(|item| related_key(item, "/html_url", "number", "/issues/"))
             .collect::<Result<Vec<_>>>()?;
-        Ok(IssueHierarchy {
+        Ok(Some(IssueHierarchy {
             parent,
             children,
             task: false,
-        })
+        }))
     }
 
     pub(super) fn parent_request(
@@ -61,7 +70,12 @@ impl Github {
         }
         Ok(Request::rest(
             method,
-            format!("repos/{}/issues/{}/sub_issues", target.repo, target.number),
+            format!(
+                "repos/{}/issues/{}/{}",
+                target.repo,
+                target.number,
+                if removing { "sub_issue" } else { "sub_issues" }
+            ),
             Some(body),
         ))
     }
