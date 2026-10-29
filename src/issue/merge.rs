@@ -14,6 +14,7 @@ use crate::store::model::{Comment, PostState};
 pub fn remote_fields(data: &IssueData) -> Fields {
     let mut fields = Fields {
         title: data.title.clone(),
+        parent: data.parent.clone(),
         body: strip_agent(&data.body),
         state: data.state,
         reason: data.reason.clone(),
@@ -31,6 +32,9 @@ pub fn from_remote(tracker: &str, repo: &str, data: &IssueData, now: &str) -> Is
         version: VERSION,
         key: format!("{repo}#{}", data.number),
         tracker: tracker.to_owned(),
+        local_key: None,
+        task: data.task,
+        sub_issues: Vec::new(),
         number: Some(data.number),
         remote: Some(RemoteInfo {
             id: data.id.clone(),
@@ -91,6 +95,9 @@ pub fn apply(issue: &mut Issue, fetched: &IssueFetched, me: &str, now: &str) -> 
     if scalar("title", &|a, b| a.title == b.title, &mut conflicted) {
         next.title = local.title.clone();
     }
+    if scalar("parent", &|a, b| a.parent == b.parent, &mut conflicted) {
+        next.parent = local.parent.clone();
+    }
     if scalar("body", &|a, b| a.body == b.body, &mut conflicted) {
         next.body = local.body.clone();
     }
@@ -116,6 +123,7 @@ pub fn apply(issue: &mut Issue, fetched: &IssueFetched, me: &str, now: &str) -> 
         });
         merged.conflicts += 1;
     }
+    issue.task = data.task;
     issue.fields = next;
     issue.base = Some(remote);
     issue.number = Some(data.number);
@@ -129,9 +137,52 @@ pub fn apply(issue: &mut Issue, fetched: &IssueFetched, me: &str, now: &str) -> 
     issue.milestone = data.milestone.clone();
     issue.due_date = data.due_date.clone();
     issue.synced_at = Some(now.to_owned());
+    clear_parent_error(issue);
     merge_links(issue, &fetched.prs);
     merge_comments(issue, &fetched.comments, me, now, &mut merged);
     merged
+}
+
+pub fn apply_parent(issue: &mut Issue, parent: &Option<String>, task: bool, now: &str) -> usize {
+    let Some(base) = &mut issue.base else {
+        return 0;
+    };
+    let mut conflicts = 0;
+    if issue.fields.parent == base.parent || issue.fields.parent == *parent {
+        issue.fields.parent.clone_from(parent);
+    } else if *parent != base.parent {
+        let mut remote_fields = base.clone();
+        remote_fields.parent.clone_from(parent);
+        issue
+            .conflicts
+            .retain(|conflict| conflict.field != "parent");
+        issue.conflicts.push(Conflict {
+            field: "parent".into(),
+            local: issue.fields.clone(),
+            remote: remote_fields,
+            seen_at: now.to_owned(),
+        });
+        issue.fields.parent.clone_from(parent);
+        conflicts = 1;
+    }
+    base.parent.clone_from(parent);
+    issue.task = task;
+    clear_parent_error(issue);
+    conflicts
+}
+
+fn clear_parent_error(issue: &mut Issue) {
+    if issue
+        .base
+        .as_ref()
+        .is_some_and(|base| base.parent == issue.fields.parent)
+        && !issue
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.field == "parent")
+    {
+        issue.errors.retain(|error| error.what != "parent");
+    }
 }
 
 /// The remote's set, minus what the local side removed since `base`, plus what it added.
@@ -237,6 +288,10 @@ pub fn unsent_comments(issue: &Issue) -> Vec<&Comment> {
 
 pub fn has_pending(issue: &Issue) -> bool {
     issue.number.is_none()
+        || issue
+            .base
+            .as_ref()
+            .is_some_and(|base| issue.fields.parent != base.parent)
         || !pending_changes(issue).is_empty()
         || !unsent_comments(issue).is_empty()
 }
@@ -254,6 +309,8 @@ mod tests {
             id: "I_1".into(),
             url: "https://example.com/o/r/issues/1".into(),
             title: title.into(),
+            parent: None,
+            task: false,
             body: "body".into(),
             state: Category::Open,
             reason: None,

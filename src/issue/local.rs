@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use super::cli::{CreateArgs, EditArgs, LinkArgs, Lists, Reason, State};
+use super::hierarchy::Index;
 use super::merge::{pending_changes, unsent_comments};
 use super::trackers::{self, Tracker};
 use super::view::summary;
@@ -182,7 +183,9 @@ fn apply_lists(
 }
 
 pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Value> {
-    if args.title.is_none()
+    if args.parent.is_none()
+        && !args.remove_parent
+        && args.title.is_none()
         && args.body.is_none()
         && args.state.is_none()
         && args.lists.add_labels.is_empty()
@@ -191,7 +194,7 @@ pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Valu
         && args.remove_assignees.is_empty()
     {
         return fail(
-            "edit needs a change: --title, --body, --state, --add-label, --remove-label, --add-assignee or --remove-assignee",
+            "edit needs a change: --title, --body, --state, --add-label, --remove-label, --add-assignee, --remove-assignee, --parent or --remove-parent",
         );
     }
     let title = args
@@ -204,7 +207,31 @@ pub fn edit(store: &Store, filter: Option<&str>, args: &EditArgs) -> Result<Valu
         .as_deref()
         .map(|body| read_text(body, "body", true))
         .transpose()?;
+    let (tracker, child) = trackers::find(store, filter, &args.key)?;
+    let index = Index::load(store, &tracker)?;
+    let parent = args.parent.as_deref().map(|key| {
+        let (_, parent) = trackers::find(store, Some(&tracker.doc.key), key)?;
+        index.validate_parent(&child.key, &parent.key)?;
+        if tracker.doc.forge == Some(crate::store::model::Forge::Gitlab) {
+            if parent.task || parent.fields.parent.is_some() {
+                return fail("a GitLab Task needs an Issue as its parent; nested Tasks are not supported");
+            }
+            if child.number.is_some() && !child.task {
+                return fail("GitLab children must be Tasks; convert the Issue to a Task on GitLab, then run `agt issue sync`");
+            }
+            if index.has_children(&child.key) { return fail("a GitLab child Task cannot have children"); }
+        }
+        Ok(parent.key)
+    }).transpose()?;
     change(store, filter, &args.key, |tracker, issue| {
+        index.normalize(issue);
+        if let Some(parent) = parent {
+            issue.fields.parent = Some(parent);
+        }
+        if args.remove_parent {
+            issue.fields.parent = None;
+        }
+
         if let Some(title) = title {
             issue.fields.title = title.trim().to_owned();
         }
@@ -319,7 +346,14 @@ pub fn create(
     filter: Option<&str>,
     args: &CreateArgs,
 ) -> Result<Value> {
-    let tracker = if filter.is_none() || filter == Some("local") {
+    let parent = args
+        .parent
+        .as_deref()
+        .map(|key| trackers::find(store, filter, key))
+        .transpose()?;
+    let tracker = if let Some((tracker, _)) = &parent {
+        tracker.clone()
+    } else if filter.is_none() || filter == Some("local") {
         trackers::local(store)?
     } else {
         let configured = trackers::configured(destinations, filter)?;
@@ -330,12 +364,19 @@ pub fn create(
         };
         trackers::ensure(store, configured)?
     };
+    if let Some((_, parent)) = &parent
+        && tracker.doc.forge == Some(crate::store::model::Forge::Gitlab)
+        && (parent.task || parent.fields.parent.is_some())
+    {
+        return fail("a GitLab Task needs an Issue as its parent; nested Tasks are not supported");
+    }
     let title = read_text(&args.title, "title", false)?;
     let body = read_text(&args.body, "body", true)?;
     let now = clock::now()?;
     let key = random::token("local-", 6);
     let fields = Fields {
         title: title.trim().to_owned(),
+        parent: parent.map(|(_, issue)| issue.key),
         body,
         state: Category::Open,
         reason: None,
@@ -346,6 +387,10 @@ pub fn create(
         version: VERSION,
         key: key.clone(),
         tracker: tracker.doc.key.clone(),
+        local_key: Some(key.clone()),
+        task: tracker.doc.forge == Some(crate::store::model::Forge::Gitlab)
+            && fields.parent.is_some(),
+        sub_issues: Vec::new(),
         number: None,
         remote: None,
         fields,
@@ -381,6 +426,11 @@ pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> 
     };
     let name = issue.doc_name();
     if issue.number.is_none() {
+        if Index::load(store, &tracker)?.has_children(&issue.key) {
+            return fail(
+                "cannot discard an issue with children; reparent or remove its children first",
+            );
+        }
         let mut possibly_sent = Vec::new();
         if issue
             .create
@@ -414,6 +464,13 @@ pub fn discard(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> 
         let edits = pending_changes(issue);
         let mut fields = Vec::new();
         for (name, changed) in [
+            (
+                "parent",
+                issue
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| base.parent != issue.fields.parent),
+            ),
             ("title", edits.title.is_some()),
             ("body", edits.body.is_some()),
             ("state", edits.state.is_some()),

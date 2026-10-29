@@ -95,6 +95,24 @@ impl IssueService for Github {
         })
     }
 
+    fn hierarchy(&self, subject: IssueSubject) -> Result<crate::forge::issue::IssueHierarchy> {
+        self.fetch_hierarchy(subject)
+    }
+
+    fn set_parent(
+        &self,
+        subject: IssueSubject,
+        parent: Option<&str>,
+        previous: Option<&str>,
+    ) -> Result<Request> {
+        self.parent_request(subject, parent, previous)
+    }
+
+    fn parent_updated(&self, response: &Value) -> Result<()> {
+        let _ = response;
+        Ok(())
+    }
+
     fn comment(&self, subject: IssueSubject, text: &str) -> Request {
         Request::rest(
             Method::Post,

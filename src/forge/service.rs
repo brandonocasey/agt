@@ -6,7 +6,9 @@ use serde_json::Value;
 
 use crate::core::error::Result;
 use crate::forge::Fetched;
-use crate::forge::issue::{Changes, IssueCaps, IssueData, IssueFetched, ListQuery, NewIssue};
+use crate::forge::issue::{
+    Changes, IssueCaps, IssueData, IssueFetched, IssueHierarchy, ListQuery, NewIssue,
+};
 use crate::forge::transport::{Response, Transport, TransportError};
 use crate::git::Repo;
 use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review};
@@ -342,6 +344,14 @@ pub trait IssueService: Service {
     fn list_changed(&self, query: &ListQuery) -> Result<Vec<IssueData>>;
     /// The issue, its comments and the PRs/MRs the host links to it.
     fn fetch_issue(&self, subject: IssueSubject) -> Result<IssueFetched>;
+    fn hierarchy(&self, subject: IssueSubject) -> Result<IssueHierarchy>;
+    fn set_parent(
+        &self,
+        subject: IssueSubject,
+        parent: Option<&str>,
+        previous: Option<&str>,
+    ) -> Result<Request>;
+    fn parent_updated(&self, response: &Value) -> Result<()>;
     /// A new comment on the issue.
     fn comment(&self, subject: IssueSubject, text: &str) -> Request;
     /// One request that applies `changes`. May read from the host, such as a user id lookup.

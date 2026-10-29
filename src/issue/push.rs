@@ -5,6 +5,7 @@
 
 use serde_json::{Value, json};
 
+use super::hierarchy::Index;
 use super::merge::{self, pending_changes, unsent_comments};
 use super::sync::{self, connect};
 use super::trackers::{self, Tracker};
@@ -97,7 +98,10 @@ fn push_names(
     queued: Vec<String>,
     automatic: bool,
 ) -> Result<Value> {
+    let index = Index::load(store, tracker)?;
+    let queued = index.push_order(queued, options.force)?;
     let mut pushing = Push {
+        index,
         store,
         tracker,
         service: None,
@@ -139,6 +143,7 @@ fn push_names(
 }
 
 struct Push<'a> {
+    index: Index,
     store: &'a Store,
     tracker: &'a Tracker,
     service: Option<Box<dyn IssueService>>,
@@ -175,6 +180,7 @@ impl Push<'_> {
     /// changes the copy only.
     fn mutate(&self, name: &str, doc: &mut Issue, change: impl FnOnce(&mut Issue)) -> Result<()> {
         if self.options.dry_run {
+            self.index.normalize(doc);
             change(doc);
             return Ok(());
         }
@@ -184,6 +190,7 @@ impl Push<'_> {
             name,
             || seed,
             |stored| {
+                self.index.normalize(stored);
                 change(stored);
                 Ok(stored.clone())
             },
@@ -195,6 +202,32 @@ impl Push<'_> {
         let Some(mut doc) = self.store.load_doc::<Issue>(&self.tracker.dir, name)? else {
             return Ok(());
         };
+        self.index.normalize(&mut doc);
+        if let Some(parent) = &doc.fields.parent {
+            if self
+                .index
+                .get(parent)
+                .is_some_and(|parent| parent.number.is_none())
+            {
+                self.deferred.push(json!({"issue": doc.key, "what": "parent", "reason": format!("parent {parent} has not been published; push again after its create succeeds")}));
+                if !self.options.dry_run {
+                    return Ok(());
+                }
+            }
+            if self.tracker.doc.forge == Some(crate::store::model::Forge::Gitlab)
+                && (self.index.has_children(&doc.key)
+                    || self
+                        .index
+                        .get(parent)
+                        .is_some_and(|parent| parent.task || parent.fields.parent.is_some()))
+            {
+                let error = TransportError::new(
+                    "GitLab supports Issue → Task hierarchies; nested Tasks cannot be published",
+                );
+                self.failure(name, &mut doc, "parent", &error)?;
+                return Ok(());
+            }
+        }
         let mut name = name.to_owned();
         let mut fresh = false;
         if doc.number.is_none() {
@@ -223,6 +256,9 @@ impl Push<'_> {
         if let Step::Stopped = self.update(&name, &mut doc)? {
             return Ok(());
         }
+        if let Step::Stopped = self.parent(&name, &mut doc)? {
+            return Ok(());
+        }
         for id in unsent_comments(&doc)
             .iter()
             .map(|c| c.id.clone())
@@ -246,12 +282,23 @@ impl Push<'_> {
     }
 
     fn refetch(&mut self, name: &str, doc: &mut Issue) -> Result<()> {
-        let fetched = self.service().fetch_issue(self.subject(doc)?)?;
+        let mut fetched = self.service().fetch_issue(self.subject(doc)?)?;
+        let hierarchy = self.service().hierarchy(self.subject(doc)?)?;
+        fetched.issue.parent = hierarchy
+            .parent
+            .map(|key| self.index.canonical(&key).to_owned());
+        fetched.issue.task = hierarchy.task;
         let now = clock::now()?;
         let me = self.login.clone();
-        self.mutate(name, doc, |issue| {
-            merge::apply(issue, &fetched, &me, &now);
-        })
+        let index = &self.index;
+        self.store
+            .update_existing_doc(&self.tracker.dir, name, |issue: &mut Issue| {
+                index.normalize(issue);
+                issue.sub_issues.clone_from(&hierarchy.children);
+                merge::apply(issue, &fetched, &me, &now);
+                *doc = issue.clone();
+                Ok(())
+            })
     }
 
     /// Records a failed write on the issue and in the report. A refusal is final until the
@@ -306,13 +353,20 @@ impl Push<'_> {
     }
 
     /// Gives the local issue the identity of the host's `data` and loads it under its number.
-    fn adopt_and_reload(&self, name: &mut String, doc: &mut Issue, data: &IssueData) -> Result<()> {
+    fn adopt_and_reload(
+        &mut self,
+        name: &mut String,
+        doc: &mut Issue,
+        data: &IssueData,
+    ) -> Result<()> {
+        self.mutate(&doc.doc_name(), doc, |_| {})?;
         sync::adopt(self.store, self.tracker, &doc.key, data)?;
         *name = data.number.to_string();
         *doc = self
             .store
             .load_doc(&self.tracker.dir, name)?
             .ok_or_else(|| Error(format!("issue {name} vanished")))?;
+        self.index.remember(doc.clone());
         Ok(())
     }
 
@@ -351,6 +405,7 @@ impl Push<'_> {
         let request = self.service().create(
             self.repo(),
             &NewIssue {
+                task: doc.task || doc.fields.parent.is_some(),
                 title: &doc.fields.title,
                 body: &body,
                 labels: &doc.fields.labels,
@@ -358,7 +413,15 @@ impl Push<'_> {
             },
         )?;
         if self.options.dry_run {
-            self.show(doc, "create", &request, json!({}));
+            self.show(
+                doc,
+                "create",
+                &request,
+                json!({"parent": doc.fields.parent}),
+            );
+            if doc.fields.parent.is_some() {
+                self.deferred.push(json!({"issue": doc.key, "what": "parent", "reason": "the parent link can be sent after the create returns an issue number"}));
+            }
             return Ok(Step::Done);
         }
         let (attempt, sent) = (self.attempt.clone(), body.clone());
@@ -461,13 +524,73 @@ impl Push<'_> {
                     {
                         issue.fields.reason = Some(reason.clone());
                     }
-                    issue.conflicts.clear();
+                    issue
+                        .conflicts
+                        .retain(|conflict| conflict.field == "parent");
                 })?;
                 self.writes
                     .push(json!({"issue": doc.key, "kind": "update"}));
                 Ok(Step::Done)
             }
             Err(error) => self.failure(name, doc, "update", &error),
+        }
+    }
+
+    fn parent(&mut self, name: &str, doc: &mut Issue) -> Result<Step> {
+        if doc
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.field == "parent")
+        {
+            return Ok(Step::Done);
+        }
+        let previous = doc.base.as_ref().and_then(|base| base.parent.as_deref());
+        if previous == doc.fields.parent.as_deref() {
+            return Ok(Step::Done);
+        }
+        let desired = doc.fields.parent.clone();
+        let request =
+            match self
+                .service()
+                .set_parent(self.subject(doc)?, desired.as_deref(), previous)
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    return self.failure(
+                        name,
+                        doc,
+                        "parent",
+                        &TransportError::new(error.to_string()),
+                    );
+                }
+            };
+        if self.options.dry_run {
+            self.show(doc, "parent", &request, json!({"parent": desired}));
+            return Ok(Step::Done);
+        }
+        match self.service().send(&request) {
+            Ok(response) => {
+                if let Err(error) = self.service().parent_updated(&response.body) {
+                    return self.failure(
+                        name,
+                        doc,
+                        "parent",
+                        &TransportError::new(error.to_string()),
+                    );
+                }
+                self.mutate(name, doc, |issue| {
+                    if let Some(base) = &mut issue.base {
+                        base.parent.clone_from(&desired);
+                    }
+                    issue
+                        .conflicts
+                        .retain(|conflict| conflict.field != "parent");
+                })?;
+                self.writes
+                    .push(json!({"issue": doc.key, "kind": "parent", "parent": desired}));
+                Ok(Step::Done)
+            }
+            Err(error) => self.failure(name, doc, "parent", &error),
         }
     }
 
@@ -528,6 +651,7 @@ fn force(issue: &mut Issue) -> Vec<String> {
         match conflict.field.as_str() {
             "title" => issue.fields.title = conflict.local.title.clone(),
             "body" => issue.fields.body = conflict.local.body.clone(),
+            "parent" => issue.fields.parent = conflict.local.parent.clone(),
             "state" => {
                 issue.fields.state = conflict.local.state;
                 issue.fields.reason = conflict.local.reason.clone();
@@ -599,6 +723,8 @@ mod tests {
             id: "I_1".into(),
             url: "u".into(),
             title: title.into(),
+            parent: None,
+            task: false,
             body: "b".into(),
             state: Category::Open,
             reason: None,

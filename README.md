@@ -50,6 +50,7 @@ summary shows them beside the review.
 
 `agt issue` keeps a local backlog with comments, private notes, and links to related work.
 It can also mirror GitHub and GitLab issues and send queued updates.
+Create sub-issues with `--parent`; GitLab children publish as native Tasks.
 Private notes and local links stay on your machine.
 
 `agt task` stores task records for work that spans sessions.

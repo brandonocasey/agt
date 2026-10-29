@@ -136,7 +136,9 @@ fn incremental_sync_lists_from_the_watermark_and_refetches_only_changes(fake: Fa
     let fetched = |number| {
         calls[before..]
             .iter()
-            .filter(|call| call.contains(&fake.issue_call(number).join(" ")))
+            .filter(|call| {
+                call.split('\t').nth(1) == Some(fake.issue_call(number).join(" ").as_str())
+            })
             .count()
     };
     assert_eq!((fetched(1), fetched(2)), (0, 1));

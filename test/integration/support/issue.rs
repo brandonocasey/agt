@@ -138,6 +138,9 @@ impl Env {
 #[derive(Clone)]
 pub struct Spec {
     pub number: u64,
+    pub parent: Option<u64>,
+    pub children: Vec<u64>,
+    pub task: bool,
     pub title: String,
     pub body: String,
     pub closed: bool,
@@ -169,6 +172,9 @@ impl Spec {
     pub fn new(number: u64, title: &str) -> Self {
         Self {
             number,
+            parent: None,
+            children: Vec::new(),
+            task: false,
             title: title.to_owned(),
             body: format!("Body of {title}"),
             closed: false,
@@ -181,6 +187,17 @@ impl Spec {
             comments: Vec::new(),
             prs: Vec::new(),
         }
+    }
+
+    pub fn parent(mut self, number: u64) -> Self {
+        self.parent = Some(number);
+        self.task = true;
+        self
+    }
+
+    pub fn children(mut self, children: &[u64]) -> Self {
+        self.children = children.to_vec();
+        self
     }
 
     pub fn updated(mut self, at: &str) -> Self {
@@ -298,6 +315,38 @@ impl dyn IssueFake + '_ {
             &strs(&self.issue_call(spec.number)),
             &self.issue_json(spec).to_string(),
         );
+        if self.name() == "github" {
+            let path = format!("repos/{}/issues/{}", self.repo(), spec.number);
+            let call = gh_get(&format!("{path}/parent"));
+            if let Some(parent) = spec.parent {
+                env.respond(&strs(&call), &json!({"number":parent,"html_url":format!("https://github.com/{}/issues/{parent}",self.repo())}).to_string());
+            } else {
+                env.fail_call_with(&strs(&call), "gh: Not Found (HTTP 404)");
+            }
+            let children: Vec<_> = spec.children.iter().map(|number| json!({"number":number,"html_url":format!("https://github.com/{}/issues/{number}",self.repo())})).collect();
+            env.respond(
+                &strs(&gh_paginate(&format!("{path}/sub_issues?per_page=100"))),
+                &json!(children).to_string(),
+            );
+        } else {
+            let item = |number: u64| json!({"id":format!("gid://gitlab/WorkItem/{}",1000+number),"iid":number.to_string(),"project":{"fullPath":self.repo()},"webUrl":format!("https://gitlab.com/{}/-/issues/{number}",self.repo())});
+            let mut work_item = item(spec.number);
+            work_item["workItemType"] = json!({"name":if spec.task {"Task"} else {"Issue"}});
+            work_item["widgets"] = json!([{"type":"HIERARCHY","parent":spec.parent.map(item),"children":{"nodes":spec.children.iter().map(|number|item(*number)).collect::<Vec<_>>(),"pageInfo":{"hasNextPage":false,"endCursor":null}}}]);
+            env.respond(
+                &[
+                    "api",
+                    "graphql",
+                    "-f",
+                    &format!("path={}", self.repo()),
+                    "-f",
+                    &format!("iid={}", spec.number),
+                    "-f",
+                    "query=IssueHierarchy",
+                ],
+                &json!({"data":{"project":{"workItems":{"nodes":[work_item]}}}}).to_string(),
+            );
+        }
         for (call, body) in self.fetch_rest(spec) {
             env.respond(&strs(&call), &body);
         }
@@ -437,6 +486,7 @@ impl IssueFake for Github {
         let mut issue = json!({
             "number": spec.number,
             "node_id": format!("I_{}", spec.number),
+            "id": 1000 + spec.number,
             "html_url": format!("https://github.com/o/r/issues/{}", spec.number),
             "title": spec.title,
             "body": spec.body,
@@ -524,6 +574,7 @@ impl IssueFake for Gitlab {
 
     fn is_read(&self, args: &str) -> bool {
         glab_is_get(args)
+            || (args.starts_with("api graphql") && args.contains("query=IssueHierarchy"))
     }
 
     fn user_call(&self) -> Vec<String> {
@@ -586,6 +637,7 @@ impl IssueFake for Gitlab {
     fn issue_json(&self, spec: &Spec) -> Value {
         json!({
             "iid": spec.number,
+            "issue_type": if spec.task { "task" } else { "issue" },
             "id": 1000 + spec.number,
             "web_url": format!("https://gitlab.com/g/p/-/issues/{}", spec.number),
             "title": spec.title,

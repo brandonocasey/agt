@@ -38,7 +38,7 @@ pub enum Command {
     },
     /// Queue a new issue.
     Create(CreateArgs),
-    /// Queue a new title, body, state, labels or assignees.
+    /// Queue changes to issue fields or its parent.
     Edit(EditArgs),
     /// Drop every queued, unpushed change of one issue; a never-pushed issue is removed. Local only.
     Discard {
@@ -59,7 +59,7 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct ListArgs {
-    /// Default `open`, or `all` with `--text`, `--pr`, `--branch` or `--title`.
+    /// Default `open`, or `all` with `--text`, `--pr`, `--branch`, `--title` or `--parent`.
     #[arg(long, value_enum)]
     pub state: Option<StateFilter>,
     #[arg(long)]
@@ -68,6 +68,9 @@ pub struct ListArgs {
     pub assignee: Option<String>,
     #[arg(long)]
     pub author: Option<String>,
+    /// Only direct children of this issue; includes closed children unless --state says otherwise.
+    #[arg(long, value_name = "KEY")]
+    pub parent: Option<String>,
     /// Only issues with queued changes.
     #[arg(long)]
     pub pending: bool,
@@ -128,6 +131,9 @@ pub struct LinkArgs {
 
 #[derive(Args)]
 pub struct CreateArgs {
+    /// Create a child of this issue, in the same tracker. GitLab children become Tasks.
+    #[arg(long, value_name = "KEY")]
+    pub parent: Option<String>,
     #[arg(long)]
     pub title: String,
     /// The body; `-` reads stdin.
@@ -149,6 +155,12 @@ pub struct Lists {
 #[derive(Args)]
 pub struct EditArgs {
     pub key: String,
+    /// Set or replace the parent issue, in the same tracker.
+    #[arg(long, value_name = "KEY", conflicts_with = "remove_parent")]
+    pub parent: Option<String>,
+    /// Remove the parent relationship.
+    #[arg(long)]
+    pub remove_parent: bool,
     #[arg(long)]
     pub title: Option<String>,
     /// The body; `-` reads stdin.

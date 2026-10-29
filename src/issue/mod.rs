@@ -5,6 +5,7 @@
 mod auto;
 mod cli;
 mod fixes;
+mod hierarchy;
 mod local;
 mod merge;
 pub mod prune;
@@ -87,6 +88,14 @@ pub fn run(cli: Cli) -> Result<Output> {
     if matches!(cli.command, Command::Sync | Command::Push { .. }) {
         crate::forge::auto::Offline::current().forbid("issue sync and push")?;
     }
+    let _hierarchy_lock = if matches!(
+        cli.command,
+        Command::Create(_) | Command::Edit(_) | Command::Discard { .. }
+    ) {
+        Some(store.publish_lock(store.root(), "hierarchy")?)
+    } else {
+        None
+    };
     let mut value = match &cli.command {
         Command::Sync => {
             let config = Config::load_for_repo(&repo)?;

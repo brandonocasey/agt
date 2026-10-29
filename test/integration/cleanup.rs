@@ -1883,3 +1883,46 @@ fn stale_browser_profiles_in_tmp_are_removed() {
     assert!(outside.exists());
     assert!(tmp.join("puppeteer_dev_chrome_profile-link").exists());
 }
+
+#[test]
+fn hierarchy_parents_children_and_pending_detach_are_kept() {
+    let prune = Prune::new();
+    let parent = prune.issue("1", 400, "closed", |_| {});
+    let child = prune.issue("2", 400, "closed", |issue| {
+        issue["fields"]["parent"] = json!("o/r#1");
+        issue["base"]["parent"] = json!("o/r#1");
+    });
+    let pending_parent = prune.issue("3", 400, "closed", |_| {});
+    let detaching = prune.issue("4", 400, "closed", |issue| {
+        issue["fields"]["parent"] = Value::Null;
+        issue["base"]["parent"] = json!("o/r#3");
+    });
+    let remote_parent = prune.issue("5", 400, "closed", |issue| {
+        issue["sub_issues"] = json!(["o/r#99"]);
+    });
+    let unlinked = prune.issue("6", 400, "closed", |_| {});
+    prune.run(&["--only", "issues", "--yes"]);
+    for path in [parent, child, pending_parent, detaching, remote_parent] {
+        assert!(path.exists(), "{}", path.display());
+    }
+    assert!(!unlinked.exists());
+}
+
+#[test]
+fn a_local_child_keeps_its_published_parent_after_an_interrupted_tracker_move() {
+    let prune = Prune::new();
+    let parent = prune.issue("1", 400, "closed", |issue| {
+        issue["local_key"] = json!("local-original");
+    });
+    let child = prune.issue("2", 400, "closed", |issue| {
+        issue["tracker"] = json!("local");
+        issue["fields"]["parent"] = json!("local-original");
+        issue["base"]["parent"] = json!("local-original");
+    });
+    let dir = prune.agents().join("issues/local");
+    fs::create_dir_all(&dir).unwrap();
+    fs::rename(child, dir.join("2.json")).unwrap();
+    prune.run(&["--only", "issues", "--yes"]);
+    assert!(parent.exists());
+    assert!(dir.join("2.json").exists());
+}

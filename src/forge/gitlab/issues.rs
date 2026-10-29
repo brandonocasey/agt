@@ -86,6 +86,38 @@ impl IssueService for Gitlab {
         })
     }
 
+    fn hierarchy(&self, subject: IssueSubject) -> Result<crate::forge::issue::IssueHierarchy> {
+        self.fetch_hierarchy(subject)
+    }
+
+    fn set_parent(
+        &self,
+        subject: IssueSubject,
+        parent: Option<&str>,
+        previous: Option<&str>,
+    ) -> Result<Request> {
+        self.parent_request(subject, parent, previous)
+    }
+
+    fn parent_updated(&self, response: &Value) -> Result<()> {
+        let payload = response
+            .pointer("/data/workItemUpdate")
+            .ok_or_else(|| Error("GitLab returned no workItemUpdate result".into()))?;
+        let errors = payload["errors"]
+            .as_array()
+            .ok_or_else(|| Error("GitLab returned no workItemUpdate errors list".into()))?;
+        if !errors.is_empty() {
+            return Err(Error(format!(
+                "GitLab refused parent update: {}",
+                payload["errors"]
+            )));
+        }
+        if payload["workItem"].is_null() {
+            return Err(Error("GitLab returned no updated work item".into()));
+        }
+        Ok(())
+    }
+
     fn comment(&self, subject: IssueSubject, text: &str) -> Request {
         Request::rest(
             Method::Post,
@@ -123,6 +155,9 @@ impl IssueService for Gitlab {
             "description": new.body,
             "labels": new.labels.join(","),
         });
+        if new.task {
+            body["issue_type"] = json!("task");
+        }
         if !new.assignees.is_empty() {
             body["assignee_ids"] = json!(self.user_ids(new.assignees)?);
         }

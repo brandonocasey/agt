@@ -3,6 +3,7 @@
 use serde_json::{Value, json};
 
 use super::cli::{ListArgs, StateFilter};
+use super::hierarchy::Index;
 use super::merge::{has_pending, pending_changes, unsent_comments};
 use super::refs;
 use super::trackers::{self, Tracker};
@@ -34,6 +35,8 @@ pub fn summary(issue: &Issue) -> Value {
         "tracker": issue.tracker,
         "number": issue.number,
         "title": issue.fields.title,
+        "parent": issue.fields.parent,
+        "task": issue.task,
         "state": issue.fields.state.as_str(),
         "reason": issue.fields.reason,
         "labels": issue.fields.labels,
@@ -147,14 +150,35 @@ pub fn list(store: &Store, filter: Option<&str>, args: &ListArgs) -> Result<Valu
     let asked = lookup.asked(args);
     let needle = args.text.as_deref().map(str::to_lowercase);
     // A text or PR/branch lookup searches closed issues too unless `--state` says otherwise.
-    let state = args.state.unwrap_or(if asked || needle.is_some() {
-        StateFilter::All
-    } else {
-        StateFilter::Open
-    });
+    let state = args
+        .state
+        .unwrap_or(if asked || needle.is_some() || args.parent.is_some() {
+            StateFilter::All
+        } else {
+            StateFilter::Open
+        });
+    let parent = args
+        .parent
+        .as_deref()
+        .map(|key| trackers::find(store, filter, key))
+        .transpose()?;
     let mut issues = Vec::new();
     for (tracker, found) in all(store, filter)? {
-        for issue in found {
+        let index = Index::from_issues(found.clone())?;
+        if parent
+            .as_ref()
+            .is_some_and(|(wanted, _)| wanted.doc.key != tracker.doc.key)
+        {
+            continue;
+        }
+        for mut issue in found {
+            index.normalize(&mut issue);
+            if let Some((_, parent)) = &parent
+                && issue.fields.parent.as_deref() != Some(parent.key.as_str())
+            {
+                continue;
+            }
+
             let fields = &issue.fields;
             let keep = match state {
                 StateFilter::All => true,
@@ -198,7 +222,9 @@ pub fn list(store: &Store, filter: Option<&str>, args: &ListArgs) -> Result<Valu
 }
 
 pub fn show(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
-    let (_, issue) = trackers::find(store, filter, key)?;
+    let (tracker, mut issue) = trackers::find(store, filter, key)?;
+    let index = Index::load(store, &tracker)?;
+    index.normalize(&mut issue);
     let changes = pending_changes(&issue);
     let comments: Vec<Value> = issue
         .comments
@@ -217,6 +243,7 @@ pub fn show(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
         })
         .collect();
     let mut view = summary(&issue);
+    view["sub_issues"] = json!(index.children(&issue.key));
     view["body"] = json!(issue.fields.body);
     view["native_state"] = json!(issue.native_state);
     view["milestone"] = json!(issue.milestone);
@@ -228,6 +255,9 @@ pub fn show(store: &Store, filter: Option<&str>, key: &str) -> Result<Value> {
     view["notes"] = json!(issue.notes);
     view["queued"] = json!({
         "create": issue.number.is_none(),
+        "parent": if issue.base.as_ref().is_some_and(|base| base.parent != issue.fields.parent) {
+            json!({"key": issue.fields.parent})
+        } else { Value::Null },
         "title": changes.title,
         "body": changes.body,
         "state": changes.state.map(|(state, reason)| json!({"state": state.as_str(), "reason": reason})),

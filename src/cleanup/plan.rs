@@ -11,7 +11,7 @@ use crate::check::prune::Entry;
 use crate::core::agents::Proc;
 use crate::core::clock;
 use crate::core::error::Result;
-use crate::issue::prune::prunable;
+use crate::issue::prune::{parents, prunable};
 use crate::review::commands::prune::expired;
 use crate::store::issues::{Issue, TRACKER_FILE};
 use crate::store::model::Target;
@@ -281,34 +281,26 @@ impl Plan {
     pub fn issues(&mut self, now: i64) -> Result<()> {
         for store in stores(Namespace::Issues)? {
             let found = store.child_dirs();
+            let mut documents = Vec::new();
             for dir in self.attempt(store.root(), found).unwrap_or_default() {
-                let result = (|| {
-                    let (issues, unknown) = store.docs_intact::<Issue>(&dir, &[TRACKER_FILE])?;
+                let result = store.docs_intact::<Issue>(&dir, &[TRACKER_FILE]);
+                if let Some((issues, unknown)) = self.attempt(&dir, result) {
                     self.warnings.extend(unknown);
-                    for issue in issues {
-                        if !prunable(&issue, now) {
-                            continue;
-                        }
-                        let name = issue.doc_name();
-                        let path = doc_path(&dir, &name);
-                        self.add_doc(
-                        "issues",
-                        path,
-                        issue.key.clone(),
-                        format!(
-                            "closed, last updated {}; nothing queued, no notes, conflicts or unsent comments",
-                            issue.updated_at
-                        ),
-                        Action::Issue {
-                            root: store.root().to_path_buf(),
-                            dir: dir.clone(),
-                            name,
-                        },
-                    );
-                    }
-                    Ok(())
-                })();
-                self.attempt(&dir, result);
+                    documents.extend(issues.into_iter().map(|issue| (dir.clone(), issue)));
+                }
+            }
+            let issues: Vec<_> = documents.iter().map(|(_, issue)| issue.clone()).collect();
+            let parents = parents(&issues);
+            for (dir, issue) in documents {
+                if parents.contains(&issue.key) || !prunable(&issue, now) {
+                    continue;
+                }
+                let name = issue.doc_name();
+                self.add_doc(
+                    "issues", doc_path(&dir, &name), issue.key.clone(),
+                    format!("closed, last updated {}; nothing queued, no notes, conflicts or unsent comments", issue.updated_at),
+                    Action::Issue { root: store.root().to_path_buf(), dir, name },
+                );
             }
             self.stray_locks(&store, Namespace::Issues);
         }

@@ -8,6 +8,7 @@ mod cleanup;
 mod commands;
 mod doctor;
 mod issue_discard;
+mod issue_hierarchy;
 mod issue_push;
 mod issue_queue;
 mod issue_read;

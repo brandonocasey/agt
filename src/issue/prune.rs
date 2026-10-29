@@ -15,6 +15,8 @@ use super::merge::has_pending;
 pub fn prunable(issue: &Issue, now: i64) -> bool {
     let links = &issue.links;
     if issue.fields.state != Category::Closed
+        || issue.fields.parent.is_some()
+        || !issue.sub_issues.is_empty()
         || has_pending(issue)
         || !issue.notes.is_empty()
         || !issue.conflicts.is_empty()
@@ -43,4 +45,35 @@ pub fn prunable(issue: &Issue, now: i64) -> bool {
         .ok()
         .flatten()
         .is_some_and(|last| past_retention(now, last))
+}
+
+pub fn parents(issues: &[Issue]) -> std::collections::HashSet<String> {
+    let aliases: std::collections::HashMap<_, _> = issues
+        .iter()
+        .flat_map(|issue| {
+            std::iter::once((issue.key.to_ascii_lowercase(), issue.key.as_str())).chain(
+                issue
+                    .local_key
+                    .as_ref()
+                    .map(|key| (key.clone(), issue.key.as_str())),
+            )
+        })
+        .collect();
+    issues
+        .iter()
+        .flat_map(|issue| {
+            issue
+                .fields
+                .parent
+                .iter()
+                .chain(issue.base.iter().flat_map(|base| base.parent.iter()))
+                .chain(
+                    issue
+                        .conflicts
+                        .iter()
+                        .flat_map(|conflict| conflict.local.parent.iter()),
+                )
+        })
+        .map(|key| aliases.get(key).copied().unwrap_or(key).to_owned())
+        .collect()
 }

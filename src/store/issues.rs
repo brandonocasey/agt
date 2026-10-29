@@ -32,6 +32,8 @@ impl Category {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Fields {
     pub title: String,
+    #[serde(default)]
+    pub parent: Option<String>,
     pub body: String,
     pub state: Category,
     /// Why a closed issue closed (GitHub `completed` or `not_planned`); `None` when open or the
@@ -148,6 +150,12 @@ pub struct Issue {
     /// `owner/repo#12`, or `local-<id>` before the host knows it.
     pub key: String,
     pub tracker: String,
+    #[serde(default)]
+    pub local_key: Option<String>,
+    #[serde(default)]
+    pub task: bool,
+    #[serde(default)]
+    pub sub_issues: Vec<String>,
     pub number: Option<u64>,
     pub remote: Option<RemoteInfo>,
     pub fields: Fields,

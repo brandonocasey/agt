@@ -3,6 +3,7 @@
 
 use serde_json::{Value, json};
 
+use super::hierarchy::Index;
 use super::merge;
 use super::trackers::{self, Tracker};
 use crate::core::clock;
@@ -76,6 +77,7 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
     })?;
     let claimed = claim_created(store, &tracker, &listed, &login)?;
     let (mut new, mut updated, mut unchanged, mut conflicts) = (0, 0, 0, 0);
+    let index = Index::load(store, &tracker)?;
     for data in &listed {
         let name = data.number.to_string();
         let existing = store.load_doc::<Issue>(&tracker.dir, &name)?;
@@ -85,19 +87,37 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
                 .as_ref()
                 .is_some_and(|remote| remote.updated_at == data.updated_at)
         });
-        if current {
-            unchanged += 1;
-            continue;
-        }
-        let fetched = service.fetch_issue(IssueSubject {
+        let mut hierarchy = service.hierarchy(IssueSubject {
             repo: &tracker.doc.repo,
             number: data.number,
         })?;
+        hierarchy.parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
+        if current {
+            let count = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
+                index.normalize(issue);
+                let count = merge::apply_parent(issue, &hierarchy.parent, hierarchy.task, &now);
+                issue.sub_issues.clone_from(&hierarchy.children);
+                Ok(count)
+            })?;
+            conflicts += count;
+            unchanged += 1;
+            continue;
+        }
+        let mut fetched = service.fetch_issue(IssueSubject {
+            repo: &tracker.doc.repo,
+            number: data.number,
+        })?;
+        fetched.issue.parent = hierarchy.parent;
+        fetched.issue.task = hierarchy.task;
         let merged = store.update_doc(
             &tracker.dir,
             &name,
             || merge::from_remote(&tracker.doc.key, &tracker.doc.repo, data, &now),
-            |issue| Ok(merge::apply(issue, &fetched, &login, &now)),
+            |issue| {
+                index.normalize(issue);
+                issue.sub_issues.clone_from(&hierarchy.children);
+                Ok(merge::apply(issue, &fetched, &login, &now))
+            },
         )?;
         conflicts += merged.conflicts;
         if existing.is_some() {
@@ -105,6 +125,31 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
         } else {
             new += 1;
         }
+    }
+    let listed_numbers: std::collections::HashSet<_> =
+        listed.iter().map(|data| data.number).collect();
+    let mut hierarchy_refreshed = listed.len();
+    for existing in index.issues().filter(|issue| {
+        issue
+            .number
+            .is_some_and(|number| !listed_numbers.contains(&number))
+    }) {
+        let hierarchy = service.hierarchy(IssueSubject {
+            repo: &tracker.doc.repo,
+            number: existing.number.unwrap(),
+        })?;
+        let parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
+        conflicts += store.update_existing_doc(
+            &tracker.dir,
+            &existing.doc_name(),
+            |issue: &mut Issue| {
+                index.normalize(issue);
+                let count = merge::apply_parent(issue, &parent, hierarchy.task, &now);
+                issue.sub_issues.clone_from(&hierarchy.children);
+                Ok(count)
+            },
+        )?;
+        hierarchy_refreshed += 1;
     }
     let newest = listed.iter().map(|data| data.updated_at.clone()).max();
     store.update_doc(
@@ -124,6 +169,7 @@ pub(super) fn sync_tracker(store: &Store, tracker: Tracker) -> Result<Value> {
     Ok(json!({
         "tracker": tracker.doc.key,
         "listed": listed.len(),
+        "hierarchy_refreshed": hierarchy_refreshed,
         "new": new,
         "updated": updated,
         "unchanged": unchanged,
@@ -183,6 +229,9 @@ pub fn adopt(store: &Store, tracker: &Tracker, local_key: &str, data: &IssueData
         local_key,
         || seed.clone(),
         |issue| {
+            if issue.local_key.is_none() {
+                issue.local_key = Some(local_key.to_owned());
+            }
             issue.key = key.clone();
             issue.number = Some(data.number);
             issue.remote = Some(crate::store::issues::RemoteInfo {
@@ -191,6 +240,7 @@ pub fn adopt(store: &Store, tracker: &Tracker, local_key: &str, data: &IssueData
                 updated_at: String::new(),
             });
             issue.author.clone_from(&data.author);
+            issue.task = data.task;
             if let Some(create) = issue.create.as_mut() {
                 create.post = crate::store::model::PostState::Posted;
             }

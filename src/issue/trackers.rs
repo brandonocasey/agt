@@ -10,6 +10,7 @@ use crate::store::issues::{Issue, TRACKER_FILE, TrackerDoc, parse_ref};
 use crate::store::model::Forge;
 
 /// A tracker's directory and document.
+#[derive(Clone)]
 pub struct Tracker {
     pub dir: PathBuf,
     pub doc: TrackerDoc,
@@ -145,7 +146,16 @@ pub fn find(store: &Store, filter: Option<&str>, text: &str) -> Result<(Tracker,
         {
             continue;
         }
-        if let Some(issue) = store.load_doc::<Issue>(&tracker.dir, &reference.name)? {
+        let issue = store.load_doc::<Issue>(&tracker.dir, &reference.name)?;
+        let issue = if issue.is_none() && reference.name.starts_with("local-") {
+            store
+                .docs::<Issue>(&tracker.dir, &[TRACKER_FILE])?
+                .into_iter()
+                .find(|issue| issue.local_key.as_deref() == Some(reference.name.as_str()))
+        } else {
+            issue
+        };
+        if let Some(issue) = issue {
             hits.push((tracker, issue));
         }
     }

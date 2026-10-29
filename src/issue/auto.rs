@@ -114,6 +114,14 @@ fn attach(
     issue: &crate::store::issues::Issue,
 ) -> Result<trackers::Tracker> {
     let target = trackers::ensure(store, configured)?;
+    if let Some(parent) = &issue.fields.parent {
+        let (parent_tracker, _) = trackers::find(store, None, parent)?;
+        if parent_tracker.doc.forge.is_some() && parent_tracker.doc.key != target.doc.key {
+            return crate::core::error::fail(
+                "a child must publish to its parent's tracker; select that tracker with --tracker",
+            );
+        }
+    }
     let name = issue.doc_name();
     store.update_existing_doc(
         &source.dir,
@@ -171,7 +179,16 @@ pub fn push_changed(
             if target.is_none_or(|target| target.push_mode() != Mode::Auto) {
                 return Ok(None);
             }
-            attach(store, destination(&destinations, filter)?, &source, &issue)?
+            let configured = destination(&destinations, filter)?;
+            let index = super::hierarchy::Index::load(store, &source)?;
+            let mut target = None;
+            for name in index.family(&issue.doc_name()) {
+                let parent = store
+                    .load_doc::<crate::store::issues::Issue>(&source.dir, &name)?
+                    .ok_or_else(|| Error(format!("issue {name} vanished")))?;
+                target = Some(attach(store, configured, &source, &parent)?);
+            }
+            target.ok_or_else(|| Error("changed issue vanished".into()))?
         } else {
             let all = config.trackers_for(repo, Kind::Issues)?;
             let mut pushes = false;
@@ -196,18 +213,8 @@ pub fn push_changed(
         {
             return crate::core::error::fail("issue upload failed; changes remain queued");
         }
-        let canonical = report["sent"]
-            .as_array()
-            .and_then(|sent| {
-                sent.iter()
-                    .find_map(|item| item.get("number").and_then(serde_json::Value::as_u64))
-            })
-            .map(|number| number.to_string())
-            .unwrap_or(name);
-        store
-            .load_doc::<crate::store::issues::Issue>(&target.dir, &canonical)?
-            .map(|issue| Some(super::view::summary(&issue)))
-            .ok_or_else(|| Error("changed issue vanished".into()))
+        trackers::find(store, Some(&target.doc.key), &key)
+            .map(|(_, issue)| Some(super::view::summary(&issue)))
     })
     .flatten();
     if let Some(updated) = result {

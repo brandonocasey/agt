@@ -1639,8 +1639,9 @@ or at least `max_age_secs` old. Failures back off for that interval and print
 `agt: sync skipped (<reason>); showing local data`. Local output and exit status remain intact.
 
 With `push = "auto"` for the tracker, mutations with a remote representation send only
-the changed issue after saving it. Its pending content is eligible; untouched
-issues remain local. Notes and local links never trigger publication or get sent.
+the changed issue after saving it. Unpublished ancestors are sent first when needed.
+Related local queues follow their parent into the selected tracker, without being sent.
+Other untouched issues remain local. Notes and local links never trigger publication or get sent.
 Automatic failures preserve queued changes. Private data is never included in remote bodies.
 
 Automatic work has a 15-second aggregate limit. Explicit `sync` and `push`
@@ -1649,9 +1650,9 @@ opt into remote access independently of automatic settings. `--offline` and
 
 | Command | What it does |
 | --- | --- |
-| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Skips an issue whose `updated_at` is unchanged. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts` per tracker. |
-| `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending] [--text T] [--pr <n\|url>] [--branch B] [--title T]` | Summaries; `pending` is whether anything is queued for the issue. `--state` defaults to `open`, or to `all` when `--text`, `--pr`, `--branch` or `--title` is given. `--text` is a case-insensitive match over title, body, comments and notes; `matched` says where. `--pr`, `--branch` and `--title` look issues up: issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which; an issue that matches any of the three lookups is kept. All filters combine with AND. |
-| `show <key>` | The issue, its comments, links, notes, what is queued (`queued`), conflicts and errors. |
+| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Refreshes hierarchy for every stored remote issue, even outside the changed listing; unchanged issue fields are skipped. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts`, `hierarchy_refreshed` per tracker. |
+| `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending] [--parent KEY] [--text T] [--pr <n\|url>] [--branch B] [--title T]` | Summaries; `pending` is whether anything is queued for the issue. `--state` defaults to `open`, or to `all` when `--text`, `--pr`, `--branch`, `--title` or `--parent` is given. `--parent` selects direct children. `--text` is a case-insensitive match over title, body, comments and notes; `matched` says where. `--pr`, `--branch` and `--title` look issues up: issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which; an issue that matches any of the three lookups is kept. All filters combine with AND. |
+| `show <key>` | The issue, its `parent`, direct `sub_issues` keys, comments, links, notes, what is queued (`queued`), conflicts and errors. |
 | `status` | Per tracker: counts, issues with queued changes, conflicts, errors, `push` and the last sync. |
 | `link <key> --pr\|--branch <value>` | A local link, never sent. With `--pr <n\|url> --comment` it also queues a comment `Linked: <url>`, once per PR/MR. GitHub shows the mention on the PR's timeline, not the issue's; a later `sync` links the PR to the issue only when the PR says `Fixes #n`. GitLab lists the MR as related. |
 
@@ -1660,8 +1661,37 @@ Queued writes (`<text>` is read from stdin when it is `-`):
 | Command | Queues |
 | --- | --- |
 | `comment <key> <text> [--private]` | A comment. With `--private` it is kept as a note on the issue instead, never queued and never sent. |
-| `create --title T [--body B] [--add-label L]... [--add-assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. `--label` and `--assignee` are accepted for `--add-label` and `--add-assignee`. |
-| `edit <key> [--title T] [--body B] [--state open\|closed [--reason completed\|not-planned]] [--add-label L]... [--remove-label L]... [--add-assignee A]... [--remove-assignee A]...` | Any of these in one change; at least one is required. A reason is GitHub only. GitLab takes one assignee here; removals apply first, so one call can swap it. |
+| `create --title T [--body B] [--parent KEY] [--add-label L]... [--add-assignee A]...` | A local issue under a `local-` key. `--tracker` selects a remote destination. `--label` and `--assignee` are accepted for `--add-label` and `--add-assignee`. |
+| `edit <key> [--parent KEY\|--remove-parent] [--title T] [--body B] [--state open\|closed [--reason completed\|not-planned]] [--add-label L]... [--remove-label L]... [--add-assignee A]... [--remove-assignee A]...` | Any of these in one change; at least one is required. A reason is GitHub only. GitLab takes one assignee here; removals apply first, so one call can swap it. |
+
+### Sub-issues
+
+`create --parent KEY` creates a child in its parent's tracker.
+`edit KEY --parent PARENT` sets or replaces its parent;
+`edit KEY --remove-parent` detaches it. These flags are mutually exclusive.
+Parent and child must belong to the same tracker for these writes.
+Missing parents, self-links, and cycles are rejected before saving.
+`list --parent KEY` returns direct children, including closed children unless `--state` says otherwise.
+`show` reports the parent key and direct `sub_issues` keys.
+Children outside the sync scope appear as keys; their full records need a broader tracker scope.
+Remote cross-project relationships are displayed and can be detached.
+
+Local hierarchies can nest. GitHub publishes them through its native sub-issue API.
+GitLab uses Issue → Task: a new child is created as a native Task.
+For an existing GitLab Issue, convert it to a Task on GitLab, then run `agt issue sync`
+before assigning a parent. agt never converts an existing Issue implicitly.
+GitLab Tasks cannot have children here.
+Nested links remain queued when publishing a local tree to GitLab.
+Remote servers must support the native hierarchy APIs.
+
+Parent relationships are queued and sync with other writable issue data.
+Private notes and local PR/branch links remain private.
+Unpublished ancestors are created before children; a failed parent create leaves its children queued.
+Original local keys still resolve after publication.
+Parent changes use three-way merging, conflicts, `push --force`, and `discard` like other scalar fields.
+A lost parent-update response is reconciled against the remote relationship before retrying.
+A dry run shows available requests; linking a new child waits for its create response's number.
+Cleanup keeps issues carrying hierarchy and parents referenced by stored children.
 
 `discard <key>` drops every queued, unpushed change of one issue and never calls a host. A
 `local-` issue that was never pushed is removed with its queued comments and private notes. For
@@ -1673,18 +1703,19 @@ queued, is an error; so is any discard while another agt holds the tracker's pus
 running). With that lock held, a create or comment still marked as being sent is stale, left by
 a push that failed or was killed, so it is discarded too and listed in `discarded.possibly_sent`
 (`create`, or the comment id): the host may already have received it, and `agt issue sync` shows
-whether it landed. A document written by a newer agt is refused with a hint to upgrade agt. Other
-issues are untouched.
+whether it landed. A document written by a newer agt is refused with a hint to upgrade agt.
+A never-pushed parent with children cannot be discarded; detach or reparent its children first.
+Other issues are untouched.
 
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
-one update with every changed field, then each comment. `--dry-run` prints the exact
+one update with changed issue fields, then a parent update, then each comment. `--dry-run` prints the exact
 `gh`/`glab` argument list and body of every write (`writes`; a real run lists `sent`)
 and reads only. A tracker with `push = false` is skipped, or an error when named with
 `--tracker`. An issue with nothing queued costs no call.
 
 Before sending, `push` re-fetches the issue and merges three ways against the last
 synced copy (`base`). A field only you changed is sent, one only the host changed is
-taken. A title, body or state both sides changed to different values is a conflict:
+taken. A title, body, state or parent both sides changed to different values is a conflict:
 the host's value wins, `push` reports it under `conflicts` (and `status` shows it),
 and `push --force` sends your value on top. Labels and assignees merge as additions
 and removals. After a send `base` moves to what was sent, so a second `push` sends

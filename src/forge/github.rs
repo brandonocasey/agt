@@ -1,4 +1,5 @@
 pub mod ci;
+mod issue_hierarchy;
 mod issues;
 
 use serde_json::Value;
