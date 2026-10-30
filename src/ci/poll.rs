@@ -1,6 +1,6 @@
 //! One poll of a target: the reads through `src/forge` and the state they add up to.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::classify::{
     Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, rollup_grace_secs,
@@ -81,6 +81,24 @@ pub fn snapshot(
 
 type Polled = Result<(State, Option<String>), TransportError>;
 
+/// The pinned head, with an abbreviated or differently cased SHA replaced by the full `observed`
+/// head it names, so comparisons with the host's full SHA match. Any other head is kept: when
+/// none is pinned yet, the observed head.
+fn pin(head: Option<String>, observed: &Value) -> Option<String> {
+    let observed = observed.as_str();
+    match head {
+        Some(head) => Some(
+            observed
+                .filter(|full| {
+                    full.get(..head.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&head))
+                })
+                .map_or(head, str::to_owned),
+        ),
+        None => observed.map(str::to_owned),
+    }
+}
+
 fn github(
     target: &Resolved,
     head: Option<String>,
@@ -90,7 +108,7 @@ fn github(
 ) -> Result<(State, Option<String>, Option<i64>), TransportError> {
     let github = github::connect(&target.host);
     let pull = github.pull_checks(&target.repo, target.target.number)?;
-    let head = head.or_else(|| pull.view["headRefOid"].as_str().map(str::to_owned));
+    let head = pin(head, &pull.view["headRefOid"]);
     let expected = head.as_deref().unwrap_or("");
     let head_state = Head {
         expected,
@@ -190,7 +208,7 @@ fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
     let gitlab = gitlab::connect(&target.host);
     let base = project_path(&target.repo);
     let mr = gitlab.merge_request(&base, target.target.number)?;
-    let head = head.or_else(|| mr["sha"].as_str().map(str::to_owned));
+    let head = pin(head, &mr["sha"]);
     let expected = head.as_deref().unwrap_or("");
     let pending = Head {
         expected,
@@ -279,5 +297,32 @@ mod tests {
         assert!(!retried(Some(404), "Not Found"));
         assert!(!retried(Some(401), "nope"));
         assert!(!retried(Some(403), "forbidden"));
+    }
+
+    #[test]
+    fn pins_an_abbreviated_sha_to_the_full_head_it_names() {
+        let full = "5eafee2fc228271177ace288081fbd621b5f0723";
+        let pinned = |head: Option<&str>, observed: Value| pin(head.map(str::to_owned), &observed);
+        assert_eq!(
+            pinned(Some("5eafee2fc"), json!(full)).as_deref(),
+            Some(full)
+        );
+        assert_eq!(
+            pinned(Some("5EAFEE2FC"), json!(full)).as_deref(),
+            Some(full)
+        );
+        assert_eq!(pinned(Some(full), json!(full)).as_deref(), Some(full));
+        assert_eq!(pinned(None, json!(full)).as_deref(), Some(full));
+        // A head that has not reached the commit yet keeps the pin as given.
+        assert_eq!(
+            pinned(Some("5eafee2fc"), json!("0123456789abcdef")).as_deref(),
+            Some("5eafee2fc")
+        );
+        assert_eq!(
+            pinned(Some(full), json!("5eafee2fc")).as_deref(),
+            Some(full)
+        );
+        assert_eq!(pinned(Some("abc"), json!(null)).as_deref(), Some("abc"));
+        assert_eq!(pinned(None, json!(null)), None);
     }
 }
