@@ -482,6 +482,21 @@ fn a_detached_worktree_is_reused_only_at_the_same_commit() {
     assert_eq!(again["path"], created["path"]);
     assert_eq!(again["branch"], Value::Null);
     assert_eq!(again["commit"], first.as_str());
+    let roundabout = env.repo.join(".worktrees/../.worktrees/review-1/");
+    let via_path = agt_json(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "other",
+            "--detach",
+            &first,
+            "--path",
+            roundabout.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(via_path["reused"], true);
+    assert_eq!(via_path["path"], created["path"]);
     let moved = agt(
         &env,
         &env.repo,
@@ -502,6 +517,21 @@ fn detach_refuses_a_branch_worktree_an_unknown_commit_and_base() {
     let (env, _) = repo_with_commit();
     agt_json(&env, &env.repo, &["create", "feat/a"]);
     let taken = agt(&env, &env.repo, &["create", "feat/a", "--detach", "HEAD"]);
+    assert!(!taken.status.success());
+    assert!(String::from_utf8_lossy(&taken.stderr).contains("has feat/a checked out"));
+    let roundabout = env.repo.join(".worktrees/feat/../feat/a/");
+    let taken = agt(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "x",
+            "--detach",
+            "HEAD",
+            "--path",
+            roundabout.to_str().unwrap(),
+        ],
+    );
     assert!(!taken.status.success());
     assert!(String::from_utf8_lossy(&taken.stderr).contains("has feat/a checked out"));
     let unknown = agt(

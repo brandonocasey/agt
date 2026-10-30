@@ -185,11 +185,11 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
 /// The worktree at `dir` when it is detached at `commit`. One on a branch or at another commit is
 /// refused: moving it could discard work, and a branch must not be reported as detached.
 fn reusable_detached(repo: &Repo, dir: &Path, commit: &str) -> Result<Option<Worktree>> {
-    let Some(entry) = repo
-        .worktrees()?
-        .into_iter()
-        .find(|entry| entry.path == dir)
-    else {
+    // `--path` may hold `..` or a trailing slash; git lists canonical paths.
+    let real = std::fs::canonicalize(dir).ok();
+    let Some(entry) = repo.worktrees()?.into_iter().find(|entry| {
+        entry.path == dir || real.is_some() && std::fs::canonicalize(&entry.path).ok() == real
+    }) else {
         return Ok(None);
     };
     let shown = dir.display();
