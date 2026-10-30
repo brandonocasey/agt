@@ -270,10 +270,30 @@ fn unreadable_required_contexts_keep_the_passed_state_and_say_so() {
     let outcome = run(&[
         step("PullChecks", &based(&[passed])),
         failing("rules/branches/main", "HTTP 403", 1),
+        step(BRANCH, &branch(&[])),
     ]);
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
     assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
     assert_eq!(outcome.events[0]["requiredContexts"], "unreadable");
+}
+
+#[test]
+fn a_refused_source_does_not_hide_a_context_the_other_lists() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let gate = run_node("CI gate", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(std::slice::from_ref(&passed))),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        failing(BRANCH, "HTTP 403", 1),
+        step("PullChecks", &based(&[passed, gate])),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        failing(BRANCH, "HTTP 403", 1),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["CI gate"]));
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[1]["requiredContexts"], "unreadable");
 }
 
 #[test]
@@ -333,7 +353,10 @@ fn the_rules_read_asks_for_every_page() {
     let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
     let outcome = run(&[
         step("PullChecks", &based(&[passed])),
-        step("rules/branches/main?per_page=100", "[]"),
+        step(
+            "--paginate repos/owner/repo/rules/branches/main?per_page=100",
+            "[]",
+        ),
         step(BRANCH, &branch(&[])),
     ]);
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);

@@ -157,35 +157,41 @@ fn contexts_of(list: &Value, out: &mut Vec<String>) {
 }
 
 impl Github {
-    /// The status check contexts that branch `branch` of `repo` requires before a merge: the
-    /// active `required_status_checks` rules of its rulesets and the classic branch protection
-    /// the branch itself reports (readable with repository contents access, unlike the
-    /// protection endpoints). Any unreadable read is an error.
-    pub fn required_contexts(
-        &self,
-        repo: &str,
-        branch: &str,
-    ) -> Result<Vec<String>, TransportError> {
+    /// The status check contexts the active `required_status_checks` rules of the rulesets
+    /// that apply to branch `branch` of `repo` require before a merge. An unreadable read is
+    /// an error.
+    pub fn rule_contexts(&self, repo: &str, branch: &str) -> Result<Vec<String>, TransportError> {
         let branch = crate::forge::encode(branch).replace("%2F", "/");
-        let mut contexts = Vec::new();
         let rules = self.transport.items(
             &Request::get(format!("repos/{repo}/rules/branches/{branch}?per_page=100")),
             &Pagination::CliPaginate,
         )?;
+        let mut contexts = Vec::new();
         for rule in &rules {
             if rule["type"] == "required_status_checks" {
                 contexts_of(&rule["parameters"]["required_status_checks"], &mut contexts);
             }
         }
+        Ok(contexts)
+    }
+
+    /// The status check contexts the classic branch protection of branch `branch` of `repo`
+    /// requires, as the branch itself reports them (readable with repository contents access,
+    /// unlike the protection endpoints). An unreadable read is an error.
+    pub fn protection_contexts(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Vec<String>, TransportError> {
+        let branch = crate::forge::encode(branch).replace("%2F", "/");
         let info = self
             .transport
             .send(&Request::get(format!("repos/{repo}/branches/{branch}")))?
             .body;
         let classic = &info["protection"]["required_status_checks"];
+        let mut contexts = Vec::new();
         contexts_of(&classic["contexts"], &mut contexts);
         contexts_of(&classic["checks"], &mut contexts);
-        contexts.sort();
-        contexts.dedup();
         Ok(contexts)
     }
 }

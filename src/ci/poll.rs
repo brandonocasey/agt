@@ -93,8 +93,11 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
 
 /// A passed state held back while a context the base branch requires has not reported: the
 /// rollup lists only checks that exist, so a required job that starts late is absent from it.
-/// When the required contexts cannot be read for want of permission the state stands, marked
-/// `requiredContexts`; any other failure of the read fails the poll, which is retried.
+/// Each source of required contexts (rulesets, classic branch protection) is read on its own, so
+/// one source refusing the token never hides what the other lists. A context still missing holds
+/// the state back. When a source cannot be read for want of permission and nothing known is
+/// missing, the state stands, marked `requiredContexts`; any other failure of a read fails the
+/// poll, which is retried.
 fn require_reported(
     github: &github::Github,
     target: &Resolved,
@@ -105,26 +108,32 @@ fn require_reported(
     if state["reason"] != "required_checks_passed" || base.is_empty() {
         return Ok(state);
     }
-    let contexts = match github.required_contexts(&target.repo, base) {
-        Ok(contexts) => contexts,
-        Err(error) if unreadable(&error) => {
-            let mut state = state;
-            state["requiredContexts"] = json!("unreadable");
-            return Ok(state);
+    let mut contexts = Vec::new();
+    let mut unreadable_source = false;
+    for read in [
+        github.rule_contexts(&target.repo, base),
+        github.protection_contexts(&target.repo, base),
+    ] {
+        match read {
+            Ok(found) => contexts.extend(found),
+            Err(error) if unreadable(&error) => unreadable_source = true,
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
-    };
+    }
+    contexts.sort();
+    contexts.dedup();
     let missing: Vec<String> = contexts
         .into_iter()
         .filter(|context| !pull.names.contains(context))
         .collect();
-    if missing.is_empty() {
-        return Ok(state);
-    }
     let mut state = state;
-    state["status"] = json!("pending");
-    state["reason"] = json!("checks_pending");
-    state["missingChecks"] = json!(missing);
+    if !missing.is_empty() {
+        state["status"] = json!("pending");
+        state["reason"] = json!("checks_pending");
+        state["missingChecks"] = json!(missing);
+    } else if unreadable_source {
+        state["requiredContexts"] = json!("unreadable");
+    }
     Ok(state)
 }
 
