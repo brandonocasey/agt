@@ -8,7 +8,9 @@ use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::read_source;
 use crate::git::CommitInfo;
-use crate::store::model::{CommitPatch, Pass, PassKind, Reveal, Reviewer, RoleUsage, Run};
+use crate::store::model::{
+    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, RoleUsage, Run, Thread,
+};
 
 use super::findings::{FindingInput, add_findings, parse_findings};
 use super::prune::prune_dir;
@@ -440,14 +442,25 @@ pub(super) fn pass_abort(ctx: &Ctx, run_id: &str, pass_id: Option<&str>) -> Resu
                 .ok_or_else(|| Error(format!("run {run_id} has no open pass")))?,
         };
         let id = run.passes[index].id.clone();
+        // A fix-check reviewer can reopen a thread or reply while its pass is still open.
+        let wrote = |thread: &Thread| {
+            thread.comments.iter().any(|comment| {
+                matches!(
+                    &comment.author,
+                    Author::Agent { run: Some(run), pass: Some(pass), .. }
+                        if run == run_id && *pass == id
+                )
+            })
+        };
         if target.threads.iter().any(|thread| {
-            thread
-                .finding
-                .as_ref()
-                .is_some_and(|finding| finding.run == run_id && finding.pass == id)
+            wrote(thread)
+                || thread
+                    .finding
+                    .as_ref()
+                    .is_some_and(|finding| finding.run == run_id && finding.pass == id)
         }) {
             return fail(format!(
-                "pass {run_id}.{id} has findings and cannot be aborted"
+                "pass {run_id}.{id} has findings or replies and cannot be aborted"
             ));
         }
         let run = find_run_mut(target, run_id)?;

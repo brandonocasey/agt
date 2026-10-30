@@ -499,8 +499,16 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
     } else {
         false
     };
+    // Only a head that is the whole range, one commit above the range start, may match by its
+    // own patch-id: a fix check's lone commit says nothing about the commits before it.
     let head_patch_id = match requested.commits {
-        [only] if only.sha == scope.head && requested.committed => only.patch_id.clone(),
+        [only]
+            if only.sha == scope.head
+                && requested.committed
+                && ctx.repo.parent(&only.sha)?.as_deref() == requested.range_base =>
+        {
+            only.patch_id.clone()
+        }
         _ => None,
     };
     let head: Vec<Covered> = if merge_after {
@@ -539,13 +547,18 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
         None => json!(format!("all {total} commits already reviewed")),
         Some(oldest) => {
             let pending = unreviewed.len();
-            let start = ctx.repo.parent(&oldest.sha)?;
             let from = requested
                 .commits
                 .iter()
                 .position(|commit| commit.sha == oldest.sha)
                 .unwrap_or(0);
             let suffix = total - from;
+            // A base at the range start would be the pass already requested, not a partial one.
+            let start = if from == 0 {
+                None
+            } else {
+                ctx.repo.parent(&oldest.sha)?
+            };
             match start {
                 Some(sha) if suffix == pending => json!(format!(
                     "{done} of {total} already reviewed; --base {sha} reviews only the other {pending} (partial)"
@@ -740,7 +753,13 @@ pub(super) fn earlier_versions(ctx: &Ctx, status: &mut Value) -> Result<()> {
     }
     let stored = ctx.store.targets(&ctx.dir)?;
     let mut recorded: Vec<(&str, &str, &str, &CommitPatch)> = Vec::new();
-    for target in &stored {
+    // Only this target's own passes: a repeated subject such as "fix lint" on another branch
+    // says nothing about this commit.
+    let own = status["target"].as_str();
+    for target in stored
+        .iter()
+        .filter(|target| Some(target.key.as_str()) == own)
+    {
         for run in &target.runs {
             for pass in run.passes.iter().filter(|pass| pass.ended_at.is_some()) {
                 for commit in &pass.commits {

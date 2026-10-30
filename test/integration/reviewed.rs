@@ -1178,3 +1178,127 @@ fn changed_commit_shows_its_earlier_reviewed_version_without_counting_it() {
     // The brief status stays cheap and carries no hint.
     assert!(env.run(&["status"])["commits"].is_null());
 }
+
+/// Reviews `rev` as a commit target of its own and ends the run.
+fn review_commit(env: &Env, rev: &str) {
+    let run = env.run(&["--range", rev, "pass", "start", "--kind", "full"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&[
+        "--range", rev, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.run(&["--range", rev, "run", "end", "--run", &run]);
+}
+
+#[test]
+fn hint_suggests_no_base_when_the_first_commit_is_the_unreviewed_one() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    env.write("y.txt", "B\n");
+    let b = env.commit_all("B");
+    review_commit(&env, &b);
+    let report = env.run(&["pass", "start", "--kind", "full", "--dry-run"]);
+    assert_eq!(
+        report["already_reviewed"]["hint"], "1 of 2 already reviewed",
+        "{report}"
+    );
+}
+
+#[test]
+fn fix_check_report_does_not_cover_the_head_by_a_lone_fix_commit() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    env.write("y.txt", "B\n");
+    env.commit_all("B");
+    let run = pass_without_run_end(&env, &[]);
+    env.write("fix.txt", "F\n");
+    let fix = env.commit_all("fix");
+    review_commit(&env, &fix);
+    let report = env.run(&[
+        "pass",
+        "start",
+        "--run",
+        &run,
+        "--kind",
+        "fix-check",
+        "--dry-run",
+    ]);
+    assert_eq!(report["already_reviewed"]["head"], json!([]), "{report}");
+    assert_eq!(env.run(&["status"])["covered_by"], json!([]));
+}
+
+#[test]
+fn pass_abort_refuses_a_pass_whose_reviewer_replied() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let reviewer = r#"[{"model":"m","effort":"high","harness":"h","starting_context":"fresh"}]"#;
+    let run = env.run_stdin(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        reviewer,
+    )["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ended = env.run_stdin(
+        &[
+            "pass",
+            "end",
+            "--run",
+            &run,
+            "--pass",
+            "c1p0",
+            "--findings",
+            "-",
+            "--reviewer",
+            "r1",
+        ],
+        r#"[{"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"broken"}]"#,
+    );
+    let id = ended["added"][0].as_str().unwrap().to_owned();
+    let started = env.run_stdin(
+        &[
+            "pass",
+            "start",
+            "--run",
+            &run,
+            "--kind",
+            "fix-check",
+            "--reviewers",
+            "-",
+        ],
+        reviewer,
+    );
+    let checker = started["pass"]["reviewers"][0]["id"].as_str().unwrap();
+    env.run(&[
+        "resolve",
+        &id,
+        "--not-fixed",
+        "still broken",
+        "--reviewer",
+        &format!("{run}.c1p1.{checker}"),
+    ]);
+    let error = env.fail(&["pass", "abort", "--run", &run], None);
+    assert!(error.contains("has findings or replies"), "{error}");
+}
+
+#[test]
+fn earlier_version_hint_ignores_other_targets() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("fix lint");
+    let first = env.git(&["rev-parse", "HEAD"]);
+    review_commit(&env, &first);
+    env.write("x.txt", "A changed\n");
+    env.git(&["add", "-A"]);
+    env.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let status = env.run(&["status", "--full"]);
+    assert!(!commit_reviewed(&status, "fix lint"), "{status}");
+    assert!(
+        status["commits"][0]["earlier_version"].is_null(),
+        "{status}"
+    );
+}

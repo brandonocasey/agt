@@ -147,7 +147,7 @@ patch-ids (`commit_count` gives their number); `show <run>.<pass>` prints them.
 
 A first pass that fails to start leaves no run behind. A pass left open blocks `run end`
 and another `pass start --run` on that run; `pass abort --run <run> [--pass <id>]`
-deletes the open pass (an ended pass is refused, and so is one with findings), and the
+deletes the open pass (an ended pass is refused, and so is one with findings or replies from its reviewers), and the
 run too when that leaves it without passes. An aborted pass counts for nothing.
 
 `pass start` adds `already_reviewed` to its output, information only: the pass still
@@ -590,7 +590,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   not. A run of only partial passes adds no repaired head to `last_reviewed_head`,
   and a run's repaired head counts only when it descends from the run's last pass
   head (a rebase before `run end` breaks that).
-  An unreviewed commit whose subject and author match a commit of a stored pass under
+  An unreviewed commit whose subject and author match a commit of a pass of this target under
   another patch gets `earlier_version` (`target`, `run`, `pass`, `sha`) in `status
   --full` and the text output; it is a hint only and never counts as reviewed.
 - `run end` adds commit patch-ids to passes whose tree now equals `HEAD`'s
