@@ -688,6 +688,21 @@ impl Repo {
 
     /// Non-merge commits in `from..to` (or all of `to` when `from` is `None`), oldest first.
     pub fn commits(&self, from: Option<&str>, to: &str) -> Result<Vec<CommitInfo>> {
+        self.commits_with(from, to, false)
+    }
+
+    /// Like [`Repo::commits`], following only the first parent of each merge, so commits a merge
+    /// brought in are left out.
+    pub fn commits_first_parent(&self, from: Option<&str>, to: &str) -> Result<Vec<CommitInfo>> {
+        self.commits_with(from, to, true)
+    }
+
+    fn commits_with(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        first_parent: bool,
+    ) -> Result<Vec<CommitInfo>> {
         let range = range(from, to);
         let mut args = vec![
             "-c",
@@ -701,6 +716,9 @@ impl Repo {
             "--no-renames",
             "--format=commit %H",
         ];
+        if first_parent {
+            args.push("--first-parent");
+        }
         args.extend(DIFF_FLAGS);
         args.extend(["--end-of-options", &range, "--"]);
         let patch = self.checked(&args, None, &[])?;
@@ -710,7 +728,7 @@ impl Repo {
             .map(|(patch_id, sha)| (sha, patch_id))
             .collect();
         Ok(self
-            .log(from, to)?
+            .log_with(from, to, first_parent)?
             .into_iter()
             .filter(|entry| entry.parents.len() <= 1)
             .map(|entry| CommitInfo {
@@ -731,15 +749,65 @@ impl Repo {
 
     /// Every commit in `from..to`, merges included, oldest first.
     pub fn log(&self, from: Option<&str>, to: &str) -> Result<Vec<LogEntry>> {
+        self.log_with(from, to, false)
+    }
+
+    /// The author name and subject of each commit of `shas` that exists; others are skipped.
+    pub fn authored(&self, shas: &[&str]) -> Result<HashMap<String, (String, String)>> {
+        let mut found = HashMap::new();
+        if shas.is_empty() {
+            return Ok(found);
+        }
+        let input = format!("{}\n", shas.join("\n")).into_bytes();
+        let checked = text(self.checked(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(input),
+            &[],
+        )?)?;
+        let present: Vec<&str> = checked
+            .lines()
+            .filter_map(|line| line.strip_suffix(" commit"))
+            .collect();
+        if present.is_empty() {
+            return Ok(found);
+        }
+        let input = format!("{}\n", present.join("\n")).into_bytes();
+        let listing = text(self.checked(
+            &[
+                "log",
+                "--no-walk=unsorted",
+                "--stdin",
+                "--format=%H%x00%an%x00%s",
+            ],
+            Some(input),
+            &[],
+        )?)?;
+        for line in listing.lines() {
+            let mut parts = line.splitn(3, '\0');
+            if let (Some(sha), Some(author), Some(subject)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                found.insert(sha.to_owned(), (author.to_owned(), subject.to_owned()));
+            }
+        }
+        Ok(found)
+    }
+
+    /// The merge commits in `from..to`.
+    pub fn merges(&self, from: Option<&str>, to: &str) -> Result<HashSet<String>> {
         let range = range(from, to);
-        let listing = self.git(&[
-            "log",
-            "--reverse",
-            "--format=%H%x00%T%x00%P%x00%s",
-            "--end-of-options",
-            &range,
-            "--",
-        ])?;
+        let listing = self.git(&["rev-list", "--merges", "--end-of-options", &range, "--"])?;
+        Ok(listing.lines().map(str::to_owned).collect())
+    }
+
+    fn log_with(&self, from: Option<&str>, to: &str, first_parent: bool) -> Result<Vec<LogEntry>> {
+        let range = range(from, to);
+        let mut args = vec!["log", "--reverse", "--format=%H%x00%T%x00%P%x00%s"];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        args.extend(["--end-of-options", &range, "--"]);
+        let listing = self.git(&args)?;
         listing
             .lines()
             .filter(|line| !line.is_empty())

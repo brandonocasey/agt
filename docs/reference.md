@@ -145,7 +145,21 @@ reviews a later head, such as a fix for a fix check; it MUST descend from the
 target's end, else the pass is refused. Pass output leaves out the per-commit
 patch-ids (`commit_count` gives their number); `show <run>.<pass>` prints them.
 
-A first pass that fails to start leaves no run behind.
+A first pass that fails to start leaves no run behind. A pass left open blocks `run end`
+and another `pass start --run` on that run; `pass abort --run <run> [--pass <id>]`
+deletes the open pass (an ended pass is refused, and so is one with findings or replies from its reviewers), and the
+run too when that leaves it without passes. An aborted pass counts for nothing.
+
+`pass start` adds `already_reviewed` to its output, information only: the pass still
+covers the whole requested range. `head` lists the passes that already cover the whole
+head, `commits` each already reviewed commit with `via` (`sha`, `patch-id`, `tree` or
+`repair`) and `by` (`target`, `run`, `pass`, `kind`, `pass_commits`, `via`; a repair has
+no `pass` or `kind`), `unreviewed` the other shas, oldest first, including changed merges
+no pass contains, and `hint` says what `--base <sha>` would review instead (null when
+nothing is reviewed yet; no `--base` when it would be the range start or the pass's own
+base). A fix check or reveal pass
+leaves its own run's earlier passes out. `pass start --dry-run` prints the same report
+(`dry_run: true`, no `pass`) and writes nothing: no run, pass or store file.
 
 ```sh
 agt review pass end --run rv-7k2m --pass c1p0 --lock
@@ -329,7 +343,10 @@ have yet; `--offline` refuses it.
 `status` never writes: not to the store, not to the git index or object
 database. By default it leaves out `commits`, `runs` and tree ids; `--full`
 adds them. It reports whether the head is reviewed, `reviews_at_head`, the passes
-that cover it, each commit's reviewed state, `unreviewed_commits`,
+that cover it, each commit's reviewed state and what marked it (`commits[].by`: `target`,
+`run`, `pass`, `kind`, `pass_commits` and `via`, one of `sha`, `patch-id`, `tree`,
+`repair` or, for a merge, `contained`), `already_reviewed` (how many commits are
+reviewed; in the brief output too), `unreviewed_commits`,
 `last_reviewed_head` (the nearest ancestor of the head that a whole-branch pass
 reviewed or a run repaired, across this repository's branch and range targets,
 to scope the next review), `review_from` (the parent of the oldest unreviewed
@@ -554,7 +571,9 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   the pass's whole-range patch-id (a squash). A matching last commit alone
   never covers a longer head: its earlier commits may have changed. A
   partial pass's range patch-id runs from its own base. A commit is reviewed
-  when its patch-id, tree or sha matches any ended pass of the target, or its
+  when its patch-id or sha matches any ended pass of the target, or its tree
+  matches an ended pass that is not partial (a partial pass's tree says nothing
+  about a squash or reorder of the commits around its delta), or its
   sha or patch-id matches an ended pass of another target of this repository
   (such as a `--range` review of the branch's end point). The head is reviewed
   when a pass or trusted record covers it, or when every commit since the
@@ -562,13 +581,24 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   conflict resolution changes the patch and shows as unreviewed. Merge commits
   are listed only when their tree differs from git's automatic merge of their
   parents (`git merge-tree --write-tree`, run with objects in a temporary
-  directory); such a merge is unreviewed until a whole-branch pass reviews a
-  head that contains it (it is then an ancestor of `last_reviewed_head`), and
-  while one sits after `last_reviewed_head` no pass covers the head. A run of
-  only partial passes adds no repaired head to `last_reviewed_head`.
+  directory); such a merge is reviewed when an ended pass of any target of this
+  repository contains it (`is_ancestor(merge, pass head)` and not
+  `is_ancestor(merge, pass base)`, a pass with no base counting from the root), and
+  `commits[].match` says `"merge"`. Ancestors of a reviewed head, tree matches
+  across targets or partial passes, forge approvals and commits of killed or open
+  passes do not count, and neither does a repair. While a changed merge is
+  unreviewed no pass covers the head. So `--range <merge>` marks that merge reviewed
+  in its own target, and a range that starts at the merge (`<merge>..<head>`) does
+  not. A run of only partial passes adds no repaired head to `last_reviewed_head`,
+  and a run's repaired head counts only when it descends from the run's last pass
+  head (a rebase before `run end` breaks that).
+  An unreviewed commit whose subject and author match a commit of a pass of this target under
+  another patch gets `earlier_version` (`target`, `run`, `pass`, `sha`) in `status
+  --full` and the text output; it is a hint only and never counts as reviewed.
 - `run end` adds commit patch-ids to passes whose tree now equals `HEAD`'s
   tree, so reviewed uncommitted work stays reviewed after it is committed and
-  later rebased.
+  later rebased. A partial pass is adopted only when its head is an ancestor of
+  `HEAD`, and a partial dirty pass never stores `HEAD`'s own patch-id.
 - `reviews_at_head` counts covering passes that are full reviews, plus fix
   checks that found no major finding (a `bug` of `high` or `medium` severity).
   Parallel reviewers in one pass count once. A pass of another target of this
@@ -597,7 +627,9 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   A summary holds one marker per run; a run's newest marker counts.
   Records of this target's own runs, or of a run whose pass covers the head,
   are skipped; their passes already count.
-- A run's `repair` commits (after its last pass, up to `HEAD` at `run end`),
+- A run's `repair` commits (after its last pass, up to `HEAD` at `run end`, along the
+  first parent only, so commits a merge brought in from the default branch are not
+  repair),
   of this target or another target of this repository (such as a range
   review's `run end --head <fix>`), show as reviewed with `"match": "repair"` in `status` commits (`"pass"` for
   a pass match), but never add to `reviews_at_head`.
