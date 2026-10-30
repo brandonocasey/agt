@@ -465,6 +465,8 @@ pub(super) struct Requested<'a> {
     pub(super) kind: PassKind,
     /// Where the merge-base-scoped range starts (the pass's own base when partial).
     pub(super) range_base: Option<&'a str>,
+    /// Where the requested commits start: the pass's own base.
+    pub(super) base: Option<&'a str>,
     pub(super) commits: &'a [CommitInfo],
     pub(super) tree: &'a str,
     pub(super) range_patch_id: Option<&'a str>,
@@ -488,22 +490,33 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
     };
     let (reviewed, repaired) = targets.reviewed(except);
 
-    // A changed merge nobody reviewed voids the head's coverage, as for `status`, and counts
-    // among the unreviewed entries.
-    let history = ctx.repo.log(requested.range_base, &scope.head)?;
-    let unreviewed_merge: HashSet<String> = if history.iter().any(|entry| entry.parents.len() > 1) {
+    // A changed merge nobody reviewed voids the head's coverage, as for `status`, and the ones
+    // in the requested commits' range count among the unreviewed entries. That range starts at
+    // the pass's own base, which on the default branch or for a continuing pass is not the
+    // range start.
+    let every: Vec<&Target> = target.into_iter().chain(&others).collect();
+    let unreviewed_in = |history: &[LogEntry]| -> Result<HashSet<String>> {
+        if !history.iter().any(|entry| entry.parents.len() > 1) {
+            return Ok(HashSet::new());
+        }
         let reader = Repo::discover()?.read_only()?;
-        let merges = changed_merges(&reader, &history)?;
-        let every: Vec<&Target> = target.into_iter().chain(&others).collect();
+        let merges = changed_merges(&reader, history)?;
         let origins = merge_origins(&ctx.repo, &merges, &every)?;
-        unreviewed_merges(&merges, &origins)
+        Ok(unreviewed_merges(&merges, &origins)
             .into_iter()
             .map(str::to_owned)
-            .collect()
-    } else {
-        HashSet::new()
+            .collect())
     };
-    let merge_after = !unreviewed_merge.is_empty();
+    let wide = ctx.repo.log(requested.range_base, &scope.head)?;
+    let narrow;
+    let history = if requested.base == requested.range_base {
+        &wide
+    } else {
+        narrow = ctx.repo.log(requested.base, &scope.head)?;
+        &narrow
+    };
+    let unreviewed_merge = unreviewed_in(history)?;
+    let merge_after = !unreviewed_merge.is_empty() || !unreviewed_in(&wide)?.is_empty();
     // Only a head that is the whole range, one commit above the range start, may match by its
     // own patch-id: a fix check's lone commit says nothing about the commits before it.
     let head_patch_id = match requested.commits {
@@ -566,15 +579,11 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
         _ if done == 0 => Value::Null,
         None => json!(format!("all {total} commits already reviewed")),
         Some(oldest) => {
-            // A base at the range start, or where the requested commits start, would be the
-            // pass already requested, not a partial one.
-            let requested_start = match requested.commits.first() {
-                Some(first) => ctx.repo.parent(&first.sha)?,
-                None => None,
-            };
+            // A base at the range start, or at the pass's own base, would be the pass already
+            // requested, not a partial one.
             let start = ctx.repo.parent(oldest)?.filter(|start| {
                 Some(start.as_str()) != requested.range_base
-                    && Some(start) != requested_start.as_ref()
+                    && Some(start.as_str()) != requested.base
             });
             match start {
                 Some(sha) => {

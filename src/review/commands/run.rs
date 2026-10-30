@@ -277,6 +277,7 @@ fn overlap(ctx: &Ctx, plan: &Plan, run_id: Option<&str>, kind: PassKind) -> Resu
             run: run_id,
             kind,
             range_base: plan.range_base.as_deref(),
+            base: plan.base.as_deref(),
             commits: &plan.commits,
             tree: &plan.tree,
             range_patch_id: plan.range_patch_id.as_deref(),

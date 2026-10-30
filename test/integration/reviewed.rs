@@ -1396,3 +1396,32 @@ fn continuing_fix_check_hint_suggests_no_base_at_the_previous_head() {
         "{report}"
     );
 }
+
+#[test]
+fn default_branch_report_counts_an_unreviewed_conflict_merge() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let merge = conflict_merge(&env);
+    env.git(&["switch", "-q", "main"]);
+    let before = env.git(&["rev-parse", "main"]);
+    env.git(&["merge", "-q", "--ff-only", "feat"]);
+    // On the default branch the range start is the head, so the merge is only in the pass's base range.
+    let report = env.run(&[
+        "pass",
+        "start",
+        "--kind",
+        "full",
+        "--base",
+        &before,
+        "--dry-run",
+    ]);
+    let report = &report["already_reviewed"];
+    assert!(
+        report["unreviewed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(merge)),
+        "{report}"
+    );
+}
