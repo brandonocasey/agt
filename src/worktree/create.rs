@@ -15,6 +15,7 @@ use super::setup::{self, Step};
 use super::{emit, fast_forward, hooks};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
+use crate::core::shell::quote;
 use crate::forge::auto::Offline;
 use crate::git::base::{Candidate, candidates, choose};
 use crate::git::{Repo, Worktree};
@@ -205,8 +206,9 @@ fn reusable_detached(repo: &Repo, dir: &Path, commit: &str) -> Result<Option<Wor
     }
     if entry.head != commit {
         return fail(format!(
-            "{shown} is detached at {}, not {commit}; when it is clean, run `git -C {shown} switch --detach {commit}`, or pick another name",
-            entry.head
+            "{shown} is detached at {}, not {commit}; when it is clean, run `git -C {} switch --detach {commit}`, or pick another name",
+            entry.head,
+            quote(&dir.display().to_string())
         ));
     }
     Ok(Some(entry))
