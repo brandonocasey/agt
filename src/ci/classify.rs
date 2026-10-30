@@ -91,6 +91,17 @@ pub struct Head<'a> {
 /// right after a push the rollup can be empty before any check run exists.
 const ROLLUP_GRACE_SECS: i64 = 120;
 
+// Test-only override of the grace, so it can be checked without waiting two minutes.
+const GRACE_OVERRIDE: &str = "AGT_ROLLUP_GRACE_SECS";
+
+/// The grace in seconds: `ROLLUP_GRACE_SECS`, or the test override when set.
+pub fn rollup_grace_secs() -> i64 {
+    std::env::var(GRACE_OVERRIDE)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(ROLLUP_GRACE_SECS)
+}
+
 fn head_mismatch(head: &Head, observed: &Value, url: &Value) -> State {
     if head.awaiting {
         return with(
@@ -137,7 +148,7 @@ pub fn classify(head: &Head, view: &Value, rollup: usize, checks: &[Value]) -> S
     }
     let normalized = normalize_checks(checks);
     if normalized.is_empty() {
-        if rollup == 0 && head.waited_secs < ROLLUP_GRACE_SECS {
+        if rollup == 0 && head.waited_secs < rollup_grace_secs() {
             return with("pending", "checks_pending", json!({"checks": []}));
         }
         return with("blocked", "no_required_checks", json!({"checks": []}));

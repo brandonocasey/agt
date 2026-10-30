@@ -21,6 +21,8 @@ pub struct Pull {
     pub rollup: usize,
     /// The name of every check and status in the rollup, required or not.
     pub names: Vec<String>,
+    /// Whether any check or status in the rollup, required or not, has not completed.
+    pub running: bool,
     /// The branch the PR merges into.
     pub base: String,
 }
@@ -47,6 +49,14 @@ fn status_bucket(state: &str) -> String {
         other => return other.to_lowercase(),
     }
     .to_owned()
+}
+
+/// Whether a rollup entry is queued, in progress or otherwise not completed.
+fn unfinished(node: &Value) -> bool {
+    if node["__typename"] == "StatusContext" {
+        return matches!(node["state"].as_str(), Some("PENDING" | "EXPECTED"));
+    }
+    node["status"] != "COMPLETED"
 }
 
 /// The required check a rollup entry describes, if it is one.
@@ -93,6 +103,7 @@ impl Github {
         let mut checks = Vec::new();
         let mut rollup = 0;
         let mut names = Vec::new();
+        let mut running = false;
         loop {
             let mut vars = vec![
                 Var::text("owner", owner),
@@ -116,6 +127,7 @@ impl Github {
                 .map_or(&[][..], Vec::as_slice);
             rollup += nodes.len();
             checks.extend(nodes.iter().filter_map(check));
+            running |= nodes.iter().any(unfinished);
             names.extend(
                 nodes
                     .iter()
@@ -141,6 +153,7 @@ impl Github {
                 checks,
                 rollup,
                 names,
+                running,
                 base: pull["baseRefName"].as_str().unwrap_or("").to_owned(),
             });
         }

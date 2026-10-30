@@ -3,7 +3,8 @@
 use serde_json::json;
 
 use super::classify::{
-    Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, with,
+    Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, rollup_grace_secs,
+    with,
 };
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
@@ -49,34 +50,44 @@ fn failure(error: &TransportError) -> (State, bool) {
     (state, retry)
 }
 
-/// The state of `target` and the head it is pinned to: the one it was given or, when it had
-/// none, the head read now. While `awaiting`, a head or pipeline that has not caught up with
-/// the pinned commit is pending, not changed.
+/// The state of `target`, the head it is pinned to (the one it was given or, when it had none,
+/// the head read now), whether the failure of the read is transient, and when the rollup went
+/// idle with a required context missing (`idle_since`, carried from the previous poll). While
+/// `awaiting`, a head or pipeline that has not caught up with the pinned commit is pending, not
+/// changed.
 pub fn snapshot(
     target: &Resolved,
     head: Option<String>,
     awaiting: bool,
     waited_secs: i64,
-) -> (State, Option<String>, bool) {
+    idle_since: Option<i64>,
+) -> (State, Option<String>, bool, Option<i64>) {
     let result = match target.target.platform {
-        Forge::Github => github(target, head.clone(), awaiting, waited_secs),
+        Forge::Github => github(target, head.clone(), awaiting, waited_secs, idle_since),
         Forge::Gitlab if target.target.pipeline => {
-            pipeline(target).map(|state| (state, head.clone()))
+            pipeline(target).map(|state| (state, head.clone(), None))
         }
-        Forge::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs),
+        Forge::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs)
+            .map(|(state, head)| (state, head, None)),
     };
     match result {
-        Ok((state, head)) => (state, head, false),
+        Ok((state, head, idle_since)) => (state, head, false, idle_since),
         Err(error) => {
             let (state, retry) = failure(&error);
-            (state, head, retry)
+            (state, head, retry, idle_since)
         }
     }
 }
 
 type Polled = Result<(State, Option<String>), TransportError>;
 
-fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
+fn github(
+    target: &Resolved,
+    head: Option<String>,
+    awaiting: bool,
+    waited_secs: i64,
+    idle_since: Option<i64>,
+) -> Result<(State, Option<String>, Option<i64>), TransportError> {
     let github = github::connect(&target.host);
     let pull = github.pull_checks(&target.repo, target.target.number)?;
     let head = head.or_else(|| pull.view["headRefOid"].as_str().map(str::to_owned));
@@ -87,8 +98,9 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
         waited_secs,
     };
     let state = classify(&head_state, &pull.view, pull.rollup, &pull.checks);
-    let state = require_reported(&github, target, &pull, state)?;
-    Ok((state, head))
+    let (state, idle_since) =
+        require_reported(&github, target, &pull, state, (waited_secs, idle_since))?;
+    Ok((state, head, idle_since))
 }
 
 /// A passed state held back while a context the base branch requires has not reported: the
@@ -98,15 +110,24 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
 /// the state back. When a source cannot be read for want of permission and nothing known is
 /// missing, the state stands, marked `requiredContexts`; any other failure of a read fails the
 /// poll, which is retried.
+///
+/// A missing context is held only while something can still produce it: while any check in the
+/// rollup is not completed the hold stands with `idle: false`. Once none is, the rollup is idle,
+/// and a context that stays missing for `rollup_grace_secs` of continuous idleness (a required job
+/// that starts late gets that grace) ends the wait as `required_checks_missing`. `clock` is the
+/// seconds into the wait and when the idleness began; the returned value is the idleness start to
+/// carry to the next poll, `None` when the rollup is not idle with a context missing.
 fn require_reported(
     github: &github::Github,
     target: &Resolved,
     pull: &github::ci::Pull,
     state: State,
-) -> Result<State, TransportError> {
+    clock: (i64, Option<i64>),
+) -> Result<(State, Option<i64>), TransportError> {
+    let (waited_secs, idle_since) = clock;
     let base = pull.base.as_str();
     if state["reason"] != "required_checks_passed" || base.is_empty() {
-        return Ok(state);
+        return Ok((state, None));
     }
     let mut contexts = Vec::new();
     let mut unreadable_source = false;
@@ -127,14 +148,24 @@ fn require_reported(
         .filter(|context| !pull.names.contains(context))
         .collect();
     let mut state = state;
-    if !missing.is_empty() {
+    if missing.is_empty() {
+        if unreadable_source {
+            state["requiredContexts"] = json!("unreadable");
+        }
+        return Ok((state, None));
+    }
+    let idle = !pull.running;
+    let since = idle.then(|| idle_since.unwrap_or(waited_secs));
+    if since.is_some_and(|since| waited_secs - since >= rollup_grace_secs()) {
+        state["status"] = json!("blocked");
+        state["reason"] = json!("required_checks_missing");
+    } else {
         state["status"] = json!("pending");
         state["reason"] = json!("checks_pending");
-        state["missingChecks"] = json!(missing);
-    } else if unreadable_source {
-        state["requiredContexts"] = json!("unreadable");
+        state["idle"] = json!(idle);
     }
-    Ok(state)
+    state["missingChecks"] = json!(missing);
+    Ok((state, since))
 }
 
 /// Whether a read failed because the token may not see it (or it does not exist), as opposed

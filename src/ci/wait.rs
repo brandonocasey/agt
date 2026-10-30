@@ -102,6 +102,9 @@ struct Tracked {
     transient_failures: u32,
     /// Unix seconds when the wait began.
     started: i64,
+    /// Seconds into the wait at which the rollup went idle with a required context missing, while
+    /// it has stayed so.
+    idle_since: Option<i64>,
 }
 
 /// Transient failures in a row after which a target is reported as a query error.
@@ -118,15 +121,16 @@ enum Polled {
 /// Reads one target on its own thread, so a hung `gh` or `glab` cannot hold the wait past its
 /// deadline or a signal.
 fn poll(tracked: &mut Tracked, deadline: Instant) -> Polled {
-    let (target, head, awaiting) = (
+    let (target, head, awaiting, idle_since) = (
         tracked.target.clone(),
         tracked.head.clone(),
         tracked.awaiting,
+        tracked.idle_since,
     );
     let waited = clock::now_secs().map_or(0, |now| (now - tracked.started).max(0));
     let (send, receive) = channel();
     thread::spawn(move || {
-        let _ = send.send(snapshot(&target, head, awaiting, waited));
+        let _ = send.send(snapshot(&target, head, awaiting, waited, idle_since));
     });
     loop {
         let now = Instant::now();
@@ -134,8 +138,9 @@ fn poll(tracked: &mut Tracked, deadline: Instant) -> Polled {
             return Polled::Interrupted;
         }
         match receive.recv_timeout((deadline - now).min(Duration::from_millis(20))) {
-            Ok((state, head, transient)) => {
+            Ok((state, head, transient, idle_since)) => {
                 tracked.head = head;
+                tracked.idle_since = idle_since;
                 tracked.transient_failures = if transient {
                     tracked.transient_failures + 1
                 } else {
@@ -214,6 +219,7 @@ pub fn run(options: &Options) -> u8 {
             done: false,
             transient_failures: 0,
             started,
+            idle_since: None,
         })
         .collect();
     install_handlers();

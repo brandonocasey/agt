@@ -1341,3 +1341,120 @@ fn gitlab_jobs_rate_limit_is_transient() {
     assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
     assert_eq!(last(&outcome)["reason"], "checks_complete");
 }
+
+/// One poll that finds `CI gate` required by a ruleset and reported by none of `contexts`.
+fn held(contexts: &[Value]) -> Vec<Step> {
+    vec![
+        step("PullChecks", &based(contexts)),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        step(BRANCH, &branch(&[])),
+    ]
+}
+
+/// `poll` with its first read waiting `seconds`.
+fn delayed(mut poll: Vec<Step>, seconds: f64) -> Vec<Step> {
+    let first = poll.remove(0).delay(seconds);
+    poll.insert(0, first);
+    poll
+}
+
+/// `--timeout 20` with the fast interval, for tests whose fake reads wait.
+const SLOW: [&str; 6] = [
+    "--interval",
+    "0.001",
+    "--max-interval",
+    "0.002",
+    "--timeout",
+    "20",
+];
+
+fn grace(secs: &'static str) -> [(&'static str, &'static str); 1] {
+    [("AGT_ROLLUP_GRACE_SECS", secs)]
+}
+
+fn optional_running(name: &str) -> Value {
+    let mut node = run_node(name, "IN_PROGRESS", None);
+    node["isRequired"] = json!(false);
+    node
+}
+
+fn idles(outcome: &Outcome) -> Vec<Value> {
+    outcome
+        .events
+        .iter()
+        .filter(|event| event["event"] != "final")
+        .map(|event| event["idle"].clone())
+        .collect()
+}
+
+#[test]
+fn a_missing_context_is_held_while_another_check_runs() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let gate = run_node("CI gate", "COMPLETED", Some("SUCCESS"));
+    let lint = optional_running("lint");
+    let mut steps = held(&[passed.clone(), lint.clone()]);
+    let slow = delayed(held(&[passed.clone(), lint]), 1.5);
+    steps.extend(slow);
+    steps.extend(held(&[passed, gate]));
+    let outcome = run_with(&steps, GITHUB_TARGET, &SLOW, &grace("1"));
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["idle"], false);
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
+fn a_context_still_missing_after_the_rollup_idles_past_the_grace_is_blocked() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let mut steps = held(std::slice::from_ref(&passed));
+    steps = delayed(steps, 1.5);
+    steps.extend(held(&[passed]));
+    let outcome = run_with(&steps, GITHUB_TARGET, &SLOW, &grace("1"));
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(
+        reasons(&outcome),
+        [
+            "checks_pending",
+            "required_checks_missing",
+            "action_required"
+        ]
+    );
+    assert_eq!(outcome.events[1]["status"], "blocked");
+    assert_eq!(outcome.events[1]["missingChecks"], json!(["CI gate"]));
+    assert_eq!(
+        last(&outcome)["results"][0]["missingChecks"],
+        json!(["CI gate"])
+    );
+}
+
+#[test]
+fn an_idle_rollup_within_the_grace_waits_for_the_late_context() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let gate = run_node("CI gate", "COMPLETED", Some("SUCCESS"));
+    let mut steps = held(std::slice::from_ref(&passed));
+    steps.extend(held(&[passed, gate]));
+    let outcome = run(&steps);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["idle"], true);
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn a_running_check_resets_the_idle_timer() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let gate = run_node("CI gate", "COMPLETED", Some("SUCCESS"));
+    let mut steps = held(std::slice::from_ref(&passed));
+    let running = delayed(held(&[passed.clone(), optional_running("lint")]), 2.5);
+    steps.extend(running);
+    steps.extend(held(std::slice::from_ref(&passed)));
+    steps.extend(held(&[passed, gate]));
+    let outcome = run_with(&steps, GITHUB_TARGET, &SLOW, &grace("2"));
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(
+        idles(&outcome),
+        [json!(true), json!(false), json!(true), Value::Null]
+    );
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
