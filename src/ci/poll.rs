@@ -50,8 +50,8 @@ fn failure(error: &TransportError) -> (State, bool) {
     (state, retry)
 }
 
-/// The state of `target`, the head it is pinned to (the one it was given or, when it had none,
-/// the head read now), whether the failure of the read is transient, and when the rollup went
+/// The state of `target`, the head it is pinned to (the one it was given, expanded to the full
+/// head it abbreviates once the host shows it, or, when it had none, the head read now), whether the failure of the read is transient, and when the rollup went
 /// idle with a required context missing (`idle_since`, carried from the previous poll). While
 /// `awaiting`, a head or pipeline that has not caught up with the pinned commit is pending, not
 /// changed.
@@ -81,17 +81,23 @@ pub fn snapshot(
 
 type Polled = Result<(State, Option<String>), TransportError>;
 
-/// The pinned head, with an abbreviated or differently cased SHA replaced by the full `observed`
-/// head it names, so comparisons with the host's full SHA match. Any other head is kept: when
-/// none is pinned yet, the observed head.
+/// The shortest `@SHA` that may name a longer head, git's default abbreviation: a shorter one
+/// could match the old head before the host shows the pushed commit, and pass the wrong commit.
+const MIN_ABBREV: usize = 7;
+
+/// The pinned head, with an abbreviated (at least `MIN_ABBREV` digits) or differently cased SHA
+/// replaced by the full `observed` head it names, so comparisons with the host's full SHA match.
+/// Any other head is kept: when none is pinned yet, the observed head.
 fn pin(head: Option<String>, observed: &Value) -> Option<String> {
     let observed = observed.as_str();
     match head {
         Some(head) => Some(
             observed
                 .filter(|full| {
-                    full.get(..head.len())
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&head))
+                    (head.len() >= MIN_ABBREV || full.len() == head.len())
+                        && full
+                            .get(..head.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&head))
                 })
                 .map_or(head, str::to_owned),
         ),
@@ -321,6 +327,15 @@ mod tests {
         assert_eq!(
             pinned(Some(full), json!("5eafee2fc")).as_deref(),
             Some(full)
+        );
+        // Below the minimum a prefix is not enough: it could be the old head's.
+        assert_eq!(
+            pinned(Some("5eafee"), json!(full)).as_deref(),
+            Some("5eafee")
+        );
+        assert_eq!(
+            pinned(Some("ABC123"), json!("abc123")).as_deref(),
+            Some("abc123")
         );
         assert_eq!(pinned(Some("abc"), json!(null)).as_deref(), Some("abc"));
         assert_eq!(pinned(None, json!(null)), None);

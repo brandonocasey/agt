@@ -525,9 +525,12 @@ fn an_abbreviated_sha_matches_the_full_head() {
     let outcome = run_with(
         &[step(
             "PullChecks",
-            &open(&[run_node("t", "COMPLETED", Some("SUCCESS"))]),
+            &pull(
+                json!({"headRefOid": "abc1234def5678"}),
+                &[run_node("t", "COMPLETED", Some("SUCCESS"))],
+            ),
         )],
-        "owner/repo#42@ABC1",
+        "owner/repo#42@ABC1234",
         &["--timeout", "5"],
         &[],
     );

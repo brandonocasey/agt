@@ -91,9 +91,10 @@ fn sleep(duration: Duration) {
 
 struct Tracked {
     target: Resolved,
-    /// The head the target is pinned to: its `@SHA`, else the head the first poll read.
+    /// The head the target is pinned to: its `@SHA` (expanded to the full head it abbreviates
+    /// once a poll reads it), else the head the first poll read.
     head: Option<String>,
-    /// The pinned head came from `--sha` and the host may not show it yet.
+    /// The pinned head came from `@SHA` and the host may not show it yet.
     awaiting: bool,
     /// The last state written.
     prior: Option<State>,

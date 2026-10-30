@@ -1155,8 +1155,9 @@ choices; no tracker at all is an error), and a
 GitLab pipeline id (current repository) or pipeline URL. Without `@SHA` the head read by the first
 poll is pinned, and a later head is a change. `@SHA` on a PR or MR target is for right after a
 push: the target stays pending (`waiting_for_pipeline`) until the head and, on GitLab, a pipeline
-(or merged-results pipeline) is on that commit. `@SHA` may be abbreviated (4 or more hex digits,
-any case); it matches the head it is a prefix of and is pinned to that full SHA.
+(or merged-results pipeline) is on that commit. `@SHA` may be abbreviated to 7 or more hex
+digits, any case; it matches the head it is a prefix of and is pinned to that full SHA. A shorter
+`@SHA` must equal the head, since it could also prefix the old head and pass the wrong commit.
 
 GitHub targets read the PR and its required checks in one GraphQL query. When that query says the required checks passed, they also read the contexts the base branch requires over REST (its rulesets, 100 per page, and the protection `GET repos/{repo}/branches/{branch}` reports, which needs no administration access); a required context that has not reported yet keeps the target `checks_pending` and is listed in `missingChecks`, with `idle` saying whether no check in the rollup is running. A required job that starts late (a gate that waits for the other jobs) is given time: once the rollup has been idle with a context still missing for 120 seconds in a row, the target is `required_checks_missing` (needs action, exit 1) with `missingChecks`, instead of waiting out `--timeout`. Any check running again restarts those 120 seconds. The two reads are independent: a context either one lists still holds the target back when the other is refused. If a read is refused (403, 404 or "resource not accessible") and no listed context is missing, the passed state stands and carries `requiredContexts: "unreadable"`; any other failure of a read, such as a 5xx, a rate limit or a timeout, is retried like the rest of the poll. GitLab targets read the
 MR, its head pipeline and the pipeline's jobs, on `GITLAB_HOST` or `glab config get host`.
