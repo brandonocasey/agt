@@ -790,3 +790,391 @@ fn sha256_repository_reviews_and_tracks_commits() {
         64
     );
 }
+
+/// Starts a full pass with `extra` flags, ends it and returns the run, left open.
+fn pass_without_run_end(env: &Env, extra: &[&str]) -> String {
+    let mut args = vec!["pass", "start", "--kind", "full"];
+    args.extend(extra);
+    let run = env.run(&args)["run"].as_str().unwrap().to_owned();
+    env.run(&["pass", "end", "--run", &run, "--pass", "c1p0"]);
+    run
+}
+
+fn unreviewed(status: &Value) -> Vec<String> {
+    status["unreviewed_commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sha| sha.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The stored target file of the repository's only target.
+fn stored_target(env: &Env) -> Value {
+    let key = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    let file = walk(&env.state())
+        .into_iter()
+        .find(|path| path.file_name().unwrap() == format!("{key}.json").as_str())
+        .unwrap();
+    serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+}
+
+/// A conflicting merge of `main` into `feat`, resolved by hand; returns the merge commit.
+fn conflict_merge(env: &Env) -> String {
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", &numbered(10, &[(4, "four")]));
+    env.commit_all("main change");
+    env.git(&["switch", "-q", "feat"]);
+    assert!(
+        !env.git_status(&["merge", "-q", "main"]),
+        "the merge conflicts"
+    );
+    env.write("a.txt", &numbered(10, &[(3, "three"), (4, "four")]));
+    env.commit_all("merge main")
+}
+
+#[test]
+fn partial_pass_tree_does_not_cover_a_squash_or_reorder() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    let a = env.commit_all("A");
+    env.write("y.txt", "B\n");
+    env.commit_all("B");
+    pass_without_run_end(&env, &["--base", &a]);
+    let run = env.run(&["status", "--full"])["runs"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&["run", "end", "--run", &run]);
+
+    env.git(&["reset", "-q", "--soft", "main"]);
+    env.commit_all("S");
+    let status = env.run(&["status", "--full"]);
+    assert!(!commit_reviewed(&status, "S"), "{status}");
+    assert_eq!(status["reviewed"], false, "{status}");
+
+    env.git(&["switch", "-q", "-C", "feat", "main"]);
+    env.write("y.txt", "B\n");
+    env.commit_all("B again");
+    env.write("x.txt", "A\n");
+    env.commit_all("A again");
+    let status = env.run(&["status", "--full"]);
+    assert!(commit_reviewed(&status, "B again"), "{status}");
+    assert!(!commit_reviewed(&status, "A again"), "{status}");
+    assert_eq!(status["reviewed"], false, "{status}");
+}
+
+#[test]
+fn partial_dirty_pass_is_not_adopted_by_a_squash() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    env.write("y.txt", "B\n");
+    let run = pass_without_run_end(&env, &["--base", "HEAD"]);
+    env.git(&["reset", "-q", "--soft", "main"]);
+    env.commit_all("S");
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status", "--full"]);
+    assert!(!commit_reviewed(&status, "S"), "{status}");
+    assert_eq!(status["reviewed"], false, "{status}");
+}
+
+#[test]
+fn repair_ignores_commits_merged_in_from_main() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    let run = pass_without_run_end(&env, &[]);
+    env.git(&["switch", "-q", "main"]);
+    env.write("m.txt", "M\n");
+    env.commit_all("main commit");
+    env.git(&["switch", "-q", "feat"]);
+    env.git(&["merge", "-q", "--no-edit", "main"]);
+    env.write("fix.txt", "F\n");
+    env.commit_all("fix");
+    env.run(&["run", "end", "--run", &run]);
+    let target = stored_target(&env);
+    let repair = target["runs"][0]["repair"].as_array().unwrap();
+    assert_eq!(repair.len(), 1, "only the fix, not main's commit: {target}");
+}
+
+#[test]
+fn rebase_before_run_end_is_not_a_last_reviewed_head() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    let run = pass_without_run_end(&env, &[]);
+    env.git(&["switch", "-q", "main"]);
+    env.write("m.txt", "M\n");
+    env.commit_all("main commit");
+    env.git(&["switch", "-q", "feat"]);
+    env.git(&["rebase", "-q", "main"]);
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert_eq!(status["last_reviewed_head"], Value::Null, "{status}");
+}
+
+#[test]
+fn conflict_merge_after_the_last_pass_stays_unreviewed_after_run_end() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let run = pass_without_run_end(&env, &[]);
+    let merge = conflict_merge(&env);
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status"]);
+    assert_eq!(unreviewed(&status), [merge], "{status}");
+    assert_eq!(status["reviewed"], false, "{status}");
+}
+
+#[test]
+fn range_review_after_a_merge_does_not_mark_it_reviewed() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    let first = env.commit_all("change");
+    let merge = conflict_merge(&env);
+    env.write("g.txt", "g\n");
+    env.commit_all("after one");
+    env.write("g.txt", "g\nh\n");
+    let last = env.commit_all("after two");
+    let review = |range: &str| {
+        let run = env.run(&["--range", range, "pass", "start", "--kind", "full"])["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        env.run(&[
+            "--range", range, "pass", "end", "--run", &run, "--pass", "c1p0",
+        ]);
+        env.run(&["--range", range, "run", "end", "--run", &run]);
+    };
+    review(&format!("{merge}..{last}"));
+    let status = env.run(&["status", "--full"]);
+    assert!(unreviewed(&status).contains(&merge), "{status}");
+    assert!(!commit_reviewed(&status, "merge main"), "{status}");
+
+    // A range that contains the merge reviews it.
+    review(&format!("{first}..{last}"));
+    let status = env.run(&["status", "--full"]);
+    assert!(commit_reviewed(&status, "merge main"), "{status}");
+    let merge_view = status["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|commit| commit["sha"] == merge.as_str())
+        .unwrap();
+    assert_eq!(merge_view["match"], "merge", "{status}");
+    assert_eq!(merge_view["by"][0]["via"], "contained", "{status}");
+}
+
+#[test]
+fn range_review_of_a_merge_marks_it_reviewed_in_its_own_target() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    let merge = conflict_merge(&env);
+    let run = env.run(&["--range", &merge, "pass", "start", "--kind", "full"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    env.run(&[
+        "--range", &merge, "pass", "end", "--run", &run, "--pass", "c1p0",
+    ]);
+    env.run(&["--range", &merge, "run", "end", "--run", &run]);
+    let status = env.run(&["--range", &merge, "status", "--full"]);
+    assert!(commit_reviewed(&status, "merge main"), "{status}");
+    assert_eq!(status["unreviewed_commits"], json!([]), "{status}");
+}
+
+fn already_reviewed(started: &Value) -> &Value {
+    &started["already_reviewed"]
+}
+
+#[test]
+fn pass_start_reports_partly_reviewed_commits() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    let a = env.commit_all("A");
+    let run = env.review("full");
+    env.write("y.txt", "B\n");
+    let b = env.commit_all("B");
+    let started = env.run(&["pass", "start", "--kind", "full"]);
+    let report = already_reviewed(&started);
+    assert_eq!(report["commits"][0]["sha"], a, "{started}");
+    assert_eq!(report["commits"][0]["via"], "sha", "{started}");
+    let by = &report["commits"][0]["by"][0];
+    assert_eq!(by["run"], run.as_str(), "{started}");
+    assert_eq!(by["pass"], "c1p0");
+    assert_eq!(by["kind"], "full");
+    assert_eq!(by["pass_commits"], 1);
+    assert_eq!(report["unreviewed"], json!([b]), "{started}");
+    assert_eq!(report["head"], json!([]), "{started}");
+    assert_eq!(
+        report["hint"],
+        format!("1 of 2 already reviewed; --base {a} reviews only the other 1 (partial)"),
+    );
+    // The pass still covers the whole range.
+    assert_eq!(started["pass"]["commit_count"], 2, "{started}");
+    assert_eq!(started["pass"]["partial"], false);
+}
+
+#[test]
+fn pass_start_reports_a_fully_reviewed_range() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    env.review("full");
+    let started = env.run(&["pass", "start", "--kind", "full"]);
+    let report = already_reviewed(&started);
+    assert_eq!(report["unreviewed"], json!([]), "{started}");
+    assert_eq!(report["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(report["head"].as_array().unwrap().len(), 1, "{started}");
+    assert_eq!(report["hint"], "all 1 commits already reviewed");
+}
+
+#[test]
+fn pass_start_reports_nothing_for_unreviewed_commits() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    let a = env.commit_all("A");
+    let started = env.run(&["pass", "start", "--kind", "full"]);
+    let report = already_reviewed(&started);
+    assert_eq!(report["commits"], json!([]), "{started}");
+    assert_eq!(report["unreviewed"], json!([a]));
+    assert_eq!(report["head"], json!([]));
+    assert_eq!(report["hint"], Value::Null);
+}
+
+#[test]
+fn fix_check_report_leaves_out_its_own_run() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    let a = env.commit_all("A");
+    let run = pass_without_run_end(&env, &[]);
+    // A fix check over the whole branch is not told that its own run reviewed it.
+    let started = env.run(&[
+        "pass",
+        "start",
+        "--run",
+        &run,
+        "--kind",
+        "fix-check",
+        "--base",
+        "main",
+    ]);
+    let report = already_reviewed(&started);
+    assert_eq!(report["commits"], json!([]), "{started}");
+    assert_eq!(report["head"], json!([]), "{started}");
+    assert_eq!(report["unreviewed"], json!([a]), "{started}");
+}
+
+#[test]
+fn dry_run_reports_and_writes_nothing() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    let a = env.commit_all("A");
+    env.review("full");
+    env.write("y.txt", "B\n");
+    let b = env.commit_all("B");
+    let store = env.state().parent().unwrap().to_path_buf();
+    let before = crate::support::snapshot(&store);
+    let report = env.run(&["pass", "start", "--kind", "full", "--dry-run"]);
+    assert_eq!(report["dry_run"], true, "{report}");
+    assert_eq!(report["already_reviewed"]["unreviewed"], json!([b]));
+    assert_eq!(report["already_reviewed"]["commits"][0]["sha"], a);
+    assert!(report["pass"].is_null(), "{report}");
+    assert!(
+        before == crate::support::snapshot(&store),
+        "a dry run wrote to the store"
+    );
+    let runs = env.run(&["status", "--full"])["runs"].clone();
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn pass_abort_deletes_an_open_pass_and_an_emptied_run() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    let run = env.run(&["pass", "start", "--kind", "full"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let blocked = env.fail(&["run", "end", "--run", &run], None);
+    assert!(blocked.contains("is still open"), "{blocked}");
+    let aborted = env.run(&["pass", "abort", "--run", &run]);
+    assert_eq!(aborted["aborted"], "c1p0", "{aborted}");
+    assert_eq!(aborted["run_removed"], true, "{aborted}");
+    let status = env.run(&["status", "--full"]);
+    assert_eq!(status["runs"], json!([]), "{status}");
+    assert_eq!(status["reviewed"], false);
+}
+
+#[test]
+fn pass_abort_keeps_the_run_with_ended_passes_and_refuses_ended_ones() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    let run = pass_without_run_end(&env, &[]);
+    let error = env.fail(&["pass", "abort", "--run", &run], None);
+    assert!(error.contains("no open pass"), "{error}");
+    let started = env.run(&["pass", "start", "--run", &run, "--kind", "fix-check"]);
+    assert_eq!(started["pass"]["id"], "c1p1");
+    let error = env.fail(&["pass", "abort", "--run", &run, "--pass", "c1p0"], None);
+    assert!(error.contains("already ended"), "{error}");
+    let aborted = env.run(&["pass", "abort", "--run", &run, "--pass", "c1p1"]);
+    assert_eq!(aborted["run_removed"], false, "{aborted}");
+    let target = stored_target(&env);
+    assert_eq!(target["runs"][0]["passes"].as_array().unwrap().len(), 1);
+    env.run(&["run", "end", "--run", &run]);
+}
+
+#[test]
+fn status_names_what_marked_each_commit() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    let a = env.commit_all("A");
+    let run = pass_without_run_end(&env, &[]);
+    env.write("fix.txt", "F\n");
+    env.commit_all("fix");
+    env.run(&["run", "end", "--run", &run]);
+    let status = env.run(&["status", "--full"]);
+    let target = status["target"].clone();
+    let commits = status["commits"].as_array().unwrap();
+    let a_view = commits
+        .iter()
+        .find(|commit| commit["sha"] == a.as_str())
+        .unwrap();
+    assert_eq!(a_view["by"][0]["target"], target, "{status}");
+    assert_eq!(a_view["by"][0]["run"], run.as_str());
+    assert_eq!(a_view["by"][0]["pass"], "c1p0");
+    assert_eq!(a_view["by"][0]["kind"], "full");
+    assert_eq!(a_view["by"][0]["via"], "sha");
+    let fix = commits
+        .iter()
+        .find(|commit| commit["subject"] == "fix")
+        .unwrap();
+    assert_eq!(fix["match"], "repair", "{status}");
+    assert_eq!(fix["by"][0]["via"], "repair");
+    assert!(fix["by"][0]["pass"].is_null());
+    assert_eq!(status["already_reviewed"], 2);
+    let brief = env.run(&["status"]);
+    assert_eq!(brief["already_reviewed"], 2, "{brief}");
+}
+
+#[test]
+fn changed_commit_shows_its_earlier_reviewed_version_without_counting_it() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("Add parser");
+    env.review("full");
+    env.write("x.txt", "A changed\n");
+    env.git(&["add", "-A"]);
+    env.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let status = env.run(&["status", "--full"]);
+    assert!(!commit_reviewed(&status, "Add parser"), "{status}");
+    assert_eq!(status["reviewed"], false);
+    let view = &status["commits"][0];
+    assert_eq!(view["earlier_version"]["pass"], "c1p0", "{status}");
+    // The brief status stays cheap and carries no hint.
+    assert!(env.run(&["status"])["commits"].is_null());
+}

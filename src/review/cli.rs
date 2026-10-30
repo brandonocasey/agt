@@ -26,7 +26,7 @@ pub enum Command {
         #[command(subcommand)]
         action: RunAction,
     },
-    /// Start or end a review pass inside a run.
+    /// Start, end or abort a review pass inside a run.
     Pass {
         #[command(subcommand)]
         action: PassAction,
@@ -195,6 +195,19 @@ pub enum PassAction {
         /// [default: the end].
         #[arg(long)]
         head: Option<String>,
+        /// Print which of the requested commits earlier passes already reviewed, and start
+        /// nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Delete the open pass of a run, such as one started on the wrong range; it counts for
+    /// nothing. A run left without passes is removed too.
+    Abort {
+        #[arg(long)]
+        run: String,
+        /// The open pass [default: the run's open pass].
+        #[arg(long)]
+        pass: Option<String>,
     },
     /// End a pass.
     End {

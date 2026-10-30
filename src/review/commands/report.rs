@@ -18,7 +18,7 @@ use crate::git::LogEntry;
 use crate::review::cli::ReportArgs;
 use crate::store::model::{Check, Forge, Outcome, Resolution, Target, TargetKind, Thread};
 
-use super::status::{brief_status, status};
+use super::status::{brief_status, earlier_versions, status};
 use super::{Ctx, qa};
 
 const SUMMARY_WIDTH: usize = 100;
@@ -102,7 +102,8 @@ pub(super) fn run(
         });
     }
     if text {
-        let status = status(ctx, head)?;
+        let mut status = status(ctx, head)?;
+        earlier_versions(ctx, &mut status)?;
         return Ok(Output::Text(detail_text(
             &status,
             section,
@@ -112,8 +113,13 @@ pub(super) fn run(
     Ok(Output::Json(if section == Section::Qa {
         qa::status(ctx, head)?
     } else {
-        let status = status(ctx, head)?;
-        if full { status } else { brief_status(status) }
+        let mut status = status(ctx, head)?;
+        if full {
+            earlier_versions(ctx, &mut status)?;
+            status
+        } else {
+            brief_status(status)
+        }
     }))
 }
 
@@ -328,6 +334,17 @@ fn threads_text(out: &mut String, status: &Value, section: Section, qa: bool) {
     }
 }
 
+/// One mark of a commit: where it was reviewed and how it matched.
+fn by_text(by: &Value) -> String {
+    let via = by["via"].as_str().unwrap_or("?");
+    let run = by["run"].as_str().unwrap_or("?");
+    let target = by["target"].as_str().unwrap_or("?");
+    match by["pass"].as_str() {
+        Some(pass) => format!("{target} {run} {pass} ({via})"),
+        None => format!("{target} {run} fixed after its last pass, not reviewed itself"),
+    }
+}
+
 fn review_text(out: &mut String, status: &Value) {
     out.push_str("\nReview\n");
     if status["head"].is_null() {
@@ -347,7 +364,41 @@ fn review_text(out: &mut String, status: &Value) {
             .find(|commit| commit["sha"] == sha)
             .and_then(|commit| commit["subject"].as_str())
             .unwrap_or("");
-        let _ = writeln!(out, "    {} {subject}", short(sha));
+        let earlier = commits
+            .iter()
+            .find(|commit| commit["sha"] == sha)
+            .map(|commit| &commit["earlier_version"])
+            .filter(|earlier| earlier.is_object())
+            .map(|earlier| {
+                format!(
+                    "   (an earlier version was reviewed: {} {} {})",
+                    earlier["target"].as_str().unwrap_or("?"),
+                    earlier["run"].as_str().unwrap_or("?"),
+                    earlier["pass"].as_str().unwrap_or("?")
+                )
+            })
+            .unwrap_or_default();
+        let _ = writeln!(out, "    {} {subject}{earlier}", short(sha));
+    }
+    let reviewed: Vec<&Value> = commits
+        .iter()
+        .filter(|commit| commit["reviewed"] == true)
+        .collect();
+    if !reviewed.is_empty() {
+        let _ = writeln!(out, "  already reviewed ({}):", reviewed.len());
+        for commit in reviewed {
+            let by = items(&commit["by"])
+                .iter()
+                .map(by_text)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _ = writeln!(
+                out,
+                "    {} {}   {by}",
+                short(commit["sha"].as_str().unwrap_or("?")),
+                commit["subject"].as_str().unwrap_or("")
+            );
+        }
     }
     match status["last_reviewed_head"].as_str() {
         Some(head) => {

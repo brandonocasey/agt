@@ -34,7 +34,7 @@ use self::approve::approve;
 use self::findings::{comment, finding_kill, reply, resolve};
 pub use self::qa::run_qa;
 use self::report::Section;
-use self::run::{pass_end, pass_start, run_end, run_start};
+use self::run::{pass_abort, pass_dry_run, pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::view::{list, show};
 
@@ -138,11 +138,18 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
         &cli.command,
         Command::Publish { approval, .. } if approval.approve
     );
-    let read_only = matches!(
+    let dry_pass = matches!(
         cli.command,
-        Command::Status { .. } | Command::List(_) | Command::Show { .. }
-    ) || matches!(cli.command, Command::Publish { dry_run: true, .. })
-        && !approving;
+        Command::Pass {
+            action: PassAction::Start { dry_run: true, .. }
+        }
+    );
+    let read_only = dry_pass
+        || matches!(
+            cli.command,
+            Command::Status { .. } | Command::List(_) | Command::Show { .. }
+        )
+        || matches!(cli.command, Command::Publish { dry_run: true, .. }) && !approving;
     // Publish writes no git objects and needs `merge-tree` for its records' coverage.
     let scratch_git = read_only || matches!(cli.command, Command::Publish { .. });
     if matches!(cli.command, Command::Sync { .. } | Command::Publish { .. }) {
@@ -223,8 +230,20 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
                     run,
                     kind,
                     base,
+                    head,
+                    dry_run,
+                    ..
+                },
+        } if dry_run => pass_dry_run(&ctx, run.as_deref(), kind, base.as_deref(), head.as_deref())?,
+        Command::Pass {
+            action:
+                PassAction::Start {
+                    run,
+                    kind,
+                    base,
                     reviewers,
                     head,
+                    dry_run: _,
                 },
         } => match run {
             Some(run) => pass_start(
@@ -277,6 +296,9 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
             findings.as_deref(),
             reviewer.as_deref(),
         )?,
+        Command::Pass {
+            action: PassAction::Abort { run, pass },
+        } => pass_abort(&ctx, &run, pass.as_deref())?,
         Command::Finding {
             action: FindingAction::Kill { id, reason },
         } => finding_kill(&ctx, &id, &reason)?,
@@ -351,7 +373,7 @@ fn run_hint(command: &Command) -> Option<String> {
             action: RunAction::End { run, .. },
         }
         | Command::Pass {
-            action: PassAction::End { run, .. },
+            action: PassAction::End { run, .. } | PassAction::Abort { run, .. },
         } => Some(run.clone()),
         Command::Pass {
             action: PassAction::Start { run, .. },

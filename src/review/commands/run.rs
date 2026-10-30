@@ -7,12 +7,16 @@ use serde_json::{Value, json};
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::read_source;
+use crate::git::CommitInfo;
 use crate::store::model::{CommitPatch, Pass, PassKind, Reveal, Reviewer, RoleUsage, Run};
 
 use super::findings::{FindingInput, add_findings, parse_findings};
 use super::prune::prune_dir;
+use super::status::{Requested, already_reviewed};
 use super::usage::{UsageInput, run_spend};
-use super::{Ctx, find_pass_mut, find_run_mut, fresh_id, major_found, random_id};
+use super::{
+    Ctx, Scope, find_pass_mut, find_run_mut, fresh_id, major_found, pass_missing, random_id,
+};
 
 pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
     let scope = ctx.scope()?;
@@ -68,7 +72,7 @@ pub(super) fn run_end(
     let repair = match &last_head {
         Some(last) if ctx.repo.is_ancestor(last, &scope.head)? => ctx
             .repo
-            .commits(Some(last), &scope.head)?
+            .commits_first_parent(Some(last), &scope.head)?
             .into_iter()
             .map(|commit| CommitPatch {
                 sha: commit.sha,
@@ -196,22 +200,33 @@ pub(super) fn assign_reviewers(run: &Run, inputs: Vec<ReviewerInput>) -> Result<
     Ok(reviewers)
 }
 
-pub(super) fn pass_start(
+/// What a pass about to start records, computed before anything is written.
+struct Plan {
+    scope: Scope,
+    commit: Option<String>,
+    tree: String,
+    base: Option<String>,
+    partial: bool,
+    commits: Vec<CommitInfo>,
+    range_base: Option<String>,
+    range_patch_id: Option<String>,
+    head_patch_id: Option<String>,
+}
+
+fn plan(
     ctx: &Ctx,
-    run_id: &str,
+    run_id: Option<&str>,
     kind: PassKind,
     base: Option<&str>,
-    reviewers: Option<&Path>,
     head: Option<&str>,
-) -> Result<Value> {
+) -> Result<Plan> {
     let scope = ctx.scope_at(head)?;
-    let inputs = read_reviewers(reviewers)?;
     let (commit, tree) = ctx.reviewed_state(&scope)?;
     let previous = scope.existing.as_ref().and_then(|target| {
         target
             .runs
             .iter()
-            .find(|run| run.id == run_id)
+            .find(|run| Some(run.id.as_str()) == run_id)
             .and_then(|run| run.passes.last())
     });
     let previous_head = previous.map(|pass| pass.head.clone());
@@ -227,24 +242,125 @@ pub(super) fn pass_start(
     // reviews always start at an explicit or earlier head and cover the branch.
     let continues = previous.is_some_and(|pass| !pass.partial) && base == previous_head;
     let partial = base != scope.base && !continues && !ctx.is_default_branch(&scope)?;
-    let range_base = if partial { &base } else { &scope.base };
+    let range_base = if partial {
+        base.clone()
+    } else {
+        scope.base.clone()
+    };
     let commits = ctx.repo.commits(base.as_deref(), &scope.head)?;
     let range_patch_id = ctx.repo.range_patch_id(range_base.as_deref(), &tree)?;
     let head_patch_id = match (&commit, commits.last()) {
         (Some(_), Some(last)) if last.sha == scope.head => last.patch_id.clone(),
         _ => None,
     };
+    Ok(Plan {
+        scope,
+        commit,
+        tree,
+        base,
+        partial,
+        commits,
+        range_base,
+        range_patch_id,
+        head_patch_id,
+    })
+}
+
+/// What earlier passes already reviewed of the commits `plan` covers.
+fn overlap(ctx: &Ctx, plan: &Plan, run_id: Option<&str>, kind: PassKind) -> Result<Value> {
+    already_reviewed(
+        ctx,
+        &Requested {
+            scope: &plan.scope,
+            run: run_id,
+            kind,
+            range_base: plan.range_base.as_deref(),
+            commits: &plan.commits,
+            tree: &plan.tree,
+            range_patch_id: plan.range_patch_id.as_deref(),
+            committed: plan.commit.is_some(),
+        },
+    )
+}
+
+/// Fails when `run` cannot take a new pass.
+fn check_startable(run: &Run, run_id: &str) -> Result<()> {
+    if run.ended_at.is_some() {
+        return fail(format!("run {run_id} already ended"));
+    }
+    if let Some(open) = run.passes.iter().find(|pass| pass.ended_at.is_none()) {
+        return fail(format!(
+            "pass {run_id}.{} is still open; end it first",
+            open.id
+        ));
+    }
+    Ok(())
+}
+
+/// `pass start --dry-run`: the report `pass start` adds, and nothing written.
+pub(super) fn pass_dry_run(
+    ctx: &Ctx,
+    run_id: Option<&str>,
+    kind: PassKind,
+    base: Option<&str>,
+    head: Option<&str>,
+) -> Result<Value> {
+    if run_id.is_none() && kind != PassKind::Full {
+        return fail("--run is required unless --kind is full, which starts the run");
+    }
+    let plan = plan(ctx, run_id, kind, base, head)?;
+    if let Some(run_id) = run_id {
+        let run = plan
+            .scope
+            .existing
+            .as_ref()
+            .and_then(|target| target.runs.iter().find(|run| run.id == run_id))
+            .ok_or_else(|| {
+                Error(format!(
+                    "run {run_id} not found in target {}",
+                    plan.scope.key
+                ))
+            })?;
+        check_startable(run, run_id)?;
+    }
+    let already_reviewed = overlap(ctx, &plan, run_id, kind)?;
+    Ok(json!({
+        "target": plan.scope.key,
+        "run": run_id,
+        "dry_run": true,
+        "base": plan.base,
+        "head": plan.scope.head,
+        "partial": plan.partial,
+        "commit_count": plan.commits.len(),
+        "already_reviewed": already_reviewed,
+    }))
+}
+
+pub(super) fn pass_start(
+    ctx: &Ctx,
+    run_id: &str,
+    kind: PassKind,
+    base: Option<&str>,
+    reviewers: Option<&Path>,
+    head: Option<&str>,
+) -> Result<Value> {
+    let inputs = read_reviewers(reviewers)?;
+    let plan = plan(ctx, Some(run_id), kind, base, head)?;
+    let already_reviewed = overlap(ctx, &plan, Some(run_id), kind)?;
+    let Plan {
+        scope,
+        commit,
+        tree,
+        base,
+        partial,
+        commits,
+        range_patch_id,
+        head_patch_id,
+        ..
+    } = plan;
     let pass = ctx.update(&scope, |target, now| {
         let run = find_run_mut(target, run_id)?;
-        if run.ended_at.is_some() {
-            return fail(format!("run {run_id} already ended"));
-        }
-        if let Some(open) = run.passes.iter().find(|pass| pass.ended_at.is_none()) {
-            return fail(format!(
-                "pass {run_id}.{} is still open; end it first",
-                open.id
-            ));
-        }
+        check_startable(run, run_id)?;
         let (cycle, number) = match (kind, run.passes.last()) {
             (PassKind::Full, last) => (last.map_or(0, |pass| pass.cycle) + 1, 0),
             (_, Some(last)) => {
@@ -289,7 +405,65 @@ pub(super) fn pass_start(
         run.passes.push(pass.clone());
         Ok(pass)
     })?;
-    Ok(json!({ "target": scope.key, "run": run_id, "pass": pass_view(&pass) }))
+    Ok(json!({
+        "target": scope.key,
+        "run": run_id,
+        "pass": pass_view(&pass),
+        "already_reviewed": already_reviewed,
+    }))
+}
+
+/// `pass abort`: deletes the open pass of a run, and the run when that leaves it without
+/// passes. The pass counts for nothing.
+pub(super) fn pass_abort(ctx: &Ctx, run_id: &str, pass_id: Option<&str>) -> Result<Value> {
+    let scope = ctx.scope()?;
+    let (pass, run_removed) = ctx.update(&scope, |target, _| {
+        let run = find_run_mut(target, run_id)?;
+        let index = match pass_id {
+            Some(id) => {
+                let index = run
+                    .passes
+                    .iter()
+                    .position(|pass| pass.id == id)
+                    .ok_or_else(|| pass_missing(run, id))?;
+                if run.passes[index].ended_at.is_some() {
+                    return fail(format!(
+                        "pass {run_id}.{id} already ended; only an open pass can be aborted"
+                    ));
+                }
+                index
+            }
+            None => run
+                .passes
+                .iter()
+                .position(|pass| pass.ended_at.is_none())
+                .ok_or_else(|| Error(format!("run {run_id} has no open pass")))?,
+        };
+        let id = run.passes[index].id.clone();
+        if target.threads.iter().any(|thread| {
+            thread
+                .finding
+                .as_ref()
+                .is_some_and(|finding| finding.run == run_id && finding.pass == id)
+        }) {
+            return fail(format!(
+                "pass {run_id}.{id} has findings and cannot be aborted"
+            ));
+        }
+        let run = find_run_mut(target, run_id)?;
+        let pass = run.passes.remove(index);
+        let empty = run.passes.is_empty();
+        if empty {
+            target.runs.retain(|known| known.id != run_id);
+        }
+        Ok((pass, empty))
+    })?;
+    Ok(json!({
+        "target": scope.key,
+        "run": run_id,
+        "aborted": pass.id,
+        "run_removed": run_removed,
+    }))
 }
 
 /// A pass without its per-commit patch-ids, which only coverage needs; `show` prints them.

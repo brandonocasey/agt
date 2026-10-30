@@ -495,16 +495,25 @@ impl Ctx {
                 if pass.tree != head_tree || pass.head == scope.head {
                     continue;
                 }
-                let commits = if self.repo.is_ancestor(&pass.head, &scope.head)? {
+                let descends = self.repo.is_ancestor(&pass.head, &scope.head)?;
+                // A partial pass reviewed a delta: when its head is not in the history (a
+                // squash or reorder of it), the equal tree says nothing about the commits.
+                if pass.partial && !descends {
+                    continue;
+                }
+                let commits = if descends {
                     self.repo.commits(Some(&pass.head), &scope.head)?
-                } else if pass.partial {
-                    Vec::new()
                 } else {
                     self.repo.commits(scope.base.as_deref(), &scope.head)?
                 };
-                let head_patch_id = match commits.iter().find(|commit| commit.sha == scope.head) {
-                    Some(commit) => commit.patch_id.clone(),
-                    None => self.repo.commit_patch_id(&scope.head)?,
+                // The head's own patch-id stands for a whole-branch pass only.
+                let head_patch_id = if pass.partial && pass.dirty {
+                    None
+                } else {
+                    match commits.iter().find(|commit| commit.sha == scope.head) {
+                        Some(commit) => commit.patch_id.clone(),
+                        None => self.repo.commit_patch_id(&scope.head)?,
+                    }
                 };
                 passes.insert(
                     format!("{}.{}", run.id, pass.id),
