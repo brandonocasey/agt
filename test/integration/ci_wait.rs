@@ -230,6 +230,17 @@ fn rules(contexts: &[&str]) -> String {
     .to_string()
 }
 
+const BRANCH: &str = "repos/owner/repo/branches/main";
+
+/// The reply to the read of a branch: classic protection requiring `contexts`.
+fn branch(contexts: &[&str]) -> String {
+    json!({"name": "main", "protected": !contexts.is_empty(), "protection": {
+        "enabled": !contexts.is_empty(),
+        "required_status_checks": {"contexts": contexts, "checks": []},
+    }})
+    .to_string()
+}
+
 fn based(contexts: &[Value]) -> String {
     pull(json!({"baseRefName": "main"}), contexts)
 }
@@ -241,10 +252,10 @@ fn a_required_context_that_has_not_reported_keeps_the_wait_pending() {
     let outcome = run(&[
         step("PullChecks", &based(std::slice::from_ref(&passed))),
         step("rules/branches/main", &rules(&["test", "CI gate"])),
-        failing("protection/required_status_checks", "HTTP 404", 1),
+        step(BRANCH, &branch(&[])),
         step("PullChecks", &based(&[passed, gate])),
         step("rules/branches/main", &rules(&["test", "CI gate"])),
-        failing("protection/required_status_checks", "HTTP 404", 1),
+        step(BRANCH, &branch(&[])),
     ]);
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
     assert_eq!(outcome.events[0]["reason"], "checks_pending");
@@ -263,6 +274,71 @@ fn unreadable_required_contexts_keep_the_passed_state_and_say_so() {
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
     assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
     assert_eq!(outcome.events[0]["requiredContexts"], "unreadable");
+}
+
+#[test]
+fn classic_protection_is_read_from_the_branch_not_the_admin_endpoint() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let legacy = run_node("legacy", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(std::slice::from_ref(&passed))),
+        step("rules/branches/main", "[]"),
+        step(BRANCH, &branch(&["test", "legacy"])),
+        step("PullChecks", &based(&[passed, legacy])),
+        step("rules/branches/main", "[]"),
+        step(BRANCH, &branch(&["test", "legacy"])),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["legacy"]));
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn an_unreadable_branch_marks_the_passed_state() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(&[passed])),
+        step("rules/branches/main", "[]"),
+        failing(BRANCH, "HTTP 403", 1),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["requiredContexts"], "unreadable");
+}
+
+#[test]
+fn a_transient_rules_failure_is_retried_not_reported_as_passed() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let gate = run_node("CI gate", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(std::slice::from_ref(&passed))),
+        failing("rules/branches/main", "HTTP 502", 1),
+        step("PullChecks", &based(std::slice::from_ref(&passed))),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        step(BRANCH, &branch(&[])),
+        step("PullChecks", &based(&[passed, gate])),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        step(BRANCH, &branch(&[])),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["CI gate"]));
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+    assert!(outcome.events[1].get("requiredContexts").is_none());
+}
+
+#[test]
+fn the_rules_read_asks_for_every_page() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(&[passed])),
+        step("rules/branches/main?per_page=100", "[]"),
+        step(BRANCH, &branch(&[])),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert!(outcome.events[0].get("requiredContexts").is_none());
 }
 
 #[test]

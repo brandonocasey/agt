@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::Github;
-use crate::forge::service::{Request, Var};
+use crate::forge::service::{Pagination, Request, Var};
 use crate::forge::split_repo_strict;
 use crate::forge::transport::TransportError;
 
@@ -158,9 +158,9 @@ fn contexts_of(list: &Value, out: &mut Vec<String>) {
 
 impl Github {
     /// The status check contexts that branch `branch` of `repo` requires before a merge: the
-    /// active `required_status_checks` rules of its rulesets and, when readable, its classic
-    /// branch protection. An unreadable ruleset read is an error; classic protection is
-    /// skipped when it is absent or not readable, as it is for most repositories.
+    /// active `required_status_checks` rules of its rulesets and the classic branch protection
+    /// the branch itself reports (readable with repository contents access, unlike the
+    /// protection endpoints). Any unreadable read is an error.
     pub fn required_contexts(
         &self,
         repo: &str,
@@ -168,24 +168,22 @@ impl Github {
     ) -> Result<Vec<String>, TransportError> {
         let branch = crate::forge::encode(branch).replace("%2F", "/");
         let mut contexts = Vec::new();
-        let rules = self
-            .transport
-            .send(&Request::get(format!(
-                "repos/{repo}/rules/branches/{branch}"
-            )))?
-            .body;
-        for rule in rules.as_array().into_iter().flatten() {
+        let rules = self.transport.items(
+            &Request::get(format!("repos/{repo}/rules/branches/{branch}?per_page=100")),
+            &Pagination::CliPaginate,
+        )?;
+        for rule in &rules {
             if rule["type"] == "required_status_checks" {
                 contexts_of(&rule["parameters"]["required_status_checks"], &mut contexts);
             }
         }
-        let classic = self.transport.send(&Request::get(format!(
-            "repos/{repo}/branches/{branch}/protection/required_status_checks"
-        )));
-        if let Ok(classic) = classic {
-            contexts_of(&classic.body["contexts"], &mut contexts);
-            contexts_of(&classic.body["checks"], &mut contexts);
-        }
+        let info = self
+            .transport
+            .send(&Request::get(format!("repos/{repo}/branches/{branch}")))?
+            .body;
+        let classic = &info["protection"]["required_status_checks"];
+        contexts_of(&classic["contexts"], &mut contexts);
+        contexts_of(&classic["checks"], &mut contexts);
         contexts.sort();
         contexts.dedup();
         Ok(contexts)
