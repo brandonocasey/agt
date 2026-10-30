@@ -87,7 +87,41 @@ fn github(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
         waited_secs,
     };
     let state = classify(&head_state, &pull.view, pull.rollup, &pull.checks);
+    let state = require_reported(&github, target, &pull, state);
     Ok((state, head))
+}
+
+/// A passed state held back while a context the base branch requires has not reported: the
+/// rollup lists only checks that exist, so a required job that starts late is absent from it.
+/// When the required contexts cannot be read the state stands, marked `requiredContexts`.
+fn require_reported(
+    github: &github::Github,
+    target: &Resolved,
+    pull: &github::ci::Pull,
+    state: State,
+) -> State {
+    let base = pull.base.as_str();
+    if state["reason"] != "required_checks_passed" || base.is_empty() {
+        return state;
+    }
+    let contexts = github.required_contexts(&target.repo, base).ok();
+    let Some(contexts) = contexts else {
+        let mut state = state;
+        state["requiredContexts"] = json!("unreadable");
+        return state;
+    };
+    let missing: Vec<String> = contexts
+        .into_iter()
+        .filter(|context| !pull.names.contains(context))
+        .collect();
+    if missing.is_empty() {
+        return state;
+    }
+    let mut state = state;
+    state["status"] = json!("pending");
+    state["reason"] = json!("checks_pending");
+    state["missingChecks"] = json!(missing);
+    state
 }
 
 fn pipeline(target: &Resolved) -> Result<State, TransportError> {

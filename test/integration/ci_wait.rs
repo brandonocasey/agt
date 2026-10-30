@@ -220,6 +220,51 @@ fn emits_initial_changed_and_final_events_once() {
     assert_eq!(last(&outcome)["results"][0]["failed"], json!([]));
 }
 
+fn rules(contexts: &[&str]) -> String {
+    let checks: Vec<Value> = contexts.iter().map(|c| json!({"context": c})).collect();
+    json!([
+        {"type": "pull_request", "parameters": {}},
+        {"type": "required_status_checks", "ruleset_id": 1,
+         "parameters": {"required_status_checks": checks}},
+    ])
+    .to_string()
+}
+
+fn based(contexts: &[Value]) -> String {
+    pull(json!({"baseRefName": "main"}), contexts)
+}
+
+#[test]
+fn a_required_context_that_has_not_reported_keeps_the_wait_pending() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let gate = run_node("CI gate", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(std::slice::from_ref(&passed))),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        failing("protection/required_status_checks", "HTTP 404", 1),
+        step("PullChecks", &based(&[passed, gate])),
+        step("rules/branches/main", &rules(&["test", "CI gate"])),
+        failing("protection/required_status_checks", "HTTP 404", 1),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["CI gate"]));
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
+fn unreadable_required_contexts_keep_the_passed_state_and_say_so() {
+    let passed = run_node("test", "COMPLETED", Some("SUCCESS"));
+    let outcome = run(&[
+        step("PullChecks", &based(&[passed])),
+        failing("rules/branches/main", "HTTP 403", 1),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["requiredContexts"], "unreadable");
+}
+
 #[test]
 fn events_keep_their_field_order() {
     let scenario = Scenario::new(&[step(

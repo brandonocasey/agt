@@ -7,7 +7,7 @@ use crate::forge::service::{Request, Var};
 use crate::forge::split_repo_strict;
 use crate::forge::transport::TransportError;
 
-const QUERY: &str = "query PullChecks($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){number url state mergedAt closed headRefOid commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion title detailsUrl isRequired(pullRequestNumber:$number) checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl isRequired(pullRequestNumber:$number)}}}}}}}}}}";
+const QUERY: &str = "query PullChecks($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){number url baseRefName state mergedAt closed headRefOid commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion title detailsUrl isRequired(pullRequestNumber:$number) checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl isRequired(pullRequestNumber:$number)}}}}}}}}}}";
 
 /// A PR and its required checks of the head commit.
 pub struct Pull {
@@ -19,6 +19,10 @@ pub struct Pull {
     pub checks: Vec<Value>,
     /// How many checks and statuses the rollup holds, required or not.
     pub rollup: usize,
+    /// The name of every check and status in the rollup, required or not.
+    pub names: Vec<String>,
+    /// The branch the PR merges into.
+    pub base: String,
 }
 
 fn bucket(status: &str, conclusion: &str) -> String {
@@ -88,6 +92,7 @@ impl Github {
         let mut cursor: Option<String> = None;
         let mut checks = Vec::new();
         let mut rollup = 0;
+        let mut names = Vec::new();
         loop {
             let mut vars = vec![
                 Var::text("owner", owner),
@@ -111,6 +116,12 @@ impl Github {
                 .map_or(&[][..], Vec::as_slice);
             rollup += nodes.len();
             checks.extend(nodes.iter().filter_map(check));
+            names.extend(
+                nodes
+                    .iter()
+                    .filter_map(|node| node["name"].as_str().or_else(|| node["context"].as_str()))
+                    .map(str::to_owned),
+            );
             let next = contexts
                 .filter(|contexts| contexts["pageInfo"]["hasNextPage"] == true)
                 .and_then(|contexts| contexts["pageInfo"]["endCursor"].as_str());
@@ -129,7 +140,54 @@ impl Github {
                 }),
                 checks,
                 rollup,
+                names,
+                base: pull["baseRefName"].as_str().unwrap_or("").to_owned(),
             });
         }
+    }
+}
+
+/// The contexts a `required_status_checks` rule or protection lists, in `list`.
+fn contexts_of(list: &Value, out: &mut Vec<String>) {
+    for entry in list.as_array().into_iter().flatten() {
+        if let Some(context) = entry["context"].as_str().or_else(|| entry.as_str()) {
+            out.push(context.to_owned());
+        }
+    }
+}
+
+impl Github {
+    /// The status check contexts that branch `branch` of `repo` requires before a merge: the
+    /// active `required_status_checks` rules of its rulesets and, when readable, its classic
+    /// branch protection. An unreadable ruleset read is an error; classic protection is
+    /// skipped when it is absent or not readable, as it is for most repositories.
+    pub fn required_contexts(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Vec<String>, TransportError> {
+        let branch = crate::forge::encode(branch).replace("%2F", "/");
+        let mut contexts = Vec::new();
+        let rules = self
+            .transport
+            .send(&Request::get(format!(
+                "repos/{repo}/rules/branches/{branch}"
+            )))?
+            .body;
+        for rule in rules.as_array().into_iter().flatten() {
+            if rule["type"] == "required_status_checks" {
+                contexts_of(&rule["parameters"]["required_status_checks"], &mut contexts);
+            }
+        }
+        let classic = self.transport.send(&Request::get(format!(
+            "repos/{repo}/branches/{branch}/protection/required_status_checks"
+        )));
+        if let Ok(classic) = classic {
+            contexts_of(&classic.body["contexts"], &mut contexts);
+            contexts_of(&classic.body["checks"], &mut contexts);
+        }
+        contexts.sort();
+        contexts.dedup();
+        Ok(contexts)
     }
 }
