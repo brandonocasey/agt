@@ -521,6 +521,27 @@ fn sha_waits_for_the_head_to_reach_the_commit() {
 }
 
 #[test]
+fn an_abbreviated_sha_matches_the_full_head() {
+    let outcome = run_with(
+        &[step(
+            "PullChecks",
+            &pull(
+                json!({"headRefOid": "abc1234def5678"}),
+                &[run_node("t", "COMPLETED", Some("SUCCESS"))],
+            ),
+        )],
+        "owner/repo#42@ABC1234",
+        &["--timeout", "5"],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(
+        reasons(&outcome),
+        ["required_checks_passed", "checks_complete"]
+    );
+}
+
+#[test]
 fn the_sha_flag_is_gone_in_favour_of_the_target_suffix() {
     let flag = run_args(&[], &["o/r#1"], &["--sha", "abc123"], &[]);
     assert_eq!(flag.status, 2);

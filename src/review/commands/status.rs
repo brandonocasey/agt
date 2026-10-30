@@ -4,31 +4,132 @@ use serde_json::{Value, json};
 
 use crate::core::error::Result;
 use crate::git::{CommitInfo, LogEntry, Repo};
-use crate::store::model::{ImportedRecord, Pass, PassKind, Target, TargetKind};
+use crate::store::model::{CommitPatch, ImportedRecord, Pass, PassKind, Target, TargetKind};
 
 use super::view::{Locator, run_views, thread_views};
-use super::{Ctx, Scope, pass_patch_ids, passes};
+use super::{Ctx, Scope, pass_patch_ids};
 
-#[derive(Default)]
-pub(super) struct Reviewed {
-    pub(super) patch_ids: HashSet<String>,
-    pub(super) trees: HashSet<String>,
-    pub(super) shas: HashSet<String>,
+/// Where a commit's mark came from: a pass of a run, or (no pass) a run's repair.
+#[derive(Clone, Copy)]
+pub(super) struct Origin<'a> {
+    pub(super) target: &'a str,
+    pub(super) run: &'a str,
+    pub(super) pass: Option<&'a Pass>,
 }
 
-impl Reviewed {
-    /// Records what an ended `pass` reviewed; its tree only for the target's own passes, since a
-    /// tree match alone may sit on another base.
-    fn add_pass(&mut self, pass: &Pass, with_tree: bool) {
-        self.patch_ids.extend(pass_patch_ids(pass).cloned());
+/// What reviewed commits are keyed by, each with the passes (or repairs) that recorded it.
+#[derive(Default)]
+pub(super) struct Reviewed<'a> {
+    patch_ids: HashMap<String, Vec<Origin<'a>>>,
+    trees: HashMap<String, Vec<Origin<'a>>>,
+    shas: HashMap<String, Vec<Origin<'a>>>,
+}
+
+impl<'a> Reviewed<'a> {
+    /// Records what an ended `pass` reviewed; its tree only for the target's own whole-branch
+    /// passes, since a tree match alone may sit on another base, and a partial pass's tree says
+    /// nothing about a squash or reorder of the commits around its delta.
+    fn add_pass(&mut self, origin: Origin<'a>, with_tree: bool) {
+        let Some(pass) = origin.pass else {
+            return;
+        };
+        for id in pass_patch_ids(pass) {
+            self.patch_ids.entry(id.clone()).or_default().push(origin);
+        }
         if with_tree {
-            self.trees.insert(pass.tree.clone());
+            self.trees
+                .entry(pass.tree.clone())
+                .or_default()
+                .push(origin);
         }
         if !pass.dirty {
-            self.shas.insert(pass.head.clone());
+            self.shas.entry(pass.head.clone()).or_default().push(origin);
         }
+        for commit in &pass.commits {
+            self.shas
+                .entry(commit.sha.clone())
+                .or_default()
+                .push(origin);
+        }
+    }
+
+    fn add_repair(&mut self, origin: Origin<'a>, commit: &CommitPatch) {
         self.shas
-            .extend(pass.commits.iter().map(|commit| commit.sha.clone()));
+            .entry(commit.sha.clone())
+            .or_default()
+            .push(origin);
+        if let Some(id) = &commit.patch_id {
+            self.patch_ids.entry(id.clone()).or_default().push(origin);
+        }
+    }
+
+    /// The origins that mark `commit`, one per pass or run, by the strongest key.
+    fn marks(&self, commit: &CommitInfo, via: Option<&'static str>) -> Vec<Mark<'a>> {
+        let keys = [
+            ("sha", self.shas.get(&commit.sha)),
+            (
+                "patch-id",
+                commit
+                    .patch_id
+                    .as_ref()
+                    .and_then(|id| self.patch_ids.get(id)),
+            ),
+            ("tree", self.trees.get(&commit.tree)),
+        ];
+        let mut marks: Vec<Mark<'a>> = Vec::new();
+        for (key, origins) in keys {
+            for origin in origins.into_iter().flatten() {
+                let seen = marks.iter().any(|mark| {
+                    mark.origin.run == origin.run
+                        && mark.origin.pass.map(|pass| &pass.id) == origin.pass.map(|pass| &pass.id)
+                });
+                if !seen {
+                    marks.push(Mark {
+                        via: via.unwrap_or(key),
+                        origin: *origin,
+                    });
+                }
+            }
+        }
+        marks
+    }
+}
+
+/// One reason a commit counts as reviewed.
+pub(super) struct Mark<'a> {
+    pub(super) via: &'static str,
+    pub(super) origin: Origin<'a>,
+}
+
+/// A commit's marks and the kind they are: reviewed by a pass (`"pass"`) or only fixed after
+/// its run's last pass (`"repair"`).
+pub(super) fn commit_marks<'a>(
+    commit: &CommitInfo,
+    reviewed: &Reviewed<'a>,
+    repaired: &Reviewed<'a>,
+) -> (Option<&'static str>, Vec<Mark<'a>>) {
+    let passes = reviewed.marks(commit, None);
+    if !passes.is_empty() {
+        return (Some("pass"), passes);
+    }
+    let repairs = repaired.marks(commit, Some("repair"));
+    if repairs.is_empty() {
+        (None, repairs)
+    } else {
+        (Some("repair"), repairs)
+    }
+}
+
+impl Mark<'_> {
+    pub(super) fn json(&self) -> Value {
+        json!({
+            "target": self.origin.target,
+            "run": self.origin.run,
+            "pass": self.origin.pass.map(|pass| &pass.id),
+            "kind": self.origin.pass.map(|pass| pass.kind),
+            "pass_commits": self.origin.pass.map(|pass| pass.commits.len()),
+            "via": self.via,
+        })
     }
 }
 
@@ -109,23 +210,52 @@ fn head_coverage<'a>(
     ))
 }
 
-/// Changed merges after the last reviewed head: they bring in code no pass reviewed.
-pub(super) fn unreviewed_merges<'h>(
+/// The passes whose range holds each changed merge: a merge is reviewed once an ended pass of
+/// any target of the repository started after its first parent's history and ended at a head
+/// containing it (`base..head`). Ancestors of a reviewed head, tree matches and repairs do not
+/// count. A merge no pass holds is absent.
+pub(super) fn merge_origins<'a, 'h>(
     repo: &Repo,
     merges: &[&'h LogEntry],
-    last_reviewed: Option<&str>,
-) -> Result<HashSet<&'h str>> {
-    let mut unreviewed = HashSet::new();
-    for merge in merges {
-        let after = match last_reviewed {
-            Some(last) => !repo.is_ancestor(&merge.sha, last)?,
-            None => true,
-        };
-        if after {
-            unreviewed.insert(merge.sha.as_str());
+    targets: &[&'a Target],
+) -> Result<HashMap<&'h str, Vec<Origin<'a>>>> {
+    let mut found: HashMap<&'h str, Vec<Origin<'a>>> = HashMap::new();
+    if merges.is_empty() {
+        return Ok(found);
+    }
+    for target in targets {
+        for run in &target.runs {
+            for pass in run.passes.iter().filter(|pass| pass.ended_at.is_some()) {
+                let known = |rev: &str| repo.object_exists(&format!("{rev}^{{commit}}"));
+                if !known(&pass.head)?
+                    || pass.base.as_deref().map(known).transpose()? == Some(false)
+                {
+                    continue;
+                }
+                let inside = repo.merges(pass.base.as_deref(), &pass.head)?;
+                for merge in merges.iter().filter(|merge| inside.contains(&merge.sha)) {
+                    found.entry(merge.sha.as_str()).or_default().push(Origin {
+                        target: &target.key,
+                        run: &run.id,
+                        pass: Some(pass),
+                    });
+                }
+            }
         }
     }
-    Ok(unreviewed)
+    Ok(found)
+}
+
+/// The changed merges no pass holds: they bring in code nobody reviewed.
+pub(super) fn unreviewed_merges<'h>(
+    merges: &[&'h LogEntry],
+    origins: &HashMap<&str, Vec<Origin>>,
+) -> HashSet<&'h str> {
+    merges
+        .iter()
+        .map(|merge| merge.sha.as_str())
+        .filter(|sha| !origins.contains_key(sha))
+        .collect()
 }
 
 /// The reviews of run `run` covering `head`, counted the way `status` counts
@@ -143,8 +273,10 @@ pub(super) fn run_reviews_at(ctx: &Ctx, target: &Target, run: &str, head: &str) 
     };
     let history = ctx.repo.log(base.as_deref(), head)?;
     let merges = changed_merges(&ctx.repo, &history)?;
-    let last_reviewed = last_reviewed_head(ctx, head)?;
-    if !unreviewed_merges(&ctx.repo, &merges, last_reviewed.as_deref())?.is_empty() {
+    let stored = ctx.store.targets(&ctx.dir)?;
+    let all: Vec<&Target> = stored.iter().collect();
+    let origins = merge_origins(&ctx.repo, &merges, &all)?;
+    if !unreviewed_merges(&merges, &origins).is_empty() {
         return Ok(0);
     }
     let commits = ctx.repo.commits(base.as_deref(), head)?;
@@ -189,6 +321,16 @@ pub(super) fn count(covered: &[Covered]) -> usize {
         .count()
 }
 
+/// The stored targets of the repository other than `target`.
+pub(super) fn other_targets(ctx: &Ctx, target: Option<&Target>) -> Result<Vec<Target>> {
+    Ok(ctx
+        .store
+        .targets(&ctx.dir)?
+        .into_iter()
+        .filter(|other| Some(&other.key) != target.map(|target| &target.key))
+        .collect())
+}
+
 /// The target and the other targets of the repository, whose passes can cover a head.
 struct Targets<'a> {
     target: Option<&'a Target>,
@@ -221,45 +363,49 @@ impl<'a> Targets<'a> {
 
     /// The commits ended passes reviewed, and the repaired ones (fixes after a run's last
     /// pass), which count as reviewed but never add to reviews_at_head, also when another
-    /// target's run repaired them (a range review's fix).
-    fn reviewed(&self) -> (Reviewed, Reviewed) {
+    /// target's run repaired them (a range review's fix). Run `except` is left out: a fix
+    /// check is not told that its own run reviewed the commits.
+    fn reviewed(&self, except: Option<&str>) -> (Reviewed<'a>, Reviewed<'a>) {
         let mut reviewed = Reviewed::default();
-        for pass in self
-            .target
-            .iter()
-            .flat_map(|target| passes(target))
-            .filter(|pass| pass.ended_at.is_some())
-        {
-            reviewed.add_pass(pass, true);
-        }
-        // Commits a review of another target of this repository recorded (a `--range` review of
-        // the branch's end point, an earlier branch target) are reviewed here too.
-        for other in self.others {
-            for pass in passes(other).filter(|pass| pass.ended_at.is_some()) {
-                reviewed.add_pass(pass, false);
-            }
-        }
         let mut repaired = Reviewed::default();
-        for commit in self
-            .target
-            .iter()
-            .flat_map(|target| &target.runs)
-            .chain(self.others.iter().flat_map(|other| &other.runs))
-            .flat_map(|run| &run.repair)
-        {
-            repaired.shas.insert(commit.sha.clone());
-            repaired.patch_ids.extend(commit.patch_id.clone());
+        // Commits a review of another target of this repository recorded (a `--range` review of
+        // the branch's end point, an earlier branch target) are reviewed here too, by patch-id
+        // and sha only.
+        let own = self.target.into_iter().map(|target| (target, true));
+        let others = self.others.iter().map(|other| (other, false));
+        for (target, own) in own.chain(others) {
+            for run in &target.runs {
+                let pass_origin = |pass| Origin {
+                    target: &target.key,
+                    run: &run.id,
+                    pass: Some(pass),
+                };
+                let ended = run.passes.iter().filter(|pass| pass.ended_at.is_some());
+                if except != Some(run.id.as_str()) {
+                    for pass in ended {
+                        reviewed.add_pass(pass_origin(pass), own && !pass.partial);
+                    }
+                }
+                let origin = Origin {
+                    target: &target.key,
+                    run: &run.id,
+                    pass: None,
+                };
+                for commit in &run.repair {
+                    repaired.add_repair(origin, commit);
+                }
+            }
         }
         (reviewed, repaired)
     }
 }
 
-/// Each commit and changed merge since the base with whether a pass or a repair reviewed it,
-/// in history order.
+/// Each commit and changed merge since the base with whether a pass or a repair reviewed it
+/// and what by, in history order.
 fn commit_views(
     commits: &[CommitInfo],
     merges: &[&LogEntry],
-    unreviewed_merges: &HashSet<&str>,
+    merge_origins: &HashMap<&str, Vec<Origin>>,
     history: &[LogEntry],
     sets: (&Reviewed, &Reviewed),
 ) -> Vec<Value> {
@@ -267,39 +413,38 @@ fn commit_views(
     let mut views: Vec<Value> = commits
         .iter()
         .map(|commit| {
-            let in_set = |set: &Reviewed| {
-                set.shas.contains(&commit.sha)
-                    || set.trees.contains(&commit.tree)
-                    || commit
-                        .patch_id
-                        .as_ref()
-                        .is_some_and(|id| set.patch_ids.contains(id))
-            };
-            let matched = if in_set(reviewed) {
-                Some("pass")
-            } else if in_set(repaired) {
-                Some("repair")
-            } else {
-                None
-            };
+            let (matched, marks) = commit_marks(commit, reviewed, repaired);
             json!({
                 "sha": commit.sha,
                 "subject": commit.subject,
                 "patch_id": commit.patch_id,
                 "reviewed": matched.is_some(),
                 "match": matched,
+                "by": marks.iter().map(Mark::json).collect::<Vec<_>>(),
             })
         })
         .collect();
-    // A changed merge is reviewed once a whole-branch pass reviewed a head that contains it.
+    // A changed merge is reviewed once an ended pass's range holds it.
     views.extend(merges.iter().map(|merge| {
-        let reviewed = !unreviewed_merges.contains(merge.sha.as_str());
+        let origins = merge_origins.get(merge.sha.as_str());
+        let by: Vec<Value> = origins
+            .into_iter()
+            .flatten()
+            .map(|origin| {
+                Mark {
+                    via: "contained",
+                    origin: *origin,
+                }
+                .json()
+            })
+            .collect();
         json!({
             "sha": merge.sha,
             "subject": merge.subject,
             "patch_id": null,
-            "reviewed": reviewed,
-            "match": reviewed.then_some("pass"),
+            "reviewed": origins.is_some(),
+            "match": origins.map(|_| "merge"),
+            "by": by,
             "merge": true,
         })
     }));
@@ -310,6 +455,160 @@ fn commit_views(
         .collect();
     views.sort_by_key(|view| view["sha"].as_str().and_then(|sha| order.get(sha)).copied());
     views
+}
+
+/// The requested range of a pass about to start, for [`already_reviewed`].
+pub(super) struct Requested<'a> {
+    pub(super) scope: &'a Scope,
+    /// The run the pass joins; its earlier passes are not reported for a fix check or reveal.
+    pub(super) run: Option<&'a str>,
+    pub(super) kind: PassKind,
+    /// Where the merge-base-scoped range starts (the pass's own base when partial).
+    pub(super) range_base: Option<&'a str>,
+    /// Where the requested commits start: the pass's own base.
+    pub(super) base: Option<&'a str>,
+    pub(super) commits: &'a [CommitInfo],
+    pub(super) tree: &'a str,
+    pub(super) range_patch_id: Option<&'a str>,
+    /// Whether the reviewed state is committed, so the head's own patch-id may match.
+    pub(super) committed: bool,
+}
+
+/// What earlier passes already reviewed of the commits a pass is about to cover: the passes
+/// covering the whole head, each commit's marks, the commits nobody reviewed and a hint. It
+/// is information only; the pass still covers the full range.
+pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value> {
+    let scope = requested.scope;
+    let target = scope.existing.as_ref();
+    let others = other_targets(ctx, target)?;
+    let except = (requested.kind != PassKind::Full)
+        .then_some(requested.run)
+        .flatten();
+    let targets = Targets {
+        target,
+        others: &others,
+    };
+    let (reviewed, repaired) = targets.reviewed(except);
+
+    // A changed merge nobody reviewed voids the head's coverage, as for `status`, and the ones
+    // in the requested commits' range count among the unreviewed entries. That range starts at
+    // the pass's own base, which on the default branch or for a continuing pass is not the
+    // range start.
+    let every: Vec<&Target> = target.into_iter().chain(&others).collect();
+    let unreviewed_in = |history: &[LogEntry]| -> Result<HashSet<String>> {
+        if !history.iter().any(|entry| entry.parents.len() > 1) {
+            return Ok(HashSet::new());
+        }
+        let reader = Repo::discover()?.read_only()?;
+        let merges = changed_merges(&reader, history)?;
+        let origins = merge_origins(&ctx.repo, &merges, &every)?;
+        Ok(unreviewed_merges(&merges, &origins)
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
+    };
+    let wide = ctx.repo.log(requested.range_base, &scope.head)?;
+    let narrow;
+    let history = if requested.base == requested.range_base {
+        &wide
+    } else {
+        narrow = ctx.repo.log(requested.base, &scope.head)?;
+        &narrow
+    };
+    let unreviewed_merge = unreviewed_in(history)?;
+    let merge_after = !unreviewed_merge.is_empty() || !unreviewed_in(&wide)?.is_empty();
+    // Only a head that is the whole range, one commit above the range start, may match by its
+    // own patch-id: a fix check's lone commit says nothing about the commits before it.
+    let head_patch_id = match requested.commits {
+        [only]
+            if only.sha == scope.head
+                && requested.committed
+                && ctx.repo.parent(&only.sha)?.as_deref() == requested.range_base =>
+        {
+            only.patch_id.clone()
+        }
+        _ => None,
+    };
+    let head: Vec<Covered> = if merge_after {
+        Vec::new()
+    } else {
+        targets
+            .covered_at(
+                requested.tree,
+                requested.range_patch_id,
+                head_patch_id.as_deref(),
+            )
+            .into_iter()
+            .filter(|covered| except != Some(covered.run))
+            .collect()
+    };
+
+    let mut commits = Vec::new();
+    let mut unreviewed: Vec<&CommitInfo> = Vec::new();
+    for commit in requested.commits {
+        let (_, marks) = commit_marks(commit, &reviewed, &repaired);
+        if marks.is_empty() {
+            unreviewed.push(commit);
+        } else {
+            commits.push(json!({
+                "sha": commit.sha,
+                "subject": commit.subject,
+                "via": marks.first().map(|mark| mark.via),
+                "by": marks.iter().map(Mark::json).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    let total = requested.commits.len();
+    let done = commits.len();
+    // Unreviewed commits and changed merges, oldest first. `history` starts at the range start,
+    // which on the default branch or for a continuing pass is not where the requested commits
+    // start: a commit missing from it keeps its place among the requested commits.
+    let place = |sha: &str| history.iter().position(|entry| entry.sha == sha);
+    let mut pending: Vec<&str> = unreviewed
+        .iter()
+        .map(|commit| commit.sha.as_str())
+        .collect();
+    pending.extend(
+        history
+            .iter()
+            .map(|entry| entry.sha.as_str())
+            .filter(|sha| unreviewed_merge.contains(*sha)),
+    );
+    pending.sort_by_key(|sha| place(sha).unwrap_or(0));
+    let hint = match pending.first() {
+        _ if done == 0 => Value::Null,
+        None => json!(format!("all {total} commits already reviewed")),
+        Some(oldest) => {
+            // A base at the range start, or at the pass's own base, would be the pass already
+            // requested, not a partial one.
+            let start = ctx.repo.parent(oldest)?.filter(|start| {
+                Some(start.as_str()) != requested.range_base
+                    && Some(start.as_str()) != requested.base
+            });
+            match start {
+                Some(sha) => {
+                    let rest = ctx.repo.commits(Some(&sha), &scope.head)?.len();
+                    if unreviewed_merge.is_empty() && rest == unreviewed.len() {
+                        json!(format!(
+                            "{done} of {total} already reviewed; --base {sha} reviews only the other {rest} (partial)"
+                        ))
+                    } else {
+                        json!(format!(
+                            "{done} of {total} already reviewed; --base {sha} starts at the oldest unreviewed commit or merge and reviews {rest} (partial)"
+                        ))
+                    }
+                }
+                None => json!(format!("{done} of {total} already reviewed")),
+            }
+        }
+    };
+    let unreviewed_shas = pending;
+    Ok(json!({
+        "head": coverage_json(&head),
+        "commits": commits,
+        "unreviewed": unreviewed_shas,
+        "hint": hint,
+    }))
 }
 
 pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
@@ -328,14 +627,10 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     let history = ctx.repo.log(scope.base.as_deref(), &head)?;
     let merges = changed_merges(&ctx.repo, &history)?;
     let last_reviewed = last_reviewed_head(ctx, &head)?;
-    let unreviewed_merges = unreviewed_merges(&ctx.repo, &merges, last_reviewed.as_deref())?;
-    let merge_after = !unreviewed_merges.is_empty();
-    let others: Vec<Target> = ctx
-        .store
-        .targets(&ctx.dir)?
-        .into_iter()
-        .filter(|other| Some(&other.key) != target.map(|target| &target.key))
-        .collect();
+    let others = other_targets(ctx, target)?;
+    let every: Vec<&Target> = target.into_iter().chain(&others).collect();
+    let merge_origins = merge_origins(&ctx.repo, &merges, &every)?;
+    let merge_after = !unreviewed_merges(&merges, &merge_origins).is_empty();
     let targets = Targets {
         target,
         others: &others,
@@ -353,11 +648,11 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         )?
     };
 
-    let (reviewed, repaired) = targets.reviewed();
+    let (reviewed, repaired) = targets.reviewed(None);
     let commit_views = commit_views(
         &commits,
         &merges,
-        &unreviewed_merges,
+        &merge_origins,
         &history,
         (&reviewed, &repaired),
     );
@@ -438,6 +733,7 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         .collect();
     let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();
     let local = count(&covered);
+    let already_reviewed = commit_views.len() - unreviewed.len();
     // Without a pass covering the whole head, each commit since the merge-base must be reviewed.
     let every_commit = !commit_views.is_empty() && unreviewed.is_empty();
     let mut status = json!({
@@ -458,6 +754,7 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         "worktree": worktree,
         "commits": commit_views,
         "unreviewed_commits": unreviewed,
+        "already_reviewed": already_reviewed,
         "open_threads": threads.open,
         "outdated_threads": threads.outdated,
         "held_questions": threads.held,
@@ -471,6 +768,78 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     });
     super::report::extend(&mut status, ctx, target, &history);
     Ok(status)
+}
+
+/// For each unreviewed commit whose subject and author match a commit a stored pass recorded
+/// under another patch, adds `earlier_version` (the pass) to its entry in `commits`: the
+/// commit was probably reviewed before it changed. It is shown only and never counts as
+/// reviewed.
+pub(super) fn earlier_versions(ctx: &Ctx, status: &mut Value) -> Result<()> {
+    let unreviewed: Vec<String> = status["unreviewed_commits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sha| sha.as_str().map(str::to_owned))
+        .collect();
+    if unreviewed.is_empty() {
+        return Ok(());
+    }
+    let stored = ctx.store.targets(&ctx.dir)?;
+    let mut recorded: Vec<(&str, &str, &str, &CommitPatch)> = Vec::new();
+    // Only this target's own passes: a repeated subject such as "fix lint" on another branch
+    // says nothing about this commit.
+    let own = status["target"].as_str();
+    // A commit still in the history is a different commit, not an earlier form of this one.
+    let current: HashSet<&str> = status["commits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|view| view["sha"].as_str())
+        .collect();
+    for target in stored
+        .iter()
+        .filter(|target| Some(target.key.as_str()) == own)
+    {
+        for run in &target.runs {
+            for pass in run.passes.iter().filter(|pass| pass.ended_at.is_some()) {
+                for commit in &pass.commits {
+                    if !current.contains(commit.sha.as_str()) {
+                        recorded.push((&target.key, &run.id, &pass.id, commit));
+                    }
+                }
+            }
+        }
+    }
+    let shas: Vec<&str> = unreviewed
+        .iter()
+        .map(String::as_str)
+        .chain(recorded.iter().map(|(_, _, _, commit)| commit.sha.as_str()))
+        .collect();
+    let authored = ctx.repo.authored(&shas)?;
+    let Some(commits) = status["commits"].as_array_mut() else {
+        return Ok(());
+    };
+    for view in commits.iter_mut().filter(|view| view["reviewed"] == false) {
+        let Some(sha) = view["sha"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let patch_id = view["patch_id"].as_str().map(str::to_owned);
+        let Some(mine) = authored.get(&sha) else {
+            continue;
+        };
+        let earlier = recorded.iter().find(|(_, _, _, commit)| {
+            commit.patch_id != patch_id && authored.get(&commit.sha) == Some(mine)
+        });
+        if let Some((target, run, pass, commit)) = earlier {
+            view["earlier_version"] = json!({
+                "target": target,
+                "run": run,
+                "pass": pass,
+                "sha": commit.sha,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// `status` without the per-commit list, runs, imported records and tree ids; `--full`
@@ -517,6 +886,7 @@ pub(super) fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
         "worktree": null,
         "commits": [],
         "unreviewed_commits": [],
+        "already_reviewed": 0,
         "open_threads": threads.open,
         "outdated_threads": threads.outdated,
         "held_questions": threads.held,
@@ -533,22 +903,28 @@ pub(super) fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
 pub(super) fn last_reviewed_head(ctx: &Ctx, head: &str) -> Result<Option<String>> {
     let mut best: Option<(u64, String)> = None;
     let targets = ctx.store.targets(&ctx.dir)?;
-    let candidates = targets
+    let mut candidates: Vec<&String> = Vec::new();
+    for run in targets
         .iter()
         .filter(|target| matches!(target.kind, TargetKind::Branch | TargetKind::Range))
         .flat_map(|target| &target.runs)
-        .flat_map(|run| {
+    {
+        candidates.extend(
             run.passes
                 .iter()
                 .filter(|pass| pass.ended_at.is_some() && !pass.dirty && !pass.partial)
-                .map(|pass| &pass.head)
-                // A run of only partial passes repaired a delta, not the branch.
-                .chain(
-                    run.repaired_head
-                        .iter()
-                        .filter(|_| run.passes.iter().any(|pass| !pass.partial)),
-                )
-        });
+                .map(|pass| &pass.head),
+        );
+        // A run of only partial passes repaired a delta, not the branch; and a repaired head
+        // that does not descend from the run's last pass (a rebase before `run end`) names
+        // commits that no pass of the run saw.
+        if let (Some(repaired), Some(last)) = (&run.repaired_head, run.passes.last())
+            && run.passes.iter().any(|pass| !pass.partial)
+            && ctx.repo.is_ancestor(&last.head, repaired)?
+        {
+            candidates.push(repaired);
+        }
+    }
     for candidate in candidates {
         if best.as_ref().is_some_and(|(_, sha)| sha == candidate)
             || !ctx.repo.object_exists(&format!("{candidate}^{{commit}}"))?
