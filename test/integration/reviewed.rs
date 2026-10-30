@@ -1302,3 +1302,54 @@ fn earlier_version_hint_ignores_other_targets() {
         "{status}"
     );
 }
+
+#[test]
+fn pass_start_report_counts_an_unreviewed_conflict_merge() {
+    let env = Env::with_branch();
+    env.write("a.txt", &numbered(10, &[(3, "three")]));
+    env.commit_all("change");
+    env.review("full");
+    let merge = conflict_merge(&env);
+    // The merge is unreviewed, so the range is not fully reviewed, with or without commits after it.
+    let report = env.run(&["pass", "start", "--kind", "full", "--dry-run"]);
+    let report = &report["already_reviewed"];
+    assert!(
+        report["unreviewed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(merge)),
+        "{report}"
+    );
+    assert_ne!(report["hint"], "all 1 commits already reviewed", "{report}");
+    env.write("g.txt", "g\n");
+    env.commit_all("after");
+    let report = env.run(&["pass", "start", "--kind", "full", "--dry-run"]);
+    let report = &report["already_reviewed"];
+    assert!(
+        report["unreviewed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(merge)),
+        "{report}"
+    );
+    let hint = report["hint"].as_str().unwrap();
+    assert!(!hint.contains(&format!("--base {merge}")), "{hint}");
+}
+
+#[test]
+fn earlier_version_hint_skips_commits_still_in_the_history() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("fix lint");
+    env.review("full");
+    env.write("y.txt", "B\n");
+    env.commit_all("fix lint");
+    let status = env.run(&["status", "--full"]);
+    let unreviewed = status["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["reviewed"] == false)
+        .unwrap();
+    assert!(unreviewed["earlier_version"].is_null(), "{status}");
+}

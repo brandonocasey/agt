@@ -488,17 +488,22 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
     };
     let (reviewed, repaired) = targets.reviewed(except);
 
-    // A changed merge nobody reviewed voids the head's coverage, as for `status`.
+    // A changed merge nobody reviewed voids the head's coverage, as for `status`, and counts
+    // among the unreviewed entries.
     let history = ctx.repo.log(requested.range_base, &scope.head)?;
-    let merge_after = if history.iter().any(|entry| entry.parents.len() > 1) {
+    let unreviewed_merge: HashSet<String> = if history.iter().any(|entry| entry.parents.len() > 1) {
         let reader = Repo::discover()?.read_only()?;
         let merges = changed_merges(&reader, &history)?;
         let every: Vec<&Target> = target.into_iter().chain(&others).collect();
         let origins = merge_origins(&ctx.repo, &merges, &every)?;
-        !unreviewed_merges(&merges, &origins).is_empty()
+        unreviewed_merges(&merges, &origins)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     } else {
-        false
+        HashSet::new()
     };
+    let merge_after = !unreviewed_merge.is_empty();
     // Only a head that is the whole range, one commit above the range start, may match by its
     // own patch-id: a fix check's lone commit says nothing about the commits before it.
     let head_patch_id = match requested.commits {
@@ -542,38 +547,50 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
     }
     let total = requested.commits.len();
     let done = commits.len();
-    let hint = match unreviewed.first() {
+    // Unreviewed commits and changed merges, oldest first.
+    let pending: HashSet<&str> = unreviewed
+        .iter()
+        .map(|commit| commit.sha.as_str())
+        .chain(unreviewed_merge.iter().map(String::as_str))
+        .collect();
+    let oldest = history
+        .iter()
+        .find(|entry| pending.contains(entry.sha.as_str()));
+    let hint = match oldest {
         _ if done == 0 => Value::Null,
         None => json!(format!("all {total} commits already reviewed")),
         Some(oldest) => {
-            let pending = unreviewed.len();
-            let from = requested
-                .commits
-                .iter()
-                .position(|commit| commit.sha == oldest.sha)
-                .unwrap_or(0);
-            let suffix = total - from;
             // A base at the range start would be the pass already requested, not a partial one.
-            let start = if from == 0 {
-                None
-            } else {
-                ctx.repo.parent(&oldest.sha)?
-            };
+            let start = ctx
+                .repo
+                .parent(&oldest.sha)?
+                .filter(|start| Some(start.as_str()) != requested.range_base);
             match start {
-                Some(sha) if suffix == pending => json!(format!(
-                    "{done} of {total} already reviewed; --base {sha} reviews only the other {pending} (partial)"
-                )),
-                Some(sha) => json!(format!(
-                    "{done} of {total} already reviewed; --base {sha} starts at the oldest unreviewed commit and reviews {suffix} (partial)"
-                )),
+                Some(sha) => {
+                    let rest = ctx.repo.commits(Some(&sha), &scope.head)?.len();
+                    if unreviewed_merge.is_empty() && rest == unreviewed.len() {
+                        json!(format!(
+                            "{done} of {total} already reviewed; --base {sha} reviews only the other {rest} (partial)"
+                        ))
+                    } else {
+                        json!(format!(
+                            "{done} of {total} already reviewed; --base {sha} starts at the oldest unreviewed commit or merge and reviews {rest} (partial)"
+                        ))
+                    }
+                }
                 None => json!(format!("{done} of {total} already reviewed")),
             }
         }
     };
+    let unreviewed_shas: Vec<&str> = history
+        .iter()
+        .map(|entry| entry.sha.as_str())
+        .filter(|sha| pending.contains(sha))
+        .collect();
     Ok(json!({
         "head": coverage_json(&head),
         "commits": commits,
-        "unreviewed": unreviewed.iter().map(|commit| &commit.sha).collect::<Vec<_>>(),
+        "unreviewed": unreviewed_shas,
         "hint": hint,
     }))
 }
@@ -756,6 +773,13 @@ pub(super) fn earlier_versions(ctx: &Ctx, status: &mut Value) -> Result<()> {
     // Only this target's own passes: a repeated subject such as "fix lint" on another branch
     // says nothing about this commit.
     let own = status["target"].as_str();
+    // A commit still in the history is a different commit, not an earlier form of this one.
+    let current: HashSet<&str> = status["commits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|view| view["sha"].as_str())
+        .collect();
     for target in stored
         .iter()
         .filter(|target| Some(target.key.as_str()) == own)
@@ -763,7 +787,7 @@ pub(super) fn earlier_versions(ctx: &Ctx, status: &mut Value) -> Result<()> {
         for run in &target.runs {
             for pass in run.passes.iter().filter(|pass| pass.ended_at.is_some()) {
                 for commit in &pass.commits {
-                    if !unreviewed.contains(&commit.sha) {
+                    if !current.contains(commit.sha.as_str()) {
                         recorded.push((&target.key, &run.id, &pass.id, commit));
                     }
                 }

@@ -154,8 +154,9 @@ run too when that leaves it without passes. An aborted pass counts for nothing.
 covers the whole requested range. `head` lists the passes that already cover the whole
 head, `commits` each already reviewed commit with `via` (`sha`, `patch-id`, `tree` or
 `repair`) and `by` (`target`, `run`, `pass`, `kind`, `pass_commits`, `via`; a repair has
-no `pass` or `kind`), `unreviewed` the other shas, and `hint` says what `--base <sha>`
-would review instead (null when nothing is reviewed yet). A fix check or reveal pass
+no `pass` or `kind`), `unreviewed` the other shas, oldest first, including changed merges
+no pass contains, and `hint` says what `--base <sha>` would review instead (null when
+nothing is reviewed yet; no `--base` when it would be the range start). A fix check or reveal pass
 leaves its own run's earlier passes out. `pass start --dry-run` prints the same report
 (`dry_run: true`, no `pass`) and writes nothing: no run, pass or store file.
 
