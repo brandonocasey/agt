@@ -68,6 +68,19 @@ fn create_hooks_run_in_the_worktree_with_the_hook_environment() {
 }
 
 #[test]
+fn create_hooks_run_for_a_detached_worktree_with_an_empty_branch() {
+    let env = repo();
+    repo_config(
+        &env,
+        "[worktree.hooks]\ncreate = [\"echo \\\"[$AGT_BRANCH]\\\" > env.txt\"]\n",
+    );
+    let output = agt(&env, &env.repo, &["create", "review-1", "--detach", "HEAD"]);
+    assert_eq!(json(&output)["hooks"]["ok"], true);
+    let seen = fs::read_to_string(env.repo.join(".worktrees/review-1/env.txt")).unwrap();
+    assert_eq!(seen.trim(), "[]");
+}
+
+#[test]
 fn a_create_hook_gets_the_worktrees_port_as_port() {
     let env = repo();
     repo_config(

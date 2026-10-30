@@ -1367,6 +1367,7 @@ Output is JSON.
 
 ```sh
 agt worktree create BRANCH [--base C] [--path P] [--prepare] [--no-hooks] [--background]
+agt worktree create NAME --detach C [--path P] [--prepare] [--no-hooks] [--background]  # no branch, e.g. a review
 agt worktree prepare [PATH] [--clone-deps]  # install dependencies from the lockfiles
 agt worktree prepare --hooks [PATH]  # rerun only the create hooks, no installs (after a failed one)
 agt worktree prepare --wait [PATH] [--timeout SECS]  # wait for the background setup `create --background` started
@@ -1430,6 +1431,13 @@ contains all the others wins; when they diverge, origin's fetched default is use
 `base.diverged` is true. `base.candidates` lists every candidate with its commit. Choosing
 moves no remote-tracking branch, and a remote that cannot be queried or fetched is an
 error naming it. A `.gitmodules` file triggers `git submodule update --init --recursive`.
+
+`--detach COMMIT-ISH` (not with `--base`) checks out that commit with no branch at
+`.worktrees/<NAME>` or `--path`; the commit must already be local, so fetch a pull request's head
+first. `branch` is `null`, no branch is created, the local default stays where it is, and create
+hooks see an empty `AGT_BRANCH`. A detached worktree already at that path and commit is reused;
+one on a branch, at another commit, or whose directory is gone is refused, with the
+`git switch --detach` command that moves a clean one.
 
 After a new branch starts at the newest default base (not with `--base`), `create` fast-forwards
 the local default branch to the fetched default of its upstream (`branch.<name>.remote` and
