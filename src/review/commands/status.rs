@@ -547,24 +547,35 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
     }
     let total = requested.commits.len();
     let done = commits.len();
-    // Unreviewed commits and changed merges, oldest first.
-    let pending: HashSet<&str> = unreviewed
+    // Unreviewed commits and changed merges, oldest first. `history` starts at the range start,
+    // which on the default branch or for a continuing pass is not where the requested commits
+    // start: a commit missing from it keeps its place among the requested commits.
+    let place = |sha: &str| history.iter().position(|entry| entry.sha == sha);
+    let mut pending: Vec<&str> = unreviewed
         .iter()
         .map(|commit| commit.sha.as_str())
-        .chain(unreviewed_merge.iter().map(String::as_str))
         .collect();
-    let oldest = history
-        .iter()
-        .find(|entry| pending.contains(entry.sha.as_str()));
-    let hint = match oldest {
+    pending.extend(
+        history
+            .iter()
+            .map(|entry| entry.sha.as_str())
+            .filter(|sha| unreviewed_merge.contains(*sha)),
+    );
+    pending.sort_by_key(|sha| place(sha).unwrap_or(0));
+    let hint = match pending.first() {
         _ if done == 0 => Value::Null,
         None => json!(format!("all {total} commits already reviewed")),
         Some(oldest) => {
-            // A base at the range start would be the pass already requested, not a partial one.
-            let start = ctx
-                .repo
-                .parent(&oldest.sha)?
-                .filter(|start| Some(start.as_str()) != requested.range_base);
+            // A base at the range start, or where the requested commits start, would be the
+            // pass already requested, not a partial one.
+            let requested_start = match requested.commits.first() {
+                Some(first) => ctx.repo.parent(&first.sha)?,
+                None => None,
+            };
+            let start = ctx.repo.parent(oldest)?.filter(|start| {
+                Some(start.as_str()) != requested.range_base
+                    && Some(start) != requested_start.as_ref()
+            });
             match start {
                 Some(sha) => {
                     let rest = ctx.repo.commits(Some(&sha), &scope.head)?.len();
@@ -582,11 +593,7 @@ pub(super) fn already_reviewed(ctx: &Ctx, requested: &Requested) -> Result<Value
             }
         }
     };
-    let unreviewed_shas: Vec<&str> = history
-        .iter()
-        .map(|entry| entry.sha.as_str())
-        .filter(|sha| pending.contains(sha))
-        .collect();
+    let unreviewed_shas = pending;
     Ok(json!({
         "head": coverage_json(&head),
         "commits": commits,

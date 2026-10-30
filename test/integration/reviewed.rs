@@ -1353,3 +1353,46 @@ fn earlier_version_hint_skips_commits_still_in_the_history() {
         .unwrap();
     assert!(unreviewed["earlier_version"].is_null(), "{status}");
 }
+
+#[test]
+fn default_branch_report_lists_commits_unreviewed_after_a_base_pass() {
+    let env = Env::with_branch();
+    env.git(&["switch", "-q", "main"]);
+    env.write("a.txt", "A\n");
+    let a = env.commit_all("A");
+    env.write("b.txt", "B\n");
+    env.commit_all("B");
+    pass_without_run_end(&env, &["--base", &a]);
+    env.write("c.txt", "C\n");
+    let c = env.commit_all("C");
+    let report = env.run(&["pass", "start", "--kind", "full", "--base", &a, "--dry-run"]);
+    let report = &report["already_reviewed"];
+    assert_eq!(report["unreviewed"], json!([c]), "{report}");
+    assert_ne!(report["hint"], "all 2 commits already reviewed", "{report}");
+}
+
+#[test]
+fn continuing_fix_check_hint_suggests_no_base_at_the_previous_head() {
+    let env = Env::with_branch();
+    env.write("x.txt", "A\n");
+    env.commit_all("A");
+    let run = pass_without_run_end(&env, &[]);
+    env.write("f1.txt", "1\n");
+    env.commit_all("F1");
+    env.write("f2.txt", "2\n");
+    let f2 = env.commit_all("F2");
+    review_commit(&env, &f2);
+    let report = env.run(&[
+        "pass",
+        "start",
+        "--run",
+        &run,
+        "--kind",
+        "fix-check",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        report["already_reviewed"]["hint"], "1 of 2 already reviewed",
+        "{report}"
+    );
+}
