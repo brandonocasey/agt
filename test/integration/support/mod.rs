@@ -23,6 +23,7 @@ const SCRUBBED_ENV: &[&str] = &[
     "AGT_NOW",
     "AGT_OFFLINE",
     "AGT_SYNC_CAP_MS",
+    "AGT_ROLLUP_GRACE_SECS",
     "AGT_PRICES",
     "AGT_MISE_BIN",
     "AGT_GIT_BIN",

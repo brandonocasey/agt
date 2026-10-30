@@ -66,6 +66,7 @@ Environment variables agt reads, or sets for programs it runs:
 | `AGT_HOOK`, `AGT_WORKTREE`, `AGT_MAIN_CHECKOUT`, `AGT_BRANCH` | `worktree` hooks | Set by agt for each hook command | set by agt |
 | `AGT_NOW` | all | Unix seconds replacing the current time | test only |
 | `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
+| `AGT_ROLLUP_GRACE_SECS` | `ci wait` | Seconds replacing the 120-second grace for an empty rollup and for a required check that is missing while nothing runs | test only |
 | `AGT_GH_BIN`, `AGT_GLAB_BIN` | everything that calls a forge | Program to run instead of `gh` or `glab` | test only |
 | `AGT_GIT_BIN`, `AGT_MISE_BIN` | `doctor` | Program to run instead of `git` or `mise` for its version checks; other commands still run `git` | test only |
 | `AGT_CLEANUP_TMP` | `cleanup` | Directory standing in for `/tmp` when looking for session scratch files and browser temp profiles | test only |
