@@ -2,7 +2,8 @@
 //! branch starts at the newest default base among every remote's live default branch and the
 //! local one; the only existing branch that moves is the local default, fast-forwarded to its
 //! upstream's fetched default when it can be. A branch that exists only as `origin/<branch>` gets
-//! a local branch tracking it.
+//! a local branch tracking it. `--detach` checks out a commit with no branch, as review
+//! checkouts do.
 
 use std::path::{Path, PathBuf};
 
@@ -15,17 +16,20 @@ use super::{emit, fast_forward, hooks};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
 use crate::forge::auto::Offline;
-use crate::git::Repo;
 use crate::git::base::{Candidate, candidates, choose};
+use crate::git::{Repo, Worktree};
 
 #[derive(Args)]
 pub struct Cli {
     /// The branch to check out; created when it does not exist (tracking `origin/<branch>` when
-    /// that exists).
+    /// that exists). With `--detach`, only the worktree's name.
     branch: String,
     /// Start a new branch here instead of at the newest default base.
     #[arg(long, value_name = "COMMIT-ISH")]
     base: Option<String>,
+    /// Check out this commit detached, with no branch, in `.worktrees/<BRANCH>`.
+    #[arg(long, value_name = "COMMIT-ISH", conflicts_with = "base")]
+    detach: Option<String>,
     /// Where to put the worktree; default: `<main checkout>/.worktrees/<branch>`.
     #[arg(long)]
     path: Option<PathBuf>,
@@ -49,16 +53,25 @@ pub fn run(cli: Cli) -> Result<Output> {
     if branch.starts_with('-') || !repo.succeeds(&["check-ref-format", &full])? {
         return fail(format!("{branch} is not a valid branch name"));
     }
-    let exists = repo.ref_commit(&full)?.is_some();
+    let detach = cli
+        .detach
+        .as_deref()
+        .map(|rev| repo.commit(rev))
+        .transpose()?;
+    let exists = detach.is_none() && repo.ref_commit(&full)?.is_some();
     if exists && cli.base.is_some() {
         return fail(format!(
             "{branch} exists; --base applies to a new branch only"
         ));
     }
-    let checked_out = repo
-        .worktrees()?
-        .into_iter()
-        .find(|entry| entry.branch.as_deref() == Some(branch));
+    let checked_out = match &detach {
+        Some(commit) => reusable_detached(&repo, &target(&repo, &cli)?, commit)?,
+        None => repo
+            .worktrees()?
+            .into_iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch)),
+    };
+    let named = detach.is_none().then_some(branch);
     let mut fetched = Vec::new();
     // Validated before the worktree exists: an invalid config must not leave one whose create
     // hooks never ran (a rerun would find it reused).
@@ -73,13 +86,15 @@ pub fn run(cli: Cli) -> Result<Output> {
     let mut value = match checked_out {
         Some(entry) => {
             let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
-            json!({"path": entry.path, "branch": branch, "commit": commit, "reused": true})
+            json!({"path": entry.path, "branch": named, "commit": commit, "reused": true})
         }
         None => {
             let dir = target(&repo, &cli)?;
             let dir_arg = dir.to_string_lossy();
             let mut value = json!({"reused": false});
-            if exists {
+            if let Some(commit) = &detach {
+                repo.git(&["worktree", "add", "--detach", &dir_arg, commit])?;
+            } else if exists {
                 repo.git(&["worktree", "add", &dir_arg, branch])?;
             } else if cli.base.is_none() && on_origin(&repo, branch)? {
                 let upstream = format!("origin/{branch}");
@@ -92,7 +107,7 @@ pub fn run(cli: Cli) -> Result<Output> {
                 value["base"] = base;
                 fetched = found;
             }
-            finish(&dir, branch, value)?
+            finish(&dir, named, value)?
         }
     };
     let mut warnings: Vec<String> = value["warnings"]
@@ -167,6 +182,36 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
     known()
 }
 
+/// The worktree at `dir` when it is detached at `commit`. One on a branch or at another commit is
+/// refused: moving it could discard work, and a branch must not be reported as detached.
+fn reusable_detached(repo: &Repo, dir: &Path, commit: &str) -> Result<Option<Worktree>> {
+    let Some(entry) = repo
+        .worktrees()?
+        .into_iter()
+        .find(|entry| entry.path == dir)
+    else {
+        return Ok(None);
+    };
+    let shown = dir.display();
+    if entry.prunable {
+        return fail(format!(
+            "{shown} is a registered worktree whose directory is gone; run `git worktree prune` first"
+        ));
+    }
+    if let Some(branch) = &entry.branch {
+        return fail(format!(
+            "{shown} has {branch} checked out; pick another name for --detach"
+        ));
+    }
+    if entry.head != commit {
+        return fail(format!(
+            "{shown} is detached at {}, not {commit}; when it is clean, run `git -C {shown} switch --detach {commit}`, or pick another name",
+            entry.head
+        ));
+    }
+    Ok(Some(entry))
+}
+
 fn target(repo: &Repo, cli: &Cli) -> Result<PathBuf> {
     if let Some(path) = &cli.path {
         return std::path::absolute(path).map_err(ctx("resolve --path"));
@@ -207,8 +252,8 @@ fn add_new(
     Ok((info, found))
 }
 
-/// Initializes submodules and describes the new worktree.
-fn finish(dir: &Path, branch: &str, mut value: Value) -> Result<Value> {
+/// Initializes submodules and describes the new worktree; `branch` is `None` when detached.
+fn finish(dir: &Path, branch: Option<&str>, mut value: Value) -> Result<Value> {
     let inside = Repo::at(dir);
     let submodules = dir.join(".gitmodules").exists();
     let mut warnings = Vec::new();

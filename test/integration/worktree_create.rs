@@ -451,6 +451,77 @@ fn an_existing_branch_without_a_worktree_gets_one_and_stays_put() {
 }
 
 #[test]
+fn detach_checks_out_a_commit_without_making_a_branch() {
+    let (env, first) = repo_with_commit();
+    commit(&env, &env.repo.clone(), "second", "2");
+    let value = agt_json(
+        &env,
+        &env.repo,
+        &["create", "review-1", "--detach", "HEAD~1"],
+    );
+    let tree = env.repo.join(".worktrees/review-1");
+    assert_eq!(value["reused"], false);
+    assert_eq!(value["path"], tree.to_str().unwrap());
+    assert_eq!(value["branch"], Value::Null);
+    assert_eq!(value["commit"], first.as_str());
+    assert!(value.get("base").is_none());
+    assert_eq!(
+        git(&env, &tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD"
+    );
+    assert_eq!(git(&env, &env.repo, &["branch", "--list", "review-1"]), "");
+}
+
+#[test]
+fn a_detached_worktree_is_reused_only_at_the_same_commit() {
+    let (env, first) = repo_with_commit();
+    let second = commit(&env, &env.repo.clone(), "second", "2");
+    let created = agt_json(&env, &env.repo, &["create", "review-1", "--detach", &first]);
+    let again = agt_json(&env, &env.repo, &["create", "review-1", "--detach", &first]);
+    assert_eq!(again["reused"], true);
+    assert_eq!(again["path"], created["path"]);
+    assert_eq!(again["branch"], Value::Null);
+    assert_eq!(again["commit"], first.as_str());
+    let moved = agt(
+        &env,
+        &env.repo,
+        &["create", "review-1", "--detach", &second],
+    );
+    assert!(!moved.status.success());
+    let message = String::from_utf8_lossy(&moved.stderr);
+    assert!(
+        message.contains(&format!("switch --detach {second}")),
+        "{message}"
+    );
+    let tree = env.repo.join(".worktrees/review-1");
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+}
+
+#[test]
+fn detach_refuses_a_branch_worktree_an_unknown_commit_and_base() {
+    let (env, _) = repo_with_commit();
+    agt_json(&env, &env.repo, &["create", "feat/a"]);
+    let taken = agt(&env, &env.repo, &["create", "feat/a", "--detach", "HEAD"]);
+    assert!(!taken.status.success());
+    assert!(String::from_utf8_lossy(&taken.stderr).contains("has feat/a checked out"));
+    let unknown = agt(
+        &env,
+        &env.repo,
+        &["create", "review-2", "--detach", "no-such-rev"],
+    );
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown commit: no-such-rev"));
+    assert!(!env.repo.join(".worktrees/review-2").exists());
+    let both = agt(
+        &env,
+        &env.repo,
+        &["create", "review-3", "--detach", "HEAD", "--base", "HEAD"],
+    );
+    assert!(!both.status.success());
+    assert!(!env.repo.join(".worktrees/review-3").exists());
+}
+
+#[test]
 fn a_bare_main_checkout_needs_a_path() {
     let (env, _) = repo_with_commit();
     let bare = env.path("bare.git");
