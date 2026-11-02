@@ -49,6 +49,8 @@ matrix!(
     sync_only_pulls_while_push_is_off,
     a_narrower_repository_key_cannot_lower_the_global_push,
     no_token_reaches_a_call_a_file_or_the_output,
+    local_and_tracker_issues_share_one_preview,
+    a_successful_create_stays_reported_when_its_comment_fails,
 );
 
 fn issue() -> Spec {
@@ -63,6 +65,41 @@ fn pushable(fake: Fake, specs: &[Spec]) -> Env {
     env
 }
 
+fn local_and_tracker_issues_share_one_preview(fake: Fake) {
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["comment", "1", "Thanks"]);
+    let local = env.issue(&["create", "--title", "Local issue"]);
+    let before = env.issue_files();
+    let dry = env.issue(&["push", "--dry-run"]);
+    assert_eq!(dry["trackers"].as_array().unwrap().len(), 1, "{dry}");
+    assert_eq!(kinds(&writes(&dry, "writes")), ["comment", "create"]);
+    assert_eq!(dry["trackers"][0]["writes"][1]["issue"], local["key"]);
+    assert_eq!(env.issue_files(), before);
+    assert!(env.forge_writes(fake).is_empty());
+}
+
+fn a_successful_create_stays_reported_when_its_comment_fails(fake: Fake) {
+    let env = Env::new();
+    env.write_config(&fake.config(true));
+    let local = env.issue(&["create", "--title", "Local issue"]);
+    env.issue(&["comment", local["key"].as_str().unwrap(), "Thanks"]);
+    env.respond(&strs(&fake.user_call()), login_body(fake));
+    env.respond(
+        &strs(&fake.create_call()),
+        &fake.issue_json(&created()).to_string(),
+    );
+    fake.accept_update(&env, 5);
+    env.fail_call(&strs(&fake.comment_call(5)));
+    let report = env.issue(&["push"]);
+    let sent = writes(&report, "sent");
+    assert_eq!(sent.len(), 1, "{report}");
+    assert_eq!(sent[0]["issue"], format!("{}#5", fake.repo()));
+    assert_eq!(sent[0]["number"], 5);
+    assert_eq!(kinds(&sent), ["create", "update"]);
+    assert_eq!(writes(&report, "failed")[0]["what"], "c1");
+    assert_eq!(doc(&env, fake, "5")["comments"][0]["post"], "posting");
+}
+
 fn doc(env: &Env, fake: Fake, name: &str) -> Value {
     env.issue_doc(fake.tracker(), name)
 }
@@ -74,6 +111,11 @@ fn writes(report: &Value, key: &str) -> Vec<Value> {
 fn kinds(writes: &[Value]) -> Vec<String> {
     writes
         .iter()
+        .flat_map(|write| {
+            write["operations"]
+                .as_array()
+                .map_or(std::slice::from_ref(write), Vec::as_slice)
+        })
         .map(|write| write["kind"].as_str().unwrap().to_owned())
         .collect()
 }
@@ -149,6 +191,11 @@ fn push_sends_each_write_once_and_a_second_push_sends_nothing(fake: Fake) {
     env.respond_nth(&strs(&fake.comment_call(1)), 2, &fake.comment_response(101));
     let report = env.issue(&["push"]);
     assert_eq!(report["dry_run"], false);
+    assert_eq!(
+        report["trackers"][0]["sent"].as_array().unwrap().len(),
+        1,
+        "{report}"
+    );
     assert_eq!(
         kinds(&writes(&report, "sent")),
         ["update", "comment", "comment"]
@@ -433,6 +480,13 @@ fn a_created_issue_is_sent_then_known_by_its_number(fake: Fake) {
     );
     fake.accept_comment(&env, 5, 700);
     let report = env.issue(&["push"]);
+    assert_eq!(report["trackers"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        report["trackers"][0]["sent"].as_array().unwrap().len(),
+        1,
+        "{report}"
+    );
+    assert_eq!(report["trackers"][0]["sent"][0]["number"], 5);
     assert_eq!(kinds(&writes(&report, "sent")), ["create", "comment"]);
     assert_eq!(
         env.forge_writes(fake),
@@ -906,7 +960,13 @@ fn manual_push_allows_omitted_permission_and_local_dry_run_writes_no_files() {
     let before = env.issue_files();
     let dry = env.issue(&["push", "--dry-run"]);
     assert_eq!(env.issue_files(), before);
-    assert_eq!(dry["trackers"][1]["writes"][0]["kind"], "create");
+    assert_eq!(dry["trackers"].as_array().unwrap().len(), 1, "{dry}");
+    assert_eq!(
+        dry["trackers"][0]["writes"].as_array().unwrap().len(),
+        1,
+        "{dry}"
+    );
+    assert_eq!(dry["trackers"][0]["writes"][0]["kind"], "create");
     assert!(env.forge_writes(fake).is_empty());
     env.respond(
         &strs(&fake.create_call()),
@@ -963,7 +1023,17 @@ fn a_local_issue_waits_for_tracker_when_every_remote_is_one() {
         &strs(&github.create_call()),
         &github.issue_json(&created()).to_string(),
     );
+    let before = env.issue_files();
+    let dry = env.issue(&["push", "--dry-run", "--tracker", "o/r"]);
+    assert_eq!(dry["trackers"].as_array().unwrap().len(), 1, "{dry}");
+    assert_eq!(kinds(&writes(&dry, "writes")), ["create"]);
+    assert_eq!(dry["trackers"][0]["tracker"], github.tracker());
+    assert_eq!(env.issue_files(), before);
     // Two remotes are two destinations: nothing is sent until one is named.
+    assert!(
+        env.issue_fail(&["push", "--dry-run"])
+            .contains("several issue destinations")
+    );
     assert!(
         env.issue_fail(&["push"])
             .contains("several issue destinations")
@@ -1030,6 +1100,8 @@ fn empty_local_tracker_does_not_require_an_attachment_destination() {
     let gitlab_writes_before = env.forge_writes(gitlab);
     let report = env.issue(&["push"]);
     assert_eq!(report["trackers"].as_array().unwrap().len(), 2);
+    let dry = env.issue(&["push", "--dry-run"]);
+    assert_eq!(dry["trackers"].as_array().unwrap().len(), 2, "{dry}");
     assert!(env.issue_state().join("local/tracker.json").exists());
     assert_eq!(env.forge_writes(github), github_writes_before);
     assert_eq!(env.forge_writes(gitlab), gitlab_writes_before);

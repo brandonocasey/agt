@@ -1,4 +1,4 @@
-//! `agt ci wait`: polls required GitHub checks or the GitLab head pipelines of PRs, MRs and
+//! `agt ci wait`: polls selected GitHub checks or the GitLab head pipelines of PRs, MRs and
 //! pipelines, and prints one JSON event per line when a target's state first appears or
 //! changes, then a final event.
 

@@ -1,5 +1,7 @@
 //! One poll of a target: the reads through `src/forge` and the state they add up to.
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use super::classify::{
@@ -121,13 +123,25 @@ fn github(
         awaiting,
         waited_secs,
     };
-    let state = classify(&head_state, &pull.view, pull.rollup, &pull.checks);
-    let (state, idle_since) =
-        require_reported(&github, target, &pull, state, (waited_secs, idle_since))?;
+    let checks = if pull.checks.is_empty() {
+        &pull.all_checks
+    } else {
+        &pull.checks
+    };
+    let state = classify(&head_state, &pull.view, pull.rollup, checks);
+    let (state, idle_since) = require_reported(
+        &github,
+        target,
+        &pull,
+        &head_state,
+        state,
+        (waited_secs, idle_since),
+    )?;
     Ok((state, head, idle_since))
 }
 
-/// A passed state held back while a context the base branch requires has not reported: the
+/// Configured contexts MUST be reported by checks GitHub marks required for this PR.
+/// A passed state is held back while a context the base branch requires has not reported: the
 /// rollup lists only checks that exist, so a required job that starts late is absent from it.
 /// Each source of required contexts (rulesets, classic branch protection) is read on its own, so
 /// one source refusing the token never hides what the other lists. A context still missing holds
@@ -145,12 +159,17 @@ fn require_reported(
     github: &github::Github,
     target: &Resolved,
     pull: &github::ci::Pull,
+    head: &Head,
     state: State,
     clock: (i64, Option<i64>),
 ) -> Result<(State, Option<i64>), TransportError> {
     let (waited_secs, idle_since) = clock;
     let base = pull.base.as_str();
-    if state["reason"] != "required_checks_passed" || base.is_empty() {
+    let fallback = pull.checks.is_empty();
+    if base.is_empty()
+        || (!fallback && state["reason"] != "required_checks_passed")
+        || (fallback && !state["checks"].is_array())
+    {
         return Ok((state, None));
     }
     let mut contexts = Vec::new();
@@ -167,15 +186,30 @@ fn require_reported(
     }
     contexts.sort();
     contexts.dedup();
+    let mut state = state;
+    if fallback && !contexts.is_empty() {
+        // An optional namesake may come from another app; GitHub alone marks required checks.
+        state = classify(head, &pull.view, pull.rollup, &pull.checks);
+    }
+    let reported: HashSet<&str> = pull
+        .checks
+        .iter()
+        .filter_map(|check| check["name"].as_str())
+        .collect();
     let missing: Vec<String> = contexts
         .into_iter()
-        .filter(|context| !pull.names.contains(context))
+        .filter(|context| !reported.contains(context.as_str()))
         .collect();
-    let mut state = state;
     if missing.is_empty() {
         if unreadable_source {
             state["requiredContexts"] = json!("unreadable");
         }
+        return Ok((state, None));
+    }
+    if !matches!(
+        state["reason"].as_str(),
+        Some("required_checks_passed" | "no_required_checks")
+    ) {
         return Ok((state, None));
     }
     let idle = !pull.running;

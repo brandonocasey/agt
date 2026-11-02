@@ -1,4 +1,4 @@
-//! The state of a PR and its required checks, for `agt ci wait`.
+//! The state of a PR and its checks, for `agt ci wait`.
 
 use serde_json::{Value, json};
 
@@ -9,7 +9,7 @@ use crate::forge::transport::TransportError;
 
 const QUERY: &str = "query PullChecks($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){number url baseRefName state mergedAt closed headRefOid commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion title detailsUrl isRequired(pullRequestNumber:$number) checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl isRequired(pullRequestNumber:$number)}}}}}}}}}}";
 
-/// A PR and its required checks of the head commit.
+/// A PR and the checks of its head commit.
 pub struct Pull {
     /// `number`, `url`, `state` (`OPEN`, `CLOSED` or `MERGED`), `mergedAt`, `closed` and
     /// `headRefOid`.
@@ -17,10 +17,10 @@ pub struct Pull {
     /// `name`, `state`, `bucket` (`pass`, `fail`, `pending`, `skipping` or `cancel`),
     /// `description`, `link`, `workflow` and `event` of each.
     pub checks: Vec<Value>,
+    /// Every check and status, used when no required contexts are configured.
+    pub all_checks: Vec<Value>,
     /// How many checks and statuses the rollup holds, required or not.
     pub rollup: usize,
-    /// The name of every check and status in the rollup, required or not.
-    pub names: Vec<String>,
     /// Whether any check or status in the rollup, required or not, has not completed.
     pub running: bool,
     /// The branch the PR merges into.
@@ -59,11 +59,8 @@ fn unfinished(node: &Value) -> bool {
     node["status"] != "COMPLETED"
 }
 
-/// The required check a rollup entry describes, if it is one.
+/// The check or status a rollup entry describes.
 fn check(node: &Value) -> Option<Value> {
-    if node["isRequired"] != true {
-        return None;
-    }
     let text = |pointer: &str| node.pointer(pointer).and_then(Value::as_str).unwrap_or("");
     match text("/__typename") {
         "CheckRun" => {
@@ -95,14 +92,14 @@ fn check(node: &Value) -> Option<Value> {
 }
 
 impl Github {
-    /// The PR `number` of `repo` (`owner/name`) and its required checks, in one read.
+    /// The PR `number` of `repo` (`owner/name`) and its checks, in one read.
     pub fn pull_checks(&self, repo: &str, number: u64) -> Result<Pull, TransportError> {
         let (owner, name) = split_repo_strict(repo)
             .ok_or_else(|| TransportError::new(format!("not an owner/repo: {repo}")))?;
         let mut cursor: Option<String> = None;
         let mut checks = Vec::new();
+        let mut all_checks = Vec::new();
         let mut rollup = 0;
-        let mut names = Vec::new();
         let mut running = false;
         loop {
             let mut vars = vec![
@@ -126,14 +123,14 @@ impl Github {
                 .and_then(|contexts| contexts["nodes"].as_array())
                 .map_or(&[][..], Vec::as_slice);
             rollup += nodes.len();
-            checks.extend(nodes.iter().filter_map(check));
-            running |= nodes.iter().any(unfinished);
-            names.extend(
+            checks.extend(
                 nodes
                     .iter()
-                    .filter_map(|node| node["name"].as_str().or_else(|| node["context"].as_str()))
-                    .map(str::to_owned),
+                    .filter(|node| node["isRequired"] == true)
+                    .filter_map(check),
             );
+            all_checks.extend(nodes.iter().filter_map(check));
+            running |= nodes.iter().any(unfinished);
             let next = contexts
                 .filter(|contexts| contexts["pageInfo"]["hasNextPage"] == true)
                 .and_then(|contexts| contexts["pageInfo"]["endCursor"].as_str());
@@ -151,8 +148,8 @@ impl Github {
                     "headRefOid": pull["headRefOid"],
                 }),
                 checks,
+                all_checks,
                 rollup,
-                names,
                 running,
                 base: pull["baseRefName"].as_str().unwrap_or("").to_owned(),
             });

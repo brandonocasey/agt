@@ -94,13 +94,17 @@ fn sync_one(store: &Store, configured: &Tracker, dir: &std::path::Path) -> Resul
         .map_err(Stop::Failed)
 }
 
-fn destination<'a>(trackers: &'a [Tracker], filter: Option<&str>) -> Result<&'a Tracker> {
+pub(super) fn destination<'a>(
+    trackers: &'a [Tracker],
+    filter: Option<&str>,
+    preview: bool,
+) -> Result<&'a Tracker> {
     let targets = trackers::configured(trackers, filter)?;
     let [target] = targets.as_slice() else {
         return crate::core::error::fail("several issue destinations; pass --tracker");
     };
     let target = *target;
-    if target.push_mode() == Mode::Off {
+    if !preview && target.push_mode() == Mode::Off {
         return crate::core::error::fail(format!(
             "push is off for {}; set `push = \"manual\"` under `[issues]`, `[sync]` or the tracker",
             target.name()
@@ -145,7 +149,7 @@ pub fn attach_pending(store: &Store, trackers: &[Tracker], filter: Option<&str>)
         for issue in store.docs::<crate::store::issues::Issue>(&source.dir, &[TRACKER_FILE])? {
             let target = match target {
                 Some(target) => target,
-                None => *target.insert(destination(trackers, filter)?),
+                None => *target.insert(destination(trackers, filter, false)?),
             };
             attach(store, target, &source, &issue)?;
         }
@@ -182,7 +186,7 @@ pub fn push_changed(
             if target.is_none_or(|target| target.push_mode() != Mode::Auto) {
                 return Ok(None);
             }
-            let configured = destination(&destinations, filter)?;
+            let configured = destination(&destinations, filter, false)?;
             let index = super::hierarchy::Index::load(store, &source)?;
             let mut target = None;
             for name in index.family(&issue.doc_name()) {

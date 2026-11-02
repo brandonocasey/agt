@@ -3,6 +3,7 @@
 //! comments. Anything that is in doubt is marked before its call, so a rerun can tell a write
 //! that landed from one that did not.
 
+use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::hierarchy::Index;
@@ -43,6 +44,19 @@ pub fn run(
 ) -> Result<Value> {
     let mut reports = Vec::new();
     let reached = trackers::configured(destinations, filter)?;
+    let mut locals = Vec::new();
+    if options.dry_run {
+        for local in trackers::stored(store, None)? {
+            if local.doc.forge.is_none()
+                && !store.docs::<Issue>(&local.dir, &[TRACKER_FILE])?.is_empty()
+            {
+                locals.push(local);
+            }
+        }
+        if !locals.is_empty() {
+            super::auto::destination(destinations, filter, true)?;
+        }
+    }
     let mut kept = Vec::new();
     for configured in &reached {
         let tracker = trackers::ensure_mode(store, configured, options.dry_run)?;
@@ -58,13 +72,18 @@ pub fn run(
             reports.push(json!({"tracker": tracker.doc.key, "skipped": "push is off"}));
             continue;
         }
-        reports.push(push_tracker(store, &tracker, options)?);
-        if options.dry_run {
-            for mut local in trackers::stored(store, Some("local")).unwrap_or_default() {
-                local.doc = tracker.doc.clone();
-                reports.push(push_tracker(store, &local, options)?);
+        let mut report = push_tracker(store, &tracker, options)?;
+        for local in &mut locals {
+            local.doc = tracker.doc.clone();
+            let mut preview = push_tracker(store, local, options)?;
+            for field in ["writes", "failed", "deferred", "conflicts"] {
+                report[field]
+                    .as_array_mut()
+                    .expect("push report arrays")
+                    .append(preview[field].as_array_mut().expect("push report arrays"));
             }
         }
+        reports.push(report);
     }
     let mut report = json!({ "dry_run": options.dry_run, "trackers": reports });
     // Some or all trackers kept their changes local: say which, as `review publish` does.
@@ -133,13 +152,36 @@ fn push_names(
         }
     }
     let writes = if options.dry_run { "writes" } else { "sent" };
+    let entries = if options.dry_run {
+        pushing.writes
+    } else {
+        summarize_writes(pushing.writes)
+    };
     Ok(json!({
         "tracker": tracker.doc.key,
-        writes: pushing.writes,
+        writes: entries,
         "failed": pushing.failed,
         "deferred": pushing.deferred,
         "conflicts": pushing.conflicts,
     }))
+}
+
+fn summarize_writes(writes: Vec<Value>) -> Vec<Value> {
+    let mut sent = IndexMap::<String, Value>::new();
+    for mut write in writes {
+        let key = write["issue"].as_str().expect("write issue key").to_owned();
+        let summary = sent.entry(key).or_insert_with(|| {
+            let mut summary = write.clone();
+            summary["operations"] = json!([]);
+            summary
+        });
+        write.as_object_mut().expect("write record").remove("issue");
+        summary["operations"]
+            .as_array_mut()
+            .expect("operations array")
+            .push(write);
+    }
+    sent.into_values().collect()
 }
 
 struct Push<'a> {

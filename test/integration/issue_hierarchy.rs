@@ -270,10 +270,10 @@ fn publish_local_tree(fake: &dyn IssueFake) {
     assert_eq!(tracker["failed"], json!([]), "{report}");
     assert_eq!(tracker["deferred"], json!([]), "{report}");
     let sent = tracker["sent"].as_array().unwrap();
-    assert_eq!(sent.len(), 3, "{report}");
+    assert_eq!(sent.len(), 2, "{report}");
     assert_eq!(sent[0]["issue"], format!("{}#1", fake.repo()));
     assert_eq!(sent[1]["issue"], format!("{}#2", fake.repo()));
-    assert_eq!(sent[2]["kind"], "parent");
+    assert_eq!(sent[1]["operations"][1]["kind"], "parent");
     assert_eq!(
         env.issue(&["show", key(&child)])["parent"],
         format!("{}#1", fake.repo())

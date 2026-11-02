@@ -1177,7 +1177,7 @@ push: the target stays pending (`waiting_for_pipeline`) until the head and, on G
 digits, any case; it matches the head it is a prefix of and is pinned to that full SHA. A shorter
 `@SHA` must equal the head, since it could also prefix the old head and pass the wrong commit.
 
-GitHub targets read the PR and its required checks in one GraphQL query. When that query says the required checks passed, they also read the contexts the base branch requires over REST (its rulesets, 100 per page, and the protection `GET repos/{repo}/branches/{branch}` reports, which needs no administration access); a required context that has not reported yet keeps the target `checks_pending` and is listed in `missingChecks`, with `idle` saying whether no check in the rollup is running. A required job that starts late (a gate that waits for the other jobs) is given time: once the rollup has been idle with a context still missing for 120 seconds in a row, the target is `required_checks_missing` (needs action, exit 1) with `missingChecks`, instead of waiting out `--timeout`. Any check running again restarts those 120 seconds. The two reads are independent: a context either one lists still holds the target back when the other is refused. If a read is refused (403, 404 or "resource not accessible") and no listed context is missing, the passed state stands and carries `requiredContexts: "unreadable"`; any other failure of a read, such as a 5xx, a rate limit or a timeout, is retried like the rest of the poll. GitLab targets read the
+GitHub targets read the PR and its checks in one GraphQL query. They watch only required checks when any are required; otherwise they watch all reported checks. When none are marked required, REST reads also identify missing required checks. Configured contexts must appear on checks GitHub marks required for this PR. A matching optional name cannot substitute for another app’s required check. When that query says the required checks passed, they also read the contexts the base branch requires over REST (its rulesets, 100 per page, and the protection `GET repos/{repo}/branches/{branch}` reports, which needs no administration access); a required context that has not reported yet keeps the target `checks_pending` and is listed in `missingChecks`, with `idle` saying whether no check in the rollup is running. A required job that starts late (a gate that waits for the other jobs) is given time: once the rollup has been idle with a context still missing for 120 seconds in a row, the target is `required_checks_missing` (needs action, exit 1) with `missingChecks`, instead of waiting out `--timeout`. Any check running again restarts those 120 seconds. The two reads are independent: a context either one lists still holds the target back when the other is refused. If a read is refused (403, 404 or "resource not accessible") and no listed context is missing, the passed state stands and carries `requiredContexts: "unreadable"`; any other failure of a read, such as a 5xx, a rate limit or a timeout, is retried like the rest of the poll. GitLab targets read the
 MR, its head pipeline and the pipeline's jobs, on `GITLAB_HOST` or `glab config get host`.
 Every call goes through the forge layer (`gh` or `glab`, replaced by `AGT_GH_BIN` and
 `AGT_GLAB_BIN`). A timeout, a 5xx, a rate limit or a failed spawn is retried with the normal backoff and becomes a `query_error` after 5 in a row for a target; authentication and permission errors fail at once. Stdout gets one JSON event per line: `initial` and `change` per target when its
@@ -1185,7 +1185,7 @@ state first appears or changes, then one `final` event with every result and the
 checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 `required_checks_passed`, `checks_pending`, `check_failed`, `check_cancelled`,
 `manual_action_required`, `required_checks_missing`, `head_changed`, `closed` or `query_error`. Defaults: 3600 seconds, a
-15 second interval doubling up to 120 seconds. A GitHub head whose status check rollup holds no checks at all is `checks_pending` during the first 120 seconds of the wait (right after a push the checks may not exist yet) and `no_required_checks` after; a rollup that has checks but none required is `no_required_checks` at once. Exit status: 0 all targets passed or merged, 1 a
+15 second interval doubling up to 120 seconds. A GitHub head whose status check rollup holds no checks at all is `checks_pending` during the first 120 seconds of the wait (right after a push the checks may not exist yet) and `no_required_checks` after; a rollup that has checks but none required waits for all checks and passes or fails from their results. Exit status: 0 all targets passed or merged, 1 a
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
 query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 
@@ -1783,8 +1783,12 @@ Other issues are untouched.
 
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
 one update with changed issue fields, then a parent update, then each comment. `--dry-run` prints the exact
-`gh`/`glab` argument list and body of every write (`writes`; a real run lists `sent`)
-and reads only. A tracker with `push = false` is skipped, or an error when named with
+`gh`/`glab` argument list and body of every write (`writes`) and reads only.
+Each tracker appears once, including any local issues destined for it. With local issues
+and several destinations, previews also require `--tracker`. A real run lists each issue
+once under `sent`, retaining its first operation's `kind` and create/claim `number`.
+Its `operations` array lists every successful create, claim, update, parent change or comment,
+in order; failures remain under `failed`. A tracker with `push = "off"` is skipped, or an error when named with
 `--tracker`. An issue with nothing queued costs no call.
 
 Before sending, `push` re-fetches the issue and merges three ways against the last
