@@ -24,6 +24,7 @@ mod review_auto_sync;
 mod review_issue;
 mod review_report;
 mod reviewed;
+mod run_metadata;
 mod secrets;
 mod session_index;
 mod sessions;

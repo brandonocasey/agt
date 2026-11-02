@@ -216,6 +216,43 @@ pub struct Run {
     /// Usage of the main session's roles (`manual`, `fix`, `main`), from `run end --usage`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage: Vec<RoleUsage>,
+    /// The kind of work under review. Run-level: set by the pass that starts the run. Absent
+    /// unless given, so documents stay readable and writable by builds without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<TaskType>,
+    /// Who implemented the work under review, such as `claude-sonnet-5-5`. Run-level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementer: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskType {
+    Design,
+    Bug,
+    Feature,
+    Fix,
+    Other,
+}
+
+impl TaskType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Design => "design",
+            Self::Bug => "bug",
+            Self::Feature => "feature",
+            Self::Fix => "fix",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Risk {
+    Low,
+    Medium,
+    High,
 }
 
 /// Tokens, time and tool calls an agent spent, as its harness reports them.
@@ -313,6 +350,12 @@ pub struct QaRun {
     pub publication_target: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage: Vec<RoleUsage>,
+    /// Who implemented the work under test, such as `claude-sonnet-5-5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementer: Option<String>,
+    /// 1 is the first QA after the implementer handed back; 2 and up retest after fixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u32>,
 }
 
 /// One tested scenario and its outcome at the state it ran against.
@@ -430,6 +473,9 @@ pub struct Pass {
     pub locked: bool,
     pub major_found: bool,
     pub killed: Vec<KilledFinding>,
+    /// Risk tier of the head this pass reviewed; per pass, because a new head can change it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<Risk>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]

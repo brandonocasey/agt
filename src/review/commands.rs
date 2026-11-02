@@ -34,7 +34,7 @@ use self::approve::approve;
 use self::findings::{comment, finding_kill, reply, resolve};
 pub use self::qa::run_qa;
 use self::report::Section;
-use self::run::{pass_abort, pass_dry_run, pass_end, pass_start, run_end, run_start};
+use self::run::{PassMeta, pass_abort, pass_dry_run, pass_end, pass_start, run_end, run_start};
 use self::status::{brief_status, status};
 use self::view::{list, show};
 
@@ -243,42 +243,52 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
                     base,
                     reviewers,
                     head,
+                    task_type,
+                    risk,
+                    implementer,
                     dry_run: _,
                 },
-        } => match run {
-            Some(run) => pass_start(
-                &ctx,
-                &run,
-                kind,
-                base.as_deref(),
-                reviewers.as_deref(),
-                head.as_deref(),
-            )?,
-            None if kind == PassKind::Full => {
-                let started = run_start(&ctx)?;
-                let run = started["run"].as_str().unwrap_or_default().to_owned();
-                let pass = pass_start(
+        } => {
+            let meta = PassMeta::new(task_type, risk, implementer)?;
+            match run {
+                Some(run) => pass_start(
                     &ctx,
                     &run,
                     kind,
                     base.as_deref(),
                     reviewers.as_deref(),
                     head.as_deref(),
-                );
-                // A first pass that fails leaves no empty run behind.
-                if pass.is_err() {
-                    let scope = ctx.scope()?;
-                    ctx.update(&scope, |target, _| {
-                        target
-                            .runs
-                            .retain(|known| known.id != run || !known.passes.is_empty());
-                        Ok(())
-                    })?;
+                    &meta,
+                )?,
+                None if kind == PassKind::Full => {
+                    let started = run_start(&ctx)?;
+                    let run = started["run"].as_str().unwrap_or_default().to_owned();
+                    let pass = pass_start(
+                        &ctx,
+                        &run,
+                        kind,
+                        base.as_deref(),
+                        reviewers.as_deref(),
+                        head.as_deref(),
+                        &meta,
+                    );
+                    // A first pass that fails leaves no empty run behind.
+                    if pass.is_err() {
+                        let scope = ctx.scope()?;
+                        ctx.update(&scope, |target, _| {
+                            target
+                                .runs
+                                .retain(|known| known.id != run || !known.passes.is_empty());
+                            Ok(())
+                        })?;
+                    }
+                    pass?
                 }
-                pass?
+                None => {
+                    return fail("--run is required unless --kind is full, which starts the run");
+                }
             }
-            None => return fail("--run is required unless --kind is full, which starts the run"),
-        },
+        }
         Command::Pass {
             action:
                 PassAction::End {

@@ -145,6 +145,18 @@ reviews a later head, such as a fix for a fix check; it MUST descend from the
 target's end, else the pass is refused. Pass output leaves out the per-commit
 patch-ids (`commit_count` gives their number); `show <run>.<pass>` prints them.
 
+Optional analysis fields let later work measure rework by task type, risk tier and
+implementer. `pass start --task-type <design|bug|feature|fix|other>` and
+`--implementer <model>` (free text on one line, such as `claude-sonnet-5-5`) belong to the
+run: the pass that starts the run sets them, and a later pass may repeat them but never
+change them or add one the run lacks. `--risk <low|medium|high>` belongs to each pass,
+because a new head can change the tier. `show <run>`, `show <run>.<pass>`, the pass output
+and `status --full` (its `runs`) print the fields that are set and nothing for the rest. A target
+written without them loads unchanged, and a target where no pass sets them is written
+byte for byte as before. Agt 0.33.0 and older read a target that carries the fields but
+refuse to write to it ("has field ... that this agt does not know"), so give the flags only
+once every host that touches the repository runs an agt that knows them.
+
 A first pass that fails to start leaves no run behind. A pass left open blocks `run end`
 and another `pass start --run` on that run; `pass abort --run <run> [--pass <id>]`
 deletes the open pass (an ended pass is refused, and so is one with findings or replies from its reviewers), and the
@@ -407,6 +419,12 @@ agt qa status                       # latest outcome per check, blockers, approv
 agt qa approve                      # refused while anything blocks
 agt qa publish --dry-run            # as agt review publish
 ```
+
+`qa run start --implementer <model>` names who implemented the work under test, and
+`--round <n>` says which QA this is: 1 is the first QA after the implementer handed back,
+2 and up are retests after fixes. Both are optional. `qa show <run>`, `qa list` (its
+`runs`) and the `qa` part of `status` print them when set. The same older-agt limit as
+for review runs applies: agt 0.33.0 and older cannot write to a target that has them.
 
 - A check records its name, kind (`manual`, `automated`, `exploratory`), outcome (`pass`, `fail`,
   `blocked`, `skipped`), steps, command, environment, evidence and note, against the current

@@ -9,10 +9,11 @@ use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::read_source;
 use crate::git::CommitInfo;
 use crate::store::model::{
-    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, RoleUsage, Run, Thread,
+    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, Risk, RoleUsage, Run, TaskType, Thread,
 };
 
 use super::findings::{FindingInput, add_findings, parse_findings};
+use super::input::implementer_name;
 use super::prune::prune_dir;
 use super::status::{Requested, already_reviewed};
 use super::usage::{UsageInput, run_spend};
@@ -46,6 +47,8 @@ pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
             record: None,
             publication_target: None,
             usage: Vec::new(),
+            task_type: None,
+            implementer: None,
         });
         Ok(id)
     })?;
@@ -339,6 +342,51 @@ pub(super) fn pass_dry_run(
     }))
 }
 
+/// The optional analysis fields of `pass start`: `task_type` and `implementer` belong to the
+/// run, `risk` to the pass.
+pub(super) struct PassMeta {
+    task_type: Option<TaskType>,
+    risk: Option<Risk>,
+    implementer: Option<String>,
+}
+
+impl PassMeta {
+    pub(super) fn new(
+        task_type: Option<TaskType>,
+        risk: Option<Risk>,
+        implementer: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            task_type,
+            risk,
+            implementer: implementer.map(implementer_name).transpose()?,
+        })
+    }
+
+    /// The pass that starts a run sets its run-level fields; a later pass may repeat them, never
+    /// differ, and cannot add a field the run lacks.
+    fn apply(&self, run: &mut Run, run_id: &str) -> Result<()> {
+        if run.passes.is_empty() {
+            run.task_type = self.task_type;
+            run.implementer.clone_from(&self.implementer);
+            return Ok(());
+        }
+        if self.task_type.is_some() && self.task_type != run.task_type {
+            return fail(format!(
+                "run {run_id} has task type {}; --task-type is set by the pass that starts the run and cannot change",
+                run.task_type.map_or("none", TaskType::as_str)
+            ));
+        }
+        if self.implementer.is_some() && self.implementer != run.implementer {
+            return fail(format!(
+                "run {run_id} has implementer {}; --implementer is set by the pass that starts the run and cannot change",
+                run.implementer.as_deref().unwrap_or("none")
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn pass_start(
     ctx: &Ctx,
     run_id: &str,
@@ -346,6 +394,7 @@ pub(super) fn pass_start(
     base: Option<&str>,
     reviewers: Option<&Path>,
     head: Option<&str>,
+    meta: &PassMeta,
 ) -> Result<Value> {
     let inputs = read_reviewers(reviewers)?;
     let plan = plan(ctx, Some(run_id), kind, base, head)?;
@@ -364,6 +413,7 @@ pub(super) fn pass_start(
     let pass = ctx.update(&scope, |target, now| {
         let run = find_run_mut(target, run_id)?;
         check_startable(run, run_id)?;
+        meta.apply(run, run_id)?;
         let (cycle, number) = match (kind, run.passes.last()) {
             (PassKind::Full, last) => (last.map_or(0, |pass| pass.cycle) + 1, 0),
             (_, Some(last)) => {
@@ -404,6 +454,7 @@ pub(super) fn pass_start(
             locked: false,
             major_found: false,
             killed: Vec::new(),
+            risk: meta.risk,
         };
         run.passes.push(pass.clone());
         Ok(pass)

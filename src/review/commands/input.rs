@@ -7,6 +7,16 @@ pub(super) fn limited(text: String, name: &str) -> Result<String> {
     Ok(text)
 }
 
+/// The model name of `--implementer`: free text, trimmed, without line breaks, short.
+pub(super) fn implementer_name(text: String) -> Result<String> {
+    let name = text.trim();
+    bounded(name, "--implementer", 200, true)?;
+    if name.chars().any(char::is_control) {
+        return fail("--implementer must be one line of text");
+    }
+    Ok(name.to_owned())
+}
+
 pub(super) fn read_body(body: &str) -> Result<String> {
     limited(argument_or_stdin(body, "body")?, "body")
 }

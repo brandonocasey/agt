@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 
-use crate::store::model::{CheckKind, Outcome, PassKind, Severity, Side, ThreadType, Triage};
+use crate::store::model::{
+    CheckKind, Outcome, PassKind, Risk, Severity, Side, TaskType, ThreadType, Triage,
+};
 
 #[derive(Args)]
 pub struct Cli {
@@ -195,6 +197,17 @@ pub enum PassAction {
         /// [default: the end].
         #[arg(long)]
         head: Option<String>,
+        /// Kind of work under review (run-level: the pass that starts the run sets it; a later
+        /// pass may repeat it, never change it).
+        #[arg(long, value_enum)]
+        task_type: Option<TaskType>,
+        /// Risk tier of the reviewed head; stored on this pass, since a new head can change it.
+        #[arg(long, value_enum)]
+        risk: Option<Risk>,
+        /// Model that implemented the work, such as `claude-sonnet-5-5` (run-level, like
+        /// `--task-type`).
+        #[arg(long, value_name = "MODEL")]
+        implementer: Option<String>,
         /// Print which of the requested commits earlier passes already reviewed, and start
         /// nothing.
         #[arg(long)]
@@ -511,6 +524,12 @@ pub enum QaRunAction {
         /// Who tests [default: git user.name].
         #[command(flatten)]
         tester: AuthorArgs,
+        /// Model that implemented the work under test, such as `claude-sonnet-5-5`.
+        #[arg(long, value_name = "MODEL")]
+        implementer: Option<String>,
+        /// 1 is the first QA after the implementer handed back; 2 and up retest after fixes.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        round: Option<u32>,
     },
     /// End a QA run.
     End {

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::approve::is_open;
 use super::findings::{self, NewThread, author, issue_key, local_thread};
-use super::input::{limited, read_body};
+use super::input::{implementer_name, limited, read_body};
 use super::report::{self, Section};
 use super::{
     Ctx, Selection, auto, fresh_id, open_ctx, publish, run_not_found, run_of_id, usage, view,
@@ -58,8 +58,14 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
     }
     let value = match cli.command {
         QaCommand::Run {
-            action: QaRunAction::Start { env, tester },
-        } => run_start(&ctx, env, &tester)?,
+            action:
+                QaRunAction::Start {
+                    env,
+                    tester,
+                    implementer,
+                    round,
+                },
+        } => run_start(&ctx, env, &tester, implementer, round)?,
         QaCommand::Run {
             action: QaRunAction::End { run, usage },
         } => {
@@ -271,9 +277,28 @@ pub(super) fn qa_state(target: Option<&Target>, head: &str, tree: Option<&str>) 
         "runs": target
             .qa_runs
             .iter()
-            .map(|run| json!({ "id": run.id, "ended": run.ended_at.is_some() }))
+            .map(run_summary)
             .collect::<Vec<_>>(),
     })
+}
+
+/// A QA run's id, whether it ended and, when set, its `implementer` and `round`.
+fn run_summary(run: &QaRun) -> Value {
+    let mut summary = json!({ "id": run.id, "ended": run.ended_at.is_some() });
+    add_qa_meta(&mut summary, run);
+    summary
+}
+
+/// Adds the run's `implementer` and `round` to `view`; an unset field adds nothing.
+fn add_qa_meta(view: &mut Value, run: &QaRun) {
+    if let Some(fields) = view.as_object_mut() {
+        if let Some(implementer) = &run.implementer {
+            fields.insert("implementer".to_owned(), json!(implementer));
+        }
+        if let Some(round) = run.round {
+            fields.insert("round".to_owned(), json!(round));
+        }
+    }
 }
 
 /// `key=value` facts, each with a key.
@@ -313,9 +338,16 @@ pub(super) fn qa_author(
     Ok(found)
 }
 
-fn run_start(ctx: &Ctx, env: Vec<String>, tester: &AuthorArgs) -> Result<Value> {
+fn run_start(
+    ctx: &Ctx,
+    env: Vec<String>,
+    tester: &AuthorArgs,
+    implementer: Option<String>,
+    round: Option<u32>,
+) -> Result<Value> {
     let scope = ctx.scope()?;
     let env = facts(env)?;
+    let implementer = implementer.map(implementer_name).transpose()?;
     let default = ctx.default_author()?;
     // QA run ids are unique in the repository, so `--run` alone finds the target.
     let taken: HashSet<String> = ctx
@@ -341,11 +373,15 @@ fn run_start(ctx: &Ctx, env: Vec<String>, tester: &AuthorArgs) -> Result<Value> 
             approval: None,
             publication_target: None,
             usage: Vec::new(),
+            implementer,
+            round,
         };
         target.qa_runs.push(run.clone());
         Ok(run)
     })?;
-    Ok(json!({ "target": scope.key, "run": run.id, "tester": run.tester }))
+    let mut started = json!({ "target": scope.key, "run": run.id, "tester": run.tester });
+    add_qa_meta(&mut started, &run);
+    Ok(started)
 }
 
 fn find_qa_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut QaRun> {
@@ -508,11 +544,12 @@ fn list(ctx: &Ctx) -> Result<Value> {
     let scope = ctx.scope()?;
     let tree = evaluated(ctx, None)?.map(|(_, tree)| tree);
     let Some(target) = scope.existing.as_ref() else {
-        return Ok(json!({ "target": null, "checks": [], "threads": [] }));
+        return Ok(json!({ "target": null, "runs": [], "checks": [], "threads": [] }));
     };
     let runs: Vec<&QaRun> = target.qa_runs.iter().collect();
     Ok(json!({
         "target": scope.key,
+        "runs": runs.iter().map(|run| run_summary(run)).collect::<Vec<_>>(),
         "checks": latest(&runs, tree.as_deref()).iter().map(check_view).collect::<Vec<_>>(),
         "threads": qa_threads(target).map(thread_view).collect::<Vec<_>>(),
     }))

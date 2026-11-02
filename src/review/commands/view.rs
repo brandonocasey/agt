@@ -378,14 +378,23 @@ pub(super) fn run_views(target: Option<&Target>) -> Vec<Value> {
         .iter()
         .flat_map(|target| &target.runs)
         .map(|run| {
-            json!({
+            let mut view = json!({
                 "id": run.id,
                 "started_at": run.started_at,
                 "ended_at": run.ended_at,
                 "passes": run.passes.iter().map(|pass| &pass.id).collect::<Vec<_>>(),
                 "repaired_head": run.repaired_head,
                 "record": run.record,
-            })
+            });
+            if let Some(fields) = view.as_object_mut() {
+                if let Some(task_type) = run.task_type {
+                    fields.insert("task_type".to_owned(), json!(task_type));
+                }
+                if let Some(implementer) = &run.implementer {
+                    fields.insert("implementer".to_owned(), json!(implementer));
+                }
+            }
+            view
         })
         .collect()
 }
