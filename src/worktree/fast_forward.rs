@@ -4,12 +4,11 @@
 //! update that git refuses for a branch being rebased or bisected. Whatever stops it is a warning,
 //! not an error, because the new worktree already exists.
 
-use serde_json::{Value, json};
-
 use crate::core::error::Result;
 use crate::core::shell::quote;
 use crate::git::base::Candidate;
 use crate::git::{GITLINK, Repo, local_branch_name};
+use serde_json::{Value, json};
 
 /// The report on the local default branch and, when it may still be behind, the warning; `None`
 /// when there is no local default branch or no remote to bring it up to.
@@ -80,9 +79,14 @@ fn update(
             "it has diverged from {remote}/{tracked} ({ahead} ahead, {behind} behind)"
         )));
     }
-    let holder = repo
-        .worktrees()?
-        .into_iter()
+    let worktrees = repo.worktrees()?;
+    if worktrees.first().is_some_and(|main| main.bare) {
+        return Ok(Some(
+            "git reports the main repository as bare; automatic default-branch updates are disabled because an existing checkout cannot be ruled out; check core.bare if this repository has a working checkout".to_owned(),
+        ));
+    }
+    let holder = worktrees
+        .iter()
         .find(|entry| entry.branch.as_deref() == Some(name));
     let Some(holder) = holder else {
         let spec = format!("{to}:refs/heads/{name}");
