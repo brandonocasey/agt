@@ -21,8 +21,6 @@ pub struct Pull {
     pub all_checks: Vec<Value>,
     /// How many checks and statuses the rollup holds, required or not.
     pub rollup: usize,
-    /// The name of every check and status in the rollup, required or not.
-    pub names: Vec<String>,
     /// Whether any check or status in the rollup, required or not, has not completed.
     pub running: bool,
     /// The branch the PR merges into.
@@ -102,7 +100,6 @@ impl Github {
         let mut checks = Vec::new();
         let mut all_checks = Vec::new();
         let mut rollup = 0;
-        let mut names = Vec::new();
         let mut running = false;
         loop {
             let mut vars = vec![
@@ -134,12 +131,6 @@ impl Github {
             );
             all_checks.extend(nodes.iter().filter_map(check));
             running |= nodes.iter().any(unfinished);
-            names.extend(
-                nodes
-                    .iter()
-                    .filter_map(|node| node["name"].as_str().or_else(|| node["context"].as_str()))
-                    .map(str::to_owned),
-            );
             let next = contexts
                 .filter(|contexts| contexts["pageInfo"]["hasNextPage"] == true)
                 .and_then(|contexts| contexts["pageInfo"]["endCursor"].as_str());
@@ -159,7 +150,6 @@ impl Github {
                 checks,
                 all_checks,
                 rollup,
-                names,
                 running,
                 base: pull["baseRefName"].as_str().unwrap_or("").to_owned(),
             });

@@ -628,10 +628,62 @@ fn fallback_uses_rest_required_contexts_instead_of_optional_failures() {
         ),
         step("rules/branches/main", &rules(&[])),
         step(BRANCH, &branch(&["gate"])),
+        step(
+            "PullChecks",
+            &based(&[
+                run_node("gate", "COMPLETED", Some("SUCCESS")),
+                optional("optional", "FAILURE"),
+            ]),
+        ),
+        step("rules/branches/main", &rules(&[])),
+        step(BRANCH, &branch(&["gate"])),
     ]);
     assert_eq!(outcome.status, 0, "{}", outcome.stderr);
-    assert_eq!(outcome.events[0]["checks"].as_array().unwrap().len(), 1);
-    assert_eq!(outcome.events[0]["checks"][0]["name"], "gate");
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["gate"]));
+    assert_eq!(outcome.events[1]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(outcome.events[1]["checks"][0]["name"], "gate");
+}
+
+#[test]
+fn a_same_name_check_from_the_wrong_app_cannot_satisfy_a_requirement() {
+    for classic in [false, true] {
+        for sibling in [false, true] {
+            let mut wrong = run_node("build", "COMPLETED", Some("SUCCESS"));
+            wrong["isRequired"] = json!(false);
+            let mut initial = vec![wrong];
+            if sibling {
+                initial.push(run_node("lint", "COMPLETED", Some("SUCCESS")));
+            }
+            let mut ready = initial.clone();
+            ready.push(run_node("build", "COMPLETED", Some("SUCCESS")));
+            let rule = if classic {
+                rules(&[])
+            } else {
+                json!([{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build","integration_id":123}]}}]).to_string()
+            };
+            let protection = if classic {
+                json!({"protection":{"required_status_checks":{"contexts":["build"],"checks":[{"context":"build","app_id":123}]}}}).to_string()
+            } else {
+                branch(&[])
+            };
+            let outcome = run(&[
+                step("PullChecks", &based(&initial)),
+                step("rules/branches/main", &rule),
+                step(BRANCH, &protection),
+                step("PullChecks", &based(&ready)),
+                step("rules/branches/main", &rule),
+                step(BRANCH, &protection),
+            ]);
+            assert_eq!(
+                outcome.events[0]["reason"], "checks_pending",
+                "classic={classic}, sibling={sibling}: {:?}",
+                outcome.events
+            );
+            assert_eq!(outcome.events[0]["missingChecks"], json!(["build"]));
+            assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+        }
+    }
 }
 
 #[test]

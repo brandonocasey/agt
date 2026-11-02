@@ -140,7 +140,7 @@ fn github(
     Ok((state, head, idle_since))
 }
 
-/// Required contexts select the checks to watch when the rollup marks none required.
+/// Configured contexts MUST be reported by checks GitHub marks required for this PR.
 /// A passed state is held back while a context the base branch requires has not reported: the
 /// rollup lists only checks that exist, so a required job that starts late is absent from it.
 /// Each source of required contexts (rulesets, classic branch protection) is read on its own, so
@@ -188,22 +188,17 @@ fn require_reported(
     contexts.dedup();
     let mut state = state;
     if fallback && !contexts.is_empty() {
-        let required: HashSet<&str> = contexts.iter().map(String::as_str).collect();
-        let checks: Vec<Value> = pull
-            .all_checks
-            .iter()
-            .filter(|check| {
-                check["name"]
-                    .as_str()
-                    .is_some_and(|name| required.contains(name))
-            })
-            .cloned()
-            .collect();
-        state = classify(head, &pull.view, pull.rollup, &checks);
+        // An optional namesake may come from another app; GitHub alone marks required checks.
+        state = classify(head, &pull.view, pull.rollup, &pull.checks);
     }
+    let reported: HashSet<&str> = pull
+        .checks
+        .iter()
+        .filter_map(|check| check["name"].as_str())
+        .collect();
     let missing: Vec<String> = contexts
         .into_iter()
-        .filter(|context| !pull.names.contains(context))
+        .filter(|context| !reported.contains(context.as_str()))
         .collect();
     if missing.is_empty() {
         if unreadable_source {
