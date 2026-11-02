@@ -251,7 +251,157 @@ fn a_later_pass_cannot_add_a_run_field_the_run_lacks() {
         &[],
     );
     assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains("task type none"));
+    assert!(stderr(&output).contains("has no task type"));
+}
+
+/// Every file under the state directory, by name, so a test can see that nothing was written.
+fn stored_files(env: &Env) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<(String, Vec<u8>)> = fs::read_dir(env.state())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                fs::read(&path).unwrap(),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn pass_start_dry_run_refuses_what_a_real_start_refuses() {
+    let env = changed_branch();
+    let started = json(&pass_start(
+        &env,
+        &["--task-type", "feature", "--implementer", "model-a"],
+    ));
+    let run = started["run"].as_str().unwrap().to_owned();
+    end_pass(&env, &run, "c1p0");
+    let before = stored_files(&env);
+
+    for extra in [
+        vec!["--task-type", "bug"],
+        vec!["--implementer", "model-b"],
+        vec!["--implementer", ""],
+        vec!["--implementer", "two\nlines"],
+    ] {
+        let mut args = vec!["pass", "start", "--run", &run, "--kind", "fix-check"];
+        args.extend(&extra);
+        let real = env.exec(&args, None, &[]);
+        assert_eq!(real.status.code(), Some(1), "{extra:?} real");
+        args.push("--dry-run");
+        let dry = env.exec(&args, None, &[]);
+        assert_eq!(
+            dry.status.code(),
+            Some(1),
+            "{extra:?} dry: {}",
+            stderr(&dry)
+        );
+        assert_eq!(stderr(&dry), stderr(&real), "{extra:?}");
+        assert!(dry.stdout.is_empty(), "{extra:?}");
+    }
+    // An invalid implementer is refused for a run-starting dry run too.
+    let dry = env.exec(
+        &[
+            "pass",
+            "start",
+            "--kind",
+            "full",
+            "--implementer",
+            " ",
+            "--dry-run",
+        ],
+        None,
+        &[],
+    );
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr(&dry));
+    assert!(stderr(&dry).contains("--implementer"));
+    assert_eq!(stored_files(&env), before, "a refused dry run wrote");
+}
+
+#[test]
+fn pass_start_dry_run_accepts_valid_fields_and_writes_nothing() {
+    let env = changed_branch();
+    let started = json(&pass_start(
+        &env,
+        &["--task-type", "feature", "--implementer", "model-a"],
+    ));
+    let run = started["run"].as_str().unwrap().to_owned();
+    end_pass(&env, &run, "c1p0");
+    let before = stored_files(&env);
+
+    // Matching values, no fields, and a first pass with fields all pass.
+    let matching = [
+        "pass",
+        "start",
+        "--run",
+        run.as_str(),
+        "--kind",
+        "fix-check",
+        "--task-type",
+        "feature",
+        "--implementer",
+        " model-a ",
+        "--risk",
+        "high",
+        "--dry-run",
+    ];
+    let absent = [
+        "pass",
+        "start",
+        "--run",
+        run.as_str(),
+        "--kind",
+        "fix-check",
+        "--dry-run",
+    ];
+    let first = [
+        "pass",
+        "start",
+        "--kind",
+        "full",
+        "--task-type",
+        "bug",
+        "--implementer",
+        "model-b",
+        "--dry-run",
+    ];
+    for args in [&matching[..], &absent[..], &first[..]] {
+        let output = env.exec(args, None, &[]);
+        assert_eq!(json(&output)["dry_run"], true, "{args:?}");
+    }
+    assert_eq!(stored_files(&env), before, "a dry run wrote");
+}
+
+#[test]
+fn a_run_field_the_run_lacks_is_described_as_missing() {
+    let env = changed_branch();
+    let started = json(&pass_start(&env, &[]));
+    let run = started["run"].as_str().unwrap().to_owned();
+    end_pass(&env, &run, "c1p0");
+    let start = |extra: &[&str]| {
+        let mut args = vec!["pass", "start", "--run", &run, "--kind", "fix-check"];
+        args.extend(extra);
+        env.exec(&args, None, &[])
+    };
+    for (flag, value, name) in [
+        ("--task-type", "bug", "task type"),
+        ("--implementer", "model-a", "implementer"),
+    ] {
+        let message = stderr(&start(&[flag, value]));
+        assert!(
+            message.contains(&format!("run {run} has no {name}")),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("only the pass that starts the run can set {flag}")),
+            "{message}"
+        );
+        assert!(!message.contains("none"), "{message}");
+    }
 }
 
 #[test]

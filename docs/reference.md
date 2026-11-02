@@ -149,7 +149,7 @@ Optional analysis fields let later work measure rework by task type, risk tier a
 implementer. `pass start --task-type <design|bug|feature|fix|other>` and
 `--implementer <model>` (free text on one line, such as `claude-sonnet-5-5`) belong to the
 run: the pass that starts the run sets them, and a later pass may repeat them but never
-change them or add one the run lacks. `--risk <low|medium|high>` belongs to each pass,
+change them or add one the run lacks (`--dry-run` refuses the same values with the same message). `--risk <low|medium|high>` belongs to each pass,
 because a new head can change the tier. `show <run>`, `show <run>.<pass>`, the pass output
 and `status --full` (its `runs`) print the fields that are set and nothing for the rest. A target
 written without them loads unchanged, and a target where no pass sets them is written

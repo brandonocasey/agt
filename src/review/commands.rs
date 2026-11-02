@@ -231,10 +231,23 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
                     kind,
                     base,
                     head,
+                    task_type,
+                    risk,
+                    implementer,
                     dry_run,
                     ..
                 },
-        } if dry_run => pass_dry_run(&ctx, run.as_deref(), kind, base.as_deref(), head.as_deref())?,
+        } if dry_run => {
+            let meta = PassMeta::new(task_type, risk, implementer)?;
+            pass_dry_run(
+                &ctx,
+                run.as_deref(),
+                kind,
+                base.as_deref(),
+                head.as_deref(),
+                &meta,
+            )?
+        }
         Command::Pass {
             action:
                 PassAction::Start {

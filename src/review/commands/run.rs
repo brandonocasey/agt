@@ -310,6 +310,7 @@ pub(super) fn pass_dry_run(
     kind: PassKind,
     base: Option<&str>,
     head: Option<&str>,
+    meta: &PassMeta,
 ) -> Result<Value> {
     if run_id.is_none() && kind != PassKind::Full {
         return fail("--run is required unless --kind is full, which starts the run");
@@ -328,6 +329,7 @@ pub(super) fn pass_dry_run(
                 ))
             })?;
         check_startable(run, run_id)?;
+        meta.check(run, run_id)?;
     }
     let already_reviewed = overlap(ctx, &plan, run_id, kind)?;
     Ok(json!({
@@ -363,25 +365,43 @@ impl PassMeta {
         })
     }
 
-    /// The pass that starts a run sets its run-level fields; a later pass may repeat them, never
-    /// differ, and cannot add a field the run lacks.
-    fn apply(&self, run: &mut Run, run_id: &str) -> Result<()> {
+    /// A pass after the run's first may repeat the run-level fields, never differ, and cannot add
+    /// one the run lacks. The run's first pass takes whatever it is given.
+    fn check(&self, run: &Run, run_id: &str) -> Result<()> {
         if run.passes.is_empty() {
-            run.task_type = self.task_type;
-            run.implementer.clone_from(&self.implementer);
             return Ok(());
         }
         if self.task_type.is_some() && self.task_type != run.task_type {
-            return fail(format!(
-                "run {run_id} has task type {}; --task-type is set by the pass that starts the run and cannot change",
-                run.task_type.map_or("none", TaskType::as_str)
-            ));
+            return fail(match run.task_type {
+                Some(stored) => format!(
+                    "run {run_id} has task type {}; --task-type is set by the pass that starts the run and cannot change",
+                    stored.as_str()
+                ),
+                None => format!(
+                    "run {run_id} has no task type; only the pass that starts the run can set --task-type"
+                ),
+            });
         }
         if self.implementer.is_some() && self.implementer != run.implementer {
-            return fail(format!(
-                "run {run_id} has implementer {}; --implementer is set by the pass that starts the run and cannot change",
-                run.implementer.as_deref().unwrap_or("none")
-            ));
+            return fail(match &run.implementer {
+                Some(stored) => format!(
+                    "run {run_id} has implementer {stored}; --implementer is set by the pass that starts the run and cannot change"
+                ),
+                None => format!(
+                    "run {run_id} has no implementer; only the pass that starts the run can set --implementer"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// The pass that starts a run sets its run-level fields; `check` refuses a later pass that
+    /// contradicts them.
+    fn apply(&self, run: &mut Run, run_id: &str) -> Result<()> {
+        self.check(run, run_id)?;
+        if run.passes.is_empty() {
+            run.task_type = self.task_type;
+            run.implementer.clone_from(&self.implementer);
         }
         Ok(())
     }
