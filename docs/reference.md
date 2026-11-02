@@ -1783,8 +1783,12 @@ Other issues are untouched.
 
 `push [--dry-run] [--force]` sends the queue, per issue in this order: create, then
 one update with changed issue fields, then a parent update, then each comment. `--dry-run` prints the exact
-`gh`/`glab` argument list and body of every write (`writes`; a real run lists `sent`)
-and reads only. A tracker with `push = false` is skipped, or an error when named with
+`gh`/`glab` argument list and body of every write (`writes`) and reads only.
+Each tracker appears once, including any local issues destined for it. With local issues
+and several destinations, previews also require `--tracker`. A real run lists each issue
+once under `sent`, retaining its first operation's `kind` and create/claim `number`.
+Its `operations` array lists every successful create, claim, update, parent change or comment,
+in order; failures remain under `failed`. A tracker with `push = "off"` is skipped, or an error when named with
 `--tracker`. An issue with nothing queued costs no call.
 
 Before sending, `push` re-fetches the issue and merges three ways against the last
