@@ -570,11 +570,90 @@ fn reports_merged_and_closed_pull_requests() {
 }
 
 #[test]
-fn reports_no_checks_unknown_checks_failures_and_cancellation() {
-    let mut optional = run_node("optional", "COMPLETED", Some("SUCCESS"));
+fn optional_checks_wait_until_terminal_without_required_contexts() {
+    for (conclusion, status) in [("SUCCESS", 0), ("FAILURE", 1)] {
+        let optional = |state, conclusion| {
+            let mut node = run_node("optional", state, conclusion);
+            node["isRequired"] = json!(false);
+            node
+        };
+        let outcome = run(&[
+            step("PullChecks", &based(&[optional("IN_PROGRESS", None)])),
+            step("rules/branches/main", &rules(&[])),
+            step(BRANCH, &branch(&[])),
+            step(
+                "PullChecks",
+                &based(&[optional("COMPLETED", Some(conclusion))]),
+            ),
+            step("rules/branches/main", &rules(&[])),
+            step(BRANCH, &branch(&[])),
+        ]);
+        assert_eq!(outcome.events[0]["reason"], "checks_pending");
+        assert_eq!(outcome.status, status, "{}", outcome.stderr);
+        assert_eq!(outcome.events[1]["checks"][0]["name"], "optional");
+    }
+}
+
+#[test]
+fn missing_required_contexts_override_optional_failures() {
+    let mut optional = run_node("optional", "COMPLETED", Some("FAILURE"));
     optional["isRequired"] = json!(false);
+    let outcome = run(&[
+        step("PullChecks", &based(&[optional])),
+        step("rules/branches/main", &rules(&["gate"])),
+        step(BRANCH, &branch(&[])),
+        step(
+            "PullChecks",
+            &based(&[run_node("gate", "COMPLETED", Some("SUCCESS"))]),
+        ),
+        step("rules/branches/main", &rules(&["gate"])),
+        step(BRANCH, &branch(&[])),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["gate"]));
+}
+
+#[test]
+fn fallback_uses_rest_required_contexts_instead_of_optional_failures() {
+    let optional = |name, conclusion| {
+        let mut node = run_node(name, "COMPLETED", Some(conclusion));
+        node["isRequired"] = json!(false);
+        node
+    };
+    let outcome = run(&[
+        step(
+            "PullChecks",
+            &based(&[optional("gate", "SUCCESS"), optional("optional", "FAILURE")]),
+        ),
+        step("rules/branches/main", &rules(&[])),
+        step(BRANCH, &branch(&["gate"])),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(outcome.events[0]["checks"][0]["name"], "gate");
+}
+
+#[test]
+fn fallback_preserves_unreadable_contexts_and_retries_transient_reads() {
+    let mut node = run_node("optional", "COMPLETED", Some("SUCCESS"));
+    node["isRequired"] = json!(false);
+    let outcome = run(&[
+        step("PullChecks", &based(std::slice::from_ref(&node))),
+        failing("rules/branches/main", "HTTP 503", 1),
+        step(BRANCH, &branch(&[])),
+        step("PullChecks", &based(&[node])),
+        failing("rules/branches/main", "HTTP 403", 1),
+        step(BRANCH, &branch(&[])),
+    ]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["requiredContexts"], "unreadable");
+}
+
+#[test]
+fn reports_unknown_checks_failures_and_cancellation() {
     let cases = [
-        (vec![optional], "no_required_checks"),
         (
             vec![run_node("test", "COMPLETED", Some("MYSTERY"))],
             "unknown_check_state",

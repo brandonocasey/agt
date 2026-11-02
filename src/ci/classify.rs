@@ -118,7 +118,7 @@ fn head_mismatch(head: &Head, observed: &Value, url: &Value) -> State {
 }
 
 /// The state of a PR from its `view`, the `rollup` size (every check, required or not) and its
-/// required `checks`.
+/// selected `checks`.
 pub fn classify(head: &Head, view: &Value, rollup: usize, checks: &[Value]) -> State {
     let url = &view["url"];
     let state_text = &view["state"];
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rollup_with_checks_but_none_required_is_no_required_checks_at_once() {
+    fn a_nonempty_rollup_without_selected_checks_is_blocked() {
         assert_eq!(
             reason_at(0, 2),
             ("blocked".into(), "no_required_checks".into())
