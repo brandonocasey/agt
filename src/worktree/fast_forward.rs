@@ -5,7 +5,9 @@
 //! not an error, because the new worktree already exists.
 
 use serde_json::{Value, json};
+use std::path::Path;
 
+use super::info::real;
 use crate::core::error::Result;
 use crate::core::shell::quote;
 use crate::git::base::Candidate;
@@ -80,11 +82,22 @@ fn update(
             "it has diverged from {remote}/{tracked} ({ahead} ahead, {behind} behind)"
         )));
     }
-    let holder = repo
-        .worktrees()?
-        .into_iter()
+    let worktrees = repo.worktrees()?;
+    let holder = worktrees
+        .iter()
         .find(|entry| entry.branch.as_deref() == Some(name));
     let Some(holder) = holder else {
+        if let Some(main) = worktrees.first()
+            && main.bare
+        {
+            let common = repo.common_dir()?;
+            if real(&main.path)? != real(Path::new(&common))? {
+                return Ok(Some(format!(
+                    "git reports {} as bare, but its Git directory is {common}; check core.bare before retrying",
+                    main.path.display()
+                )));
+            }
+        }
         let spec = format!("{to}:refs/heads/{name}");
         let fetch = [
             "fetch",

@@ -208,6 +208,80 @@ fn a_local_default_checked_out_nowhere_moves_as_a_ref() {
 }
 
 #[test]
+fn a_checkout_reported_as_bare_keeps_its_default_branch_and_index() {
+    for inherited in [false, true] {
+        let (env, _, first, tip) = behind_origin();
+        let index = git(&env, &env.repo, &["write-tree"]);
+        let target = env.path("work");
+        let mut command = env.bin(&env.repo);
+        command.args(["worktree", "create", "work", "--path"]);
+        command.arg(&target);
+        if inherited {
+            command
+                .env("GIT_CONFIG_COUNT", "2")
+                .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+                .env("GIT_CONFIG_VALUE_0", "always")
+                .env("GIT_CONFIG_KEY_1", "core.bare")
+                .env("GIT_CONFIG_VALUE_1", "true");
+        } else {
+            git(&env, &env.repo, &["config", "core.bare", "true"]);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["commit"], tip.as_str());
+        assert_eq!(value["local_default"]["status"], "skipped", "{value}");
+        assert_eq!(value["local_default"]["behind"], 1);
+        assert!(
+            value["local_default"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("bare")
+        );
+        assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+        assert_eq!(git(&env, &env.repo, &["write-tree"]), index);
+        assert!(!env.repo.join("second").exists());
+        assert_eq!(fs::read_to_string(env.repo.join("first")).unwrap(), "1");
+        assert!(target.join("second").exists());
+    }
+}
+
+#[test]
+fn a_genuine_bare_default_still_fast_forwards() {
+    let (env, remote, _, tip) = behind_origin();
+    let bare = env.path("bare repo;1.git");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            env.repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    git(
+        &env,
+        &bare,
+        &["remote", "set-url", "origin", remote.to_str().unwrap()],
+    );
+    let alias = env.path("bare alias");
+    std::os::unix::fs::symlink(&bare, &alias).unwrap();
+    let target = env.path("work");
+    let value = agt_json(
+        &env,
+        &alias,
+        &["create", "work", "--path", target.to_str().unwrap()],
+    );
+    assert_eq!(value["local_default"]["status"], "updated", "{value}");
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert_eq!(git(&env, &bare, &["rev-parse", "main"]), tip);
+    assert!(target.join("second").exists());
+}
+
+#[test]
 fn local_changes_the_merge_would_overwrite_keep_the_local_default_and_warn() {
     let (env, bare, first, _) = behind_origin();
     let tip = advance(&env, &bare, "first");

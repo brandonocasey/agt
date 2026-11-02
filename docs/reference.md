@@ -1478,6 +1478,11 @@ run once that is resolved. Every `skipped` adds `local <name> not updated: <reas
 `warnings`, which is otherwise empty; it never fails `create`. Without remotes or a local default
 branch there is no `local_default`.
 
+Before updating a branch Git lists as checked out nowhere, `create` checks a bare main entry.
+If its path differs from the common Git directory, the local default update is skipped.
+Check `core.bare` before retrying. This avoids moving the branch while leaving an existing
+checkout's files and index at the old commit.
+
 `agt worktree prepare [PATH] [--clone-deps]` installs dependencies in a worktree (default: the
 current one). It runs `mise install` first when `mise.toml`, `.mise.toml` or `.tool-versions`
 exists and `mise` is on PATH, then one install per lockfile in the root: `package-lock.json`
