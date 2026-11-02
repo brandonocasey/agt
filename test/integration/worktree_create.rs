@@ -248,8 +248,68 @@ fn a_checkout_reported_as_bare_keeps_its_default_branch_and_index() {
 }
 
 #[test]
-fn a_genuine_bare_default_still_fast_forwards() {
-    let (env, remote, _, tip) = behind_origin();
+fn separate_metadata_cannot_hide_a_checkout_from_the_default_update() {
+    for (symlink, keep_index) in [(false, true), (false, false), (true, true), (true, false)] {
+        let (env, _, first, tip) = behind_origin();
+        let metadata = env.path("metadata-custom");
+        fs::rename(env.repo.join(".git"), &metadata).unwrap();
+        if symlink {
+            std::os::unix::fs::symlink(&metadata, env.repo.join(".git")).unwrap();
+        } else {
+            fs::write(
+                env.repo.join(".git"),
+                format!("gitdir: {}\n", metadata.display()),
+            )
+            .unwrap();
+        }
+        if !keep_index {
+            fs::remove_file(metadata.join("index")).unwrap();
+        }
+        let index = fs::read(metadata.join("index")).ok();
+        git(&env, &env.repo, &["config", "core.bare", "true"]);
+        let target = env.path("work");
+        let value = agt_json(
+            &env,
+            &env.repo,
+            &["create", "work", "--path", target.to_str().unwrap()],
+        );
+        assert_eq!(value["local_default"]["status"], "skipped", "{value}");
+        assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+        assert_eq!(fs::read(metadata.join("index")).ok(), index);
+        assert_eq!(fs::read_to_string(env.repo.join("first")).unwrap(), "1");
+        assert!(!env.repo.join("second").exists());
+        assert_eq!(value["commit"], tip.as_str());
+        assert!(target.join("second").exists());
+    }
+}
+
+#[test]
+fn a_bare_main_report_is_unsafe_even_with_a_linked_holder() {
+    let (env, _, first, tip) = behind_origin();
+    git(&env, &env.repo, &["config", "core.bare", "true"]);
+    let holder = env.path("holder");
+    git(
+        &env,
+        &env.repo,
+        &["worktree", "add", "-q", holder.to_str().unwrap(), "main"],
+    );
+    let target = env.path("work");
+    let value = agt_json(
+        &env,
+        &holder,
+        &["create", "work", "--path", target.to_str().unwrap()],
+    );
+    assert_eq!(value["local_default"]["status"], "skipped", "{value}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+    assert!(!env.repo.join("second").exists());
+    assert!(!holder.join("second").exists());
+    assert_eq!(value["commit"], tip.as_str());
+    assert!(target.join("second").exists());
+}
+
+#[test]
+fn a_genuine_bare_default_stays_while_the_new_worktree_uses_the_tip() {
+    let (env, remote, first, tip) = behind_origin();
     let bare = env.path("bare repo;1.git");
     git(
         &env,
@@ -275,9 +335,10 @@ fn a_genuine_bare_default_still_fast_forwards() {
         &alias,
         &["create", "work", "--path", target.to_str().unwrap()],
     );
-    assert_eq!(value["local_default"]["status"], "updated", "{value}");
-    assert_eq!(value["warnings"], serde_json::json!([]));
-    assert_eq!(git(&env, &bare, &["rev-parse", "main"]), tip);
+    assert_eq!(value["local_default"]["status"], "skipped", "{value}");
+    assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(git(&env, &bare, &["rev-parse", "main"]), first);
+    assert_eq!(value["commit"], tip.as_str());
     assert!(target.join("second").exists());
 }
 

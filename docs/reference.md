@@ -1478,10 +1478,10 @@ run once that is resolved. Every `skipped` adds `local <name> not updated: <reas
 `warnings`, which is otherwise empty; it never fails `create`. Without remotes or a local default
 branch there is no `local_default`.
 
-Before updating a branch Git lists as checked out nowhere, `create` checks a bare main entry.
-If its path differs from the common Git directory, the local default update is skipped.
-Check `core.bare` before retrying. This avoids moving the branch while leaving an existing
-checkout's files and index at the old commit.
+When Git reports the main repository as bare, the local default update is skipped.
+A bare listing can hide an existing checkout, so neither its path nor its missing index
+proves a branch-only update is safe. The new worktree still uses the selected tip, including
+for genuine bare repositories. If this repository has a main checkout, check `core.bare`.
 
 `agt worktree prepare [PATH] [--clone-deps]` installs dependencies in a worktree (default: the
 current one). It runs `mise install` first when `mise.toml`, `.mise.toml` or `.tool-versions`
