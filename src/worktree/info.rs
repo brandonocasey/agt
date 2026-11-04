@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::disposable::is_disposable;
+use super::disposable::{is_disposable, is_os_junk};
 use super::nested;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
@@ -205,15 +205,16 @@ pub fn dirty(root: &Path) -> Result<(usize, usize)> {
     Ok((listed.len() - untracked + hidden, untracked))
 }
 
-/// Untracked, non-ignored files that are not disposable: work a plain `worktree remove` refuses
-/// to drop, because no backup keeps it.
-pub fn untracked(root: &Path) -> Result<usize> {
+/// Untracked, non-ignored paths, except files the operating system recreates: work that no
+/// backup keeps, so a plain `worktree remove` refuses it.
+pub fn untracked(root: &Path) -> Result<Vec<String>> {
     Ok(status(root)?
-        .iter()
+        .into_iter()
         .filter(|(untracked, path)| {
-            *untracked && (!is_disposable(path) || root.join(path).join(".git").exists())
+            *untracked && !is_os_junk(path.rsplit('/').next().unwrap_or_default())
         })
-        .count())
+        .map(|(_, path)| path)
+        .collect())
 }
 
 /// Modified tracked files and untracked files that are not disposable: what removing the

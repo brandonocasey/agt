@@ -395,6 +395,29 @@ fn work_a_remove_hook_leaves_behind_blocks_the_removal() {
 }
 
 #[test]
+fn an_untracked_file_a_remove_hook_writes_blocks_the_removal() {
+    let env = repo();
+    repo_config(
+        &env,
+        "[worktree.hooks]\nremove = [\"echo state > dump.txt\"]\n",
+    );
+    json(&agt(&env, &env.repo, &["create", "dump"]));
+    let tree = env.repo.join(".worktrees/dump");
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("dump.txt") && error.contains("nothing was backed up"),
+        "{error}"
+    );
+    assert!(tree.join("dump.txt").exists());
+}
+
+#[test]
 fn a_status_stuck_at_starting_does_not_block_a_new_setup() {
     let env = repo();
     let first = json(&agt(&env, &env.repo, &["create", "stuck"]));

@@ -69,9 +69,7 @@ pub fn take(main: &Path, entry: &Worktree, untracked: bool) -> Result<Taken> {
         .unwrap_or_default();
     create_dirs(&dir, 0o700)?;
     let reference = format!("{REF_PREFIX}{id}");
-    let made = build(
-        main, entry, &dir, id, &reference, created, untracked,
-    );
+    let made = build(main, entry, &dir, id, &reference, created, untracked);
     if made.is_err() {
         // A failed backup leaves neither the ref nor the directory behind.
         let _ = shared.git(&["update-ref", "-d", &reference]);

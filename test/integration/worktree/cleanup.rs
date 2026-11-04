@@ -525,6 +525,7 @@ fn a_dirty_worktree_stays_unless_dirty_is_passed() {
     let wt = site.branch("wip");
     site.env.git(&["merge", "-q", "wip"]);
     fs::write(wt.join("wip"), "changed").unwrap();
+    fs::write(wt.join("fresh.txt"), "new\n").unwrap();
 
     let report = site.run(&["--yes"]);
     let row = site.kept(&report, "wip");
@@ -544,6 +545,12 @@ fn a_dirty_worktree_stays_unless_dirty_is_passed() {
         site.env
             .git(&["show", &format!("refs/agt/backups/{id}:wip")]),
         "changed"
+    );
+    // Cleanup, unlike `worktree remove`, keeps untracked files in the snapshot.
+    assert_eq!(
+        site.env
+            .git(&["show", &format!("refs/agt/backups/{id}:fresh.txt")]),
+        "new"
     );
     assert_eq!(site.branches(), ["main"]);
 }

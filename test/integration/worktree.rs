@@ -33,7 +33,7 @@ impl Fixture {
         Self { env, wt }
     }
 
-    /// Dirties the worktree: tracked, staged, deleted and untracked files plus ignored ones.
+    /// Dirties the worktree: tracked, staged, added and deleted files plus ignored ones.
     fn dirty(&self) {
         let wt = &self.wt;
         fs::write(wt.join("a.txt"), "a changed\n").unwrap();
@@ -1589,6 +1589,16 @@ fn an_edit_outside_a_narrowed_sparse_cone_is_in_the_backup() {
 }
 
 #[test]
+fn an_untracked_file_in_a_vendor_directory_still_blocks_removal() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.wt.join("vendor")).unwrap();
+    fs::write(f.wt.join("vendor/dep.go"), "steps\n").unwrap();
+    let wt = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &wt, "--yes"], "vendor/dep.go");
+    assert!(f.wt.exists());
+}
+
+#[test]
 fn an_untracked_file_blocks_removal_unless_forced_and_is_not_backed_up() {
     let f = sparse_fixture();
     fs::create_dir_all(f.wt.join("notes")).unwrap();
@@ -1602,9 +1612,10 @@ fn an_untracked_file_blocks_removal_unless_forced_and_is_not_backed_up() {
     f.refuses(&f.env.repo, &["remove", &wt], "pass --force");
     assert!(f.wt.exists());
     let plan = f.json(&["remove", &wt, "--force"]);
-    assert_eq!(plan["untracked_lost"], 1);
+    assert_eq!(plan["untracked_lost"], json!(["notes/todo.md"]));
     let removed = f.json(&["remove", &wt, "--yes", "--force"]);
     assert_eq!(removed["snapshot_files"], 0);
+    assert_eq!(removed["untracked_lost"], json!(["notes/todo.md"]));
     f.json(&["restore", removed["id"].as_str().unwrap()]);
     assert!(!f.wt.join("notes/todo.md").exists());
 }

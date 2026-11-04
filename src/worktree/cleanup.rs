@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::idle::{Allow, Cwds, blocker};
 use super::landed::{Finding, Scene, Verdict};
-use super::remove::removal;
+use super::remove::{Untracked, removal};
 use super::{info, roots};
 use crate::core::config::Config;
 use crate::core::error::Result;
@@ -330,7 +330,7 @@ fn remove_worktree(
         real.display(),
         subject.finding.verdict.as_str()
     );
-    match removal(main, &real, entry, true, cli.dirty, true) {
+    match removal(main, &real, entry, true, cli.dirty, Untracked::Backup) {
         Ok(done) => {
             let mut row = json!({
                 "path": real,
