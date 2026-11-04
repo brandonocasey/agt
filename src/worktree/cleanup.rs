@@ -1,6 +1,7 @@
 //! `agt cleanup --only worktrees`: remove worktrees and delete local branches whose work
-//! already landed in the default branch. Never touches a remote, a PR, uncommitted work (a
-//! snapshot backup keeps it) or a branch whose merge cannot be proven.
+//! already landed in the default branch. Never touches a remote, a PR, uncommitted work
+//! (tracked edits go to a snapshot backup; untracked and ignored files only with `--dirty`) or a
+//! branch whose merge cannot be proven.
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::idle::{Allow, Cwds, blocker};
 use super::landed::{Finding, Scene, Verdict};
-use super::remove::removal;
+use super::remove::{Untracked, removal};
 use super::{info, roots};
 use crate::core::config::Config;
 use crate::core::error::Result;
@@ -28,8 +29,8 @@ pub struct Options {
     /// Set from `agt cleanup --yes`.
     #[arg(skip)]
     pub yes: bool,
-    /// Also remove worktrees with uncommitted work, which the snapshot backup keeps, or with
-    /// ignored files no build recreates, such as `.env`, which are lost.
+    /// Also remove worktrees with uncommitted work: tracked edits stay in the snapshot backup,
+    /// but untracked files and ignored files no build recreates, such as `.env`, are lost.
     #[arg(long)]
     dirty: bool,
     /// Also remove worktrees where something changed in the last 3 days.
@@ -312,6 +313,7 @@ fn remove_worktree(
             "evidence": subject.finding.evidence,
             "action": action,
             "ignored_lost": info::lost(&real)?,
+            "untracked_lost": info::capped(info::untracked(&real)?),
         });
         match super::hooks::resolve(main) {
             Ok(resolved) => {
@@ -330,7 +332,14 @@ fn remove_worktree(
         real.display(),
         subject.finding.verdict.as_str()
     );
-    match removal(main, &real, entry, true, cli.dirty) {
+    // No snapshot keeps untracked files: they go only with `--dirty`, and a hook that writes
+    // one keeps the worktree.
+    let untracked = if cli.dirty {
+        Untracked::Drop
+    } else {
+        Untracked::Refuse
+    };
+    match removal(main, &real, entry, true, cli.dirty, untracked) {
         Ok(done) => {
             let mut row = json!({
                 "path": real,
@@ -340,6 +349,7 @@ fn remove_worktree(
                 "verdict": subject.finding.verdict.as_str(),
                 "evidence": subject.finding.evidence,
                 "ignored_lost": done["ignored_lost"],
+                "untracked_lost": done["untracked_lost"],
             });
             if done.get("hooks").is_some() {
                 row["hooks"] = done["hooks"].clone();

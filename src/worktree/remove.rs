@@ -20,6 +20,9 @@ pub struct Cli {
     /// Skip the `[worktree.hooks] remove` commands.
     #[arg(long)]
     no_hooks: bool,
+    /// Remove although untracked files exist; the backup does not keep them.
+    #[arg(long)]
+    force: bool,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -40,7 +43,16 @@ pub fn run(cli: Cli) -> Result<Output> {
     let warnings = cwds.own_in(&path);
     gate::check(&path, &main)?;
 
-    let (modified, untracked) = info::dirty(&path)?;
+    let (modified, _) = info::dirty(&path)?;
+    let unbacked = info::untracked(&path)?;
+    let mode = if cli.force {
+        Untracked::Drop
+    } else {
+        Untracked::Refuse
+    };
+    if mode == Untracked::Refuse {
+        refuse_untracked(&path, &unbacked)?;
+    }
     if !cli.yes {
         let (planned, untrusted) = if cli.no_hooks {
             (Vec::new(), None)
@@ -56,11 +68,16 @@ pub fn run(cli: Cli) -> Result<Output> {
             "path": path,
             "branch": entry.branch,
             "head": entry.head,
-            "snapshot_files": modified + untracked,
+            "snapshot_files": modified,
+            "untracked_lost": info::capped(unbacked),
             "ignored_lost": info::lost(&path)?,
             "hooks": {"remove": planned},
             "warnings": warnings,
-            "next": "pass --yes to back up and remove",
+            "next": if cli.force {
+                "pass --yes --force to back up and remove; untracked files are not backed up"
+            } else {
+                "pass --yes to back up and remove"
+            },
         });
         if let Some(untrusted) = untrusted {
             plan["hooks"]["untrusted"] = untrusted;
@@ -68,9 +85,38 @@ pub fn run(cli: Cli) -> Result<Output> {
         return Ok(Output::Json(plan));
     }
 
-    let mut done = removal(&main, &path, entry, !cli.no_hooks, true)?;
+    let mut done = removal(&main, &path, entry, !cli.no_hooks, true, mode)?;
     done["warnings"] = json!(warnings);
     Ok(Output::Json(done))
+}
+
+/// What a removal does with untracked, non-ignored files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Untracked {
+    /// Fail while any exist: no backup keeps them.
+    Refuse,
+    /// Delete them with the worktree; the snapshot leaves them out.
+    Drop,
+}
+
+/// Fails, naming the first few of `paths`, when there are untracked files no backup would keep.
+fn refuse_untracked(path: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let shown: Vec<&str> = paths.iter().take(5).map(String::as_str).collect();
+    let more = paths.len() - shown.len();
+    fail(format!(
+        "{} has {} untracked files no backup keeps ({}{}); commit or delete them, or pass --force (cleanup: --dirty) to remove without them; nothing was backed up or removed",
+        path.display(),
+        paths.len(),
+        shown.join(", "),
+        if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// Runs the remove hooks when `run_hooks`, backs `entry` up, then removes its worktree; the
@@ -82,6 +128,7 @@ pub(super) fn removal(
     entry: &Worktree,
     run_hooks: bool,
     allow_lost: bool,
+    untracked: Untracked,
 ) -> Result<Value> {
     gate::check(path, main)?;
     let mut hooks_report = None;
@@ -112,6 +159,14 @@ pub(super) fn removal(
             lost.join(", ")
         ));
     }
+    // A hook may have written an untracked file since the caller checked.
+    let dropped = match untracked {
+        Untracked::Refuse => {
+            refuse_untracked(path, &info::untracked(path)?)?;
+            Vec::new()
+        }
+        Untracked::Drop => info::untracked(path)?,
+    };
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
@@ -134,6 +189,7 @@ pub(super) fn removal(
         "backup_dir": taken.dir,
         "snapshot_files": taken.changed,
         "ignored_lost": lost,
+        "untracked_lost": info::capped(dropped),
         "head_on_local_branch": !local.is_empty(),
         "head_on_remote_branch": !remote.is_empty(),
         "local_branches": local,

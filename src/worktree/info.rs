@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::disposable::is_disposable;
+use super::disposable::{is_disposable, is_os_junk};
 use super::nested;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
@@ -203,6 +203,29 @@ pub fn dirty(root: &Path) -> Result<(usize, usize)> {
     let untracked = listed.iter().filter(|(untracked, _)| *untracked).count();
     let hidden = Repo::at(root).hidden_edits()?.len();
     Ok((listed.len() - untracked + hidden, untracked))
+}
+
+/// Untracked, non-ignored paths, except files the operating system recreates: work that no
+/// backup keeps, so a plain `worktree remove` refuses it.
+pub fn untracked(root: &Path) -> Result<Vec<String>> {
+    Ok(status(root)?
+        .into_iter()
+        .filter(|(untracked, path)| {
+            *untracked && !is_os_junk(path.rsplit('/').next().unwrap_or_default())
+        })
+        .map(|(_, path)| path)
+        .collect())
+}
+
+/// `paths` cut to 100 entries, with a last entry counting the rest, so a report stays small.
+pub fn capped(mut paths: Vec<String>) -> Vec<String> {
+    const MAX: usize = 100;
+    if paths.len() > MAX {
+        let more = paths.len() - MAX;
+        paths.truncate(MAX);
+        paths.push(format!("... and {more} more"));
+    }
+    paths
 }
 
 /// Modified tracked files and untracked files that are not disposable: what removing the

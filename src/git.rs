@@ -615,15 +615,16 @@ impl Repo {
         self.unhide(&temp_index)?;
         let env = [("GIT_INDEX_FILE", temp_index.as_path())];
         // `--sparse` (git 2.35) makes add take files outside the sparse-checkout patterns too.
-        let sparse = self.exec(&["add", "--sparse", "-A"], None, &env)?;
+        // `-u`: tracked files only. A backup never keeps untracked files.
+        let sparse = self.exec(&["add", "--sparse", "-u"], None, &env)?;
         if !sparse.status.success() {
             let stderr = String::from_utf8_lossy(&sparse.stderr);
             if !(stderr.contains("unknown option") || stderr.contains("usage:")) {
-                return fail(format!("git add --sparse -A failed: {}", stderr.trim()));
+                return fail(format!("git add --sparse -u failed: {}", stderr.trim()));
             }
             // An older git cannot add paths outside the patterns: take what it can, then
             // refuse if the tree is not the working tree, rather than lose an edit.
-            self.checked(&["add", "-A"], None, &env)?;
+            self.checked(&["add", "-u"], None, &env)?;
             let tree = text(self.checked(&["write-tree"], None, &env)?)?;
             let lost = self.checked(&["diff-files", "--name-only", "-z"], None, &env)?;
             if let Some(name) = nul_fields(&lost).next() {

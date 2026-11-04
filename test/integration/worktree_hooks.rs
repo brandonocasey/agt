@@ -104,7 +104,11 @@ fn the_repository_config_overrides_the_global_hooks_per_key() {
     let tree = env.repo.join(".worktrees/o");
     assert!(tree.join("local").exists());
     assert!(!tree.join("global").exists());
-    let plan = json(&agt(&env, &env.repo, &["remove", tree.to_str().unwrap()]));
+    let plan = json(&agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--force"],
+    ));
     assert_eq!(plan["hooks"]["remove"][0], "true");
 }
 
@@ -388,6 +392,29 @@ fn work_a_remove_hook_leaves_behind_blocks_the_removal() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("nested"), "{error}");
     assert!(tree.join("nested").exists());
+}
+
+#[test]
+fn an_untracked_file_a_remove_hook_writes_blocks_the_removal() {
+    let env = repo();
+    repo_config(
+        &env,
+        "[worktree.hooks]\nremove = [\"echo state > dump.txt\"]\n",
+    );
+    json(&agt(&env, &env.repo, &["create", "dump"]));
+    let tree = env.repo.join(".worktrees/dump");
+    let output = agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("dump.txt") && error.contains("nothing was backed up"),
+        "{error}"
+    );
+    assert!(tree.join("dump.txt").exists());
 }
 
 #[test]
