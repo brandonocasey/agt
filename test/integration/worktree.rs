@@ -42,6 +42,7 @@ impl Fixture {
         fs::remove_file(wt.join("c.txt")).unwrap();
         fs::write(wt.join("new.bin"), [0u8, 159, 146, 150, 10]).unwrap();
         fs::set_permissions(wt.join("new.bin"), fs::Permissions::from_mode(0o755)).unwrap();
+        wgit(&self.env, wt, &["add", "new.bin"]);
         fs::write(wt.join(".env"), "SECRET=1\n").unwrap();
         fs::set_permissions(wt.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir_all(wt.join("node_modules/pkg")).unwrap();
@@ -237,6 +238,7 @@ fn restore_file_modes_cannot_escape_through_parent_paths_or_symlinks() {
         fs::write(&outside, "outside").unwrap();
         fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
         std::os::unix::fs::symlink(f.env.path(""), f.wt.join("link")).unwrap();
+        wgit(&f.env, &f.wt, &["add", "link"]);
         let removed = f.remove();
         let record = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("backup.json");
         let mut saved: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
@@ -452,13 +454,14 @@ fn list_reports_counts_ahead_and_merged_for_this_repo_and_all_roots() {
         "merged",
         &merged.to_string_lossy(),
     ]);
+    fs::write(f.wt.join("extra.txt"), "extra\n").unwrap();
     let listed = f.json(&["list"]);
     let rows = listed["worktrees"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     let feat = rows.iter().find(|row| row["branch"] == "feat").unwrap();
     let real = fs::canonicalize(&f.wt).unwrap();
     assert_eq!(feat["path"], real.to_string_lossy().as_ref());
-    assert_eq!(feat["modified"], 3);
+    assert_eq!(feat["modified"], 4);
     assert_eq!(feat["untracked"], 1);
     assert_eq!(feat["ignored"], 1);
     assert_eq!(feat["ahead"], 1);
@@ -1110,6 +1113,7 @@ fn a_worktree_name_that_is_no_ref_name_still_backs_up_and_restores() {
     let odd = f.env.path("trees").join("my tree~1^x:y..z.lock");
     worktree_at(&f, "odd", &odd);
     fs::write(odd.join("note.txt"), "note\n").unwrap();
+    wgit(&f.env, &odd, &["add", "note.txt"]);
     let removed = f.json(&["remove", &odd.to_string_lossy(), "--yes"]);
     let id = removed["id"].as_str().unwrap();
     assert!(!id.contains([' ', '~', '^', ':']), "{id}");
@@ -1544,6 +1548,7 @@ fn a_worktree_named_with_repeated_lock_endings_backs_up_and_restores() {
     let odd = f.env.path("trees").join("x.lock.lock");
     worktree_at(&f, "odd", &odd);
     fs::write(odd.join("note.txt"), "note\n").unwrap();
+    wgit(&f.env, &odd, &["add", "note.txt"]);
     let removed = f.json(&["remove", &odd.to_string_lossy(), "--yes"]);
     let id = removed["id"].as_str().unwrap();
     assert!(!id.ends_with(".lock"), "{id}");
@@ -1584,16 +1589,24 @@ fn an_edit_outside_a_narrowed_sparse_cone_is_in_the_backup() {
 }
 
 #[test]
-fn an_untracked_file_outside_the_sparse_cone_is_in_the_backup() {
+fn an_untracked_file_blocks_removal_unless_forced_and_is_not_backed_up() {
     let f = sparse_fixture();
     fs::create_dir_all(f.wt.join("notes")).unwrap();
     fs::write(f.wt.join("notes/todo.md"), "todo\n").unwrap();
-    let removed = f.remove();
-    f.json(&["restore", removed["id"].as_str().unwrap()]);
-    assert_eq!(
-        fs::read_to_string(f.wt.join("notes/todo.md")).unwrap(),
-        "todo\n"
+    let wt = f.wt.to_string_lossy().into_owned();
+    f.refuses(
+        &f.env.repo,
+        &["remove", &wt, "--yes"],
+        "1 untracked files no backup keeps",
     );
+    f.refuses(&f.env.repo, &["remove", &wt], "pass --force");
+    assert!(f.wt.exists());
+    let plan = f.json(&["remove", &wt, "--force"]);
+    assert_eq!(plan["untracked_lost"], 1);
+    let removed = f.json(&["remove", &wt, "--yes", "--force"]);
+    assert_eq!(removed["snapshot_files"], 0);
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert!(!f.wt.join("notes/todo.md").exists());
 }
 
 /// Gives the submodule's upstream a release commit that no branch holds, tagged `tag`, and
@@ -1805,11 +1818,11 @@ fn a_leftover_clone_whose_path_holds_vendored_files_is_not_checked_as_the_superp
     fs::write(f.wt.join("mod/vendored.c"), "int x;\n").unwrap();
     wgit(&f.env, &f.wt, &["add", "-A"]);
     wgit(&f.env, &f.wt, &["commit", "-q", "-m", "vendor it"]);
-    // An untracked file at the top: the snapshot holds it, so it must not refuse.
+    // An untracked file at the top is not a vendored file: only `--force` removes past it.
     fs::write(f.wt.join("todo.txt"), "todo\n").unwrap();
     let wt = f.wt.to_string_lossy().into_owned();
-    assert_eq!(f.json(&["remove", &wt])["plan"], true);
-    f.json(&["remove", &wt, "--yes"]);
+    assert_eq!(f.json(&["remove", &wt, "--force"])["plan"], true);
+    f.json(&["remove", &wt, "--yes", "--force"]);
     assert!(!f.wt.exists());
 }
 

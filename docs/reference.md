@@ -1391,7 +1391,7 @@ agt worktree prepare --hooks [PATH]  # rerun only the create hooks, no installs 
 agt worktree prepare --wait [PATH] [--timeout SECS]  # wait for the background setup `create --background` started
 agt worktree port [PATH] [--env]            # a stable dev-server port
 agt worktree list [--all-repos]            # this repository's linked worktrees, or every repository under the roots
-agt worktree remove PATH [--yes] [--no-hooks]  # without --yes: print the plan, change nothing
+agt worktree remove PATH [--yes] [--no-hooks] [--force]  # without --yes: print the plan, change nothing; untracked files block it unless --force, which drops them (no backup keeps them)
 agt cleanup --only worktrees [--all-repos] [--yes] [--offline] [--dirty] [--recent] [--worktree NAME-OR-PATH]...  # remove landed worktrees, delete landed branches
 agt worktree trust [PATH] [--remove]        # trust (or forget) the repository's [worktree.hooks]
 agt worktree trust --list                   # trusted files and whether each still matches

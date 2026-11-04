@@ -104,7 +104,11 @@ fn the_repository_config_overrides_the_global_hooks_per_key() {
     let tree = env.repo.join(".worktrees/o");
     assert!(tree.join("local").exists());
     assert!(!tree.join("global").exists());
-    let plan = json(&agt(&env, &env.repo, &["remove", tree.to_str().unwrap()]));
+    let plan = json(&agt(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--force"],
+    ));
     assert_eq!(plan["hooks"]["remove"][0], "true");
 }
 

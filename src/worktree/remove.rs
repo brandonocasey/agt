@@ -20,6 +20,9 @@ pub struct Cli {
     /// Skip the `[worktree.hooks] remove` commands.
     #[arg(long)]
     no_hooks: bool,
+    /// Remove although untracked files exist; the backup does not keep them.
+    #[arg(long)]
+    force: bool,
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
@@ -40,7 +43,14 @@ pub fn run(cli: Cli) -> Result<Output> {
     let warnings = cwds.own_in(&path);
     gate::check(&path, &main)?;
 
-    let (modified, untracked) = info::dirty(&path)?;
+    let (modified, _) = info::dirty(&path)?;
+    let unbacked = info::untracked(&path)?;
+    if unbacked > 0 && !cli.force {
+        return fail(format!(
+            "{} has {unbacked} untracked files no backup keeps; commit or delete them, or pass --force to remove without them",
+            path.display()
+        ));
+    }
     if !cli.yes {
         let (planned, untrusted) = if cli.no_hooks {
             (Vec::new(), None)
@@ -56,7 +66,8 @@ pub fn run(cli: Cli) -> Result<Output> {
             "path": path,
             "branch": entry.branch,
             "head": entry.head,
-            "snapshot_files": modified + untracked,
+            "snapshot_files": modified,
+            "untracked_lost": unbacked,
             "ignored_lost": info::lost(&path)?,
             "hooks": {"remove": planned},
             "warnings": warnings,
@@ -68,7 +79,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         return Ok(Output::Json(plan));
     }
 
-    let mut done = removal(&main, &path, entry, !cli.no_hooks, true)?;
+    let mut done = removal(&main, &path, entry, !cli.no_hooks, true, false)?;
     done["warnings"] = json!(warnings);
     Ok(Output::Json(done))
 }
@@ -82,6 +93,7 @@ pub(super) fn removal(
     entry: &Worktree,
     run_hooks: bool,
     allow_lost: bool,
+    untracked: bool,
 ) -> Result<Value> {
     gate::check(path, main)?;
     let mut hooks_report = None;
@@ -112,7 +124,7 @@ pub(super) fn removal(
             lost.join(", ")
         ));
     }
-    let taken = snapshot::take(main, entry)?;
+    let taken = snapshot::take(main, entry, untracked)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
     let branches = |pattern: &str| -> Result<Vec<String>> {

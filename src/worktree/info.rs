@@ -205,6 +205,17 @@ pub fn dirty(root: &Path) -> Result<(usize, usize)> {
     Ok((listed.len() - untracked + hidden, untracked))
 }
 
+/// Untracked, non-ignored files that are not disposable: work a plain `worktree remove` refuses
+/// to drop, because no backup keeps it.
+pub fn untracked(root: &Path) -> Result<usize> {
+    Ok(status(root)?
+        .iter()
+        .filter(|(untracked, path)| {
+            *untracked && (!is_disposable(path) || root.join(path).join(".git").exists())
+        })
+        .count())
+}
+
 /// Modified tracked files and untracked files that are not disposable: what removing the
 /// worktree would only keep in its snapshot.
 pub fn unsaved(root: &Path) -> Result<usize> {

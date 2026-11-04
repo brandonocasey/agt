@@ -33,7 +33,7 @@ pub(super) fn require_commit(entry: &Worktree) -> Result<()> {
     Ok(())
 }
 
-pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
+pub fn take(main: &Path, entry: &Worktree, untracked: bool) -> Result<Taken> {
     let created = clock::now_secs()?;
     let stamp = clock::format(created);
     let stamp = format!(
@@ -69,7 +69,9 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
         .unwrap_or_default();
     create_dirs(&dir, 0o700)?;
     let reference = format!("{REF_PREFIX}{id}");
-    let made = build(main, entry, &shared, &dir, id, &reference, created);
+    let made = build(
+        main, entry, &dir, id, &reference, created, untracked,
+    );
     if made.is_err() {
         // A failed backup leaves neither the ref nor the directory behind.
         let _ = shared.git(&["update-ref", "-d", &reference]);
@@ -81,13 +83,14 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
 fn build(
     main: &Path,
     entry: &Worktree,
-    shared: &Repo,
     dir: &Path,
     id: String,
     reference: &str,
     created: i64,
+    untracked: bool,
 ) -> Result<Taken> {
-    let tree = Repo::at(&entry.path).worktree_tree_with_hidden_edits()?;
+    let shared = &Repo::at(main);
+    let tree = Repo::at(&entry.path).worktree_tree_with_hidden_edits(untracked)?;
     let message = format!("agt worktree backup {id}");
     let snapshot = shared.git(&[
         "-c",

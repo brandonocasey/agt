@@ -330,7 +330,7 @@ fn remove_worktree(
         real.display(),
         subject.finding.verdict.as_str()
     );
-    match removal(main, &real, entry, true, cli.dirty) {
+    match removal(main, &real, entry, true, cli.dirty, true) {
         Ok(done) => {
             let mut row = json!({
                 "path": real,
