@@ -546,12 +546,13 @@ fn a_dirty_worktree_stays_unless_dirty_is_passed() {
             .git(&["show", &format!("refs/agt/backups/{id}:wip")]),
         "changed"
     );
-    // Cleanup, unlike `worktree remove`, keeps untracked files in the snapshot.
-    assert_eq!(
-        site.env
-            .git(&["show", &format!("refs/agt/backups/{id}:fresh.txt")]),
-        "new"
-    );
+    // `--dirty` drops untracked files, as `worktree remove --force` does: no snapshot keeps them.
+    assert_eq!(report["removed"][0]["untracked_lost"], json!(["fresh.txt"]));
+    assert!(!site.env.git_status(&[
+        "cat-file",
+        "-e",
+        &format!("refs/agt/backups/{id}:fresh.txt")
+    ]));
     assert_eq!(site.branches(), ["main"]);
 }
 

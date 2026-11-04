@@ -28,8 +28,8 @@ pub struct Options {
     /// Set from `agt cleanup --yes`.
     #[arg(skip)]
     pub yes: bool,
-    /// Also remove worktrees with uncommitted work, which the snapshot backup keeps, or with
-    /// ignored files no build recreates, such as `.env`, which are lost.
+    /// Also remove worktrees with uncommitted work: tracked edits stay in the snapshot backup,
+    /// but untracked files and ignored files no build recreates, such as `.env`, are lost.
     #[arg(long)]
     dirty: bool,
     /// Also remove worktrees where something changed in the last 3 days.
@@ -312,6 +312,7 @@ fn remove_worktree(
             "evidence": subject.finding.evidence,
             "action": action,
             "ignored_lost": info::lost(&real)?,
+            "untracked_lost": info::untracked(&real)?,
         });
         match super::hooks::resolve(main) {
             Ok(resolved) => {
@@ -330,7 +331,9 @@ fn remove_worktree(
         real.display(),
         subject.finding.verdict.as_str()
     );
-    match removal(main, &real, entry, true, cli.dirty, Untracked::Backup) {
+    // The gate keeps a worktree with untracked work unless `--dirty`; what reaches here is
+    // disposable or consented to, and no snapshot keeps it.
+    match removal(main, &real, entry, true, cli.dirty, Untracked::Drop) {
         Ok(done) => {
             let mut row = json!({
                 "path": real,
@@ -340,6 +343,7 @@ fn remove_worktree(
                 "verdict": subject.finding.verdict.as_str(),
                 "evidence": subject.finding.evidence,
                 "ignored_lost": done["ignored_lost"],
+                "untracked_lost": done["untracked_lost"],
             });
             if done.get("hooks").is_some() {
                 row["hooks"] = done["hooks"].clone();
