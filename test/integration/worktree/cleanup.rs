@@ -252,8 +252,8 @@ fn an_ancestor_merged_branch_loses_its_clean_worktree_and_branch() {
     let site = Site::new();
     let wt = site.branch("done");
     let tip = site.tip("done");
-    // A disposable untracked file does not make the worktree dirty.
-    fs::write(wt.join("debug.log"), "noise").unwrap();
+    // A file the operating system recreates does not make the worktree dirty.
+    fs::write(wt.join(".DS_Store"), "noise").unwrap();
     site.env.git(&["merge", "-q", "done"]);
 
     let report = site.run(&["--yes"]);
@@ -580,6 +580,55 @@ fn an_ignored_secret_keeps_the_worktree_unless_dirty_is_passed() {
     assert!(!wt.exists());
     assert_eq!(report["removed"][0]["ignored_lost"], json!([".env"]));
     assert_eq!(site.branches(), ["main"]);
+}
+
+#[test]
+fn an_untracked_file_keeps_the_worktree_unless_dirty_is_passed_and_is_then_deleted() {
+    let site = Site::new();
+    let wt = site.branch("loose");
+    site.env.git(&["merge", "-q", "loose"]);
+    // Disposable-looking names are still work: no snapshot keeps them.
+    fs::write(wt.join("debug.log"), "noise").unwrap();
+    fs::create_dir_all(wt.join("vendor")).unwrap();
+    fs::write(wt.join("vendor/dep.go"), "package dep\n").unwrap();
+
+    let plan = site.run(&[]);
+    let row = site.kept(&plan, "loose");
+    let reason = row["reason"].as_str().unwrap();
+    assert!(reason.starts_with("dirty"), "{row}");
+    assert!(wt.exists());
+
+    let report = site.run(&["--yes", "--dirty"]);
+    assert!(!wt.exists());
+    assert_eq!(
+        report["removed"][0]["untracked_lost"],
+        json!(["debug.log", "vendor/dep.go"])
+    );
+    let id = report["removed"][0]["id"].as_str().unwrap();
+    assert!(!site.env.git_status(&[
+        "cat-file",
+        "-e",
+        &format!("refs/agt/backups/{id}:vendor/dep.go")
+    ]));
+}
+
+#[test]
+fn an_untracked_file_a_remove_hook_writes_keeps_the_worktree() {
+    let site = Site::new();
+    let wt = site.branch("hooked-note");
+    site.env.git(&["merge", "-q", "hooked-note"]);
+    site.env
+        .write_config("[worktree.hooks]\nremove = [\"touch notes.md\"]\n");
+
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "hooked-note");
+    let reason = row["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("removal failed:") && reason.contains("notes.md"),
+        "{row}"
+    );
+    assert!(wt.join("notes.md").exists());
+    assert_eq!(site.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
 #[test]

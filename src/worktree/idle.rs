@@ -20,8 +20,8 @@ pub struct Allow {
     pub offline: bool,
     /// Pass a worktree where something changed in the last 3 days.
     pub recent: bool,
-    /// Pass a worktree with uncommitted work, which a snapshot backup keeps, or with ignored
-    /// files that are lost.
+    /// Pass a worktree with uncommitted work (a snapshot backup keeps tracked edits), or with
+    /// untracked or ignored files that are lost.
     pub dirty: bool,
 }
 
@@ -75,7 +75,21 @@ pub fn blocker(
     let unsaved = info::unsaved(&real)?;
     if unsaved > 0 && !allow.dirty {
         return blocked(format!(
-            "dirty: {unsaved} modified or untracked files; pass --dirty to remove it after a snapshot backup"
+            "dirty: {unsaved} modified or untracked files; pass --dirty to remove it (tracked edits are backed up, untracked files are deleted)"
+        ));
+    }
+    // No snapshot keeps untracked files, not even the disposable-looking ones `unsaved` skips.
+    let untracked = info::untracked(&real)?;
+    if !untracked.is_empty() && !allow.dirty {
+        return blocked(format!(
+            "dirty: {} untracked files no backup keeps ({}); pass --dirty to delete them with it",
+            untracked.len(),
+            untracked
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     // No backup keeps ignored files, so a `.env` or notes go with the worktree.

@@ -69,7 +69,7 @@ pub fn run(cli: Cli) -> Result<Output> {
             "branch": entry.branch,
             "head": entry.head,
             "snapshot_files": modified,
-            "untracked_lost": unbacked,
+            "untracked_lost": info::capped(unbacked),
             "ignored_lost": info::lost(&path)?,
             "hooks": {"remove": planned},
             "warnings": warnings,
@@ -93,9 +93,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 /// What a removal does with untracked, non-ignored files.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Untracked {
-    /// Keep them in the snapshot.
-    Backup,
-    /// Fail while any exist: no backup would keep them.
+    /// Fail while any exist: no backup keeps them.
     Refuse,
     /// Delete them with the worktree; the snapshot leaves them out.
     Drop,
@@ -109,7 +107,7 @@ fn refuse_untracked(path: &Path, paths: &[String]) -> Result<()> {
     let shown: Vec<&str> = paths.iter().take(5).map(String::as_str).collect();
     let more = paths.len() - shown.len();
     fail(format!(
-        "{} has {} untracked files no backup keeps ({}{}); commit or delete them, or pass --force to remove without them; nothing was backed up or removed",
+        "{} has {} untracked files no backup keeps ({}{}); commit or delete them, or pass --force (cleanup: --dirty) to remove without them; nothing was backed up or removed",
         path.display(),
         paths.len(),
         shown.join(", "),
@@ -168,9 +166,8 @@ pub(super) fn removal(
             Vec::new()
         }
         Untracked::Drop => info::untracked(path)?,
-        Untracked::Backup => Vec::new(),
     };
-    let taken = snapshot::take(main, entry, untracked == Untracked::Backup)?;
+    let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
     let branches = |pattern: &str| -> Result<Vec<String>> {
@@ -192,7 +189,7 @@ pub(super) fn removal(
         "backup_dir": taken.dir,
         "snapshot_files": taken.changed,
         "ignored_lost": lost,
-        "untracked_lost": dropped,
+        "untracked_lost": info::capped(dropped),
         "head_on_local_branch": !local.is_empty(),
         "head_on_remote_branch": !remote.is_empty(),
         "local_branches": local,

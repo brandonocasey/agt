@@ -1,6 +1,7 @@
 //! `agt cleanup --only worktrees`: remove worktrees and delete local branches whose work
-//! already landed in the default branch. Never touches a remote, a PR, uncommitted work (a
-//! snapshot backup keeps it) or a branch whose merge cannot be proven.
+//! already landed in the default branch. Never touches a remote, a PR, uncommitted work
+//! (tracked edits go to a snapshot backup; untracked and ignored files only with `--dirty`) or a
+//! branch whose merge cannot be proven.
 
 use std::path::{Path, PathBuf};
 
@@ -312,7 +313,7 @@ fn remove_worktree(
             "evidence": subject.finding.evidence,
             "action": action,
             "ignored_lost": info::lost(&real)?,
-            "untracked_lost": info::untracked(&real)?,
+            "untracked_lost": info::capped(info::untracked(&real)?),
         });
         match super::hooks::resolve(main) {
             Ok(resolved) => {
@@ -331,9 +332,14 @@ fn remove_worktree(
         real.display(),
         subject.finding.verdict.as_str()
     );
-    // The gate keeps a worktree with untracked work unless `--dirty`; what reaches here is
-    // disposable or consented to, and no snapshot keeps it.
-    match removal(main, &real, entry, true, cli.dirty, Untracked::Drop) {
+    // No snapshot keeps untracked files: they go only with `--dirty`, and a hook that writes
+    // one keeps the worktree.
+    let untracked = if cli.dirty {
+        Untracked::Drop
+    } else {
+        Untracked::Refuse
+    };
+    match removal(main, &real, entry, true, cli.dirty, untracked) {
         Ok(done) => {
             let mut row = json!({
                 "path": real,

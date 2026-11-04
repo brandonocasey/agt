@@ -217,6 +217,17 @@ pub fn untracked(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// `paths` cut to 100 entries, with a last entry counting the rest, so a report stays small.
+pub fn capped(mut paths: Vec<String>) -> Vec<String> {
+    const MAX: usize = 100;
+    if paths.len() > MAX {
+        let more = paths.len() - MAX;
+        paths.truncate(MAX);
+        paths.push(format!("... and {more} more"));
+    }
+    paths
+}
+
 /// Modified tracked files and untracked files that are not disposable: what removing the
 /// worktree would only keep in its snapshot.
 pub fn unsaved(root: &Path) -> Result<usize> {

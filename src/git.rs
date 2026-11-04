@@ -610,21 +610,21 @@ impl Repo {
     /// Like [`Self::worktree_tree`], but a tracked file marked skip-worktree or assume-unchanged
     /// that exists on disk is taken as it is, not as the index has it. A file that is gone (a
     /// sparse checkout) keeps its entry, or the tree would record it as deleted.
-    pub fn worktree_tree_with_hidden_edits(&self, untracked: bool) -> Result<String> {
+    pub fn worktree_tree_with_hidden_edits(&self) -> Result<String> {
         let (_scratch, temp_index) = self.scratch_index()?;
         self.unhide(&temp_index)?;
         let env = [("GIT_INDEX_FILE", temp_index.as_path())];
         // `--sparse` (git 2.35) makes add take files outside the sparse-checkout patterns too.
-        let all = if untracked { "-A" } else { "-u" };
-        let sparse = self.exec(&["add", "--sparse", all], None, &env)?;
+        // `-u`: tracked files only. A backup never keeps untracked files.
+        let sparse = self.exec(&["add", "--sparse", "-u"], None, &env)?;
         if !sparse.status.success() {
             let stderr = String::from_utf8_lossy(&sparse.stderr);
             if !(stderr.contains("unknown option") || stderr.contains("usage:")) {
-                return fail(format!("git add --sparse {all} failed: {}", stderr.trim()));
+                return fail(format!("git add --sparse -u failed: {}", stderr.trim()));
             }
             // An older git cannot add paths outside the patterns: take what it can, then
             // refuse if the tree is not the working tree, rather than lose an edit.
-            self.checked(&["add", all], None, &env)?;
+            self.checked(&["add", "-u"], None, &env)?;
             let tree = text(self.checked(&["write-tree"], None, &env)?)?;
             let lost = self.checked(&["diff-files", "--name-only", "-z"], None, &env)?;
             if let Some(name) = nul_fields(&lost).next() {

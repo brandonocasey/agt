@@ -1589,6 +1589,25 @@ fn an_edit_outside_a_narrowed_sparse_cone_is_in_the_backup() {
 }
 
 #[test]
+fn an_os_junk_file_does_not_block_removal_and_a_long_list_is_cut() {
+    let f = Fixture::new();
+    fs::write(f.wt.join(".DS_Store"), "x").unwrap();
+    let wt = f.wt.to_string_lossy().into_owned();
+    f.json(&["remove", &wt, "--yes"]);
+
+    let f = Fixture::new();
+    for n in 0..7 {
+        fs::write(f.wt.join(format!("loose-{n}.txt")), "x").unwrap();
+    }
+    let wt = f.wt.to_string_lossy().into_owned();
+    f.refuses(
+        &f.env.repo,
+        &["remove", &wt, "--yes"],
+        "loose-4.txt, and 2 more)",
+    );
+}
+
+#[test]
 fn an_untracked_file_in_a_vendor_directory_still_blocks_removal() {
     let f = Fixture::new();
     fs::create_dir_all(f.wt.join("vendor")).unwrap();
