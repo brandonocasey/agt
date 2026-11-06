@@ -1274,6 +1274,45 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
 }
 
 #[test]
+fn a_merged_branch_with_a_signed_tip_is_listed_when_git_shows_signatures() {
+    let prune = Prune::new();
+    let home = prune.env.path("home");
+    let repo = home.join("projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let key = prune.env.path("signing-key");
+    let status = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "gpg.format", "ssh"]);
+    git(&["config", "user.signingkey", key.to_str().unwrap()]);
+    git(&["config", "log.showSignature", "true"]);
+    git(&["commit", "-q", "-S", "--allow-empty", "-m", "one"]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&["branch", "done"]);
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    let repo_path = repo.canonicalize().unwrap();
+    assert_eq!(
+        report["manual"]["branches"],
+        json!([format!("git -C {} branch -d done", repo_path.display())])
+    );
+}
+
+#[test]
 fn scratch_never_follows_a_link_out_of_the_harness_root() {
     let prune = Prune::new();
     let uid = unsafe { libc::getuid() };

@@ -27,7 +27,7 @@ fn old(secs: i64, now: i64) -> bool {
     now - secs >= MIN_DAYS * clock::SECS_PER_DAY
 }
 
-/// Whether nothing under `path` changed for [`MIN_DAYS`]; an unreadable path is not listed.
+/// Whether nothing under `path` changed for [`MIN_DAYS`]; false when `path` cannot be read.
 fn untouched(path: &Path, now: i64) -> bool {
     measure(path).is_ok_and(|(newest, _)| old(newest, now))
 }
