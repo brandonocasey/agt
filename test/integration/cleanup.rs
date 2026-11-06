@@ -1211,8 +1211,20 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
         fs::create_dir_all(browsers.join(name)).unwrap();
     }
 
+    let copy = prune.backup("copy");
+
+    // A day short of 30 days old, nothing is listed yet.
+    let report = prune.run_at(later() - DAY, &["--only", "manual"]);
+    for section in ["branches", "backups", "codex_releases", "playwright"] {
+        assert_eq!(report["manual"][section], json!([]), "{section}");
+    }
+
     let report = prune.run_at(later(), &["--only", "manual"]);
     let manual = &report["manual"];
+    assert_eq!(
+        manual["backups"],
+        json!([format!("0.0 MiB {}", copy.display())])
+    );
     let repo_path = repo.canonicalize().unwrap();
     assert_eq!(
         manual["branches"],
@@ -1251,14 +1263,53 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     let report = prune.run_at(later(), &["--only", "manual", "--yes"]);
     let saved = PathBuf::from(report["manual_report"].as_str().unwrap());
     let text = fs::read_to_string(&saved).unwrap();
-    assert!(text.contains("<!-- count: 4 -->"), "{text}");
+    assert!(text.contains("<!-- count: 5 -->"), "{text}");
     assert!(text.contains(&format!("git -C {} branch -d done", repo_path.display())));
     assert_eq!(
         count(&prune),
-        format!("agt: 4 cleanup candidates in {}\n", saved.display())
+        format!("agt: 5 cleanup candidates in {}\n", saved.display())
     );
     assert!(releases.join("0.9.0").exists() && browsers.join("chromium-1100").exists());
     assert!(repo_path.join(".worktrees/busy").exists());
+}
+
+#[test]
+fn a_merged_branch_with_a_signed_tip_is_listed_when_git_shows_signatures() {
+    let prune = Prune::new();
+    let home = prune.env.path("home");
+    let repo = home.join("projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let key = prune.env.path("signing-key");
+    let status = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "gpg.format", "ssh"]);
+    git(&["config", "user.signingkey", key.to_str().unwrap()]);
+    git(&["config", "log.showSignature", "true"]);
+    git(&["commit", "-q", "-S", "--allow-empty", "-m", "one"]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(&["branch", "done"]);
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    let repo_path = repo.canonicalize().unwrap();
+    assert_eq!(
+        report["manual"]["branches"],
+        json!([format!("git -C {} branch -d done", repo_path.display())])
+    );
 }
 
 #[test]

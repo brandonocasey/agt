@@ -55,8 +55,8 @@ enum Only {
     /// pipe-mode browsers after 5 minutes once their parent is gone (adopted by init), with or
     /// without a session marker, and what they started.
     Processes,
-    /// Merged worktrees and branches, other backups, old Codex releases and Playwright
-    /// builds: listed, never deleted. `--yes` saves the list to a report.
+    /// Merged branches, other backups, old Codex releases and Playwright builds, once 30 days
+    /// old: listed, never deleted. `--yes` saves the list to a report.
     Manual,
     /// Worktrees and local branches whose work landed in the default branch, in the current
     /// repository. Only when named: `--yes` then removes each worktree after a snapshot
@@ -115,7 +115,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         plan.processes(now)?;
     }
     let candidates = if only(Only::Manual) {
-        Some(manual::candidates()?)
+        Some(manual::candidates(now)?)
     } else {
         None
     };
