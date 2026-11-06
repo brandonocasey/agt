@@ -1211,8 +1211,20 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
         fs::create_dir_all(browsers.join(name)).unwrap();
     }
 
+    let copy = prune.backup("copy");
+
+    // A day short of 30 days old, nothing is listed yet.
+    let report = prune.run_at(later() - DAY, &["--only", "manual"]);
+    for section in ["branches", "backups", "codex_releases", "playwright"] {
+        assert_eq!(report["manual"][section], json!([]), "{section}");
+    }
+
     let report = prune.run_at(later(), &["--only", "manual"]);
     let manual = &report["manual"];
+    assert_eq!(
+        manual["backups"],
+        json!([format!("0.0 MiB {}", copy.display())])
+    );
     let repo_path = repo.canonicalize().unwrap();
     assert_eq!(
         manual["branches"],
@@ -1251,11 +1263,11 @@ fn manual_leftovers_are_listed_and_saved_never_deleted() {
     let report = prune.run_at(later(), &["--only", "manual", "--yes"]);
     let saved = PathBuf::from(report["manual_report"].as_str().unwrap());
     let text = fs::read_to_string(&saved).unwrap();
-    assert!(text.contains("<!-- count: 4 -->"), "{text}");
+    assert!(text.contains("<!-- count: 5 -->"), "{text}");
     assert!(text.contains(&format!("git -C {} branch -d done", repo_path.display())));
     assert_eq!(
         count(&prune),
-        format!("agt: 4 cleanup candidates in {}\n", saved.display())
+        format!("agt: 5 cleanup candidates in {}\n", saved.display())
     );
     assert!(releases.join("0.9.0").exists() && browsers.join("chromium-1100").exists());
     assert!(repo_path.join(".worktrees/busy").exists());

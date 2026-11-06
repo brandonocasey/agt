@@ -9,13 +9,15 @@ use super::backup;
 use super::info;
 use super::landed::Scene;
 use super::roots;
-use crate::core::error::Result;
+use crate::core::error::{Result, ctx};
 use crate::git::Repo;
 
 /// A merged branch that `agt cleanup --only worktrees` would delete and no worktree holds.
 pub struct Found {
     pub repo: PathBuf,
     pub branch: String,
+    /// When the branch's tip was committed, in Unix seconds.
+    pub committed: i64,
 }
 
 /// A worktree backup `agt worktree remove` made.
@@ -23,13 +25,19 @@ pub struct Backup {
     pub id: String,
     /// The backup's directory.
     pub dir: PathBuf,
+    /// When it was made, as the record states it.
+    pub created: String,
 }
 
 /// Every worktree backup, oldest first.
 pub fn backups() -> Result<Vec<Backup>> {
     Ok(backup::all()?
         .into_iter()
-        .map(|(record, dir)| Backup { id: record.id, dir })
+        .map(|(record, dir)| Backup {
+            id: record.id,
+            dir,
+            created: record.created,
+        })
         .collect())
 }
 
@@ -56,9 +64,16 @@ fn of(repo: &Repo) -> Result<Vec<Found>> {
             continue;
         }
         if let Some(branch) = local.branch {
+            let tip = format!("refs/heads/{branch}");
+            let committed = repo.git(&["log", "-1", "--format=%ct", &tip])?;
+            let committed = committed
+                .trim()
+                .parse()
+                .map_err(ctx(format!("read the commit time of {tip}")))?;
             found.push(Found {
                 repo: main.clone(),
                 branch,
+                committed,
             });
         }
     }

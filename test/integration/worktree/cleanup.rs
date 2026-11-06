@@ -233,16 +233,24 @@ fn the_manual_list_names_the_command_that_deletes_a_worktree_backup() {
     site.env.git(&["merge", "-q", "done"]);
     let report = site.run(&["--recent", "--yes"]);
     let id = report["removed"][0]["id"].as_str().unwrap();
-    let output = site
-        .env
-        .bin(&site.env.repo)
-        .args(["cleanup", "--only", "manual"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    // The backup is stamped with the sweep's clock, `days_on` days ahead.
+    let backups = |days: i64| {
+        let now = i64::try_from(unix_now()).unwrap() + (site.days_on + days) * 86_400;
+        let output = site
+            .env
+            .bin(&site.env.repo)
+            .args(["cleanup", "--only", "manual"])
+            .env("AGT_NOW", now.to_string())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["manual"]["backups"].clone()
+    };
+    // Listed only once the backup is 30 days old.
+    assert_eq!(backups(29), json!([]));
     assert_eq!(
-        report["manual"]["backups"],
+        backups(30),
         json!([format!("agt worktree backups rm {id} --yes")])
     );
 }

@@ -1,7 +1,7 @@
 //! Leftovers that cleanup lists but never deletes, because they may hold work or another tool
 //! owns them: merged branches, backups, old Codex releases and superseded Playwright
-//! browsers. `--yes` saves the list to a report, so a session can mention it
-//! without scanning every repository again.
+//! browsers. Only leftovers at least [`MIN_DAYS`] old are listed. `--yes` saves the list to a
+//! report, so a session can mention it without scanning every repository again.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::files::measure;
+use crate::core::clock;
 use crate::core::error::{Result, ctx};
 use crate::core::harness;
 use crate::core::local;
@@ -17,6 +18,19 @@ use crate::store::{Namespace, Store};
 use crate::worktree::prune;
 
 const COUNT_PREFIX: &str = "<!-- count: ";
+
+/// How old a leftover must be before it is listed.
+pub const MIN_DAYS: i64 = 30;
+
+/// Whether something last changed at `secs` is at least [`MIN_DAYS`] old at `now`.
+fn old(secs: i64, now: i64) -> bool {
+    now - secs >= MIN_DAYS * clock::SECS_PER_DAY
+}
+
+/// Whether nothing under `path` changed for [`MIN_DAYS`]; an unreadable path is not listed.
+fn untouched(path: &Path, now: i64) -> bool {
+    measure(path).is_ok_and(|(newest, _)| old(newest, now))
+}
 
 pub const SECTIONS: [(&str, &str); 4] = [
     (
@@ -40,10 +54,13 @@ pub struct Candidate {
     pub item: String,
 }
 
-/// Merged branches under the configured roots no worktree holds, each with the command that
-/// deletes it. Merged worktrees are `agt cleanup --only worktrees`.
-fn merged(found: &mut Vec<Candidate>) -> Result<()> {
-    for work in prune::candidates()? {
+/// Merged branches under the configured roots no worktree holds and whose tip is old, each with
+/// the command that deletes it. Merged worktrees are `agt cleanup --only worktrees`.
+fn merged(now: i64, found: &mut Vec<Candidate>) -> Result<()> {
+    for work in prune::candidates()?
+        .into_iter()
+        .filter(|work| old(work.committed, now))
+    {
         found.push(Candidate {
             section: "branches",
             item: format!(
@@ -57,8 +74,9 @@ fn merged(found: &mut Vec<Candidate>) -> Result<()> {
 }
 
 /// Everything in the backups directory except agt's own backups, which the `backups` kind
-/// handles. A worktree backup is listed with the command that deletes it.
-fn backups(found: &mut Vec<Candidate>) -> Result<()> {
+/// handles, once old. A worktree backup is listed with the command that deletes it, by the
+/// time its record states, else by its files.
+fn backups(now: i64, found: &mut Vec<Candidate>) -> Result<()> {
     let store = Store::open(Namespace::Reviews)?;
     let own: Vec<PathBuf> = store
         .agt_backups()
@@ -68,6 +86,10 @@ fn backups(found: &mut Vec<Candidate>) -> Result<()> {
         .collect();
     let worktree_backups = prune::backups()?;
     for backup in &worktree_backups {
+        let made = clock::parse(&backup.created);
+        if !made.map_or_else(|_| untouched(&backup.dir, now), |made| old(made, now)) {
+            continue;
+        }
         found.push(Candidate {
             section: "backups",
             item: format!("agt worktree backups rm {} --yes", quote(&backup.id)),
@@ -85,7 +107,10 @@ fn backups(found: &mut Vec<Candidate>) -> Result<()> {
                 .iter()
                 .any(|backup| backup.dir.parent() == Some(path.as_path()))
         })
-        .map(|path| (measure(&path).map_or(0, |(_, bytes)| bytes), path))
+        .filter_map(|path| {
+            let (newest, bytes) = measure(&path).ok()?;
+            old(newest, now).then_some((bytes, path))
+        })
         .collect();
     sized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     for (bytes, path) in sized {
@@ -120,7 +145,7 @@ fn version_key(name: &str) -> Vec<(String, u64)> {
     parts
 }
 
-fn codex_releases(home: &Path, found: &mut Vec<Candidate>) {
+fn codex_releases(home: &Path, now: i64, found: &mut Vec<Candidate>) {
     let standalone = home
         .join(harness::CODEX_DIR)
         .join(harness::CODEX_STANDALONE_DIR);
@@ -141,7 +166,7 @@ fn codex_releases(home: &Path, found: &mut Vec<Candidate>) {
         .position(|name| current.as_deref() == Some(releases.join(name).as_path()));
     for (index, name) in names.iter().enumerate() {
         let keep = current_index.is_some_and(|at| index == at || index + 1 == at);
-        if !keep {
+        if !keep && untouched(&releases.join(name), now) {
             found.push(Candidate {
                 section: "codex_releases",
                 item: releases.join(name).display().to_string(),
@@ -165,13 +190,13 @@ fn playwright_roots(home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-fn playwright(home: &Path, found: &mut Vec<Candidate>) {
+fn playwright(home: &Path, now: i64, found: &mut Vec<Candidate>) {
     for root in playwright_roots(home) {
-        playwright_in(&root, found);
+        playwright_in(&root, now, found);
     }
 }
 
-fn playwright_in(root: &Path, found: &mut Vec<Candidate>) {
+fn playwright_in(root: &Path, now: i64, found: &mut Vec<Candidate>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -188,25 +213,24 @@ fn playwright_in(root: &Path, found: &mut Vec<Candidate>) {
         .collect();
     builds.sort();
     for pair in builds.windows(2) {
-        if pair[0].0 == pair[1].0 {
+        let build = root.join(format!("{}-{}", pair[0].0, pair[0].1));
+        if pair[0].0 == pair[1].0 && untouched(&build, now) {
             found.push(Candidate {
                 section: "playwright",
-                item: root
-                    .join(format!("{}-{}", pair[0].0, pair[0].1))
-                    .display()
-                    .to_string(),
+                item: build.display().to_string(),
             });
         }
     }
 }
 
-pub fn candidates() -> Result<Vec<Candidate>> {
+/// Every leftover at least [`MIN_DAYS`] old at `now`.
+pub fn candidates(now: i64) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
-    merged(&mut found)?;
-    backups(&mut found)?;
+    merged(now, &mut found)?;
+    backups(now, &mut found)?;
     let home = local::home()?;
-    codex_releases(&home, &mut found);
-    playwright(&home, &mut found);
+    codex_releases(&home, now, &mut found);
+    playwright(&home, now, &mut found);
     Ok(found)
 }
 
@@ -238,7 +262,7 @@ pub fn save(candidates: &[Candidate], now: i64) -> Result<PathBuf> {
     let mut text = format!(
         "# Cleanup candidates\n\n{COUNT_PREFIX}{} -->\nGenerated {}. List only; nothing here is deleted automatically.\n",
         candidates.len(),
-        crate::core::clock::format(now)
+        clock::format(now)
     );
     for (section, heading) in SECTIONS {
         text.push_str(&format!("\n## {heading}\n"));

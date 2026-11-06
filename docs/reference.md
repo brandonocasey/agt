@@ -554,7 +554,9 @@ never counts as a browser server. A parent that is a `systemd --user` manager ra
 treated as gone. A program that init or a launchd agent runs on purpose with one of these markers
 and no `CLAUDE_PID` would be listed too, so read the dry run before `--yes`.
 
-`manual` lists what cleanup never deletes, in `manual` by section: `branches` (local branches in
+`manual` lists what cleanup never deletes, once it is at least 30 days old (a branch by its tip's
+commit time, a worktree backup by its record's creation time, anything else by the newest change
+of any file in it), in `manual` by section: `branches` (local branches in
 the default branch, not protected and not checked out, as `git -C <repo> branch -d <name>`), for
 the repositories under the `agt worktree` roots; this uses local ancestry, without network calls.
 Merged worktrees are not listed: `agt cleanup --only worktrees --all-repos --offline` plans their
