@@ -110,6 +110,7 @@ impl Source {
     }
 
     /// Every PR/MR of the repository whose source branch is `branch`, all states, all pages.
+    /// Forgejo is searched open PRs first and stops at the first search that finds one.
     pub fn pulls(&self, branch: &str) -> Result<Vec<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();

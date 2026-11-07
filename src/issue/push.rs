@@ -556,28 +556,21 @@ impl Push<'_> {
         if changes.is_empty() {
             return Ok(Step::Done);
         }
-        // Record what the service gets: a close with no reason is sent with its default.
-        if let Some((Category::Closed, reason)) = changes.state.as_mut()
-            && reason.is_none()
-            && crate::forge::service::kind(
-                self.tracker
-                    .doc
-                    .forge
-                    .ok_or_else(|| Error("local tracker has no remote destination".into()))?,
-            )
-            .issue_caps
-            .close_reasons
-        {
-            *reason = Some("completed".to_owned());
-        }
-        let labels_apart = crate::forge::service::kind(
+        let caps = &crate::forge::service::kind(
             self.tracker
                 .doc
                 .forge
                 .ok_or_else(|| Error("local tracker has no remote destination".into()))?,
         )
-        .issue_caps
-        .labels_apart;
+        .issue_caps;
+        // Record what the service gets: a close with no reason is sent with its default.
+        if let Some((Category::Closed, reason)) = changes.state.as_mut()
+            && reason.is_none()
+            && caps.close_reasons
+        {
+            *reason = Some("completed".to_owned());
+        }
+        let labels_apart = caps.labels_apart;
         for part in changes.into_requests(labels_apart) {
             if let Step::Stopped = self.send_update(name, doc, &part)? {
                 return Ok(Step::Stopped);

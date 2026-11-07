@@ -2002,6 +2002,51 @@ fn forgejo_a_reply_is_a_quote_and_a_resolve_stays_local() {
     );
 }
 
+/// A reply posted as a general comment is stored in the thread it answers, which is a review
+/// thread; the host returns it as a general comment, and sync still finds it there.
+#[test]
+fn forgejo_a_posted_reply_is_not_flagged_deleted_by_the_next_sync() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let mut remote = Remote::by("alice");
+    remote.thread(
+        "301",
+        false,
+        3,
+        vec![Comment::new(301, "alice", "Alice asks why.")],
+    );
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "5"]);
+    let alice = svc.local_thread(301);
+    env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    svc.accept_nth(env, Call::PostNote, 1, 610);
+    env.run(&["publish", "--pr", "5", "--not-own"]);
+    let posted = env.forge_inputs();
+    let (_, input) = posted
+        .iter()
+        .find(|(args, _)| *args == svc.call(Call::PostNote).join(" "))
+        .expect("the reply was posted");
+    let body = serde_json::from_str::<Value>(input).unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    remote.general("610", Comment::new(610, "me", &body));
+    svc.sync(&setup, &remote);
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["threads"]["deleted"], 0, "{synced}");
+    let comments = thread(&env.run(&["list"]), &alice)["comments"].clone();
+    let reply = comments
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|comment| comment["remote"]["id"] == "610")
+        .unwrap_or_else(|| panic!("the reply keeps the id the host gave it: {comments}"));
+    assert_eq!(reply["deleted_remote"], false, "{reply}");
+}
+
 /// A formal approval of someone else's PR is a review of the head with the event `APPROVED`; the
 /// response is saved, and when it is lost sync claims the review by what was sent.
 #[test]

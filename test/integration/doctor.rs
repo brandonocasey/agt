@@ -241,26 +241,29 @@ fn forgejo_setup() -> Env {
         "origin",
         "https://codeberg.org/o/r.git",
     ]);
-    env.respond(&["--version"], "tea version 0.12.0");
+    env.respond(&["--version"], "tea version 0.13.0");
     env
 }
 
+/// tea 0.11 has no `tea api`; 0.12 has it but no `-d`, which every request body goes through.
 #[test]
-fn a_tea_without_the_api_subcommand_warns_with_the_minimum_version() {
-    let env = forgejo_setup();
-    forgejo::logins(&env);
-    env.respond(&["--version"], "tea version 0.11.1");
-    let (_, report) = doctor(&env);
-    let tea = row(&report, "tea");
-    assert_eq!(tea["status"], "warn", "{report}");
-    assert!(
-        tea["detail"]
-            .as_str()
-            .unwrap()
-            .contains("0.11.1, older than 0.12"),
-        "{tea}"
-    );
-    assert!(tea["fix"].as_str().unwrap().contains("0.12"), "{tea}");
+fn a_tea_without_api_data_warns_with_the_minimum_version() {
+    for old in ["0.11.1", "0.12.0"] {
+        let env = forgejo_setup();
+        forgejo::logins(&env);
+        env.respond(&["--version"], &format!("tea version {old}"));
+        let (_, report) = doctor(&env);
+        let tea = row(&report, "tea");
+        assert_eq!(tea["status"], "warn", "{report}");
+        assert!(
+            tea["detail"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("{old}, older than 0.13")),
+            "{tea}"
+        );
+        assert!(tea["fix"].as_str().unwrap().contains("0.13"), "{tea}");
+    }
 }
 
 #[test]
@@ -269,7 +272,7 @@ fn a_forgejo_origin_checks_the_tea_tool_and_its_login() {
     forgejo::logins(&env);
     let (_, report) = doctor(&env);
     assert_eq!(row(&report, "tea")["status"], "ok", "{report}");
-    assert_eq!(row(&report, "tea")["detail"], "0.12.0");
+    assert_eq!(row(&report, "tea")["detail"], "0.13.0");
     let auth = row(&report, "auth codeberg.org");
     assert_eq!(auth["status"], "ok", "{report}");
     assert_eq!(auth["detail"], "tea as me");

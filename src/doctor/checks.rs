@@ -20,8 +20,8 @@ use super::Row;
 
 /// `git merge-tree --write-tree` arrived in this git version.
 const MIN_GIT: [u64; 2] = [2, 38];
-/// `tea api` first shipped in this tea version.
-const MIN_TEA: [u64; 2] = [0, 12];
+/// `tea api -d`, which agt sends every request body through, first shipped in this tea version.
+const MIN_TEA: [u64; 2] = [0, 13];
 const MISE_PIN: &str = "github:brandonocasey/agt";
 const IGNORED: [(&str, &str); 3] = [
     (".worktrees/", ".worktrees/probe"),
@@ -126,8 +126,8 @@ fn tools() -> Vec<Row> {
             {
                 Row::warn(
                     name,
-                    format!("{found}, older than 0.12 (it has no `tea api`)"),
-                    "upgrade tea to 0.12 or newer",
+                    format!("{found}, older than 0.13 (its `tea api` has no `-d`)"),
+                    "upgrade tea to 0.13 or newer",
                 )
             }
             Some(found) => Row::ok(name, found),

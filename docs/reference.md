@@ -1236,8 +1236,9 @@ on GitHub and GitLab, with these differences:
   the comments of a review take no paging parameters, so one request reads all of them.
 - `tea api` exits 0 whatever the host answered, so agt passes `-i` and reads the `HTTP/1.1 <status>`
   line tea prints to stderr: a status of 400 or more is an error that carries the status (a 404 on
-  `auto-merge off` means no schedule). `tea` 0.12.0 is the first release with `tea api`;
-  `agt doctor` warns about an older one.
+  `auto-merge off` means no schedule). `tea` 0.12.0 is the first release with `tea api`
+  and 0.13.0 the first with `-d`, which agt needs to send a request body; `agt doctor` warns about
+  an older one.
 - A tea login with a port (`https://git.example.com:3000`) serves a remote on that host name; a
   login on the exact host is preferred.
 
@@ -1622,7 +1623,7 @@ are terminated; a check finishing after the deadline cannot report success.
 check (name, `ok`/`warn`/`fail`, detail, fix hint), as a table or, with `--json`,
 `{"status", "checks": [...]}`. It is read-only: it writes nothing, reads no credentials (a forge
 login is only the exit status and account name of `gh auth status` / `glab auth status`, or the account `tea logins list` names) and
-makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `tea` (>= 0.12.0, the first with `tea api`; older is a warning), `mise` and their versions; the
+makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `tea` (>= 0.13.0, the first with `tea api -d`, which agt needs for request bodies; older is a warning), `mise` and their versions; the
 login for the origin forge (a fail when missing) and for the other installed forge CLIs (a
 warning); the running agt version against the one `mise ls --current` pins for
 `github:brandonocasey/agt` (older: warn, `mise install`; when `mise ls` fails, the detail is its first stderr line containing `ERROR`, else its last line and the fix is

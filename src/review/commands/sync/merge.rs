@@ -314,11 +314,14 @@ impl<'a> Seen<'a> {
             .any(|(kind, id)| *id == remote.id && same_kind(self.caps, remote.kind, *kind))
     }
 
-    /// A comment is of its thread's kind; with no remote thread yet, as `publish` leaves a
-    /// review's comments, it matches by id alone.
+    /// A comment is of its thread's kind, or a general comment: a reply the host cannot attach
+    /// to a thread is posted as one and kept in the thread it answers. With no remote thread
+    /// yet, as `publish` leaves a review's comments, it matches by id alone.
     fn comment(&self, thread: Option<&RemoteThread>, remote: &RemoteComment) -> bool {
         self.comments.iter().any(|(kind, id)| {
-            *id == remote.id && thread.is_none_or(|thread| same_kind(self.caps, thread.kind, *kind))
+            *id == remote.id
+                && (*kind == RemoteKind::General
+                    || thread.is_none_or(|thread| same_kind(self.caps, thread.kind, *kind)))
         })
     }
 }
