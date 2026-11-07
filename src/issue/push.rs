@@ -556,21 +556,32 @@ impl Push<'_> {
         if changes.is_empty() {
             return Ok(Step::Done);
         }
+        let caps = &crate::forge::service::kind(
+            self.tracker
+                .doc
+                .forge
+                .ok_or_else(|| Error("local tracker has no remote destination".into()))?,
+        )
+        .issue_caps;
         // Record what the service gets: a close with no reason is sent with its default.
         if let Some((Category::Closed, reason)) = changes.state.as_mut()
             && reason.is_none()
-            && crate::forge::service::kind(
-                self.tracker
-                    .doc
-                    .forge
-                    .ok_or_else(|| Error("local tracker has no remote destination".into()))?,
-            )
-            .issue_caps
-            .close_reasons
+            && caps.close_reasons
         {
             *reason = Some("completed".to_owned());
         }
-        let request = self.service().update(self.subject(doc)?, &changes)?;
+        let labels_apart = caps.labels_apart;
+        for part in changes.into_requests(labels_apart) {
+            if let Step::Stopped = self.send_update(name, doc, &part)? {
+                return Ok(Step::Stopped);
+            }
+        }
+        Ok(Step::Done)
+    }
+
+    /// Sends one edit of the issue and records what went out.
+    fn send_update(&mut self, name: &str, doc: &mut Issue, changes: &Changes) -> Result<Step> {
+        let request = self.service().update(self.subject(doc)?, changes)?;
         if self.options.dry_run {
             self.show(doc, "update", &request, json!({}));
             return Ok(Step::Done);
@@ -579,7 +590,7 @@ impl Push<'_> {
             Ok(_) => {
                 self.mutate(name, doc, |issue| {
                     if let Some(base) = issue.base.as_mut() {
-                        record_sent(base, &changes);
+                        record_sent(base, changes);
                     }
                     // The local copy takes the reason that went out, so nothing is left to send.
                     if let Some((state, Some(reason))) = &changes.state
@@ -601,6 +612,9 @@ impl Push<'_> {
     }
 
     fn parent(&mut self, name: &str, doc: &mut Issue) -> Result<Step> {
+        if !self.tracker.sends_parent() {
+            return Ok(Step::Done);
+        }
         if doc
             .conflicts
             .iter()

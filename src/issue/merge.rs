@@ -9,6 +9,8 @@ use crate::store::issues::{
 };
 use crate::store::model::{Comment, PostState};
 
+use super::trackers::key_takes_parent;
+
 /// The writable fields of `data`, as the host holds them. A marker `agt` added to the body is
 /// not part of what a person wrote.
 pub fn remote_fields(data: &IssueData) -> Fields {
@@ -286,12 +288,24 @@ pub fn unsent_comments(issue: &Issue) -> Vec<&Comment> {
         .collect()
 }
 
+/// Whether a push has anything to send for `issue`. A parent counts only where the issue's
+/// tracker takes one: a push never sends it to a service without hierarchy.
 pub fn has_pending(issue: &Issue) -> bool {
+    (parent_queued(issue) && key_takes_parent(&issue.tracker))
+        || has_pending_apart_from_parent(issue)
+}
+
+/// A parent set here that the host does not have yet.
+pub fn parent_queued(issue: &Issue) -> bool {
+    issue
+        .base
+        .as_ref()
+        .is_some_and(|base| issue.fields.parent != base.parent)
+}
+
+/// What a push still has to send, apart from the parent.
+fn has_pending_apart_from_parent(issue: &Issue) -> bool {
     issue.number.is_none()
-        || issue
-            .base
-            .as_ref()
-            .is_some_and(|base| issue.fields.parent != base.parent)
         || !pending_changes(issue).is_empty()
         || !unsent_comments(issue).is_empty()
 }

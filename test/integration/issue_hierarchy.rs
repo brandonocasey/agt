@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
-use crate::support::Env;
-use crate::support::issue::{Github, Gitlab, IssueFake, Spec};
+use crate::support::issue::{Forgejo, Github, Gitlab, IssueFake, Spec};
+use crate::support::{Env, strs};
 
 fn key(issue: &Value) -> &str {
     issue["key"].as_str().unwrap()
@@ -1147,4 +1147,99 @@ fn gitlab_test_case_malformed_widgets_still_errors() {
         env.issue_fail(&["sync"])
             .contains("GitLab work item has no hierarchy widget")
     );
+}
+
+/// Forgejo has no parent link between issues, so a host's issues are all roots and a local
+/// parent stays local.
+#[test]
+fn forgejo_pulls_no_hierarchy() {
+    let fake: &dyn IssueFake = &Forgejo;
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(
+        &env,
+        &[
+            Spec::new(1, "Parent").children(&[2]),
+            Spec::new(2, "Child").parent(1),
+        ],
+    );
+    env.issue(&["sync"]);
+    assert_eq!(env.issue(&["show", "1"])["sub_issues"], json!([]));
+    assert_eq!(env.issue(&["show", "2"])["parent"], Value::Null);
+    assert_eq!(env.issue(&["list", "--parent", "1"])["count"], 0);
+    assert!(env.forge_writes(fake).is_empty());
+}
+
+#[test]
+fn forgejo_keeps_a_local_parent_local_and_a_push_skips_it() {
+    let fake: &dyn IssueFake = &Forgejo;
+    let env = Env::new();
+    env.write_config(&fake.config(false));
+    fake.serve(&env, &[]);
+    let parent = env.issue(&["create", "--title", "Parent"]);
+    let child = env.issue(&["create", "--title", "Child", "--parent", key(&parent)]);
+    let created = |number: u64, title: &str| {
+        let mut spec = Spec::new(number, title);
+        spec.body = fake.created_body_placeholder().into();
+        fake.issue_json(&spec).to_string()
+    };
+    let create_call = fake.create_call();
+    let create = strs(&create_call);
+    env.respond_nth(&create, 1, &created(1, "Parent"));
+    env.respond_nth(&create, 2, &created(2, "Child"));
+    fake.serve_issue(&env, &Spec::new(1, "Parent"));
+    fake.serve_issue(&env, &Spec::new(2, "Child"));
+    env.write_config(&fake.config(true));
+    for round in 0..2 {
+        let report = env.issue(&["push"]);
+        let tracker = &report["trackers"][0];
+        assert_eq!(
+            tracker["sent"].as_array().unwrap().len(),
+            if round == 0 { 2 } else { 0 },
+            "{report}"
+        );
+        assert!(tracker["failed"].as_array().unwrap().is_empty(), "{report}");
+        assert!(
+            tracker["deferred"].as_array().unwrap().is_empty(),
+            "{report}"
+        );
+    }
+    assert_eq!(
+        env.issue(&["show", key(&child)])["parent"],
+        format!("{}#1", fake.repo())
+    );
+    assert_eq!(
+        env.issue(&["show", key(&parent)])["sub_issues"],
+        json!([format!("{}#2", fake.repo())])
+    );
+    assert!(
+        env.forge_calls()
+            .iter()
+            .all(|call| !call.contains("sub_issue") && !call.contains("parent")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn forgejo_issue_whose_only_change_is_a_local_parent_is_not_pending() {
+    let fake: &dyn IssueFake = &Forgejo;
+    let env = Env::new();
+    env.write_config(&fake.config(true));
+    fake.serve(&env, &[Spec::new(1, "Parent"), Spec::new(2, "Child")]);
+    env.issue(&["sync"]);
+    env.issue(&["edit", "2", "--parent", "1"]);
+    assert_eq!(env.issue(&["show", "2"])["parent"], "o/r#1");
+    assert_eq!(env.issue(&["show", "2"])["pending"], false);
+    assert_eq!(env.issue(&["list", "--pending"])["count"], 0);
+    let status = env.issue(&["status"]);
+    assert_eq!(status["trackers"][0]["pending"], json!([]), "{status}");
+    // A tracker with hierarchy still counts the queued parent.
+    let github: &dyn IssueFake = &Github;
+    let queued = Env::new();
+    queued.write_config(&github.config(true));
+    github.serve(&queued, &[Spec::new(1, "Parent"), Spec::new(2, "Child")]);
+    queued.issue(&["sync"]);
+    queued.issue(&["edit", "2", "--parent", "1"]);
+    assert_eq!(queued.issue(&["show", "2"])["pending"], true);
 }

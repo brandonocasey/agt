@@ -1,5 +1,6 @@
 //! The user's hosts file: `$XDG_CONFIG_HOME/agt/hosts.json` names the forge of hosts agt cannot
-//! tell from `gh` or `glab` alone.
+//! tell from `gh`, `glab` or `tea` alone: `{"git.example.com": {"service": "forgejo"}}`, where
+//! `gitea` means the same.
 
 use std::collections::HashMap;
 
@@ -37,4 +38,26 @@ pub fn named(host: &str) -> Result<Option<Forge>> {
     let entry: HostEntry = serde_json::from_value(entry)
         .map_err(|error| Error(format!("{} entry for {host}: {error}", path.display())))?;
     Ok(Some(entry.service))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_host_is_named_forgejo_or_gitea_and_stored_forges_keep_their_names() {
+        let forge = |name: &str| {
+            serde_json::from_str::<HostEntry>(&format!(r#"{{"service": "{name}"}}"#))
+                .unwrap()
+                .service
+        };
+        assert!(forge("forgejo") == Forge::Forgejo);
+        assert!(forge("gitea") == Forge::Forgejo);
+        assert!(forge("github") == Forge::Github);
+        assert!(forge("gitlab") == Forge::Gitlab);
+        let stored = |forge: Forge| serde_json::to_string(&forge).unwrap();
+        assert_eq!(stored(Forge::Github), r#""github""#);
+        assert_eq!(stored(Forge::Gitlab), r#""gitlab""#);
+        assert_eq!(stored(Forge::Forgejo), r#""forgejo""#);
+    }
 }

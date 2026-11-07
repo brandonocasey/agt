@@ -69,9 +69,10 @@ enum Command {
     /// merged, 1 a target needs action (failed, canceled, skipped or manual, head changed,
     /// closed), 2 usage or query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
     ///
-    /// With --job, only the jobs (on GitHub, the checks) with those exact names count, whatever else
-    /// the pipeline runs. A named job that is absent while checks still run is pending; once they
-    /// are idle (GitLab: the pipeline stopped running) it is `job_not_found` (exit 1).
+    /// With --job, only the jobs (on GitHub and Forgejo, the checks or commit statuses of the
+    /// head, by exact context name) with those exact names count, whatever else the pipeline
+    /// runs. A named job that is absent while checks still run is pending; once they are idle
+    /// (GitLab: the pipeline stopped running) it is `job_not_found` (exit 1).
     #[command(verbatim_doc_comment)]
     Wait {
         #[arg(value_name = "TARGET", required = true)]

@@ -1,6 +1,6 @@
 //! A fake hosting service for scenarios. A [`FakeService`] speaks the scenario's language (a
 //! [`Remote`] PR, semantic [`Call`]s, an [`Expect`] pinning the service's capabilities by hand)
-//! and turns it into the exact argv and response bodies the fake `gh`/`glab` replays. One
+//! and turns it into the exact argv and response bodies the fake `gh`/`glab`/`tea` replays. One
 //! scenario function then runs against every service in [`all`].
 //!
 //! A new service adds `<service>.rs` here, pinned [`Expect`] facts, a
@@ -12,6 +12,7 @@ use super::scenario::{Setup, count_calls};
 use super::{Env, strs};
 
 pub mod argv;
+pub mod forgejo;
 pub mod github;
 pub mod gitlab;
 
@@ -161,6 +162,8 @@ pub struct Expect {
     ranges: bool,
     reply: &'static str,
     approve: &'static str,
+    /// The `event` of the review that approves, where approving is a review.
+    approve_event: &'static str,
     approve_self_allowed: Option<bool>,
     edits_attributed: bool,
     resolve: bool,
@@ -179,6 +182,7 @@ impl Expect {
                 ranges: true,
                 reply: "review_threads",
                 approve: "review",
+                approve_event: "APPROVE",
                 approve_self_allowed: Some(false),
                 edits_attributed: true,
                 resolve: true,
@@ -193,6 +197,7 @@ impl Expect {
                 ranges: true,
                 reply: "all",
                 approve: "call",
+                approve_event: "APPROVE",
                 approve_self_allowed: None,
                 edits_attributed: false,
                 resolve: true,
@@ -201,6 +206,21 @@ impl Expect {
                 general_kind: "discussion",
                 notes_become_discussions: true,
                 pagination: "cli_paginate",
+            },
+            "forgejo" => Self {
+                inline: "review_batch",
+                ranges: false,
+                reply: "none",
+                approve: "review",
+                approve_event: "APPROVED",
+                approve_self_allowed: Some(false),
+                edits_attributed: false,
+                resolve: false,
+                unresolve: false,
+                general_resolvable: false,
+                general_kind: "general",
+                notes_become_discussions: false,
+                pagination: "page_numbers",
             },
             other => panic!("no pinned expectations for {other}; add them here"),
         };
@@ -269,6 +289,17 @@ impl Expect {
     /// The formal approval is a review, which its author may not give on their own PR.
     pub fn approves_by_review(&self) -> bool {
         self.approve == "review"
+    }
+
+    /// The `event` of the review that formally approves.
+    pub fn approve_event(&self) -> &'static str {
+        self.approve_event
+    }
+
+    /// A reply to a thread of the diff is a native reply, which a service with no reply route
+    /// answers with a general comment that quotes the thread.
+    pub fn replies_to_threads_natively(&self) -> bool {
+        self.reply != "none"
     }
 
     pub fn self_approval_allowed(&self) -> bool {

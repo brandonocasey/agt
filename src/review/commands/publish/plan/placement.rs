@@ -2,7 +2,7 @@
 
 use super::Planner;
 use crate::forge::anchors;
-use crate::forge::service::{Placement, Position};
+use crate::forge::service::{Placement, Position, Wanted};
 use crate::review::commands::publish::render::location;
 use crate::store::model::{Anchor, Side};
 
@@ -38,10 +38,15 @@ impl Planner<'_> {
             &single
         };
         let placed = match (&anchor.commit, wanted) {
-            (Some(commit), Some(line)) => {
-                self.service()
-                    .place(self.repo, self.review, anchor, commit, line)
-            }
+            (Some(commit), Some(line)) => self.service().place(
+                self.repo,
+                self.review,
+                Wanted {
+                    anchor,
+                    commit,
+                    line,
+                },
+            ),
             _ => None,
         };
         match placed {

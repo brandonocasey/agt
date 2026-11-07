@@ -21,6 +21,11 @@ macro_rules! matrix {
                 fn gitlab() {
                     super::$scenario(&crate::support::issue::Gitlab);
                 }
+
+                #[test]
+                fn forgejo() {
+                    super::$scenario(&crate::support::issue::Forgejo);
+                }
             }
         )*
     };
@@ -83,10 +88,16 @@ fn a_successful_create_stays_reported_when_its_comment_fails(fake: Fake) {
     env.write_config(&fake.config(true));
     let local = env.issue(&["create", "--title", "Local issue"]);
     env.issue(&["comment", local["key"].as_str().unwrap(), "Thanks"]);
-    env.respond(&strs(&fake.user_call()), login_body(fake));
+    log_in(&env, fake);
+    let mut spec = created();
+    if !fake.labels_with_other_fields() {
+        // The create sent no labels and the host shows none, so the update after it is only the
+        // title and body, which can go out together.
+        spec.labels.clear();
+    }
     env.respond(
         &strs(&fake.create_call()),
-        &fake.issue_json(&created()).to_string(),
+        &fake.issue_json(&spec).to_string(),
     );
     fake.accept_update(&env, 5);
     env.fail_call(&strs(&fake.comment_call(5)));
@@ -134,16 +145,20 @@ fn queue_everything(env: &Env, fake: Fake) {
     env.issue(&["comment", "1", "Thanks"]);
     env.issue(&["edit", "1", "--state", "closed"]);
     env.issue(&["edit", "1", "--add-assignee", "ann"]);
-    env.issue(&["edit", "1", "--add-label", "triage"]);
+    if fake.labels_with_other_fields() {
+        env.issue(&["edit", "1", "--add-label", "triage"]);
+    }
     env.issue(&["edit", "1", "--title", "New title"]);
     env.issue(&["link", "1", "--pr", "7", "--comment"]);
 }
 
-fn expected_update() -> Update {
+fn expected_update(fake: Fake) -> Update {
     Update {
         title: Some("New title"),
         close: Some(true),
-        labels: Some(vec!["bug", "triage"]),
+        labels: fake
+            .labels_with_other_fields()
+            .then(|| vec!["bug", "triage"]),
         assignees: Some(vec!["ann"]),
         assignee_ids: Some(vec![11]),
         ..Update::default()
@@ -159,7 +174,7 @@ fn a_dry_run_renders_every_write_and_sends_none(fake: Fake) {
     let planned = writes(&report, "writes");
     assert_eq!(kinds(&planned), ["update", "comment", "comment"]);
     assert_eq!(planned[0]["args"], json!(fake.update_call(1)));
-    assert_eq!(planned[0]["body"], fake.update_body(&expected_update()));
+    assert_eq!(planned[0]["body"], fake.update_body(&expected_update(fake)));
     assert_eq!(planned[1]["args"], json!(fake.comment_call(1)));
     let first = text(&planned[1]["body"]);
     assert!(
@@ -168,11 +183,7 @@ fn a_dry_run_renders_every_write_and_sends_none(fake: Fake) {
     );
     assert!(first.ends_with(" -->"), "{first}");
     let second = text(&planned[2]["body"]);
-    let url = if fake.name() == "github" {
-        "https://github.com/o/r/pull/7"
-    } else {
-        "https://gitlab.com/g/p/-/merge_requests/7"
-    };
+    let url = fake.pr_url(7);
     assert!(
         second.starts_with(&format!(
             "Linked: {url}\n\n<!-- agent-review id=c2 attempt=at-"
@@ -211,7 +222,7 @@ fn push_sends_each_write_once_and_a_second_push_sends_nothing(fake: Fake) {
     );
     assert_eq!(
         fake.sent(&env, &fake.update_call(1)),
-        [fake.update_body(&expected_update())]
+        [fake.update_body(&expected_update(fake))]
     );
     let comments = fake.sent(&env, &fake.comment_call(1));
     assert!(text(&comments[0]).starts_with("Thanks\n\n"));
@@ -236,8 +247,13 @@ fn push_sends_each_write_once_and_a_second_push_sends_nothing(fake: Fake) {
     );
 
     // The host now shows the changes; a sync finds the copy in step with it.
+    let labels: &[&str] = if fake.labels_with_other_fields() {
+        &["bug", "triage"]
+    } else {
+        &["bug"]
+    };
     let mut remote = Spec::new(1, "New title")
-        .labels(&["bug", "triage"])
+        .labels(labels)
         .assignees(&["ann"])
         .closed()
         .updated("2026-10-18T10:00:00Z")
@@ -253,12 +269,10 @@ fn push_sends_each_write_once_and_a_second_push_sends_nothing(fake: Fake) {
     assert_eq!(env.issue(&["show", "1"])["pending"], false);
 }
 
-fn login_body(fake: Fake) -> &'static str {
-    if fake.name() == "github" {
-        r#"{"login":"me"}"#
-    } else {
-        r#"{"username":"me"}"#
-    }
+/// Lets the CLI reach the host as `me`.
+fn log_in(env: &Env, fake: Fake) {
+    fake.log_in(env);
+    env.respond(&strs(&fake.user_call()), &fake.user_body());
 }
 
 fn only_the_remote_changed_is_taken_and_the_local_change_is_sent(fake: Fake) {
@@ -278,7 +292,7 @@ fn only_the_remote_changed_is_taken_and_the_local_change_is_sent(fake: Fake) {
         ..Update::default()
     };
     assert_eq!(
-        fake.sent(&env, &fake.update_call(1)),
+        fake.sent(&env, &fake.update_call_for(1, &update)),
         [fake.update_body(&update)]
     );
     assert_eq!(doc(&env, fake, "1")["fields"]["title"], "Login breaks");
@@ -341,7 +355,7 @@ fn labels_merge_when_both_sides_change(fake: Fake) {
         ..Update::default()
     };
     assert_eq!(
-        fake.sent(&env, &fake.update_call(1)),
+        fake.sent(&env, &fake.update_call_for(1, &update)),
         [fake.update_body(&update)]
     );
 }
@@ -445,7 +459,7 @@ fn a_created_issue_is_sent_then_known_by_its_number(fake: Fake) {
     ]);
     let key = made["key"].as_str().unwrap().to_owned();
     env.issue(&["comment", &key, "First!"]);
-    env.respond(&strs(&fake.user_call()), login_body(fake));
+    log_in(&env, fake);
     let dry = env.issue(&["push", "--dry-run"]);
     let planned = writes(&dry, "writes");
     assert_eq!(kinds(&planned), ["create"]);
@@ -456,12 +470,7 @@ fn a_created_issue_is_sent_then_known_by_its_number(fake: Fake) {
         "{body}"
     );
     let mut expected = fake.create_body("Brand new", "", &["bug"], &[]);
-    let field = if fake.name() == "github" {
-        "body"
-    } else {
-        "description"
-    };
-    expected[field] = json!(body);
+    expected[fake.text_field()] = json!(body);
     assert_eq!(planned[0]["body"], expected);
     assert!(env.forge_writes(fake).is_empty());
 
@@ -470,14 +479,7 @@ fn a_created_issue_is_sent_then_known_by_its_number(fake: Fake) {
         &strs(&fake.create_call()),
         &fake.issue_json(&spec).to_string(),
     );
-    env.respond(
-        &strs(&fake.user_call()),
-        if fake.name() == "github" {
-            r#"{"login":"me"}"#
-        } else {
-            r#"{"username":"me"}"#
-        },
-    );
+    log_in(&env, fake);
     fake.accept_comment(&env, 5, 700);
     let report = env.issue(&["push"]);
     assert_eq!(report["trackers"].as_array().unwrap().len(), 1, "{report}");
@@ -528,14 +530,7 @@ fn lose_a_create(fake: Fake) -> (Env, String) {
         "bug",
     ]);
     let key = made["key"].as_str().unwrap().to_owned();
-    env.respond(
-        &strs(&fake.user_call()),
-        if fake.name() == "github" {
-            r#"{"login":"me"}"#
-        } else {
-            r#"{"username":"me"}"#
-        },
-    );
+    log_in(&env, fake);
     env.fail_call(&strs(&fake.create_call()));
     let report = env.issue(&["push"]);
     assert_eq!(writes(&report, "failed")[0]["what"], "create");
@@ -762,14 +757,7 @@ fn push_a_create_with_answer(fake: Fake, answer: &str) -> (Env, String) {
     env.write_config(&fake.config(true));
     let made = env.issue(&["create", "--title", "Brand new", "--body", "Text"]);
     let key = made["key"].as_str().unwrap().to_owned();
-    env.respond(
-        &strs(&fake.user_call()),
-        if fake.name() == "github" {
-            r#"{"login":"me"}"#
-        } else {
-            r#"{"username":"me"}"#
-        },
-    );
+    log_in(&env, fake);
     env.respond(&strs(&fake.create_call()), answer);
     env.issue_exec(&["push"], "", &[]);
     assert_eq!(fake.count(&env, &fake.create_call()), 1);
@@ -856,7 +844,7 @@ fn automatic_create_attaches_one_issue_and_returns_its_canonical_key() {
     let other = unrelated["key"].as_str().unwrap();
     env.issue(&["comment", other, "Unrelated pending comment"]);
     env.write_config("[sync]\npush = \"auto\"\n");
-    env.respond(&strs(&fake.user_call()), login_body(fake));
+    log_in(&env, fake);
     env.respond(
         &strs(&fake.create_call()),
         &fake.issue_json(&created()).to_string(),
@@ -930,7 +918,7 @@ fn automatic_failure_preserves_local_save_and_explicit_false_denies_network() {
     assert_eq!(env.issue_doc("local", key)["fields"]["title"], "Keep me");
     assert!(env.forge_calls().is_empty());
     env.write_config("[sync]\npush = \"auto\"\n");
-    env.respond(&strs(&fake.user_call()), login_body(fake));
+    log_in(&env, fake);
     env.fail_call(&strs(&fake.create_call()));
     let edited = env.issue(&["edit", key, "--title", "Saved despite failure"]);
     assert_eq!(edited["title"], "Saved despite failure");
@@ -956,7 +944,7 @@ fn manual_push_allows_omitted_permission_and_local_dry_run_writes_no_files() {
         "bug",
     ]);
     let key = made["key"].as_str().unwrap();
-    env.respond(&strs(&fake.user_call()), login_body(fake));
+    log_in(&env, fake);
     let before = env.issue_files();
     let dry = env.issue(&["push", "--dry-run"]);
     assert_eq!(env.issue_files(), before);
@@ -988,7 +976,7 @@ fn an_automatic_create_returns_its_identity_when_a_followup_write_fails() {
     let env = Env::new();
     env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
     env.write_config("[sync]\npush = \"auto\"\n");
-    env.respond(&strs(&fake.user_call()), login_body(fake));
+    log_in(&env, fake);
     env.respond(
         &strs(&fake.create_call()),
         &fake.issue_json(&created()).to_string(),
@@ -1018,7 +1006,7 @@ fn a_local_issue_waits_for_tracker_when_every_remote_is_one() {
     env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
     env.git(&["remote", "add", "upstream", "https://gitlab.com/g/p.git"]);
     env.write_config("[sync]\npush = \"manual\"\n");
-    env.respond(&strs(&github.user_call()), login_body(github));
+    log_in(&env, github);
     env.respond(
         &strs(&github.create_call()),
         &github.issue_json(&created()).to_string(),
@@ -1081,7 +1069,7 @@ fn empty_local_tracker_does_not_require_an_attachment_destination() {
     ]);
     let key = made["key"].as_str().unwrap();
     env.write_config(&github.config(true));
-    env.respond(&strs(&github.user_call()), login_body(github));
+    log_in(&env, github);
     env.respond(
         &strs(&github.create_call()),
         &github.issue_json(&created()).to_string(),
@@ -1234,4 +1222,86 @@ fn automatic_push_rejects_colliding_policy_and_attachment_destinations() {
             "Saved locally"
         );
     }
+}
+
+const FORGEJO: &crate::support::issue::Forgejo = &crate::support::issue::Forgejo;
+
+#[test]
+fn a_forgejo_edit_answered_500_stays_queued_with_its_error() {
+    let fake: Fake = FORGEJO;
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["edit", "1", "--title", "New title"]);
+    let call = fake.update_call(1);
+    let patch = strs(&call);
+    env.respond(&patch, r#"{"message":"boom"}"#);
+    env.respond_status(&patch, "500 Internal Server Error");
+    let report = env.issue(&["push"]);
+    assert!(writes(&report, "sent").is_empty(), "{report}");
+    assert_eq!(writes(&report, "failed")[0]["what"], "update", "{report}");
+    let stored = doc(&env, fake, "1");
+    assert_eq!(stored["errors"][0]["what"], "update");
+    assert_ne!(stored["base"], stored["fields"]);
+    assert_eq!(env.issue(&["show", "1"])["pending"], true);
+}
+
+#[test]
+fn a_forgejo_retitle_with_a_relabel_goes_out_as_two_requests_and_the_next_issue_still_goes() {
+    let fake: Fake = FORGEJO;
+    let env = pushable(fake, &[issue(), Spec::new(2, "Second")]);
+    env.issue(&["edit", "1", "--title", "New title", "--add-label", "triage"]);
+    env.issue(&["edit", "2", "--title", "Other"]);
+    fake.accept_update(&env, 1);
+    fake.accept_update(&env, 2);
+    let report = env.issue(&["push"]);
+    assert!(writes(&report, "failed").is_empty(), "{report}");
+    let labels = Update {
+        labels: Some(vec!["bug", "triage"]),
+        ..Update::default()
+    };
+    assert_eq!(
+        env.forge_writes(fake),
+        [
+            fake.update_call(1).join(" "),
+            fake.update_call_for(1, &labels).join(" "),
+            fake.update_call(2).join(" "),
+        ]
+    );
+    let title = Update {
+        title: Some("New title"),
+        ..Update::default()
+    };
+    assert_eq!(
+        fake.sent(&env, &fake.update_call(1)),
+        [fake.update_body(&title)]
+    );
+    assert_eq!(
+        fake.sent(&env, &fake.update_call_for(1, &labels)),
+        [fake.update_body(&labels)]
+    );
+    for key in ["1", "2"] {
+        let stored = doc(&env, fake, key);
+        assert_eq!(stored["base"], stored["fields"], "{key}");
+        assert_eq!(env.issue(&["show", key])["pending"], false);
+    }
+}
+
+#[test]
+fn a_forgejo_label_change_that_is_refused_keeps_the_sent_title_and_queues_only_the_labels() {
+    let fake: Fake = FORGEJO;
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["edit", "1", "--title", "New title", "--add-label", "triage"]);
+    let labels = Update {
+        labels: Some(vec!["bug", "triage"]),
+        ..Update::default()
+    };
+    let call = fake.update_call_for(1, &labels);
+    let put = strs(&call);
+    env.respond(&strs(&fake.update_call(1)), "{}");
+    env.respond(&put, r#"{"message":"no"}"#);
+    env.respond_status(&put, "403 Forbidden");
+    let report = env.issue(&["push"]);
+    assert_eq!(writes(&report, "failed")[0]["what"], "update", "{report}");
+    let stored = doc(&env, fake, "1");
+    assert_eq!(stored["base"]["title"], "New title");
+    assert_eq!(stored["base"]["labels"], json!(["bug"]));
 }

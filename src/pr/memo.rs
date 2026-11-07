@@ -1,5 +1,6 @@
-//! The auto-merge settings `agt pr auto-merge off` paused, so `on` restores the same ones. They
-//! live in `$XDG_STATE_HOME/agents/pr/auto-merge.json`, keyed by `<host>/<repo>#<number>`.
+//! The auto-merge settings `agt pr auto-merge off` paused, so `on` restores the same ones; for
+//! Forgejo, which cannot report them, also those `agt pr merge --auto` set. They live in
+//! `$XDG_STATE_HOME/agents/pr/auto-merge.json`, keyed by `<host>/<repo>#<number>`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

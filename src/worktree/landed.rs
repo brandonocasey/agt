@@ -263,7 +263,8 @@ impl Scene {
             Ok(pulls) => pulls,
             Err(error) => return Ok(finding(Verdict::Unknown, format!("forge lookup: {error}"))),
         };
-        if let Some(open) = pulls
+        let counted: Vec<_> = pulls.iter().filter(|pull| origin.counts(pull)).collect();
+        if let Some(open) = counted
             .iter()
             .find(|pull| pull.state == Some(ReviewState::Open))
         {
@@ -316,7 +317,7 @@ impl Scene {
                 format!("PR #{} is in a state agt does not know", unknown.number),
             ));
         }
-        if let Some(closed) = pulls
+        if let Some(closed) = counted
             .iter()
             .find(|pull| pull.state == Some(ReviewState::Closed))
         {

@@ -1,0 +1,16 @@
+[
+  {
+    "id": 7001,
+    "body": "Please add a test.",
+    "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}#issuecomment-7001",
+    "created_at": "2026-10-14T07:00:00Z",
+    "user": { "login": "alice" }
+  },
+  {
+    "id": 7002,
+    "body": "Done.",
+    "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}#issuecomment-7002",
+    "created_at": "2026-10-14T08:00:00Z",
+    "user": { "login": "me" }
+  }
+]

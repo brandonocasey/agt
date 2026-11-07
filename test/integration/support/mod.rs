@@ -14,6 +14,7 @@ pub mod scenario;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agt");
 pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
+pub const FAKE_TEA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-tea.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
 /// Non-Git variables that can change a test. Tests that need one set it after `Env::command`.
@@ -117,6 +118,7 @@ impl Env {
             .env("TZ", "UTC")
             .env("AGT_GH_BIN", FAKE_FORGE)
             .env("AGT_GLAB_BIN", FAKE_FORGE)
+            .env("AGT_TEA_BIN", FAKE_TEA)
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
             // `agt cleanup` must see only this environment: its cache, its tmp, no processes.
             .env("XDG_CACHE_HOME", self.root.join("cache"))
@@ -153,6 +155,13 @@ impl Env {
     /// `auth status` that gh must not see.
     pub fn respond_glab(&self, args: &[&str], body: &str) {
         fs::write(self.forge_file(args, "glab.json"), body).unwrap();
+    }
+
+    /// Makes the fake tea answer the call with the HTTP status line `status`, such as
+    /// `404 Not Found`, as `tea api -i` prints it to stderr; the body stays what
+    /// [`Env::respond`] set, and the exit status is 0 as tea's always is.
+    pub fn respond_status(&self, args: &[&str], status: &str) {
+        fs::write(self.forge_file(args, "status"), status).unwrap();
     }
 
     /// Like [`Env::respond`], for the `call`-th call with these arguments only (from 1, counted

@@ -71,6 +71,25 @@ impl Changes {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// The edits to send, one request each: a host that sets labels apart gets them last, in an
+    /// edit of their own, after the other fields.
+    pub fn into_requests(mut self, labels_apart: bool) -> Vec<Self> {
+        let labels = self.labels.take();
+        if labels.is_none() || !labels_apart {
+            self.labels = labels;
+            return vec![self];
+        }
+        let labels_only = Self {
+            labels,
+            ..Self::default()
+        };
+        if self.is_empty() {
+            vec![labels_only]
+        } else {
+            vec![self, labels_only]
+        }
+    }
 }
 
 pub struct NewIssue<'a> {
@@ -86,6 +105,10 @@ pub struct IssueCaps {
     pub multi_assignee: bool,
     /// Closing takes a reason (`completed`, `not_planned`).
     pub close_reasons: bool,
+    /// An issue can have a parent; without it a parent stays local and is never sent.
+    pub hierarchy: bool,
+    /// Labels are set by a request of their own, not as a field of an issue edit.
+    pub labels_apart: bool,
 }
 
 /// Names of the `key` field of each item of the array at `pointer`.

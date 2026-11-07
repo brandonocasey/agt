@@ -11,7 +11,7 @@ use crate::core::config::{self, Config};
 use crate::core::harness;
 use crate::core::local;
 use crate::forge::auto::Offline;
-use crate::forge::transport::Cli;
+use crate::forge::transport::{Cli, TEA_LOGINS_LIST, parse_tea_logins, tea_login_for};
 use crate::forge::{hosts, service};
 use crate::git::Repo;
 use crate::store::model::Forge;
@@ -20,6 +20,8 @@ use super::Row;
 
 /// `git merge-tree --write-tree` arrived in this git version.
 const MIN_GIT: [u64; 2] = [2, 38];
+/// `tea api -d`, which agt sends every request body through, first shipped in this tea version.
+const MIN_TEA: [u64; 2] = [0, 13];
 const MISE_PIN: &str = "github:brandonocasey/agt";
 const IGNORED: [(&str, &str); 3] = [
     (".worktrees/", ".worktrees/probe"),
@@ -57,6 +59,11 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
+/// Whether the version in `text` is `min` or newer.
+fn at_least(text: &str, min: [u64; 2]) -> bool {
+    numbers(text).is_some_and(|have| have[..] >= min[..])
+}
+
 fn git() -> Cli {
     Cli::other("git", "AGT_GIT_BIN")
 }
@@ -73,6 +80,10 @@ fn glab() -> Cli {
     Cli::glab_configured()
 }
 
+fn tea() -> Cli {
+    Cli::tea()
+}
+
 /// The version a tool prints for `--version`; `None` when it is missing or fails.
 fn version(cli: &Cli) -> Option<String> {
     let (ok, out, _) = cli.probe(&["--version"])?;
@@ -83,9 +94,7 @@ fn version(cli: &Cli) -> Option<String> {
 fn tools() -> Vec<Row> {
     let mut rows = Vec::new();
     rows.push(match version(&git()) {
-        Some(found) if numbers(&found).is_some_and(|have| have[..] >= MIN_GIT[..]) => {
-            Row::ok("git", found)
-        }
+        Some(found) if at_least(&found, MIN_GIT) => Row::ok("git", found),
         Some(found) => Row::fail(
             "git",
             format!("{found}, older than 2.38 (needed for `git merge-tree --write-tree`)"),
@@ -104,9 +113,23 @@ fn tools() -> Vec<Row> {
             glab(),
             "install the GitLab CLI: https://gitlab.com/gitlab-org/cli",
         ),
+        (
+            service::kind(Forge::Forgejo).tool,
+            tea(),
+            "install the Gitea CLI: https://gitea.com/gitea/tea",
+        ),
         ("mise", mise(), "install mise: https://mise.jdx.dev"),
     ] {
         rows.push(match version(&cli) {
+            Some(found)
+                if name == service::kind(Forge::Forgejo).tool && !at_least(&found, MIN_TEA) =>
+            {
+                Row::warn(
+                    name,
+                    format!("{found}, older than 0.13 (its `tea api` has no `-d`)"),
+                    "upgrade tea to 0.13 or newer",
+                )
+            }
             Some(found) => Row::ok(name, found),
             None => Row::warn(name, "not found", hint),
         });
@@ -127,12 +150,16 @@ fn forge_cli(forge: Forge, host: Option<&str>) -> Cli {
         (Forge::Github, None) => gh(),
         (Forge::Gitlab, Some(host)) => Cli::glab(host),
         (Forge::Gitlab, None) => glab(),
+        (Forge::Forgejo, _) => tea(),
     }
 }
 
 /// Logged in to `host` (or to anything, without one) through the forge's CLI: `Ok` with the
 /// account, `Err` with why not. A missing CLI is `Err(None)`.
 fn login(forge: Forge, host: Option<&str>) -> Result<String, Option<String>> {
+    if forge == Forge::Forgejo {
+        return tea_login(host);
+    }
     let mut args = vec!["auth", "status"];
     args.extend(host.map(|_| "--hostname").into_iter().chain(host));
     let (ok, out, err) = forge_cli(forge, host).probe(&args).ok_or(None)?;
@@ -143,8 +170,32 @@ fn login(forge: Forge, host: Option<&str>) -> Result<String, Option<String>> {
     }
 }
 
+/// Like [`login`] for tea, which has no `auth status`: its login list names the account.
+fn tea_login(host: Option<&str>) -> Result<String, Option<String>> {
+    let (ok, out, _) = tea().probe(TEA_LOGINS_LIST).ok_or(None)?;
+    let logins = if ok {
+        parse_tea_logins(&out)
+    } else {
+        Vec::new()
+    };
+    let found = match host {
+        Some(host) => tea_login_for(&logins, host),
+        None => logins.first(),
+    };
+    match found {
+        Some(login) => Ok(login.user.clone().unwrap_or_else(|| login.name.clone())),
+        None => Err(Some("not logged in".into())),
+    }
+}
+
 fn login_hint(forge: Forge, host: Option<&str>) -> String {
     let name = service::kind(forge).tool;
+    if forge == Forge::Forgejo {
+        return match host {
+            Some(host) => format!("{name} login add --url https://{host}"),
+            None => format!("{name} login add"),
+        };
+    }
     match host {
         Some(host) => format!("{name} auth login --hostname {host}"),
         None => format!("{name} auth login"),
@@ -166,11 +217,12 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
             // It may still be GitHub Enterprise or self-hosted GitLab that nobody logged in to.
             None => Row::warn(
                 &name,
-                format!("no gh or glab login for {host}; forge features unavailable"),
+                format!("no gh, glab or tea login for {host}; forge features unavailable"),
                 format!(
-                    "{} or {}",
+                    "{}, {} or {}",
                     login_hint(Forge::Github, Some(host)),
-                    login_hint(Forge::Gitlab, Some(host))
+                    login_hint(Forge::Gitlab, Some(host)),
+                    login_hint(Forge::Forgejo, Some(host))
                 ),
             ),
             Some(forge) => match login(forge, Some(host)) {
@@ -189,7 +241,7 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
             },
         });
     }
-    for forge in [Forge::Github, Forge::Gitlab] {
+    for forge in [Forge::Github, Forge::Gitlab, Forge::Forgejo] {
         if own.is_some_and(|(_, own)| own == Some(forge)) {
             continue;
         }

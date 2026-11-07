@@ -46,6 +46,7 @@ fn pr(node: &Value) -> Pr {
             .flatten()
             .filter_map(|label| label["name"].as_str().map(str::to_owned))
             .collect(),
+        auto_merge_known: true,
         auto_merge: node
             .pointer("/autoMergeRequest/mergeMethod")
             .and_then(Value::as_str)
@@ -233,17 +234,7 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
     if let Some(text) = &changes.body {
         body.insert("body".into(), json!(text));
     }
-    if !changes.add_labels.is_empty() || !changes.remove_labels.is_empty() {
-        let mut labels: Vec<&String> = current
-            .labels
-            .iter()
-            .filter(|label| !changes.remove_labels.contains(label))
-            .collect();
-        for label in &changes.add_labels {
-            if !labels.contains(&label) {
-                labels.push(label);
-            }
-        }
+    if let Some(labels) = changes.merged_labels(&current.labels) {
         body.insert("labels".into(), json!(labels));
     }
     if !body.is_empty() {

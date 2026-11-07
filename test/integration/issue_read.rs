@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::issue::{FIRST_SINCE, Github, Gitlab, IssueFake, Spec};
+use crate::support::issue::{FIRST_SINCE, Forgejo, Github, Gitlab, IssueFake, Spec};
 use crate::support::{Env, strs};
 
 type Fake<'a> = &'a dyn IssueFake;
@@ -21,6 +21,11 @@ macro_rules! matrix {
                 #[test]
                 fn gitlab() {
                     super::$scenario(&crate::support::issue::Gitlab);
+                }
+
+                #[test]
+                fn forgejo() {
+                    super::$scenario(&crate::support::issue::Forgejo);
                 }
             }
         )*
@@ -41,6 +46,25 @@ matrix!(
     link_and_note_stay_local,
     a_second_tracker_is_found_by_key_or_repo,
 );
+
+#[test]
+fn a_forgejo_issue_with_more_comments_than_a_page_reads_them_all_with_one_request() {
+    let fake: Fake = &Forgejo;
+    let spec = (1..=120).fold(Spec::new(1, "Chatty"), |spec, id| {
+        spec.comment(id, "bob", &format!("note {id}"))
+    });
+    let env = synced(fake, &[spec]);
+    let shown = env.issue(&["show", "1"]);
+    let notes = shown["comments"].as_array().unwrap();
+    assert_eq!(notes.len(), 120, "{shown}");
+    let reads: Vec<String> = env
+        .forge_calls()
+        .into_iter()
+        .filter(|call| call.contains("issues/1/comments"))
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert!(!reads[0].contains("page="), "{reads:?}");
+}
 
 pub fn synced(fake: Fake, specs: &[Spec]) -> Env {
     let env = Env::new();
@@ -102,9 +126,17 @@ fn first_sync_imports_issues_comments_and_links(fake: Fake) {
         .collect();
     assert_eq!(comments, ["Seen on 2.1", "Fix in progress"]);
     assert_eq!(doc["comments"][0]["id"], "remote-10");
-    assert_eq!(doc["links"]["prs"][0]["number"], 5);
-    assert_eq!(doc["links"]["prs"][0]["branch"], "fix/1-login");
-    assert_eq!(doc["links"]["prs"][0]["source"], "remote");
+    if fake.links_prs() {
+        assert_eq!(doc["links"]["prs"][0]["number"], 5);
+        assert_eq!(doc["links"]["prs"][0]["branch"], "fix/1-login");
+        assert_eq!(doc["links"]["prs"][0]["source"], "remote");
+    } else {
+        assert_eq!(
+            doc["links"]["prs"],
+            json!([]),
+            "the host lists no closing PRs"
+        );
+    }
     let tracker_doc = env.issue_doc(fake.tracker(), "tracker");
     assert_eq!(tracker_doc["login"], "me");
     assert_eq!(tracker_doc["watermark"], "2026-10-11T10:00:00Z");
@@ -141,7 +173,9 @@ fn incremental_sync_lists_from_the_watermark_and_refetches_only_changes(fake: Fa
             })
             .count()
     };
-    assert_eq!((fetched(1), fetched(2)), (0, 1));
+    // Forgejo reads an issue's hierarchy with the same GET as the issue, once a sync for each.
+    let probe = usize::from(fake.name() == "forgejo");
+    assert_eq!((fetched(1), fetched(2)), (probe, 1 + probe));
     assert_eq!(
         env.issue_doc(fake.tracker(), "2")["fields"]["title"],
         "Old thing renamed"
@@ -217,7 +251,11 @@ fn show_has_the_documented_shape(fake: Fake) {
         assert_eq!(shown["comments"].as_array().unwrap().len(), 2);
         assert_eq!(shown["comments"][1]["author"], "ann");
         assert_eq!(shown["comments"][1]["post"], "posted");
-        assert_eq!(shown["links"]["prs"][0]["number"], 5);
+        if fake.links_prs() {
+            assert_eq!(shown["links"]["prs"][0]["number"], 5);
+        } else {
+            assert_eq!(shown["links"]["prs"], json!([]));
+        }
         assert_eq!(shown["queued"]["create"], false);
         assert_eq!(shown["queued"]["comments"], json!([]));
         assert_eq!(shown["errors"], json!([]));
@@ -275,14 +313,32 @@ fn search_matches_title_body_comments_and_notes(fake: Fake) {
 fn find_by_pr_branch_and_title(fake: Fake) {
     let env = synced(fake, &two_issues());
     let key = format!("{}#1", fake.repo());
+    if !fake.links_prs() {
+        // No closing PRs come from the host: a PR is found by a link made here, a branch by
+        // its name, and a title by the issues it names.
+        assert!(keys(&env.issue(&["list", "--pr", "5"])).is_empty());
+        env.issue(&["link", "1", "--pr", "5"]);
+        let found = env.issue(&["list", "--pr", "5"]);
+        assert_eq!(keys(&found), std::slice::from_ref(&key));
+        assert_eq!(found["issues"][0]["via"], json!(["link"]));
+        let by_branch = env.issue(&["list", "--branch", "fix/1-login"]);
+        assert_eq!(by_branch["issues"][0]["via"], json!(["branch-name"]));
+        let titled = env.issue(&[
+            "list",
+            "--pr",
+            "77",
+            "--title",
+            &format!("Fix #2 and {key}"),
+        ]);
+        assert_eq!(titled["count"], 2);
+        return;
+    }
     let found = env.issue(&["list", "--pr", "5"]);
     assert_eq!(keys(&found), std::slice::from_ref(&key));
     assert_eq!(found["issues"][0]["via"], json!(["link"]));
     assert!(keys(&env.issue(&["list", "--pr", "6"])).is_empty());
-    let url = match fake.name() {
-        "github" => "https://github.com/o/r/pull/5",
-        _ => "https://gitlab.com/g/p/-/merge_requests/5",
-    };
+    let url = fake.pr_url(5);
+    let url = url.as_str();
     assert_eq!(
         keys(&env.issue(&["list", "--pr", url])),
         std::slice::from_ref(&key)
@@ -344,7 +400,9 @@ fn link_and_note_stay_local(fake: Fake) {
     env.issue(&["sync"]);
     let doc = env.issue_doc(fake.tracker(), "2");
     assert_eq!(doc["links"]["prs"].as_array().unwrap().len(), 1);
-    assert_eq!(doc["links"]["prs"][0]["source"], "remote");
+    // Where the host lists no PRs, the link made here stays the only one.
+    let source = if fake.links_prs() { "remote" } else { "local" };
+    assert_eq!(doc["links"]["prs"][0]["source"], source);
     assert_eq!(doc["notes"][0]["text"], "private");
 }
 
@@ -384,23 +442,22 @@ fn involved_scope_lists_each_way_a_user_is_involved_and_dedupes() {
             "[[issues.tracker]]\nforge = \"gitlab\"\nhost = \"gitlab.com\"\nrepo = \"g/p\"\n",
             vec![],
         ),
+        (
+            &Forgejo as Fake,
+            "[[issues.tracker]]\nforge = \"forgejo\"\nhost = \"codeberg.org\"\nrepo = \"o/r\"\n",
+            vec!["&created_by=me", "&assigned_by=me", "&mentioned_by=me"],
+        ),
     ] {
         let env = Env::new();
         env.write_config(config);
         let spec = Spec::new(1, "Shared");
-        env.respond(
-            &strs(&fake.user_call()),
-            if fake.name() == "github" {
-                r#"{"login":"me"}"#
-            } else {
-                r#"{"username":"me"}"#
-            },
-        );
+        fake.log_in(&env);
+        env.respond(&strs(&fake.user_call()), &fake.user_body());
         let listing = Value::Array(vec![fake.issue_json(&spec)]).to_string();
         let since = FIRST_SINCE;
         let base = fake.list_call(since);
         let path = base.last().unwrap().clone();
-        let variants: Vec<String> = if fake.name() == "github" {
+        let variants: Vec<String> = if fake.name() != "gitlab" {
             calls
                 .iter()
                 .map(|filter| format!("{path}{filter}"))

@@ -127,6 +127,20 @@ fn failures_take_the_host_from_an_mr_url() {
 }
 
 #[test]
+fn failures_is_gitlab_only_and_refuses_a_forgejo_pull_request_without_running_tea() {
+    let env = Env::new();
+    let output = env
+        .bin(&env.repo)
+        .args(["ci", "failures", "https://codeberg.org/o/r/pulls/5"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("failures needs a GitLab MR"), "{stderr}");
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
 fn offline_refuses_ci_commands() {
     let env = Env::new();
     for args in [vec!["ci", "wait", "o/r#1"], vec!["ci", "failures", "g/p!1"]] {
@@ -142,5 +156,19 @@ fn offline_refuses_ci_commands() {
             "{args:?}"
         );
     }
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn offline_refuses_ci_wait_on_a_forgejo_pull_request_without_running_tea() {
+    let env = Env::new();
+    let output = env
+        .bin(&env.repo)
+        .env("AGT_OFFLINE", "1")
+        .args(["ci", "wait", "https://codeberg.org/o/r/pulls/5"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("offline mode forbids agt ci"));
     assert!(env.forge_calls().is_empty());
 }

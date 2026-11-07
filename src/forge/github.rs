@@ -10,7 +10,7 @@ use crate::core::error::{Error, Result, fail};
 use crate::forge::anchors;
 use crate::forge::service::{
     ApproveCap, BatchPoster, Capabilities, Inline, Kind, Method, Pagination, Placement, Position,
-    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Var,
+    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Var, Wanted,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData};
@@ -162,15 +162,8 @@ impl ReviewService for Github {
         }
     }
 
-    fn place(
-        &self,
-        repo: &Repo,
-        review: &Review,
-        anchor: &Anchor,
-        commit: &str,
-        line: u32,
-    ) -> Option<Placement> {
-        place(repo, review, anchor, commit, line)
+    fn place(&self, repo: &Repo, review: &Review, wanted: Wanted) -> Option<Placement> {
+        place(repo, review, wanted.anchor, wanted.commit, wanted.line)
     }
 
     fn inline(&self) -> Inline<'_> {
@@ -540,19 +533,6 @@ fn review_thread(pager: &Pager, node: &Value) -> Result<ThreadData> {
     })
 }
 
-fn general(kind: RemoteKind, comment: CommentData, review_state: Option<String>) -> ThreadData {
-    ThreadData {
-        info: RemoteThread {
-            url: comment.url.clone(),
-            review_state,
-            ..RemoteThread::new(kind, comment.id.clone(), false)
-        },
-        resolved: false,
-        comments: vec![comment],
-        position_head: None,
-    }
-}
-
 fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
     let Some((owner, name)) = forge::split_repo_strict(repo) else {
         return fail(format!("GitHub repository must be owner/name: {repo}"));
@@ -619,7 +599,7 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
             editor: forge::text(&node, "/editor/login"),
             review_id: None,
         };
-        threads.push(general(
+        threads.push(forge::general(
             RemoteKind::Review,
             review,
             forge::text(&node, "/state"),
@@ -632,7 +612,7 @@ fn fetch(gh: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         "comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId url body createdAt author{login} editor{login}}}",
     );
     for node in pager.pages(&comments_query, "comments")?.1 {
-        threads.push(general(RemoteKind::General, comment(&node)?, None));
+        threads.push(forge::general(RemoteKind::General, comment(&node)?, None));
     }
     Ok(Fetched {
         pr,

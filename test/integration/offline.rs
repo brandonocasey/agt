@@ -1,6 +1,6 @@
 //! The root `--offline` flag against commands that would reach a remote: a `git` that records
-//! `fetch`, `ls-remote` and `push` and refuses them, and the fake `gh` and `glab` call log, show
-//! that no call happens.
+//! `fetch`, `ls-remote` and `push` and refuses them, and the fake `gh`, `glab` and `tea` call log,
+//! show that no call happens.
 
 use std::fs;
 use std::process::Output;
@@ -16,9 +16,13 @@ impl Site {
     /// A repository with `main` pushed to a bare origin that reads as a GitHub URL, and a `git`
     /// in front of the real one that records and refuses network commands.
     fn new() -> Self {
+        Self::at("git@github.com:acme/app.git")
+    }
+
+    /// Like [`Site::new`], with origin at `url`.
+    fn at(url: &str) -> Self {
         let env = Env::new();
         let bare = env.path("origin.git");
-        let url = "git@github.com:acme/app.git";
         env.git(&["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
         env.write("base.txt", "base\n");
         env.commit_all("base");
@@ -208,4 +212,36 @@ fn local_commands_make_no_network_call() {
     site.ok(&["review", "list"]);
     site.ok(&["cleanup", "--only", "worktrees"]);
     site.ok(&["worktree", "list"]);
+}
+
+const FORGEJO_ORIGIN: &str = "git@codeberg.org:acme/app.git";
+
+#[test]
+fn forgejo_commands_refuse_without_running_tea() {
+    let site = Site::at(FORGEJO_ORIGIN);
+    site.env.git(&["checkout", "-q", "-b", "topic"]);
+    for (args, what) in [
+        (vec!["pr", "list"], "agt pr"),
+        (vec!["review", "sync"], "review sync and publish"),
+        (
+            vec!["review", "publish", "--dry-run"],
+            "review sync and publish",
+        ),
+        (vec!["issue", "sync"], "issue sync and push"),
+        (vec!["issue", "push"], "issue sync and push"),
+    ] {
+        site.refused(&args, &format!("offline mode forbids {what}"));
+    }
+}
+
+#[test]
+fn local_commands_on_a_forgejo_origin_make_no_network_call() {
+    let site = Site::at(FORGEJO_ORIGIN);
+    site.env.git(&["checkout", "-q", "-b", "topic"]);
+    let doctor = site.agt(&["doctor", "--json"]);
+    assert!(doctor.status.code().is_some_and(|code| code < 3));
+    assert_eq!(site.network(), Vec::<String>::new());
+    site.ok(&["issue", "list"]);
+    site.ok(&["review", "list"]);
+    site.ok(&["cleanup", "--only", "worktrees"]);
 }

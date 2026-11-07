@@ -159,6 +159,9 @@ pub struct Review {
 pub enum Forge {
     Github,
     Gitlab,
+    /// Forgejo and Gitea, which share one REST API; `gitea` is read as an alias.
+    #[serde(alias = "gitea")]
+    Forgejo,
 }
 
 /// The state of a PR/MR on any forge.

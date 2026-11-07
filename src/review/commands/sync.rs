@@ -272,7 +272,8 @@ fn detect(ctx: &Ctx, host: &str) -> Result<Forge> {
         Error(format!(
             "unsupported forge {host}: sync and publish need github.com or a host `gh auth \
              status` knows, or gitlab.com, GITLAB_HOST, glab's configured host, a host \
-             `glab auth status` knows, or an entry for it in $XDG_CONFIG_HOME/agt/hosts.json"
+             `glab auth status` knows, codeberg.org, a host `tea logins list` shows, or an entry \
+             for it in $XDG_CONFIG_HOME/agt/hosts.json"
         ))
     })
 }

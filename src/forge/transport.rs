@@ -1,11 +1,11 @@
-//! How a [`Request`] reaches a host through a CLI (`gh`, `glab`) that holds its own login.
+//! How a [`Request`] reaches a host through a CLI (`gh`, `glab`, `tea`) that holds its own login.
 //! Services build requests; the transport parses replies and extracts failure status codes.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::io::ErrorKind;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -33,7 +33,7 @@ impl Response {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransportError {
     /// The HTTP status when the host answered, else `None` (the tool or network failed).
     pub status: Option<u16>,
@@ -93,8 +93,10 @@ impl dyn Transport + '_ {
     ) -> std::result::Result<Vec<Value>, TransportError> {
         let mut items = Vec::new();
         let mut request = request.clone();
-        if *pagination == Pagination::CliPaginate {
-            request.paginate = true;
+        match pagination {
+            Pagination::CliPaginate => request.paginate = true,
+            Pagination::PageNumbers(size) => request = first_page(request, *size),
+            _ => {}
         }
         loop {
             let response = self.send(&request)?;
@@ -129,12 +131,37 @@ fn next_page(pagination: &Pagination, request: &Request, response: &Response) ->
             let sep = if base.contains('?') { '&' } else { '?' };
             format!("{base}{sep}continuationToken={token}")
         }
+        Pagination::PageNumbers(size) => {
+            // A page shorter than the size is the last one.
+            if response.body.as_array()?.len() < *size {
+                return None;
+            }
+            let (before, page) = path.rsplit_once("page=")?;
+            format!("{before}page={}", page.parse::<usize>().ok()? + 1)
+        }
         Pagination::GraphqlCursor | Pagination::CliPaginate => return None,
     };
     Some(Request {
         endpoint: Endpoint::Rest(url),
         ..request.clone()
     })
+}
+
+/// `path` asking for page `page` of `size` items; `page` is the last query parameter, which
+/// [`next_page`] relies on.
+pub fn with_page(path: &str, page: usize, size: usize) -> String {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{sep}limit={size}&page={page}")
+}
+
+fn first_page(request: Request, size: usize) -> Request {
+    match &request.endpoint {
+        Endpoint::Rest(path) => Request {
+            endpoint: Endpoint::Rest(with_page(path, 1, size)),
+            ..request
+        },
+        Endpoint::Graphql(_) => request,
+    }
 }
 
 /// The `rel="next"` URL of a `Link` header.
@@ -174,7 +201,7 @@ fn timed_out(name: &str, limit: Duration) -> TransportError {
     TransportError::new(format!("{name} timed out after {limit:?}"))
 }
 
-/// A CLI process: `gh` or `glab` with its environment.
+/// A CLI process: `gh`, `glab` or `tea` with its environment.
 pub struct Cli {
     program: OsString,
     name: &'static str,
@@ -208,7 +235,17 @@ impl Cli {
         }
     }
 
-    /// A tool other than gh and glab, such as `git` or `mise`; the `AGT_*` variable `over`
+    /// tea, which holds a login per host and takes none from the environment.
+    pub fn tea() -> Self {
+        let name = service::kind(Forge::Forgejo).tool;
+        Self {
+            program: env::value_or("AGT_TEA_BIN", name),
+            name,
+            env: Vec::new(),
+        }
+    }
+
+    /// A tool other than gh, glab and tea, such as `git` or `mise`; the `AGT_*` variable `over`
     /// overrides the program.
     pub fn other(name: &'static str, over: &str) -> Self {
         Self {
@@ -241,6 +278,15 @@ impl Cli {
         args: &[&str],
         input: Option<&[u8]>,
     ) -> std::result::Result<Vec<u8>, TransportError> {
+        self.run_with_stderr(args, input).map(|(stdout, _)| stdout)
+    }
+
+    /// Like [`Cli::run`], and also the stderr of a successful run.
+    fn run_with_stderr(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> std::result::Result<(Vec<u8>, String), TransportError> {
         let name = self.name;
         let captured = self.capture(args, input)?;
         let output = captured.output;
@@ -256,7 +302,8 @@ impl Cli {
             });
         }
         captured.input.map_err(ctx(format!("write to {name}")))?;
-        Ok(output.stdout)
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        Ok((output.stdout, stderr))
     }
 
     fn capture(
@@ -285,11 +332,49 @@ impl From<Error> for TransportError {
     }
 }
 
-/// `gh` or `glab` running `api` requests.
+/// `gh`, `glab` or `tea` running `api` requests.
 pub struct CliTransport {
     cli: Cli,
     /// Which tool the requests are for; each spells the `api` subcommand's flags differently.
     forge: Forge,
+    /// The host a `tea api` call is for; only tea needs it.
+    tea: Option<TeaHost>,
+}
+
+/// The host a `tea api` call is for, and the tea login that reaches it, found on first use.
+struct TeaHost {
+    host: String,
+    login: OnceLock<std::result::Result<String, TransportError>>,
+}
+
+/// The logins `tea logins list` shows, read once per process. A failed read is not kept, so the
+/// next call tries again.
+fn cached_tea_logins(cli: &Cli) -> std::result::Result<&'static [TeaLogin], TransportError> {
+    static LOGINS: OnceLock<Vec<TeaLogin>> = OnceLock::new();
+    if let Some(logins) = LOGINS.get() {
+        return Ok(logins);
+    }
+    let out = cli.run(TEA_LOGINS_LIST, None)?;
+    Ok(LOGINS.get_or_init(|| parse_tea_logins(&String::from_utf8_lossy(&out))))
+}
+
+impl TeaHost {
+    fn login(&self, cli: &Cli) -> std::result::Result<&str, TransportError> {
+        self.login
+            .get_or_init(|| {
+                let logins = cached_tea_logins(cli)?;
+                tea_login_for(logins, &self.host)
+                    .map(|login| login.name.clone())
+                    .ok_or_else(|| {
+                        TransportError::new(format!(
+                            "tea has no login for {host}: run `tea login add --url https://{host}`",
+                            host = self.host
+                        ))
+                    })
+            })
+            .as_deref()
+            .map_err(Clone::clone)
+    }
 }
 
 impl CliTransport {
@@ -297,6 +382,7 @@ impl CliTransport {
         Self {
             cli: Cli::gh(host),
             forge: Forge::Github,
+            tea: None,
         }
     }
 
@@ -304,6 +390,18 @@ impl CliTransport {
         Self {
             cli: Cli::glab(host),
             forge: Forge::Gitlab,
+            tea: None,
+        }
+    }
+
+    pub fn tea(host: &str) -> Self {
+        Self {
+            cli: Cli::tea(),
+            forge: Forge::Forgejo,
+            tea: Some(TeaHost {
+                host: host.to_owned(),
+                login: OnceLock::new(),
+            }),
         }
     }
 
@@ -312,12 +410,19 @@ impl CliTransport {
         Self {
             cli: Cli::glab_configured(),
             forge: Forge::Gitlab,
+            tea: None,
         }
     }
 }
 
 impl Transport for CliTransport {
     fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
+        if let Some(tea) = &self.tea {
+            if matches!(request.endpoint, Endpoint::Graphql(_)) {
+                return Err(TransportError::new("tea has no GraphQL endpoint"));
+            }
+            tea.login(&self.cli)?;
+        }
         let args = self.render(request);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let input = request
@@ -325,39 +430,15 @@ impl Transport for CliTransport {
             .as_ref()
             .map(|body| serde_json::to_vec(body).map_err(ctx("serialize request")))
             .transpose()?;
-        let output = self.cli.run(&args, input.as_deref())?;
-        let name = self.cli.name;
-        let body = if request.raw {
-            Value::String(String::from_utf8_lossy(&output).into_owned())
-        } else if request.paginate {
-            // One JSON array per page.
-            let mut items = Vec::new();
-            for page in serde_json::Deserializer::from_slice(&output).into_iter::<Value>() {
-                match page.map_err(ctx(format!("parse {name} output")))? {
-                    Value::Array(page) => items.extend(page),
-                    other => {
-                        return Err(TransportError::new(format!(
-                            "{name} printed a non-array page: {other}"
-                        )));
-                    }
-                }
-            }
-            Value::Array(items)
-        } else if output.iter().all(u8::is_ascii_whitespace) {
-            Value::Null
-        } else {
-            let value: Value =
-                serde_json::from_slice(&output).map_err(ctx(format!("parse {name} output")))?;
-            if let Some(errors) = value.get("errors").filter(|errors| !errors.is_null()) {
-                return Err(TransportError::new(format!(
-                    "{name} returned errors: {errors}"
-                )));
-            }
-            value
-        };
+        let (output, stderr) = self.cli.run_with_stderr(&args, input.as_deref())?;
+        if self.tea.is_some()
+            && let Some(refusal) = tea_refusal(&stderr, &output)
+        {
+            return Err(refusal);
+        }
         Ok(Response {
             headers: Vec::new(),
-            body,
+            body: read_body(self.cli.name, request, &output)?,
         })
     }
 
@@ -365,8 +446,54 @@ impl Transport for CliTransport {
         match self.forge {
             Forge::Github => gh_args(request),
             Forge::Gitlab => glab_args(request),
+            Forge::Forgejo => {
+                // A dry run names the host where no login was found.
+                let login = self
+                    .tea
+                    .as_ref()
+                    .map_or("", |tea| tea.login(&self.cli).unwrap_or(tea.host.as_str()));
+                tea_args(request, login)
+            }
         }
     }
+}
+
+/// The JSON a CLI printed for `request`: one value, or for a paginated read the items of every
+/// page; the text itself for a raw read, and `Null` for no output.
+fn read_body(
+    name: &str,
+    request: &Request,
+    output: &[u8],
+) -> std::result::Result<Value, TransportError> {
+    if request.raw {
+        return Ok(Value::String(String::from_utf8_lossy(output).into_owned()));
+    }
+    if request.paginate {
+        // One JSON array per page.
+        let mut items = Vec::new();
+        for page in serde_json::Deserializer::from_slice(output).into_iter::<Value>() {
+            match page.map_err(ctx(format!("parse {name} output")))? {
+                Value::Array(page) => items.extend(page),
+                other => {
+                    return Err(TransportError::new(format!(
+                        "{name} printed a non-array page: {other}"
+                    )));
+                }
+            }
+        }
+        return Ok(Value::Array(items));
+    }
+    if output.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Value::Null);
+    }
+    let value: Value =
+        serde_json::from_slice(output).map_err(ctx(format!("parse {name} output")))?;
+    if let Some(errors) = value.get("errors").filter(|errors| !errors.is_null()) {
+        return Err(TransportError::new(format!(
+            "{name} returned errors: {errors}"
+        )));
+    }
+    Ok(value)
 }
 
 fn graphql_args(vars: &[Var]) -> impl Iterator<Item = String> + '_ {
@@ -436,6 +563,123 @@ pub fn gh_args(request: &Request) -> Vec<String> {
 /// The `glab api` arguments of a request.
 pub fn glab_args(request: &Request) -> Vec<String> {
     api_args(request, &GLAB_FLAGS)
+}
+
+/// The `tea api` arguments of a request, run with the tea login `login`.
+///
+/// `tea api` takes `--login <name>` to pick the login (it has no host flag), `-X` for the
+/// method, `-d @-` for a body read from stdin and `-i` to print the HTTP status line to stderr
+/// (tea exits 0 whatever the host answered), and its flags come before the endpoint.
+pub fn tea_args(request: &Request, login: &str) -> Vec<String> {
+    let mut args = ["api", "--login", login, "-i"].map(str::to_owned).to_vec();
+    if let Endpoint::Rest(path) = &request.endpoint {
+        args.extend(["-X".to_owned(), request.method.as_str().to_owned()]);
+        if request.body.is_some() {
+            args.extend(["-H", "Content-Type: application/json", "-d", "@-"].map(str::to_owned));
+        }
+        args.push(path.clone());
+    }
+    args
+}
+
+/// The arguments that make `tea` print its logins as JSON.
+///
+/// unverified: `tea logins list --output json` prints an array of objects whose `name` and `url`
+/// keys (any case) name the login and its server, and no token.
+pub const TEA_LOGINS_LIST: &[&str] = &["logins", "list", "--output", "json"];
+
+/// One login of `tea logins list`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TeaLogin {
+    pub name: String,
+    /// The lowercase host of the login's URL.
+    pub host: String,
+    pub user: Option<String>,
+    pub default: bool,
+}
+
+/// The logins in the JSON `tea logins list` printed; none for output that is not a list.
+pub fn parse_tea_logins(json: &str) -> Vec<TeaLogin> {
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(json) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let field = |name: &str| {
+                item.as_object()?
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value)
+            };
+            let text = |name: &str| field(name)?.as_str().map(str::to_owned);
+            Some(TeaLogin {
+                name: text("name")?,
+                host: host_of_url(&text("url")?),
+                user: text("user"),
+                default: field("default") == Some(&Value::Bool(true))
+                    || text("default").is_some_and(|flag| flag == "true"),
+            })
+        })
+        .collect()
+}
+
+/// The lowercase host (with a port, if any) of a server URL.
+fn host_of_url(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    host.to_ascii_lowercase()
+}
+
+/// The port of a login's host (`git.example.com:3000`), if it has one.
+fn port_of(host: &str) -> Option<&str> {
+    let (_, port) = host.rsplit_once(':')?;
+    (!port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())).then_some(port)
+}
+
+/// The login that reaches `host`: one with exactly that host, else, for a `host` without a port,
+/// one on that host name at any port (a git remote's host has no web port); the default one when
+/// several do.
+pub fn tea_login_for<'a>(logins: &'a [TeaLogin], host: &str) -> Option<&'a TeaLogin> {
+    let name_only = port_of(host).is_none();
+    logins
+        .iter()
+        .filter_map(|login| {
+            let exact = login.host.eq_ignore_ascii_case(host);
+            let same_name = name_only
+                && port_of(&login.host).is_some()
+                && login
+                    .host
+                    .rsplit_once(':')
+                    .is_some_and(|(name, _)| name.eq_ignore_ascii_case(host));
+            (exact || same_name).then_some((login, !exact))
+        })
+        .min_by_key(|(login, inexact)| (*inexact, !login.default))
+        .map(|(login, _)| login)
+}
+
+/// The error for an HTTP status of 400 or more in the `HTTP/1.1 <code> <text>` line `tea api -i`
+/// prints to stderr; `None` for any other answer.
+fn tea_refusal(stderr: &str, body: &[u8]) -> Option<TransportError> {
+    let line = stderr.lines().find(|line| line.starts_with("HTTP/"))?;
+    let answer = line.split_once(' ')?.1;
+    let (code, text) = answer.split_once(' ').unwrap_or((answer, ""));
+    let status = code.parse::<u16>().ok().filter(|status| *status >= 400)?;
+    let body = String::from_utf8_lossy(body);
+    Some(TransportError {
+        status: Some(as_seen_by_retries(status, &body)),
+        message: format!("tea api failed: {text} (HTTP {status}): {}", body.trim()),
+    })
+}
+
+/// The tea logins, or `None` when tea is missing or `tea logins list` fails.
+pub fn tea_logins() -> Option<Vec<TeaLogin>> {
+    Cli::tea()
+        .text(TEA_LOGINS_LIST)
+        .map(|out| parse_tea_logins(&out))
 }
 
 /// The HTTP status a CLI reports in its error text: the `(HTTP nnn)` suffix, as in
@@ -585,6 +829,179 @@ mod tests {
                 "-"
             ]
         );
+    }
+
+    #[test]
+    fn tea_renders_its_api_flags_before_the_endpoint() {
+        let get = rest(Method::Get, "repos/o/r/pulls?limit=50&page=1", None);
+        assert_eq!(
+            tea_args(&get, "codeberg"),
+            [
+                "api",
+                "--login",
+                "codeberg",
+                "-i",
+                "-X",
+                "GET",
+                "repos/o/r/pulls?limit=50&page=1"
+            ]
+        );
+        let post = rest(Method::Post, "repos/o/r/issues", Some(json!({})));
+        assert_eq!(
+            tea_args(&post, "work"),
+            [
+                "api",
+                "--login",
+                "work",
+                "-i",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                "@-",
+                "repos/o/r/issues"
+            ]
+        );
+    }
+
+    const LOGINS: &str = r#"[
+        {"name": "codeberg.org", "url": "https://codeberg.org", "user": "me", "default": true},
+        {"Name": "work", "URL": "https://Git.Example.com:3000/sub/", "User": "u2", "Default": false},
+        {"name": "work2", "url": "https://git.example.com:3000", "default": "true"},
+        {"url": "https://nameless.example.com"}
+    ]"#;
+
+    #[test]
+    fn tea_logins_name_their_host_and_prefer_the_default() {
+        let logins = parse_tea_logins(LOGINS);
+        let names: Vec<&str> = logins.iter().map(|login| login.name.as_str()).collect();
+        assert_eq!(names, ["codeberg.org", "work", "work2"]);
+        assert_eq!(logins[1].host, "git.example.com:3000");
+        assert_eq!(logins[0].user.as_deref(), Some("me"));
+        let named = |host: &str| tea_login_for(&logins, host).map(|login| login.name.as_str());
+        assert_eq!(named("codeberg.org"), Some("codeberg.org"));
+        assert_eq!(named("GIT.example.com:3000"), Some("work2"));
+        assert_eq!(named("git.example.com"), Some("work2"));
+        assert_eq!(named("git.example.com:3001"), None);
+        assert_eq!(named("nameless.example.com"), None);
+    }
+
+    #[test]
+    fn a_login_on_the_exact_host_wins_over_one_with_a_port() {
+        let logins = parse_tea_logins(
+            r#"[{"name": "ported", "url": "https://git.example.com:3000", "default": true},
+                {"name": "plain", "url": "https://git.example.com"}]"#,
+        );
+        let named = |host: &str| tea_login_for(&logins, host).map(|login| login.name.as_str());
+        assert_eq!(named("git.example.com"), Some("plain"));
+        assert_eq!(named("git.example.com:3000"), Some("ported"));
+    }
+
+    #[test]
+    fn output_that_is_not_a_login_list_has_no_logins() {
+        for text in ["", "not json", "{}", "[1, \"a\"]"] {
+            assert!(parse_tea_logins(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn tea_turns_an_http_status_of_400_or_more_into_an_error_with_that_status() {
+        let refused = |stderr: &str| tea_refusal(stderr, br#"{"message":"no"}"#);
+        let error = refused("HTTP/1.1 405 Method Not Allowed\nContent-Type: x\n\n").unwrap();
+        assert_eq!(error.status, Some(405));
+        assert_eq!(
+            error.message,
+            r#"tea api failed: Method Not Allowed (HTTP 405): {"message":"no"}"#
+        );
+        assert_eq!(refused("HTTP/2.0 404\n").unwrap().status, Some(404));
+        for ok in [
+            "HTTP/1.1 200 OK\n\n",
+            "HTTP/1.1 399 Odd\n",
+            "",
+            "warning: slow\n",
+        ] {
+            assert!(refused(ok).is_none(), "{ok}");
+        }
+    }
+
+    /// A host that serves `total` numbered items by the `limit` and `page` query parameters.
+    struct Numbered {
+        total: usize,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl Transport for Numbered {
+        fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
+            let Endpoint::Rest(path) = &request.endpoint else {
+                unreachable!()
+            };
+            self.asked.borrow_mut().push(path.clone());
+            let (_, query) = path.split_once('?').unwrap();
+            let param = |name: &str| -> usize {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            let (limit, page) = (param("limit"), param("page"));
+            let first = ((page - 1) * limit).min(self.total);
+            let last = (first + limit).min(self.total);
+            Ok(Response {
+                headers: Vec::new(),
+                body: Value::Array((first + 1..=last).map(|number| json!(number)).collect()),
+            })
+        }
+
+        fn render(&self, _request: &Request) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn read_numbered(total: usize) -> (Vec<Value>, Vec<String>) {
+        let source = Numbered {
+            total,
+            asked: RefCell::new(Vec::new()),
+        };
+        let transport: &dyn Transport = &source;
+        let items = transport
+            .items(
+                &rest(Method::Get, "repos/o/r/pulls?state=all", None),
+                &Pagination::PageNumbers(50),
+            )
+            .unwrap();
+        (items, source.asked.into_inner())
+    }
+
+    #[test]
+    fn page_numbers_are_followed_until_a_short_page() {
+        let (items, asked) = read_numbered(120);
+        assert_eq!(
+            items,
+            (1..=120).map(|number| json!(number)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            asked,
+            [
+                "repos/o/r/pulls?state=all&limit=50&page=1",
+                "repos/o/r/pulls?state=all&limit=50&page=2",
+                "repos/o/r/pulls?state=all&limit=50&page=3"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_last_page_costs_one_more_read_and_no_items_one_read() {
+        let (items, asked) = read_numbered(100);
+        assert_eq!((items.len(), asked.len()), (100, 3));
+        let (items, asked) = read_numbered(0);
+        assert_eq!((items.len(), asked.len()), (0, 1));
+        let (items, asked) = read_numbered(50);
+        assert_eq!((items.len(), asked.len()), (50, 2));
+        let (items, asked) = read_numbered(1);
+        assert_eq!((items.len(), asked.len()), (1, 1));
     }
 
     #[test]

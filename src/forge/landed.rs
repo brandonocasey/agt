@@ -8,7 +8,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::select::{self, Selected};
 use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::{Transport, TransportError};
-use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
+use crate::forge::{self, PullNode, encode, forgejo, github, gitlab, hosts};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
@@ -54,7 +54,7 @@ impl Source {
             None => service::detect(&selected.host, hosts::named(&selected.host)?, None)
                 .ok_or_else(|| {
                     Error(format!(
-                        "origin is not a GitHub or GitLab host that gh or glab is logged in to ({} is an unknown forge, or gh/glab is not authenticated for it)",
+                        "origin is not a GitHub or GitLab host that gh or glab is logged in to, or a Forgejo host that tea is logged in to ({} is an unknown forge, or gh/glab/tea is not authenticated for it)",
                         selected.host
                     ))
                 })?,
@@ -109,14 +109,23 @@ impl Source {
         Ok(sources)
     }
 
-    /// Every PR/MR of the repository whose source branch is `branch`, all states, all pages.
+    /// The PRs/MRs of the repository whose source branch is `branch`, all pages: every state on
+    /// GitHub and GitLab; on Forgejo the open ones, and every state only when none of them is the
+    /// repository's own.
     pub fn pulls(&self, branch: &str) -> Result<Vec<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();
         match self.forge {
             Forge::Github => self.github(transport, Some(branch)),
             Forge::Gitlab => self.gitlab(transport, Some(branch)),
+            Forge::Forgejo => self.forgejo(transport, Some(branch)),
         }
+    }
+
+    /// Whether `pull` counts as the branch's open or closed PR; Forgejo ignores fork PRs there,
+    /// GitHub and GitLab count them.
+    pub fn counts(&self, pull: &Pull) -> bool {
+        pull.same_repo || self.forge != Forge::Forgejo
     }
 
     /// Every open PR/MR of the repository, all pages.
@@ -126,6 +135,7 @@ impl Source {
         match self.forge {
             Forge::Github => self.github(transport, None),
             Forge::Gitlab => self.gitlab(transport, None),
+            Forge::Forgejo => self.forgejo(transport, None),
         }
     }
 
@@ -133,8 +143,8 @@ impl Source {
     pub fn pull(&self, number: u64) -> Result<Option<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();
-        // Only GitHub says which object is missing; a GitLab 404 may be the project itself, so
-        // it stays an error the caller can report.
+        // Only GitHub says which object is missing; a GitLab or Forgejo 404 may be the project
+        // itself, so it stays an error the caller can report.
         let missing = |error: &TransportError| {
             self.forge == Forge::Github
                 && error.message.contains("Could not resolve to a PullRequest")
@@ -168,6 +178,10 @@ impl Source {
                     Err(error) if missing(&error) => Ok(None),
                     Err(error) => Err(error.into()),
                 }
+            }
+            Forge::Forgejo => {
+                let path = format!("repos/{}/pulls/{number}", self.repo);
+                forgejo_pull(&transport.json(&Request::get(path))?).map(Some)
             }
         }
     }
@@ -228,6 +242,38 @@ impl Source {
             .map(gitlab_pull)
             .collect()
     }
+
+    /// The branch is matched on what the host lists by state, open pull requests first; fork pull requests of the same name are listed too, so every state is listed as well
+    /// when none of the open ones is the repository's own.
+    fn forgejo(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
+        let Some(branch) = branch else {
+            let open = forgejo::pulls(transport, &self.repo, "open")?;
+            return open.iter().map(forgejo_pull).collect();
+        };
+        let on_branch = |state: &str| -> Result<Vec<Value>> {
+            let mut nodes = forgejo::pulls(transport, &self.repo, state)?;
+            nodes.retain(|node| node["head"]["ref"] == branch);
+            Ok(nodes)
+        };
+        let is_own = |node: &Value| forgejo::pull_node(node).same_repo == Some(true);
+        let mut nodes = on_branch("open")?;
+        if !nodes.iter().any(is_own) {
+            let all = on_branch("all")?;
+            if nodes.is_empty() {
+                nodes = all;
+            } else {
+                nodes.extend(all.into_iter().filter(is_own));
+            }
+        }
+        nodes.iter().map(forgejo_pull).collect()
+    }
+}
+
+fn forgejo_pull(node: &Value) -> Result<Pull> {
+    pull(
+        forgejo::pull_node(node),
+        "a Forgejo pull request has no number",
+    )
 }
 
 fn github_pull(node: &Value) -> Result<Pull> {

@@ -22,6 +22,11 @@ macro_rules! matrix {
                 fn gitlab() {
                     super::$scenario(&crate::support::issue::Gitlab);
                 }
+
+                #[test]
+                fn forgejo() {
+                    super::$scenario(&crate::support::issue::Forgejo);
+                }
             }
         )*
     };

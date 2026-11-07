@@ -30,6 +30,11 @@ macro_rules! matrix {
                 fn gitlab() {
                     super::$scenario(&crate::support::forge::gitlab::Gitlab::new());
                 }
+
+                #[test]
+                fn forgejo() {
+                    super::$scenario(&crate::support::forge::forgejo::Forgejo::new());
+                }
             }
         )*
     };
@@ -181,17 +186,16 @@ fn publish_posts_every_payload_once(svc: Svc) {
     assert_eq!(snapshot(&env.state()), state, "a dry run writes nothing");
     svc.assert_dry_reads(env, calls);
     // f1 is already posted: the fix to it is a reply and a resolve. f2 is a general finding.
+    // Where a thread has no native reply, an agent's fix is not a general comment: only the
+    // answers to Alice's two comments are posted, and a resolve is only cleared locally.
+    let replies: &[&str] = if svc.expect().replies_to_threads_natively() {
+        &["reply", "reply", "reply"]
+    } else {
+        &["reply", "reply"]
+    };
     let every_write = general_then(
         svc,
-        &[
-            "thread",
-            "reply",
-            "reply",
-            "reply",
-            "resolve",
-            "unresolve",
-            "summary",
-        ],
+        &[&["thread"], replies, &["resolve", "unresolve", "summary"]].concat(),
     );
     assert_eq!(kinds(&dry, "writes"), every_write);
     svc.assert_dry_run(&setup, &dry);
@@ -438,6 +442,8 @@ fn reply_on_general_finding_follows_the_reply_capability(svc: Svc) {
     let text = marked("Not fixed: needs a design change.", &reply);
     let answer = if native {
         text
+    } else if !svc.expect().edits_attributed() {
+        "{{LAST_BODY}}".to_owned()
     } else {
         format!("> quoted\n> — @me\n\n{text}")
     };
@@ -900,10 +906,27 @@ fn comments_outside_the_pr_diff_are_never_posted_unless_on_another_file(svc: Svc
     let dry = dry_run(env, svc, &[]);
     let skipped = dry["skipped"].as_array().unwrap();
     let outside_skip = skipped.iter().find(|item| &item["item"] == outside);
-    assert!(svc.expect().ranges());
-    svc.assert_range(&dry, 1, 3, "Range in one hunk.");
     let other = ended["added"][2].as_str().unwrap();
     let other_skip = skipped.iter().find(|item| item["item"] == other);
+    if !svc.expect().ranges() {
+        // No range and no comment on a file: the comment on a line outside the diff and the one
+        // on a file the PR leaves alone are left to the summary.
+        svc.assert_range(&dry, 1, 3, "Range in one hunk.");
+        assert_eq!(
+            outside_skip.unwrap_or_else(|| panic!("{dry}"))["reason"],
+            "its lines are not in the PR/MR diff of the reviewed range"
+        );
+        assert_eq!(
+            other_skip.unwrap_or_else(|| panic!("{dry}"))["reason"],
+            "listed in the summary: a general comment here cannot be resolved"
+        );
+        let summary = write_starting(&dry, "body", "**⚠️ ");
+        assert!(summary.contains("`a.txt:9`"), "{summary}");
+        assert!(summary.contains("`lib/b.txt:2`"), "{summary}");
+        return;
+    }
+    assert!(svc.expect().ranges());
+    svc.assert_range(&dry, 1, 3, "Range in one hunk.");
     if svc.expect().posts_general_findings() {
         // A changed file's unchanged line takes a diff discussion with both line numbers.
         assert!(outside_skip.is_none(), "{dry}");
@@ -1017,7 +1040,7 @@ fn approvals_post_no_comment(svc: Svc) {
         !skipped_items(&dry).iter().any(|item| item.starts_with(&id)),
         "{dry}"
     );
-    assert_eq!(approval_writes(&dry), 0, "{dry}");
+    assert_eq!(approval_writes(svc, &dry), 0, "{dry}");
     // A formal approval of the same head upgrades it: no comment, unless the host refuses
     // the formal part.
     let formal = env.approve(svc.number(), &["--formal"]);
@@ -1054,19 +1077,21 @@ fn approvals_post_no_comment(svc: Svc) {
         assert_eq!(writes_for(&dry, &formal), ["approve"], "{dry}");
     }
     assert_eq!(
-        approval_writes(&dry),
+        approval_writes(svc, &dry),
         usize::from(svc.expect().approves_by_call()),
         "{dry}"
     );
 }
 
 /// The host approvals in the writes of a dry run: an `approve` call or an `APPROVE` review.
-fn approval_writes(dry: &Value) -> usize {
+fn approval_writes(svc: Svc, dry: &Value) -> usize {
     dry["writes"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|write| write["kind"] == "approve" || write["input"]["event"] == "APPROVE")
+        .filter(|write| {
+            write["kind"] == "approve" || write["input"]["event"] == svc.expect().approve_event()
+        })
         .count()
 }
 
@@ -1081,7 +1106,7 @@ fn formal_approval_on_someone_elses_pr(svc: Svc) {
     let writes = dry["writes"].as_array().unwrap();
     if svc.expect().approves_by_review() {
         assert_eq!(writes.len(), 1, "{dry}");
-        assert_eq!(writes[0]["input"]["event"], "APPROVE");
+        assert_eq!(writes[0]["input"]["event"], svc.expect().approve_event());
         assert_eq!(writes[0]["input"]["commit_id"], setup.head.as_str());
         // Only the hidden marker: no approval text.
         let body = writes[0]["input"]["body"].as_str().unwrap();
@@ -1131,10 +1156,10 @@ fn approving_twice_posts_once_and_reopened_findings_hold_it(svc: Svc) {
     assert_eq!(env.approve(svc.number(), &["--formal", "--not-own"]), first);
     let named = ["--not-own", "--only", first.as_str()];
     let dry = dry_run(env, svc, &named);
-    assert_eq!(approval_writes(&dry), 1, "{dry}");
+    assert_eq!(approval_writes(svc, &dry), 1, "{dry}");
     env.run(&["resolve", &f1, "--not-fixed", "reopened"]);
     let dry = dry_run(env, svc, &named);
-    assert_eq!(approval_writes(&dry), 0, "{dry}");
+    assert_eq!(approval_writes(svc, &dry), 0, "{dry}");
     assert!(
         dry["skipped"]
             .to_string()

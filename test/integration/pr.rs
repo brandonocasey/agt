@@ -5,7 +5,9 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
+use crate::support::forge::argv::{tea_bodyless, tea_get, tea_get_as, tea_write};
+use crate::support::forge::forgejo;
+use crate::support::{Env, strs};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -1041,6 +1043,570 @@ fn gitlab_auto_merge_on_that_merges_at_once_succeeds_and_forgets_the_memo() {
     assert_eq!(issue_state(&env, &key), "closed");
     assert_eq!(on["pr"]["state"], "merged");
     assert!(!std::fs::read_to_string(&record).unwrap().contains("squash"));
+}
+
+const FJ_PULLS: &str = "repos/o/r/pulls";
+
+fn forgejo() -> Env {
+    let env = setup("https://codeberg.org/o/r.git");
+    forgejo::logins(&env);
+    env
+}
+
+fn fj_pr(number: u64, extra: &Value) -> Value {
+    let mut node = json!({
+        "id": number * 10, "number": number,
+        "html_url": format!("https://codeberg.org/o/r/pulls/{number}"),
+        "title": "Add a", "body": "", "state": "open", "merged": false, "mergeable": true,
+        "draft": false, "user": {"login": "me"}, "labels": [{"name": "bug"}],
+        "base": {"ref": "main", "repo": {"full_name": "o/r"}},
+        "head": {"ref": "feat", "sha": SHA, "repo": {"full_name": "o/r"}},
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        node[key] = value.clone();
+    }
+    node
+}
+
+fn fj_get(env: &Env, path: &str, body: &Value) {
+    env.respond(&strs(&tea_get(path)), &body.to_string());
+}
+
+fn fj_view(env: &Env, number: u64, extra: &Value) {
+    fj_get(env, &format!("{FJ_PULLS}/{number}"), &fj_pr(number, extra));
+}
+
+fn fj_write(env: &Env, method: &str, path: &str, body: &Value) {
+    env.respond(&strs(&tea_write(method, path)), &body.to_string());
+}
+
+/// The merge route of PR 7, answered with an empty body.
+fn fj_merge_route(env: &Env) {
+    fj_write(env, "POST", &format!("{FJ_PULLS}/7/merge"), &json!({}));
+}
+
+fn fj_record(env: &Env) -> String {
+    std::fs::read_to_string(env.path("state/agents/pr/auto-merge.json")).unwrap_or_default()
+}
+
+#[test]
+fn forgejo_view_reads_the_pr_of_the_current_branch_and_reports_auto_merge_as_unknown() {
+    let env = forgejo();
+    // A fork's PR with the same head name is not the branch's PR.
+    let fork = json!({"head": {"ref": "feat", "sha": SHA, "repo": {"full_name": "fork/r"}}});
+    for state in ["open", "all"] {
+        fj_get(
+            &env,
+            &format!("{FJ_PULLS}?state={state}"),
+            &json!([fj_pr(6, &fork), fj_pr(7, &json!({}))]),
+        );
+    }
+    fj_view(&env, 7, &json!({"mergeable": false}));
+    let view = ok(&env, &["view"]);
+    assert_eq!(view["number"], 7);
+    assert_eq!(view["state"], "open");
+    assert_eq!(view["head_sha"], SHA);
+    assert_eq!(view["author"], "me");
+    assert_eq!(view["labels"], json!(["bug"]));
+    assert_eq!(view["auto_merge"], "unknown");
+    assert_eq!(view["auto_merge_method"], Value::Null);
+    assert_eq!(view["queue"], Value::Null);
+    assert_eq!(view["conflicts"], true);
+}
+
+#[test]
+fn forgejo_upload_is_refused_before_any_call() {
+    let env = forgejo();
+    env.write("a.png", "png");
+    let message = err(&env, &["upload", "a.png"]);
+    assert!(
+        message.contains("Forgejo can attach an image only to"),
+        "{message}"
+    );
+    assert!(
+        env.forge_calls().iter().all(|call| !call.contains("api")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn forgejo_view_ignores_a_pr_whose_head_repository_is_gone() {
+    let env = forgejo();
+    // A contributor's merged PR from a deleted fork is not the branch's own.
+    let gone = json!({"state": "closed", "merged": true, "head": {"ref": "feat", "repo": null}});
+    fj_get(&env, &format!("{FJ_PULLS}?state=open"), &json!([]));
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=all"),
+        &json!([fj_pr(5, &gone)]),
+    );
+    assert!(err(&env, &["view"]).contains("no PR/MR for branch feat in o/r"));
+}
+
+#[test]
+fn forgejo_view_without_a_pr_names_the_branch() {
+    let env = forgejo();
+    for state in ["open", "all"] {
+        fj_get(&env, &format!("{FJ_PULLS}?state={state}"), &json!([]));
+    }
+    assert!(err(&env, &["view"]).contains("no PR/MR for branch feat in o/r"));
+}
+
+#[test]
+fn forgejo_view_of_a_branch_lists_the_open_pulls_and_every_state_only_when_none_is_open() {
+    let pulls = |env: &Env| -> Vec<String> {
+        env.forge_calls()
+            .into_iter()
+            .filter(|call| call.contains("repos/o/r/pulls?"))
+            .map(|call| call.rsplit_once("state=").unwrap().1.to_owned())
+            .collect()
+    };
+    let merged = json!({"state": "closed", "merged": true, "merged_at": "2026-10-01T00:00:00Z"});
+
+    let env = forgejo();
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=open"),
+        &json!([fj_pr(7, &json!({}))]),
+    );
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=all"),
+        &json!([fj_pr(5, &merged)]),
+    );
+    fj_view(&env, 7, &json!({}));
+    assert_eq!(ok(&env, &["view"])["number"], 7);
+    assert_eq!(pulls(&env), ["open&limit=50&page=1"]);
+
+    let env = forgejo();
+    fj_get(&env, &format!("{FJ_PULLS}?state=open"), &json!([]));
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=all"),
+        &json!([fj_pr(5, &merged)]),
+    );
+    fj_view(&env, 5, &merged);
+    let view = ok(&env, &["view"]);
+    assert_eq!(
+        (view["number"].clone(), view["state"].clone()),
+        (json!(5), json!("merged"))
+    );
+    assert_eq!(pulls(&env), ["open&limit=50&page=1", "all&limit=50&page=1"]);
+}
+
+#[test]
+fn forgejo_view_reads_a_wip_title_as_a_draft() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({"title": "WIP: Add a"}));
+    let view = ok(&env, &["view", "7"]);
+    assert_eq!(view["draft"], true);
+    assert_eq!(view["mergeable"], "blocked");
+    assert_eq!(view["merge_state"], "draft");
+}
+
+#[test]
+fn forgejo_list_filters_the_branch_and_the_author_it_asks_the_host_for() {
+    let env = forgejo();
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=open"),
+        &json!([
+            fj_pr(1, &json!({})),
+            fj_pr(2, &json!({"user": {"login": "bob"}})),
+            fj_pr(
+                3,
+                &json!({"head": {"ref": "feat-2", "sha": SHA, "repo": {"full_name": "o/r"}}})
+            ),
+        ]),
+    );
+    fj_get(&env, "user", &json!({"login": "me"}));
+    let rows = ok(&env, &["list", "--mine", "--branch", "feat"]);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["number"], 1);
+    let everyone = ok(&env, &["list"]);
+    assert_eq!(everyone.as_array().unwrap().len(), 3);
+}
+
+/// The fake tea serves a list a page at a time (`limit` and `page` as `tea api` asks), so a list
+/// longer than a page only comes back whole when agt reads every page.
+#[test]
+fn forgejo_list_reads_every_page_of_the_host() {
+    let path = format!("{FJ_PULLS}?state=open");
+    for (count, pages) in [(120_u64, 3), (100, 3), (50, 2), (49, 1)] {
+        let env = forgejo();
+        // Only the last pull request has the head branch asked for, so it is seen only when the
+        // last page is read.
+        let other = json!({"head": {"ref": "other", "sha": SHA, "repo": {"full_name": "o/r"}}});
+        let last = json!({"head": {"ref": "last", "sha": SHA, "repo": {"full_name": "o/r"}}});
+        let items: Vec<Value> = (1..=count)
+            .map(|number| fj_pr(number, if number == count { &last } else { &other }))
+            .collect();
+        forgejo::respond_list(&env, &path, &items);
+        let rows = ok(&env, &["list", "--branch", "last"]);
+        assert_eq!(rows.as_array().unwrap().len(), 1, "{count}");
+        assert_eq!(rows[0]["number"], count);
+        let reads: Vec<String> = env
+            .forge_calls()
+            .into_iter()
+            .filter(|call| call.contains("repos/o/r/pulls?"))
+            .collect();
+        assert_eq!(reads.len(), pages, "{count}: {reads:?}");
+        assert!(
+            reads[pages - 1].ends_with(&format!("limit=50&page={pages}")),
+            "{count}: {reads:?}"
+        );
+    }
+}
+
+#[test]
+fn forgejo_list_merged_keeps_only_merged_pull_requests() {
+    let env = forgejo();
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=closed"),
+        &json!([
+            fj_pr(1, &json!({"state": "closed", "merged": true})),
+            fj_pr(2, &json!({"state": "closed"})),
+        ]),
+    );
+    let rows = ok(&env, &["list", "--state", "merged"]);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["number"], 1);
+    assert_eq!(rows[0]["state"], "merged");
+}
+
+#[test]
+fn forgejo_create_posts_the_branch_against_the_default_base() {
+    let env = forgejo();
+    fj_get(&env, &format!("{FJ_PULLS}?state=open"), &json!([]));
+    fj_write(&env, "POST", FJ_PULLS, &json!({"number": 9}));
+    fj_view(&env, 9, &json!({"title": "WIP: T"}));
+    let created = ok(&env, &["create", "--title", "T", "--body", "B", "--draft"]);
+    assert_eq!(created["number"], 9);
+    assert_eq!(created["draft"], true);
+    assert_eq!(
+        inputs(&env)[0].1,
+        json!({"head": "feat", "base": "main", "title": "WIP: T", "body": "B"})
+    );
+}
+
+#[test]
+fn forgejo_create_refuses_when_the_branch_has_a_pr() {
+    let env = forgejo();
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=open"),
+        &json!([fj_pr(7, &json!({}))]),
+    );
+    let output = pr(&env, &["create", "--title", "t"]);
+    assert_eq!(output.status.code(), Some(1));
+    let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["number"], 7);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already has 7"));
+    assert!(env.forge_inputs().is_empty());
+}
+
+#[test]
+fn forgejo_update_edits_the_title_then_replaces_the_label_set() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_write(&env, "PATCH", &format!("{FJ_PULLS}/7"), &json!({}));
+    fj_write(&env, "PUT", "repos/o/r/issues/7/labels", &json!([]));
+    ok(
+        &env,
+        &[
+            "update",
+            "7",
+            "--title",
+            "New",
+            "--add-label",
+            "ship",
+            "--remove-label",
+            "bug",
+        ],
+    );
+    let sent = inputs(&env);
+    assert_eq!(sent[0].1, json!({"title": "New"}));
+    assert_eq!(sent[1].1, json!({"labels": ["ship"]}));
+    assert!(err(&env, &["update", "7"]).contains("nothing to update"));
+}
+
+#[test]
+fn forgejo_update_marks_and_unmarks_a_draft_in_the_title() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_write(&env, "PATCH", &format!("{FJ_PULLS}/7"), &json!({}));
+    ok(&env, &["update", "7", "--draft"]);
+    fj_view(&env, 7, &json!({"title": "WIP: Add a"}));
+    ok(&env, &["update", "7", "--draft=false"]);
+    let sent = inputs(&env);
+    assert_eq!(sent[0].1, json!({"title": "WIP: Add a"}));
+    assert_eq!(sent[1].1, json!({"title": "Add a"}));
+}
+
+#[test]
+fn forgejo_merge_refuses_a_head_that_is_not_the_sha_or_a_draft() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    assert!(err(&env, &["merge", "7", "--sha", "fedcba9876543210"]).contains("not fedcba98"));
+    fj_view(&env, 7, &json!({"title": "WIP: Add a"}));
+    assert!(err(&env, &["merge", "7", "--sha", SHA]).contains("is a draft"));
+    assert!(env.forge_inputs().is_empty());
+}
+
+#[test]
+fn forgejo_merge_sends_the_head_guard_and_the_method() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_merge_route(&env);
+    ok(&env, &["merge", "7", "--sha", SHA, "--method", "squash"]);
+    ok(&env, &["merge", "7", "--sha", SHA]);
+    let sent = inputs(&env);
+    assert_eq!(
+        sent[0].1,
+        json!({"Do": "squash", "head_commit_id": SHA, "delete_branch_after_merge": false})
+    );
+    assert_eq!(sent[1].1["Do"], "merge");
+}
+
+#[test]
+fn forgejo_merge_closes_the_local_issues_the_pr_names() {
+    let env = forgejo();
+    let named = env.issue(&["create", "--title", "Named"])["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fj_view(&env, 7, &json!({}));
+    let path = tea_get(&format!("{FJ_PULLS}/7"));
+    let merged = fj_pr(
+        7,
+        &json!({"state": "closed", "merged": true, "body": format!("Fixes {named}")}),
+    );
+    env.respond_nth(&strs(&path), 2, &merged.to_string());
+    fj_merge_route(&env);
+    let done = ok(&env, &["merge", "7", "--sha", SHA, "--method", "squash"]);
+    assert_eq!(done["state"], "merged");
+    assert_eq!(done["closed_issues"], json!([named]));
+    assert_eq!(issue_state(&env, &named), "closed");
+}
+
+#[test]
+fn forgejo_merge_auto_asks_the_host_to_merge_when_checks_succeed_and_records_the_method() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_merge_route(&env);
+    ok(
+        &env,
+        &["merge", "7", "--sha", SHA, "--method", "rebase", "--auto"],
+    );
+    assert_eq!(
+        inputs(&env)[0].1,
+        json!({
+            "Do": "rebase", "head_commit_id": SHA, "delete_branch_after_merge": false,
+            "merge_when_checks_succeed": true,
+        })
+    );
+    assert!(fj_record(&env).contains("rebase"), "{}", fj_record(&env));
+}
+
+#[test]
+fn forgejo_auto_merge_off_cancels_with_a_delete_and_on_restores_the_recorded_method() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_merge_route(&env);
+    ok(
+        &env,
+        &["merge", "7", "--sha", SHA, "--method", "squash", "--auto"],
+    );
+    env.reset_calls();
+    let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&delete), "");
+    let off = ok(&env, &["auto-merge", "off", "7"]);
+    assert_eq!(off["changed"], true);
+    assert_eq!(off["pr"]["auto_merge"], "unknown");
+    assert!(
+        env.forge_calls()
+            .iter()
+            .any(|call| call.ends_with("-X DELETE repos/o/r/pulls/7/merge")),
+        "{:?}",
+        env.forge_calls()
+    );
+    assert!(fj_record(&env).contains("squash"), "{}", fj_record(&env));
+
+    let on = ok(&env, &["auto-merge", "on", "7"]);
+    assert_eq!(on["changed"], true);
+    assert_eq!(on["merged"], false);
+    assert_eq!(on["pr"]["auto_merge"], "unknown");
+    let restored = inputs(&env).pop().unwrap().1;
+    assert_eq!(restored["Do"], "squash");
+    assert_eq!(restored["merge_when_checks_succeed"], true);
+    assert_eq!(restored["head_commit_id"], SHA);
+    assert!(fj_record(&env).contains("squash"), "{}", fj_record(&env));
+
+    ok(&env, &["auto-merge", "off", "7"]);
+    ok(&env, &["auto-merge", "on", "7"]);
+    assert_eq!(inputs(&env).pop().unwrap().1["Do"], "squash");
+}
+
+#[test]
+fn forgejo_a_second_auto_merge_off_keeps_the_method_the_first_one_recorded() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_merge_route(&env);
+    ok(
+        &env,
+        &["merge", "7", "--sha", SHA, "--method", "squash", "--auto"],
+    );
+    let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&delete), "");
+    assert_eq!(ok(&env, &["auto-merge", "off", "7"])["changed"], true);
+
+    env.respond(&strs(&delete), r#"{"message":"Not Found"}"#);
+    env.respond_status(&strs(&delete), "404 Not Found");
+    assert_eq!(ok(&env, &["auto-merge", "off", "7"])["changed"], false);
+
+    assert_eq!(ok(&env, &["auto-merge", "on", "7"])["changed"], true);
+    assert_eq!(inputs(&env).pop().unwrap().1["Do"], "squash");
+}
+
+#[test]
+fn forgejo_auto_merge_off_that_finds_none_scheduled_changes_nothing_and_keeps_no_memo() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&delete), r#"{"message":"Not Found"}"#);
+    env.respond_status(&strs(&delete), "404 Not Found");
+    let off = ok(&env, &["auto-merge", "off", "7"]);
+    assert_eq!(off["changed"], false);
+    assert!(!fj_record(&env).contains("merge"), "{}", fj_record(&env));
+    let message = err(&env, &["auto-merge", "on", "7"]);
+    assert!(
+        message.contains("no paused auto-merge is recorded"),
+        "{message}"
+    );
+    assert!(env.forge_inputs().is_empty());
+}
+
+#[test]
+fn forgejo_auto_merge_off_of_an_unrecorded_one_restores_as_a_plain_merge() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_merge_route(&env);
+    let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&delete), "");
+    ok(&env, &["auto-merge", "off", "7"]);
+    ok(&env, &["auto-merge", "on", "7"]);
+    assert_eq!(inputs(&env)[0].1["Do"], "merge");
+}
+
+#[test]
+fn forgejo_auto_merge_off_reports_a_host_failure_that_is_not_a_missing_schedule() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&delete), r#"{"message":"boom"}"#);
+    env.respond_status(&strs(&delete), "500 Internal Server Error");
+    let message = err(&env, &["auto-merge", "off", "7"]);
+    assert!(message.contains("500"), "{message}");
+    assert!(message.contains("boom"), "{message}");
+}
+
+#[test]
+fn forgejo_merge_that_the_host_refuses_is_an_error_and_leaves_the_pr_open() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    let merge = tea_write("POST", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&merge), r#"{"message":"Please try again later"}"#);
+    env.respond_status(&strs(&merge), "405 Method Not Allowed");
+    let message = err(&env, &["merge", "7", "--sha", SHA]);
+    assert!(message.contains("405"), "{message}");
+    assert!(message.contains("Please try again later"), "{message}");
+}
+
+#[test]
+fn a_forgejo_origin_without_a_tea_login_names_the_login_command() {
+    let env = setup("https://codeberg.org/o/r.git");
+    let message = err(&env, &["list"]);
+    assert!(
+        message.contains("tea has no login for codeberg.org"),
+        "{message}"
+    );
+    assert!(message.contains("tea login add"), "{message}");
+}
+
+#[test]
+fn a_self_hosted_forgejo_origin_is_found_through_the_hosts_file_or_the_tea_login() {
+    let host = "git.example.invalid";
+    let login = ("selfhost", "https://git.example.invalid");
+    // The tea login alone names the host: the probe finds it.
+    let probed = setup("git@git.example.invalid:o/r.git");
+    forgejo::logins_of(&probed, &[login]);
+    fj_login_list(&probed, &json!([fj_pr(7, &json!({}))]));
+    assert_eq!(ok(&probed, &["list"])[0]["number"], 7);
+
+    // The hosts file says the host is Forgejo or Gitea; the login is still tea's.
+    for service in ["forgejo", "gitea"] {
+        let env = setup("git@git.example.invalid:o/r.git");
+        forgejo::logins_of(&env, &[login]);
+        let dir = env.path("config/agt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("hosts.json"),
+            format!(r#"{{"{host}": {{"service": "{service}"}}}}"#),
+        )
+        .unwrap();
+        fj_login_list(&env, &json!([fj_pr(8, &json!({}))]));
+        assert_eq!(ok(&env, &["list"])[0]["number"], 8, "{service}");
+    }
+}
+
+/// Answers the open PR list through the tea login `selfhost`.
+fn fj_login_list(env: &Env, body: &Value) {
+    let path = tea_get_as("selfhost", &format!("{FJ_PULLS}?state=open"));
+    env.respond(&strs(&path), &body.to_string());
+}
+
+#[test]
+fn forgejo_pr_writes_are_refused_when_push_is_off_and_no_call_is_made() {
+    let env = forgejo();
+    env.write_config("[pull_requests]\npush = \"off\"\n");
+    let calls = env.forge_calls().len();
+    for args in [
+        vec!["create", "--title", "T"],
+        vec!["update", "7", "--title", "T"],
+        vec!["merge", "7", "--sha", SHA],
+        vec!["auto-merge", "off", "7"],
+    ] {
+        let message = err(&env, &args);
+        assert!(
+            message.contains("refused: push is off for codeberg.org/o/r"),
+            "{args:?}: {message}"
+        );
+    }
+    assert!(env.forge_inputs().is_empty());
+    assert!(
+        env.forge_calls()[calls..]
+            .iter()
+            .all(|call| call.contains("-X GET") || call.contains("logins list")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn offline_refuses_every_forgejo_pr_command_without_running_tea() {
+    let env = forgejo();
+    let output = env
+        .bin(&env.repo)
+        .env("AGT_OFFLINE", "1")
+        .args(["pr", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("offline mode forbids agt pr"), "{stderr}");
+    assert!(env.forge_calls().is_empty());
 }
 
 #[test]

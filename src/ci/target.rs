@@ -119,9 +119,15 @@ fn gitlab_host() -> Result<String> {
         .ok_or_else(|| Error("no GitLab host: set GITLAB_HOST or configure glab's host".into()))
 }
 
-/// The host and repository of the tracker `agt pr` picks (see `--remote`), which must be on the
-/// forge the target names.
-fn tracker(platform: Forge, remote: Option<&str>) -> Result<(String, String)> {
+/// Whether a target written for `platform` can name a pull request on `found`: a bare `#N`
+/// parses as a GitHub reference, but means a PR of a Forgejo tracker just as well.
+fn names_same_forge(platform: Forge, found: Forge) -> bool {
+    platform == found || (platform == Forge::Github && found == Forge::Forgejo)
+}
+
+/// The host, repository and forge of the tracker `agt pr` picks (see `--remote`), which must be
+/// on the forge the target names.
+fn tracker(platform: Forge, remote: Option<&str>) -> Result<(String, String, Forge)> {
     let repo = Repo::discover()?;
     let config = Config::load_for_repo(&repo)?;
     let source = Source::of(&require_tracker(
@@ -131,35 +137,48 @@ fn tracker(platform: Forge, remote: Option<&str>) -> Result<(String, String)> {
         remote,
         None,
     )?)?;
-    if source.forge != platform {
+    if !names_same_forge(platform, source.forge) {
+        let hint = if source.forge == Forge::Forgejo {
+            "; name a Forgejo pull request as #PR, for example #7"
+        } else {
+            ""
+        };
         return fail(format!(
-            "{}/{} is {}, but the target is a {} reference",
+            "{}/{} is {}, but the target is a {} reference{hint}",
             source.host,
             source.repo,
             service::kind(source.forge).name,
             service::kind(platform).name
         ));
     }
-    Ok((source.host, source.repo))
+    Ok((source.host, source.repo, source.forge))
 }
 
 /// Fills in the host and repository a target leaves out; `remote` picks the tracker for a target
 /// that names no repository.
-pub fn resolve(target: Target, remote: Option<&str>) -> Result<Resolved> {
+pub fn resolve(mut target: Target, remote: Option<&str>) -> Result<Resolved> {
+    if target.platform == Forge::Forgejo && target.pipeline {
+        return fail("agt ci wait takes a Forgejo pull request, not an Actions run URL");
+    }
     let (host, repo) = match (target.host.clone(), target.repo.clone()) {
         (Some(host), Some(repo)) => (host, repo),
         (None, Some(repo)) => {
             let host = match target.platform {
                 Forge::Github => github::default_host(),
                 Forge::Gitlab => gitlab_host()?,
+                Forge::Forgejo => return fail("a Forgejo target needs a pull request URL"),
             };
             (host, repo)
         }
-        (_, None) => tracker(target.platform, remote)?,
+        (_, None) => {
+            let (host, repo, platform) = tracker(target.platform, remote)?;
+            target.platform = platform;
+            (host, repo)
+        }
     };
     let number = target.number;
     let key = match (target.platform, target.pipeline) {
-        (Forge::Github, _) => format!("{repo}#{number}"),
+        (Forge::Github | Forge::Forgejo, _) => format!("{repo}#{number}"),
         (Forge::Gitlab, false) => format!("{repo}!{number}"),
         (Forge::Gitlab, true) => format!("{repo}/-/pipelines/{number}"),
     };
@@ -175,6 +194,25 @@ pub fn resolve(target: Target, remote: Option<&str>) -> Result<Resolved> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forgejo_url_is_a_forgejo_target_and_a_bare_hash_may_name_one() {
+        let url = parse("https://codeberg.org/o/r/pulls/9@abc123").unwrap();
+        assert_eq!(url.platform, Forge::Forgejo);
+        assert_eq!(url.host.as_deref(), Some("codeberg.org"));
+        assert_eq!((url.number, url.awaiting), (9, true));
+        assert!(names_same_forge(Forge::Github, Forge::Forgejo));
+        assert!(!names_same_forge(Forge::Github, Forge::Gitlab));
+        assert!(!names_same_forge(Forge::Forgejo, Forge::Github));
+    }
+
+    #[test]
+    fn a_forgejo_actions_run_cannot_be_waited_on() {
+        let run = parse("https://codeberg.org/o/r/actions/runs/4").unwrap();
+        assert!(run.pipeline);
+        let error = resolve(run, None).err().unwrap();
+        assert!(error.0.contains("Actions run"), "{}", error.0);
+    }
 
     #[test]
     fn parses_every_target_form() {

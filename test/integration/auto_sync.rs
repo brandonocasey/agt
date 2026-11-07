@@ -1,6 +1,6 @@
 //! Auto-sync: a read pulls from the forge first when the local copy is stale, and falls back to
 //! the local data, with one line on stderr, when the forge cannot be reached. The issue
-//! scenarios run against GitHub and GitLab, the review ones against GitHub.
+//! scenarios run against GitHub, GitLab and Forgejo, the review ones against GitHub.
 
 use std::fs;
 use std::process::Output;
@@ -33,6 +33,11 @@ macro_rules! matrix {
                 #[test]
                 fn gitlab() {
                     super::$scenario(&crate::support::issue::Gitlab);
+                }
+
+                #[test]
+                fn forgejo() {
+                    super::$scenario(&crate::support::issue::Forgejo);
                 }
             }
         )*
@@ -90,16 +95,11 @@ pub(crate) fn skipped_reason(output: &Output) -> String {
 /// The tracker as `synced` leaves it, then the host renames issue 1 after the watermark.
 fn changed_on_the_host(fake: Fake) -> Env {
     let env = synced(fake, &[Spec::new(1, "Login fails")]);
-    let host = if fake.name() == "github" {
-        "github.com"
-    } else {
-        "gitlab.com"
-    };
     env.git(&[
         "remote",
         "add",
         "origin",
-        &format!("https://{host}/{}.git", fake.repo()),
+        &format!("https://{}/{}.git", fake.host(), fake.repo()),
     ]);
     env.write_config(&format!(
         "{}\n[sync]\npull = \"auto\"\n",
@@ -204,6 +204,7 @@ fn a_missing_tool_leaves_the_local_read_and_one_line(fake: Fake) {
         &[
             ("AGT_GH_BIN", "/nonexistent/gh"),
             ("AGT_GLAB_BIN", "/nonexistent/glab"),
+            ("AGT_TEA_BIN", "/nonexistent/tea"),
         ],
     );
     assert_eq!(output.status.code(), Some(0));
@@ -223,6 +224,7 @@ fn a_slow_forge_is_killed_at_the_cap(fake: Fake) {
         &[
             ("AGT_GH_BIN", &tool),
             ("AGT_GLAB_BIN", &tool),
+            ("AGT_TEA_BIN", &tool),
             ("AGT_SYNC_CAP_MS", "400"),
         ],
     );
@@ -279,7 +281,7 @@ fn a_held_lock_skips_the_issue_sync(fake: Fake) {
 
 fn a_tracker_filter_syncs_only_that_tracker(fake: Fake) {
     let other_config = match fake.name() {
-        "github" => Gitlab.config(false),
+        "github" | "forgejo" => Gitlab.config(false),
         _ => Github.config(false),
     };
     let env = changed_on_the_host(fake);

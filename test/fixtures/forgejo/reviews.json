@@ -1,0 +1,38 @@
+[
+  {
+    "id": 5001,
+    "state": "PENDING",
+    "body": "A draft review nobody sees yet.",
+    "submitted_at": null,
+    "user": { "login": "alice" },
+    "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}#issuecomment-5001",
+    "comments_count": 0
+  },
+  {
+    "id": 5002,
+    "state": "COMMENT",
+    "body": "",
+    "submitted_at": "2026-10-13T09:00:00Z",
+    "user": { "login": "alice" },
+    "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}#issuecomment-5002",
+    "comments_count": 0
+  },
+  {
+    "id": 5003,
+    "state": "APPROVED",
+    "body": "Looks good to me.",
+    "submitted_at": "2026-10-13T10:00:00Z",
+    "user": { "login": "alice" },
+    "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}#issuecomment-5003",
+    "comments_count": 0
+  },
+  {
+    "id": 5004,
+    "state": "COMMENT",
+    "body": "",
+    "submitted_at": "2026-10-13T11:00:00Z",
+    "user": { "login": "dj-bot" },
+    "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}#issuecomment-5004",
+    "comments_count": 3
+  }
+]

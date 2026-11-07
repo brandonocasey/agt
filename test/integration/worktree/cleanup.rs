@@ -7,7 +7,9 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{Env, Sealed, proc_start, unix_now};
+use crate::support::forge::argv::tea_get;
+use crate::support::forge::forgejo;
+use crate::support::{Env, Sealed, proc_start, strs, unix_now};
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -525,6 +527,364 @@ fn a_gitlab_merge_request_proves_a_squash_and_a_cross_project_one_does_not() {
     assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
     assert_eq!(site.kept(&report, "fork")["verdict"], "unmerged");
     assert_eq!(site.branches(), ["fork", "main"]);
+}
+
+#[test]
+fn a_github_open_fork_pull_request_still_gives_open_and_the_first_open_one_is_cited() {
+    let site = Site::new();
+    site.branch("solo");
+    site.branch("both");
+    let (solo, both) = (site.tip("solo"), site.tip("both"));
+    site.pulls("solo", &[pull(4, "OPEN", "main", "solo", &solo, true)]);
+    site.pulls(
+        "both",
+        &[
+            pull(4, "OPEN", "main", "both", &both, true),
+            pull(5, "OPEN", "main", "both", &both, false),
+        ],
+    );
+
+    let report = site.run(&["--yes"]);
+    for branch in ["solo", "both"] {
+        let row = site.kept(&report, branch);
+        assert_eq!(row["verdict"], "open", "{row}");
+        assert!(
+            row["reason"].as_str().unwrap().contains("open PR #4 "),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn a_gitlab_open_fork_merge_request_still_gives_open_and_the_first_open_one_is_cited() {
+    let site = Site::at("git@gitlab.com:acme/app.git");
+    site.branch("solo");
+    site.branch("both");
+    let (solo, both) = (site.tip("solo"), site.tip("both"));
+    let mr = |iid: u64, branch: &str, head: &str, source: u64| {
+        json!({
+            "iid": iid,
+            "web_url": format!("https://gitlab.com/acme/app/-/merge_requests/{iid}"),
+            "state": "opened",
+            "target_branch": "main",
+            "source_branch": branch,
+            "sha": head,
+            "source_project_id": source,
+            "target_project_id": 10,
+        })
+    };
+    let path = |branch: &str| {
+        format!("projects/acme%2Fapp/merge_requests?source_branch={branch}&state=all&per_page=100")
+    };
+    site.env.respond(
+        &["api", "-X", "GET", "--paginate", &path("solo")],
+        &json!([mr(4, "solo", &solo, 555)]).to_string(),
+    );
+    site.env.respond(
+        &["api", "-X", "GET", "--paginate", &path("both")],
+        &json!([mr(4, "both", &both, 555), mr(5, "both", &both, 10)]).to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    for branch in ["solo", "both"] {
+        let row = site.kept(&report, branch);
+        assert_eq!(row["verdict"], "open", "{row}");
+        assert!(
+            row["reason"].as_str().unwrap().contains("open PR #4 "),
+            "{row}"
+        );
+    }
+}
+
+/// The head of a Forgejo pull request: `repo` is the repository the branch lives in.
+#[derive(Clone, Copy)]
+struct Head<'a> {
+    branch: &'a str,
+    sha: &'a str,
+    repo: &'a str,
+}
+
+/// A Forgejo pull request of `acme/app` as the list route shows it.
+fn forgejo_pull(number: u64, state: &str, head: Head) -> Value {
+    let Head { branch, sha, repo } = head;
+    json!({
+        "number": number,
+        "html_url": format!("https://codeberg.org/acme/app/pulls/{number}"),
+        "title": format!("Title of {number}"),
+        "state": if state == "open" { "open" } else { "closed" },
+        "merged": state == "merged",
+        "merged_at": (state == "merged").then_some("2026-01-01T00:00:00Z"),
+        "closed_at": (state == "closed").then_some("2026-03-04T05:06:07Z"),
+        "base": {"ref": "main", "repo": {"full_name": "acme/app"}},
+        "head": {"ref": branch, "sha": sha, "repo": {"full_name": repo}},
+    })
+}
+
+#[test]
+fn a_forgejo_pull_request_proves_a_squash_and_a_fork_one_does_not() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("sq");
+    site.branch("fork");
+    let (sq, fork) = (site.tip("sq"), site.tip("fork"));
+    site.squash("sq");
+    site.squash("fork");
+    forgejo::logins(&site.env);
+    site.env
+        .respond(&strs(&tea_get("repos/acme/app/pulls?state=open")), "[]");
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([
+            forgejo_pull(
+                11,
+                "merged",
+                Head {
+                    branch: "sq",
+                    sha: &sq,
+                    repo: "acme/app",
+                },
+            ),
+            forgejo_pull(
+                12,
+                "merged",
+                Head {
+                    branch: "fork",
+                    sha: &fork,
+                    repo: "someone/app",
+                },
+            ),
+        ])
+        .to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(report["deleted"][0]["branch"], "sq");
+    assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
+    assert_eq!(site.kept(&report, "fork")["verdict"], "unmerged");
+    assert_eq!(site.branches(), ["fork", "main"]);
+}
+
+/// How many times the fake tea was asked for a pull request list.
+fn forgejo_list_calls(site: &Site) -> usize {
+    site.env
+        .forge_calls()
+        .iter()
+        .filter(|call| call.contains("pulls?state="))
+        .count()
+}
+
+#[test]
+fn a_forgejo_branch_with_only_fork_pull_requests_lists_each_state_once() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("fork");
+    let fork = site.tip("fork");
+    site.squash("fork");
+    forgejo::logins(&site.env);
+    site.env
+        .respond(&strs(&tea_get("repos/acme/app/pulls?state=open")), "[]");
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([forgejo_pull(
+            12,
+            "merged",
+            Head {
+                branch: "fork",
+                sha: &fork,
+                repo: "someone/app",
+            },
+        )])
+        .to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "fork")["verdict"], "unmerged");
+    assert_eq!(forgejo_list_calls(&site), 2, "{:?}", site.env.forge_calls());
+}
+
+#[test]
+fn a_forgejo_open_fork_pull_request_then_an_own_closed_one_lists_each_state_once() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("both");
+    let both = site.tip("both");
+    forgejo::logins(&site.env);
+    let on = |number, state, repo| {
+        forgejo_pull(
+            number,
+            state,
+            Head {
+                branch: "both",
+                sha: &both,
+                repo,
+            },
+        )
+    };
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=open")),
+        &json!([on(5, "open", "someone/app")]).to_string(),
+    );
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([on(5, "open", "someone/app"), on(4, "closed", "acme/app")]).to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "both")["verdict"], "closed");
+    assert_eq!(forgejo_list_calls(&site), 2, "{:?}", site.env.forge_calls());
+}
+
+#[test]
+fn a_forgejo_branch_with_an_open_pull_request_is_kept_without_listing_every_state() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("wip");
+    let head = site.tip("wip");
+    forgejo::logins(&site.env);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=open")),
+        &json!([forgejo_pull(
+            7,
+            "open",
+            Head {
+                branch: "wip",
+                sha: &head,
+                repo: "acme/app",
+            }
+        )])
+        .to_string(),
+    );
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "wip")["verdict"], "open");
+    let reads = site.env.forge_calls();
+    assert!(
+        reads.iter().all(|call| !call.contains("state=all")),
+        "{reads:?}"
+    );
+}
+
+#[test]
+fn a_closed_forgejo_pull_request_row_carries_head_title_and_closed_at() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("shelved");
+    let head = site.tip("shelved");
+    forgejo::logins(&site.env);
+    site.env
+        .respond(&strs(&tea_get("repos/acme/app/pulls?state=open")), "[]");
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([forgejo_pull(
+            7,
+            "closed",
+            Head {
+                branch: "shelved",
+                sha: &head,
+                repo: "acme/app",
+            }
+        )])
+        .to_string(),
+    );
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "shelved");
+    assert_eq!(row["verdict"], "closed");
+    assert_eq!(row["head"], head.as_str());
+    assert_eq!(row["title"], "Title of 7");
+    assert_eq!(row["closed_at"], "2026-03-04T05:06:07Z");
+}
+
+/// What the Forgejo list route answers for `acme/app` in the `open` state and in every state.
+fn forgejo_feed(site: &Site, open: &[Value], all: &[Value]) {
+    forgejo::logins(&site.env);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=open")),
+        &json!(open).to_string(),
+    );
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!(all).to_string(),
+    );
+}
+
+fn fork_head<'a>(branch: &'a str, sha: &'a str) -> Head<'a> {
+    Head {
+        branch,
+        sha,
+        repo: "me/app",
+    }
+}
+
+fn own_head<'a>(branch: &'a str, sha: &'a str) -> Head<'a> {
+    Head {
+        branch,
+        sha,
+        repo: "acme/app",
+    }
+}
+
+#[test]
+fn a_forgejo_fork_pull_request_of_the_same_branch_name_is_not_the_branchs_own() {
+    for state in ["open", "closed"] {
+        let site = Site::at("git@codeberg.org:acme/app.git");
+        site.branch("feat");
+        let tip = site.tip("feat");
+        let all = [forgejo_pull(4, state, fork_head("feat", &tip))];
+        let open = if state == "open" { &all[..] } else { &[] };
+        forgejo_feed(&site, open, &all);
+
+        let report = site.run(&["--yes"]);
+        let row = site.kept(&report, "feat");
+        assert_eq!(row["verdict"], "unmerged", "{state}: {row}");
+        assert!(
+            !row["reason"].as_str().unwrap().contains("#4 "),
+            "{state}: {row}"
+        );
+    }
+}
+
+#[test]
+fn a_forgejo_own_merged_pull_request_decides_beside_an_open_fork_one() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("feat");
+    let tip = site.tip("feat");
+    site.squash("feat");
+    let all = [
+        forgejo_pull(4, "open", fork_head("feat", &tip)),
+        forgejo_pull(3, "merged", own_head("feat", &tip)),
+    ];
+    forgejo_feed(&site, &all[..1], &all);
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(report["deleted"][0]["branch"], "feat");
+    assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
+}
+
+#[test]
+fn a_forgejo_own_open_pull_request_is_cited_beside_an_open_fork_one() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("feat");
+    let tip = site.tip("feat");
+    let open = [
+        forgejo_pull(4, "open", fork_head("feat", &tip)),
+        forgejo_pull(5, "open", own_head("feat", &tip)),
+    ];
+    forgejo_feed(&site, &open, &open);
+
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "feat");
+    assert_eq!(row["verdict"], "open");
+    assert!(row["reason"].as_str().unwrap().contains("PR #5 "), "{row}");
+}
+
+#[test]
+fn a_forgejo_origin_without_a_tea_login_keeps_every_branch_and_says_why() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("sq");
+    site.squash("sq");
+    let report = site.run(&["--yes"]);
+    assert_eq!(report["deleted"], json!([]));
+    let row = site.kept(&report, "sq");
+    assert_ne!(row["verdict"], "squash-merged");
+    assert!(
+        row.to_string()
+            .contains("tea has no login for codeberg.org"),
+        "{row}"
+    );
 }
 
 #[test]

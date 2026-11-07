@@ -10,11 +10,12 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::auto_sync::{LOCAL, SKIPPED, skipped_reason};
-use crate::support::forge::{assert_read_only, github};
+use crate::support::forge::argv::tea_get;
+use crate::support::forge::{assert_read_only, forgejo, github};
 use crate::support::issue::NOW;
 use crate::support::process::{assert_gone, slow_tool};
 use crate::support::scenario::Setup;
-use crate::support::{Env, executable};
+use crate::support::{Env, executable, strs};
 
 const ORIGIN: &str = "git@github.com:me/repo.git";
 
@@ -163,6 +164,149 @@ fn a_failing_forge_leaves_the_local_review_read_and_one_line() {
     assert_eq!(env.forge_calls().len(), calls);
     skipped_reason(&review_now(env, at + 301, &["list"], &[]));
     assert!(env.forge_calls().len() > calls);
+}
+
+/// A Forgejo origin whose PR 5 exists on the host and is not yet imported: tea is logged in and
+/// the list of PRs the lookup reads names it.
+fn unsynced_forgejo_pr() -> Setup {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    forgejo::sync_fixtures(&setup);
+    forgejo_pulls(
+        &setup.env,
+        r#"[{"number":5,"state":"open","head":{"ref":"feat","repo":{"full_name":"me/proj"}}}]"#,
+    );
+    setup
+}
+
+/// The pull requests of the repository, all open: the lookup reads the open ones first.
+fn forgejo_pulls(env: &Env, body: &str) {
+    for state in ["open", "all"] {
+        env.respond(
+            &strs(&tea_get(&format!("repos/me/proj/pulls?state={state}"))),
+            body,
+        );
+    }
+}
+
+fn forgejo_lookups(env: &Env) -> usize {
+    env.forge_calls()
+        .iter()
+        .filter(|call| call.contains("pulls?state=open"))
+        .count()
+}
+
+#[test]
+fn a_forgejo_review_read_finds_the_pr_and_syncs_it() {
+    let setup = unsynced_forgejo_pr();
+    let local = review_now(&setup.env, NOW, &["list"], &[("AGT_OFFLINE", "1")]);
+    assert!(!String::from_utf8_lossy(&local.stdout).contains("fg-t6001"));
+    assert!(setup.env.forge_calls().is_empty());
+    for (args, wanted) in [
+        (vec!["list"], "fg-t6001"),
+        (vec!["status"], "fg-5"),
+        (vec!["show", "fg-t6001"], "fg-t6001"),
+    ] {
+        let setup = unsynced_forgejo_pr();
+        let output = review_now(&setup.env, NOW, &args, &[]);
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "", "{args:?}");
+        let text = review_json(&output).to_string();
+        assert!(text.contains(wanted), "{args:?}: {text}");
+        assert_read_only(&forgejo::Forgejo::new(), &setup.env);
+    }
+}
+
+#[test]
+fn a_synced_forgejo_review_is_read_again_only_when_stale() {
+    let setup = unsynced_forgejo_pr();
+    let env = &setup.env;
+    env.pull_with(&["sync", "--pr", "5"], &[("AGT_NOW", &NOW.to_string())]);
+    let synced = env.forge_calls().len();
+    let fresh = review_now(env, NOW + 299, &["status"], &[]);
+    assert_eq!(String::from_utf8_lossy(&fresh.stderr), "");
+    assert_eq!(env.forge_calls().len(), synced);
+    let stale = review_now(env, NOW + 301, &["status"], &[]);
+    assert_eq!(String::from_utf8_lossy(&stale.stderr), "");
+    assert!(env.forge_calls().len() > synced);
+    assert_eq!(forgejo_lookups(env), 0);
+    let target = env.run_with(&["status", "--full"], None, &[("AGT_OFFLINE", "1")]);
+    assert_eq!(target["target"], "fg-5");
+}
+
+#[test]
+fn offline_keeps_forgejo_review_reads_local() {
+    let setup = unsynced_forgejo_pr();
+    let env = &setup.env;
+    for output in [
+        review_now(env, NOW, &["--offline", "status"], &[]),
+        review_now(env, NOW, &["status"], &[("AGT_OFFLINE", "1")]),
+    ] {
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+        assert!(output.status.success());
+    }
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn a_forgejo_branch_without_a_pr_is_looked_up_once_per_window() {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    let env = &setup.env;
+    forgejo::login(env);
+    forgejo_pulls(env, "[]");
+    // The origin has no parent to look in.
+    env.respond(&strs(&tea_get("repos/me/proj")), "{}");
+    let local = review_now(env, NOW, &["status"], &[("AGT_OFFLINE", "1")]);
+    for at in [NOW, NOW + 60, NOW + 299] {
+        let output = review_now(env, at, &["status"], &[]);
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+        assert_eq!(output.stdout, local.stdout);
+    }
+    assert_eq!(forgejo_lookups(env), 1, "{:?}", env.forge_calls());
+    let output = review_now(env, NOW + 301, &["list"], &[]);
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(forgejo_lookups(env), 2);
+}
+
+#[test]
+fn a_failing_forgejo_leaves_the_local_review_read_and_one_line() {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    let env = &setup.env;
+    let local = review_now(env, NOW, &["list"], &[("AGT_OFFLINE", "1")]);
+    // The fake refuses every call it has no answer for, and tea has no login.
+    let output = review_now(env, NOW, &["list"], &[]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, local.stdout);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with(SKIPPED) && stderr.ends_with(LOCAL),
+        "{stderr}"
+    );
+    let calls = env.forge_calls().len();
+    let paused = review_now(env, NOW, &["list"], &[]);
+    assert_eq!(String::from_utf8_lossy(&paused.stderr), "");
+    assert_eq!(env.forge_calls().len(), calls);
+    skipped_reason(&review_now(env, NOW + 301, &["list"], &[]));
+    assert!(env.forge_calls().len() > calls);
+}
+
+#[test]
+fn a_slow_tea_is_killed_for_a_review_read() {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    let env = &setup.env;
+    let local = review_now(env, NOW, &["list"], &[("AGT_OFFLINE", "1")]);
+    let (tool, pid) = slow_tool(env);
+    let started = Instant::now();
+    let output = review_now(
+        env,
+        NOW,
+        &["list"],
+        &[("AGT_TEA_BIN", &tool), ("AGT_SYNC_CAP_MS", "400")],
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, local.stdout);
+    assert!(skipped_reason(&output).contains("timed out"));
+    assert_gone(&pid);
 }
 
 #[test]

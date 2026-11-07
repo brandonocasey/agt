@@ -52,6 +52,7 @@ fn mr(node: &Value) -> Pr {
             .flatten()
             .filter_map(|label| label.as_str().map(str::to_owned))
             .collect(),
+        auto_merge_known: true,
         auto_merge: node["merge_when_pipeline_succeeds"]
             .as_bool()
             .unwrap_or(false)

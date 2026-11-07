@@ -11,7 +11,7 @@ use super::classify::{
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
 use crate::forge::transport::TransportError;
-use crate::forge::{github, gitlab};
+use crate::forge::{forgejo, github, gitlab};
 use crate::store::model::Forge;
 
 /// Whether repeating the read may succeed: a rate limit, a timeout, a server error or a failure
@@ -71,6 +71,7 @@ pub fn snapshot(
         }
         Forge::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs)
             .map(|(state, head)| (state, head, None)),
+        Forge::Forgejo => forgejo(target, head.clone(), awaiting, (waited_secs, idle_since)),
     };
     match result {
         Ok((state, head, idle_since)) => (state, head, false, idle_since),
@@ -285,6 +286,39 @@ fn unreadable(error: &TransportError) -> bool {
             .message
             .to_lowercase()
             .contains("resource not accessible")
+}
+
+/// The PR's statuses are all the evidence: Forgejo marks none of them required. With `--job`
+/// only the statuses of those names count, and a name no status has is held as on GitHub.
+fn forgejo(
+    target: &Resolved,
+    head: Option<String>,
+    awaiting: bool,
+    clock: (i64, Option<i64>),
+) -> Result<(State, Option<String>, Option<i64>), TransportError> {
+    let forgejo = forgejo::connect(&target.host);
+    let pull = forgejo.pull_checks(&target.repo, target.target.number)?;
+    let head = pin(head, &pull.view["headRefOid"]);
+    let expected = head.as_deref().unwrap_or("");
+    let head_state = Head {
+        expected,
+        awaiting,
+        waited_secs: clock.0,
+    };
+    let rollup = pull.checks.len();
+    if target.jobs.is_empty() {
+        let state = classify(&head_state, &pull.view, rollup, &pull.checks);
+        return Ok((state, head, None));
+    }
+    let (selected, names) = select_named(&pull.checks, &target.jobs);
+    let state = classify(&head_state, &pull.view, rollup, &selected);
+    let missing = Missing {
+        names,
+        reason: "job_not_found",
+    };
+    let idle = !pull.checks.iter().any(|check| check["bucket"] == "pending");
+    let (state, idle_since) = hold_missing(state, missing, idle, clock);
+    Ok((state, head, idle_since))
 }
 
 fn pipeline(target: &Resolved) -> Result<State, TransportError> {

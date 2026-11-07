@@ -51,7 +51,7 @@ Configuration files live under `$XDG_CONFIG_HOME/agt/` (`~/.config/agt/` when
 | --- | --- | --- |
 | `$XDG_CONFIG_HOME/agt/config.toml` | `[sync]` `pull = "manual"`, `push = "off"`, `max_age_secs = 300`, `remotes = "all"`; `[issues]` and `[pull_requests]` `pull`, `push` (unset: `[sync]`); `[[tracker]]` `host`, `repo`, `forge`, `remote`, `pull`, `push`, `enabled = true`, `issues`, `pull_requests`; `[worktree]` `roots` (unset: `~/Projects/*/*` and `~/projects/*/*`); `[worktree.hooks]` `create = []`, `remove = []` | [Issues](#issues), [worktrees](#worktrees) |
 | `<main checkout>/.config/agt.toml` | The same keys, overriding the global file field by field (arrays replace); linked worktrees read the main checkout's file | [Issues](#issues) |
-| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab"}` | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
+| `$XDG_CONFIG_HOME/agt/hosts.json` | Host name to `{"service": "github" \| "gitlab" \| "forgejo" \| "gitea"}` (the last two are one forge) | [Sync](#sync), [PR](#pr), [CI](#ci), [Cleanup](#cleanup) |
 | `$XDG_CONFIG_HOME/agt/model-prices.json` | A `models` object of rates per model | [Sessions](#sessions) |
 
 Unknown keys and invalid values in the TOML files are errors that name the file and the key.
@@ -67,7 +67,7 @@ Environment variables agt reads, or sets for programs it runs:
 | `AGT_NOW` | all | Unix seconds replacing the current time | test only |
 | `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
 | `AGT_ROLLUP_GRACE_SECS` | `ci wait` | Seconds replacing the 120-second grace for an empty rollup and for a required check that is missing while nothing runs | test only |
-| `AGT_GH_BIN`, `AGT_GLAB_BIN` | everything that calls a forge | Program to run instead of `gh` or `glab` | test only |
+| `AGT_GH_BIN`, `AGT_GLAB_BIN`, `AGT_TEA_BIN` | everything that calls a forge | Program to run instead of `gh`, `glab` or `tea` | test only |
 | `AGT_GIT_BIN`, `AGT_MISE_BIN` | `doctor` | Program to run instead of `git` or `mise` for its version checks; other commands still run `git` | test only |
 | `AGT_CLEANUP_TMP` | `cleanup` | Directory standing in for `/tmp` when looking for session scratch files and browser temp profiles | test only |
 | `AGT_CLEANUP_PID` | `cleanup` | Limits the orphan-process sweep to this pid; `0` looks at none | test only |
@@ -657,20 +657,21 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
 ## Sync
 
 - Forge, in this order: an entry in `$XDG_CONFIG_HOME/agt/hosts.json`, a JSON object of host to
-  `{"service": "github"}` or `{"service": "gitlab"}`, such as
+  `{"service": "github"}`, `{"service": "gitlab"}` or `{"service": "forgejo"}` (`"gitea"` is the same), such as
   `{"git.example.com": {"service": "gitlab"}}`, with host names compared without regard to
   case and entries for other hosts ignored; the
-  names below that need no lookup (`github.com`, `gitlab.com`); the forge this
+  names below that need no lookup (`github.com`, `gitlab.com`, `codeberg.org`); the forge this
   repository last synced that host with; then the CLI checks below, which are
   the slowest. GitHub (`gh`, with `GH_HOST=<host>`) for `github.com` or a host
   `gh auth status --hostname <host>` knows; GitLab (`glab`, with
   `GITLAB_HOST=<host>`) for `gitlab.com`, the host in `GITLAB_HOST`, glab's
   configured host (`glab config get host`, the global default only), or a host
   `glab auth status --hostname <host>` knows (a self-hosted GitLab glab is
-  logged in to). Any other host fails with
+  logged in to); Forgejo or Gitea (`tea`) for `codeberg.org` or a host `tea logins list` names.
+  Any other host fails with
   `unsupported forge <host>`; the forge is never guessed. The host and
-  repository come from `--pr <url>` (a GitHub `/pull/<n>` or GitLab
-  `/-/merge_requests/<iid>` URL), `--remote <name|host/repo>` or the tracker of the `origin`
+  repository come from `--pr <url>` (a GitHub `/pull/<n>`, GitLab
+  `/-/merge_requests/<iid>` or Forgejo `/pulls/<n>` URL), `--remote <name|host/repo>` or the tracker of the `origin`
   remote ([Issues](#issues) lists how trackers are chosen).
 - PR/MR lookup: the PR whose head is `<origin owner>:<branch>` (GitHub) or the
   MR whose source branch is the current branch (GitLab), first in `origin`,
@@ -679,7 +680,7 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   fork's MR with the same branch name is skipped. A closed PR/MR joins the
   branch's target only when its head is the branch head or an ancestor of it;
   an older, unrelated PR/MR of a reused branch name syncs into its own target.
-- The target is renamed to `gh-<number>` or `gl-<iid>` under both locks, keeping
+- The target is renamed to `gh-<number>`, `gl-<iid>` or `fg-<number>` under both locks, keeping
   its runs and threads. Away from the branch (such as on a detached `HEAD`),
   `sync` joins the local branch target of the PR/MR's head branch the same way,
   unless that target's passes do not lead to the PR/MR head; later commands on
@@ -703,14 +704,16 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   or reopen that `publish` has not sent yet (`resolve_pending`). The review or comment that carries an approval, whose body is only a marker or
   the rendered text, keeps the approval text stored. Local fields
   (type, severity, triage, held, killed findings, anchors of our findings) and
-  comments not yet posted stay. Remote threads match local ones by remote id,
+  comments not yet posted stay. Remote threads match local ones by remote id
+  and kind (a review, an inline comment and a general comment can share a host id on GitHub and
+  Forgejo; GitLab matches a note and its discussion by id alone),
   then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first
   comment, then by a trusted `<!-- agent-review id=<local id> attempt=<attempt> -->`
   marker that `publish` adds to every body. That marker claims only a local
   comment in `posting` state with the same attempt id, never a `pending` one:
   another store's comment can carry the same local id (`h1/c1`). Unmatched threads are imported as
   `gh-t<comment id>` (review thread), `gh-r<review id>` (review body),
-  `gh-c<comment id>` (general comment) or `gl-n<note id>`, with `-2`, `-3`
+  `gh-c<comment id>` (general comment), `gl-n<note id>` or, on Forgejo, `fg-t`, `fg-r` and `fg-c` with the same meanings, with `-2`, `-3`
   added when that id is taken; an id is never reused, including a killed
   finding's. A GitLab discussion keeps its thread when a reply turns an
   individual note into a discussion. `publish`'s own review bodies are not
@@ -740,7 +743,9 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   is cleared.
 - Threads and comments the host no longer returns are kept and flagged
   `deleted_remote: true` with `deleted_seen_at`; they are never dropped and
-  are not open. The flag clears if they come back.
+  are not open. The flag clears if they come back. A thread or comment counts as returned
+  only under its own kind, so a surviving review with the same host id does not hide a
+  deleted general comment (GitLab matches a note and its discussion by id alone).
 - Malformed GitHub connection pages or repeated pagination cursors fail the fetch.
   The failed fetch leaves stored threads and publication retry markers unchanged.
 - The authenticated login is cached in `.account.json` in the repository's
@@ -1191,7 +1196,7 @@ checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
 query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 
-`--job NAME` (repeatable, exact and case-sensitive) waits only for the jobs of that name, for every target: on GitHub any check of the head, required or not, and on GitLab the jobs of the head pipeline, whose own status is ignored. All named jobs must pass (`required_checks_passed`); a failed one is `check_failed` or `check_cancelled` and is listed under `failed`. A named job that has not appeared is `checks_pending` with `missingChecks` while checks run (GitHub: until the rollup has been idle for 120 seconds; GitLab: until the pipeline stops running, including when it waits on a manual job), then `job_not_found` (exit 1). A named GitLab job that has not started when the pipeline is blocked, for instance behind a manual job, gives the pipeline's reason (`manual_action_required`, `check_failed`) at once. A named job that failed counts even when GitLab allows it to fail. A skipped job passes on GitHub (`skipping`) but needs action on GitLab (`unknown_check_state`). Without `--job` nothing changes.
+`--job NAME` (repeatable, exact and case-sensitive) waits only for the jobs of that name, for every target: on GitHub any check of the head, required or not, on Forgejo the statuses of the head, by exact context name, and on GitLab the jobs of the head pipeline, whose own status is ignored. All named jobs must pass (`required_checks_passed`); a failed one is `check_failed` or `check_cancelled` and is listed under `failed`. A named job that has not appeared is `checks_pending` with `missingChecks` while checks run (GitHub and Forgejo: until no check or status of the head has been pending for 120 seconds; GitLab: until the pipeline stops running, including when it waits on a manual job), then `job_not_found` (exit 1). A named GitLab job that has not started when the pipeline is blocked, for instance behind a manual job, gives the pipeline's reason (`manual_action_required`, `check_failed`) at once. A named job that failed counts even when GitLab allows it to fail. A skipped job passes on GitHub and Forgejo (`skipping`) but needs action on GitLab (`unknown_check_state`). Without `--job` nothing changes.
 
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
@@ -1201,11 +1206,55 @@ specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each fa
 `--limit` (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
 `pending` or `unclear`.
 
+## Forgejo and Gitea
+
+Forgejo and Gitea are one forge to agt (`forgejo`; `gitea` in `hosts.json` means the same). Every
+call is a `tea api` request (`AGT_TEA_BIN` replaces `tea`), so `tea` must be installed and logged in
+to the host with `tea login add`. agt picks the login for a host from `tea logins list` and never
+reads tea's configuration file. `codeberg.org` is known without a lookup; any other host is found
+through `hosts.json` or a tea login. Without a login a call fails with `tea has no login for <host>`.
+Reviews, issues, `agt pr`, `agt ci wait`, `agt branch check`, `agt cleanup` and `agt doctor` work as
+on GitHub and GitLab, with these differences:
+
+- Keys start with `fg-` (`fg-<number>` for a review target, `fg-t`, `fg-r` and `fg-c` for imported
+  threads, reviews and comments, `fg-<host>-<owner>-<repo>` for an issue tracker).
+- There is no thread object. In-diff comments on one file and line are one thread, rooted at the
+  first. The API has no call to reply to or resolve a thread, so a reply is posted as a general comment
+  that quotes the thread, and a local resolve stays local: `publish` lists it under `skipped` with
+  `Forgejo cannot resolve threads; cleared locally`. A resolve made on the host syncs. The next
+  `sync` reopens a thread resolved only locally.
+- `agt pr` marks a draft by the `WIP: ` title prefix. The PR does not say whether auto-merge is
+  on, so `auto_merge` is `"unknown"`. `merge --auto` schedules the merge with
+  `merge_when_checks_succeed`; `auto-merge off` cancels the schedule (a 404 means none was set)
+  and `auto-merge on` schedules it again with the method `merge --auto` recorded, `merge` by default.
+- `agt cleanup` lets only the repository's own PRs make a branch `open` or `closed`: they are found
+  among the open PRs first, then among every state; a fork's PR of the same name, or one whose head
+  repository is gone, is ignored. On
+  GitHub and GitLab a same-named fork PR still counts.
+- `agt ci wait` reads the combined commit status of the PR head. Every status counts, a `warning` or `skipped` one as `skipping` (it passes); there is no
+  required-check logic. Name the PR as `#<number>`; an Actions run URL is refused.
+  `agt ci failures` stays GitLab only.
+- Issues have no parent or child: `--parent` stays local and `issue push` skips it. Labels are set by name.
+- The lists the API pages (pull requests, reviews, issues, labels, commit statuses) are read page by page
+  (`limit` and `page`) until a short page; the page size is 50. The comments of an issue or PR and
+  the comments of a review take no paging parameters, so one request reads all of them.
+- `tea api` exits 0 whatever the host answered, so agt passes `-i` and reads the `HTTP/1.1 <status>`
+  line tea prints to stderr: a status of 400 or more is an error that carries the status (a 404 on
+  `auto-merge off` means no schedule). `tea` 0.12.0 is the first release with `tea api`
+  and 0.13.0 the first with `-d`, which agt needs to send a request body; `agt doctor` warns about
+  an older one.
+- A tea login with a port (`https://git.example.com:3000`) serves a remote on that host name; a
+  login on the exact host is preferred.
+
+unverified: the JSON shapes (`tea logins list --output json`, the REST routes) come from tea's source
+and the Forgejo API description. No test ran a real `tea` or Forgejo host; the test fake `tea`
+(see [Testing](#testing)) answers as that source says tea does.
+
 ## PR
 
-`agt pr` is one GitHub/GitLab-neutral command for the PR/MR of the current repository; the forge
+`agt pr` is one GitHub/GitLab/Forgejo-neutral command for the PR/MR of the current repository; the forge
 comes from the tracker of the `origin` remote (or the tracker `--remote <name|host/repo>`, or a PR/MR URL, names; see
-[Issues](#issues)), and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`) must be installed and logged in. `create`, `update`,
+[Issues](#issues)), and `gh`, `glab` or `tea` (`AGT_GH_BIN`, `AGT_GLAB_BIN`, `AGT_TEA_BIN`) must be installed and logged in. `create`, `update`,
 `merge`, `auto-merge` and `upload` are refused when `push` was set to `off` for the tracker. Output is JSON.
 
 ```sh
@@ -1220,8 +1269,8 @@ agt pr upload <file>...
 
 `view` without a number reads the PR/MR of `--branch` or the current branch (an open one first,
 else the newest) and prints `number`, `url`, `title`, `state` (`open`, `merged`, `closed`),
-`draft`, `head_branch`, `base_branch`, `head_sha`, `author`, `labels`, `auto_merge` (`on` or
-`off`) with `auto_merge_method`, `queue` (the merge queue or train state, `null` when not
+`draft`, `head_branch`, `base_branch`, `head_sha`, `author`, `labels`, `auto_merge` (`on`, `off`, or `unknown` where the forge does not say, as on Forgejo)
+with `auto_merge_method`, `queue` (the merge queue or train state, `null` when not
 queued), `mergeable` (`mergeable`, `conflicting`, `blocked` or `unknown` while the forge computes it), the forge's own `merge_state` and `conflicts`. `list` prints an array of the same rows
 (newest first, at most 100). `create` fails, printing the existing one, when the branch has an
 open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head starts with `--sha`
@@ -1242,6 +1291,9 @@ PR/MR. GitHub (github.com only) takes the upload through its undocumented `user-
 endpoint, which accepts a user token but not an app or installation token; GitLab uses the
 project's Markdown uploads API through `glab api --form` (a glab release that has it) and returns
 its own relative Markdown, with `url` made absolute from `full_path`.
+
+Forgejo has no repository-level upload (it attaches files only to an existing issue or comment), so `upload` is refused there
+before any call.
 
 Failures print `agt: error: ...` and exit 1.
 
@@ -1441,7 +1493,7 @@ roots = ["~/Projects/*/*", "~/projects/*/*"]
 
 `agt cleanup --only worktrees` finds work that already landed in the default branch and removes it: in the current repository, or with `--all-repos` in every repository under the roots. Its report is the `worktrees` field of the cleanup report. Without `--yes` it prints the plan (`plan: true`; per repository `remove`, `delete`, `kept` and `warnings`, each candidate with its `verdict`, `evidence` and the exact `action`) and changes nothing except fetching PR heads into the object store. With `--yes` the lists are `removed` (`path`, backup `id` and `ref`), `deleted` (`branch`, `tip`, `verdict`, `evidence`, `restore`: the `git branch <name> <tip>` that brings it back), `kept` (`branch` or `path`, `verdict`, `reason`) (a `closed` row also carries the PR/MR's `head` sha, `title` and `closed_at`, read from the forge lookup) and `warnings`. `--worktree <branch-or-path>` (repeatable, with or without `--yes`) limits the pass to the named rows: a name is a local branch or a worktree path, a worktree row and its branch go together, and unnamed rows are never judged or touched. Each named row is judged exactly as the plan judges it, so it is acted on only while it still qualifies; one that does not is listed under the repository's `skipped` (the `kept` row, with its reason, in place of `kept`), and a name that matches no row (protected, unknown or gone) is listed in `worktrees.skipped` with a reason. It never touches the default branch, `main`, `master` or `develop` by name, the main checkout's branch, the current branch or the worktree holding the current directory, and it never deletes a remote branch, pushes, closes a PR, resets or discards files.
 
-A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or the repository has no tracker that serves pull requests (every git remote on a known GitHub or GitLab host is one under the default `[sync] remotes = "all"`; `pull = "off"` drops one), the PRs/MRs for that source branch are listed on every such tracker (GitHub GraphQL, GitLab REST; every state, every page) through `gh`/`glab`. A PR merged on any one tracker lands the branch, even when another tracker has a PR open for it; when none landed it, an open PR on any tracker gives `open` (on one tracker an open PR wins over that tracker's older merged PRs; kept); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from the tracker's git remote and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). Each forge host is found as `agt review` finds it, including its `hosts.json`.
+A branch gets a verdict, strongest evidence first. `merged`: its tip is an ancestor of the local default branch; it is deleted with `git branch -d`, so git can still refuse. Otherwise, unless `--offline` or the repository has no tracker that serves pull requests (every git remote on a known GitHub, GitLab or Forgejo host is one under the default `[sync] remotes = "all"`; `pull = "off"` drops one), the PRs/MRs for that source branch are listed on every such tracker (GitHub GraphQL through `gh`, GitLab REST through `glab`, Forgejo REST through `tea`; every page, and on Forgejo the open PRs first, then every state only when none of them is the repository's own). A PR merged on any one tracker lands the branch, even when another tracker has a PR open for it; when none landed it, an open PR on any tracker gives `open` (on one tracker an open PR wins over that tracker's older merged PRs; kept); a PR closed without merging gives `closed` (kept, with its number and URL). A merged PR counts only when it merged into the default branch, its source branch is the local branch, it is from the same repository (not a fork), its head commit is local (else `refs/pull/<n>/head` or `refs/merge-requests/<iid>/head` is fetched from the tracker's git remote and must equal the head SHA) and the local tip is the PR head or an ancestor of it: `squash-merged`, deleted with `git branch -D` after re-reading the tip, and the tip is reported. A tip past or beside the merged head is `diverged` (kept, `diverged from merged PR #<n>`). A failed forge call, a head SHA mismatch or anything unexpected is `unknown` (kept), and no evidence is `unmerged` (kept). Each forge host is found as `agt review` finds it, including its `hosts.json`.
 
 A linked worktree whose branch is `merged` or `squash-merged`, or whose detached HEAD is in the default branch, is removed first, as `remove --yes` does (`--dirty` stands for `remove --force`: it deletes untracked files with the worktree, since no snapshot keeps them; snapshot backup, then `git worktree remove --force` once), and then its branch is deleted. It is kept when it is locked, missing, holds a submodule or a nested git repository `remove` would refuse, has a live Claude Code session in it (as `remove`), or any process with its current directory inside it (native process APIs on macOS, `/proc/*/cwd` on Linux; unreadable individual processes are skipped, but a failed process enumeration keeps the worktree and reports the reason). It is kept as `recent` when anything in it changed in the last 3 days (its HEAD commit time, the mtime of its git dir's `HEAD`, `index` or `logs/HEAD`, or of any tracked or untracked non-ignored file), so a worktree just made by `create` survives, unless `--recent` is passed. It is also kept as `dirty` when it has modified tracked files or untracked files, unless `--dirty` is passed: tracked edits are then backed up, and untracked files (any non-ignored one except OS junk, disposable-looking `build/`, `vendor/` and `*.log` paths included) are deleted with the worktree. A file a remove hook writes keeps the worktree too. It is kept as `dirty` too when its `ignored_lost` list is not empty, unless `--dirty` is passed: no backup keeps those files. It is checked again after the remove hooks run, so a file a hook leaves keeps the worktree too. A kept worktree keeps its branch. Each `remove` row also lists `ignored_lost` and `untracked_lost` (cut to 100 entries), as `remove` does. With `--yes`, stderr announces each step as it starts (`agt: removing <path> (<verdict>)`, `agt: deleting branch <branch>`); stdout keeps the JSON report.
 
@@ -1574,8 +1626,8 @@ are terminated; a check finishing after the deadline cannot report success.
 `agt doctor [--json]` reports whether this host and repository are set up for agt, one row per
 check (name, `ok`/`warn`/`fail`, detail, fix hint), as a table or, with `--json`,
 `{"status", "checks": [...]}`. It is read-only: it writes nothing, reads no credentials (a forge
-login is only the exit status and account name of `gh auth status` / `glab auth status`) and
-makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `mise` and their versions; the
+login is only the exit status and account name of `gh auth status` / `glab auth status`, or the account `tea logins list` names) and
+makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `tea` (>= 0.13.0, the first with `tea api -d`, which agt needs for request bodies; older is a warning), `mise` and their versions; the
 login for the origin forge (a fail when missing) and for the other installed forge CLIs (a
 warning); the running agt version against the one `mise ls --current` pins for
 `github:brandonocasey/agt` (older: warn, `mise install`; when `mise ls` fails, the detail is its first stderr line containing `ERROR`, else its last line and the fix is
@@ -1677,8 +1729,8 @@ of `origin`, the only tracker. A review target already synced with a PR/MR keeps
 must name that PR/MR's repository or one on the same host with the same project name (a fork or its parent; the stored PR/MR is used either way), or the
 command fails, and a PR/MR URL with a `--remote` for
 another repository also fails. When several remain and none is `origin`, the command fails and
-lists the `--remote` choices. An `origin` on a host only a `gh` or `glab` login identifies
-(GitHub Enterprise, a self-hosted GitLab), with no `[[tracker]]` for it, still counts as the
+lists the `--remote` choices. An `origin` on a host only a `gh`, `glab` or `tea` login identifies
+(GitHub Enterprise, a self-hosted GitLab or Forgejo), with no `[[tracker]]` for it, still counts as the
 tracker of `origin` and wins over the other trackers. `agt ci` and `agt branch check` choose their tracker
 the same way and take `--remote`. `agt cleanup` instead asks every pull request tracker, plus such an `origin`, for the PRs/MRs of a branch, and a PR/MR merged on any of them counts as landed. `--tracker` on `agt issue` selects an issue
 destination by key or `owner/repo`; `issue sync` pulls every issue tracker; automatic issue work uses only the tracker of `origin` unless `--tracker` is given. With several issue trackers (a fork's `origin` and `upstream`, by default), `issue push` sends a new local issue only with `--tracker`; without it, it fails and sends nothing.
@@ -1702,9 +1754,9 @@ line on stderr per key and file:
 An old key and its new key in one file are an error that names both.
 
 `involved` includes issues you created, are assigned or (GitHub only) are mentioned in.
-GitLab has no mentions filter. Credentials come from `gh` and `glab`.
+GitLab has no mentions filter. Credentials come from `gh`, `glab` and `tea`.
 Issues live under `<main-checkout>/.agt/issues/<tracker>/<number-or-local-id>.json`.
-Remote tracker keys are `gh-<host>-<owner>-<repo>` or `gl-<host>-<group>-<project>`.
+Remote tracker keys are `gh-<host>-<owner>-<repo>`, `gl-<host>-<group>-<project>` or `fg-<host>-<owner>-<repo>`.
 Local issues use the local tracker. `--tracker` accepts a key or `owner/repo`;
 issue references accept `owner/repo#12`, `#12`, `12` or `local-xxxxxx`.
 Different destinations sharing a tracker key cause an identity collision error.
@@ -1824,9 +1876,9 @@ failure does not make `push` exit non-zero: it is listed under `failed`. A creat
 
 ## Testing
 
-`AGT_GH_BIN` and `AGT_GLAB_BIN` replace the `gh` and `glab`
-executables; tests point both at `test/fixtures/fake-forge.sh`, which replays
-canned responses and fails on any other call. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
+`AGT_GH_BIN`, `AGT_GLAB_BIN` and `AGT_TEA_BIN` replace the `gh`, `glab` and `tea`
+executables; tests point the first two at `test/fixtures/fake-forge.sh`, which replays
+canned responses and fails on any other call, and the third at `test/fixtures/fake-tea.sh`, which answers `tea logins list` and hands every other call to the same script, which behaves as `tea api -i` does: it exits 0 and prints `HTTP/1.1 <status>` to stderr, `404 Not Found` and the like for a `<key>.status` file, and serves a list without a `page` parameter whole. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning and sync age; do not set it otherwise. `AGT_SYNC_CAP_MS` replaces the 15 seconds an auto-sync may take, for the same
 reason. Default issue/review tests assert local operation; automatic-sync tests opt in explicitly. `AGT_OFFLINE=1` (`Env::offline`) also blocks explicit remote calls. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with

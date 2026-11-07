@@ -3,6 +3,8 @@
 
 use serde_json::{Value, json};
 
+use crate::support::forge::argv::tea_write;
+use crate::support::forge::forgejo::{self, Forgejo};
 use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::forge::{Call, Comment, FakeService, Remote};
@@ -1755,4 +1757,392 @@ fn a_pending_formal_approval_waits_for_only_to_name_it() {
     assert_eq!(approves(&dry), 0, "{dry}");
     let dry = env.run(&["publish", "--pr", "3", "--only", &id, "--dry-run"]);
     assert_eq!(approves(&dry), 1, "{dry}");
+}
+
+// Forgejo
+
+/// Forgejo shows no edits, so a summary whose edit failed still shows text this store sent: it is
+/// not imported as a thread, and the edit goes out again.
+#[test]
+fn forgejo_a_failed_summary_edit_keeps_the_summary_trusted() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    for finding in [setup.finding(1), setup.finding(2)] {
+        env.run(&["resolve", &finding, "--stale"]);
+    }
+    svc.link(&setup);
+    svc.accept(env, Call::PostNote, 6002);
+    env.run(&["publish", "--pr", "5"]);
+    let first = summary_sent(env);
+    env.write("c.txt", "c\n");
+    let head = env.commit_all("more");
+    let mut remote = Remote::new().head(head.clone());
+    remote.general("6002", Comment::new(6002, "me", &first));
+    svc.sync(&setup, &remote);
+    let patch = tea_write("PATCH", "repos/me/proj/issues/comments/6002");
+    let patch = strs(&patch);
+    env.fail_call_with(&patch, "tea: Bad Gateway (HTTP 502)");
+    env.fail(&["publish", "--pr", "5"], None);
+    env.pull(&["sync", "--pr", "5"]);
+    assert!(!ids(&env.run(&["list"])).contains(&"fg-c6002".to_owned()));
+
+    // The fake host does not apply edits, so it lists the comment again once it is edited.
+    env.pass_call(&patch);
+    env.respond(&patch, r#"{"id":6002}"#);
+    svc.sync(&setup, &Remote::new().head(head.clone()));
+    let published = env.run(&["publish", "--pr", "5"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    assert_eq!(
+        svc.count(env, Call::PostNote),
+        1,
+        "edited, not posted again"
+    );
+    let mut remote = Remote::new().head(head);
+    remote.general("6002", Comment::new(6002, "me", &summary_sent(env)));
+    svc.sync(&setup, &remote);
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["records"], 1, "{synced}");
+    assert!(open_ids(&env.run(&["status"])).is_empty());
+}
+
+/// A review batch posted without its response saved is matched by the marker of its comment, and
+/// a general comment posted the same way by its own, so neither is posted again.
+#[test]
+fn forgejo_crash_after_write_does_not_duplicate() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    env.run(&["comment", "--body", "A note of mine.", "--author", "me"]);
+    svc.link(&setup);
+    svc.lose(env, Call::PostInline);
+    env.fail(&["publish", "--pr", "5"], None);
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &f1)["comments"][0]["post"], "posting");
+    assert!(thread(&list, &f1)["comments"][0]["attempt"].is_string());
+
+    let mut remote = Remote::new();
+    remote.thread(
+        "501",
+        false,
+        3,
+        vec![Comment::new(501, "me", &sent(env, &f1))],
+    );
+    remote.reviews.push(forgejo::own_review(&setup.head));
+    svc.sync(&setup, &remote);
+    svc.lose(env, Call::PostNote);
+    env.fail(&["publish", "--pr", "5"], None);
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, &f1)["comments"][0]["remote"]["id"], "501");
+    assert_eq!(thread(&list, "h1")["comments"][0]["post"], "posting");
+
+    remote.general("601", Comment::new(601, "me", &sent(env, "h1")));
+    svc.sync(&setup, &remote);
+    svc.restore(env, Call::PostNote);
+    svc.accept(env, Call::PostNote, 604);
+    let published = env.run(&["publish", "--pr", "5"]);
+    assert_eq!(kinds(&published, "posted"), ["summary"]);
+    assert_eq!(svc.count(env, Call::PostInline), 1);
+    assert_eq!(
+        svc.count(env, Call::PostNote),
+        2,
+        "the note once, the summary once"
+    );
+    let list = env.run(&["list"]);
+    assert_eq!(thread(&list, "h1")["comments"][0]["remote"]["id"], "601");
+    assert_never_posted(env);
+}
+
+/// The host refusing a general comment of mine fails the publish.
+#[test]
+fn forgejo_a_refused_general_comment_fails_the_publish() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.link(&setup);
+    env.run(&[
+        "comment",
+        "--body",
+        "General note from me.",
+        "--author",
+        "me",
+    ]);
+    env.fail_call_with(
+        &strs(&svc.call(Call::PostThread)),
+        "tea: Forbidden (HTTP 403)",
+    );
+    let failed = env.fail(&["publish", "--pr", "5", "--only", "h1"], None);
+    assert!(failed.contains("403"), "{failed}");
+}
+
+/// A general comment is no discussion: each comment under it is a thread of its own.
+#[test]
+fn forgejo_general_comments_are_one_thread_each() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let mut remote = Remote::new();
+    remote.general("4002", Comment::new(4002, "alice", "Alice general text."));
+    remote.general("4003", Comment::new(4003, "bob", "Bob reply text."));
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "5"]);
+    let list = env.run(&["list"]);
+    for id in ["fg-c4002", "fg-c4003"] {
+        assert_eq!(thread(&list, id)["comments"].as_array().unwrap().len(), 1);
+    }
+}
+
+/// No range comments: a range finding is posted on its last line, as a plain in-diff comment.
+#[test]
+fn forgejo_a_range_is_posted_on_its_last_line() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let started = env.run_stdin(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        PUBLISH.reviewers,
+    );
+    let run = started["run"].as_str().unwrap();
+    env.run_stdin(
+        &["pass", "end", "--run", run, "--pass", "c1p0", "--findings", "-", "--reviewer", "r1"],
+        r#"[{"type":"nit","path":"a.txt","start_line":2,"line":3,"scenario":"Range in one hunk."}]"#,
+    );
+    svc.link(&setup);
+    env.run(&["run", "end", "--run", run]);
+    let dry = env.run(&["publish", "--pr", "5", "--dry-run"]);
+    svc.assert_range(&dry, 2, 3, "Range in one hunk.");
+    let comments = dry["writes"][0]["input"]["comments"].as_array().unwrap();
+    let range = comments
+        .iter()
+        .find(|comment| {
+            comment["body"]
+                .as_str()
+                .unwrap()
+                .contains("Range in one hunk.")
+        })
+        .unwrap_or_else(|| panic!("{dry}"));
+    assert_eq!(range["new_position"], 3, "{dry}");
+    assert_eq!(range["path"], "a.txt");
+}
+
+/// There is no route to reply to or resolve a review thread: a reply to Alice's thread is a general
+/// comment that quotes her, and a resolve is cleared locally, with a notice, and sent nowhere.
+#[test]
+fn forgejo_a_reply_is_a_quote_and_a_resolve_stays_local() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let mut remote = Remote::by("alice");
+    remote.thread(
+        "301",
+        false,
+        3,
+        vec![Comment::new(301, "alice", "Alice asks why.")],
+    );
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "5"]);
+    let alice = svc.local_thread(301);
+    env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
+    env.run(&["resolve", &alice, "--answered"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    svc.accept_nth(env, Call::PostNote, 1, 610);
+    svc.accept_nth(env, Call::PostNote, 2, 611);
+    let dry = env.run(&["publish", "--pr", "5", "--not-own", "--dry-run"]);
+    // The answer and the "Answered above." that `resolve --answered` adds.
+    assert_eq!(
+        kinds(&dry, "writes"),
+        ["reply", "reply", "resolve"],
+        "{dry}"
+    );
+    let reply = &dry["writes"][0];
+    assert_eq!(reply["call"], json!(svc.call(Call::PostNote)), "{dry}");
+    let text = reply["input"]["body"].as_str().unwrap();
+    assert!(
+        text.starts_with("> Alice asks why.\n> — @alice, [comment]("),
+        "{text}"
+    );
+    assert!(text.contains("\n\nBecause of X.\n"), "{text}");
+    let resolve = &dry["writes"][2];
+    assert_eq!(
+        resolve["call"],
+        json!([]),
+        "a resolve is sent nowhere: {dry}"
+    );
+    assert!(
+        dry["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skip| skip["item"] == alice.as_str()
+                && skip["reason"] == "Forgejo cannot resolve threads; cleared locally"),
+        "{dry}"
+    );
+
+    let posted = env.run(&["publish", "--pr", "5", "--not-own"]);
+    assert_eq!(
+        kinds(&posted, "posted"),
+        ["reply", "reply", "resolve"],
+        "{posted}"
+    );
+    assert_eq!(svc.count(env, Call::PostNote), 2);
+    // Only the quoted reply was written: no call reached a resolve route.
+    let writes: Vec<String> = env
+        .forge_calls()
+        .iter()
+        .filter_map(|call| call.split('\t').nth(1))
+        .filter(|args| !svc.is_read(args))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(writes, vec![svc.call(Call::PostNote).join(" "); 2]);
+    assert_eq!(
+        thread(&env.run(&["list"]), &alice)["resolve_pending"],
+        Value::Null,
+        "the local resolve is done with"
+    );
+}
+
+/// A reply posted as a general comment is stored in the thread it answers, which is a review
+/// thread; the host returns it as a general comment, and sync still finds it there.
+#[test]
+fn forgejo_a_posted_reply_is_not_flagged_deleted_by_the_next_sync() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let mut remote = Remote::by("alice");
+    remote.thread(
+        "301",
+        false,
+        3,
+        vec![Comment::new(301, "alice", "Alice asks why.")],
+    );
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "5"]);
+    let alice = svc.local_thread(301);
+    env.run(&["reply", &alice, "--body", "Because of X.", "--author", "me"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    svc.accept_nth(env, Call::PostNote, 1, 610);
+    env.run(&["publish", "--pr", "5", "--not-own"]);
+    let posted = env.forge_inputs();
+    let (_, input) = posted
+        .iter()
+        .find(|(args, _)| *args == svc.call(Call::PostNote).join(" "))
+        .expect("the reply was posted");
+    let body = serde_json::from_str::<Value>(input).unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    remote.general("610", Comment::new(610, "me", &body));
+    svc.sync(&setup, &remote);
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["threads"]["deleted"], 0, "{synced}");
+    let comments = thread(&env.run(&["list"]), &alice)["comments"].clone();
+    let reply = comments
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|comment| comment["remote"]["id"] == "610")
+        .unwrap_or_else(|| panic!("the reply keeps the id the host gave it: {comments}"));
+    assert_eq!(reply["deleted_remote"], false, "{reply}");
+}
+
+/// A formal approval of someone else's PR is a review of the head with the event `APPROVED`; the
+/// response is saved, and when it is lost sync claims the review by what was sent.
+#[test]
+fn forgejo_approve_review_claimed_by_sync_is_not_sent_again() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    let mut remote = Remote::by("alice");
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "5"]);
+    let id = env.approve("5", &["--formal", "--not-own"]);
+    env.run(&["run", "end", "--run", &setup.run]);
+    let dry = env.run(&[
+        "publish",
+        "--pr",
+        "5",
+        "--not-own",
+        "--only",
+        &id,
+        "--dry-run",
+    ]);
+    assert_eq!(dry["writes"][0]["input"]["event"], "APPROVED", "{dry}");
+    assert_eq!(dry["writes"][0]["input"]["commit_id"], setup.head.as_str());
+    // The review lands, but its response is lost.
+    svc.lose(env, Call::Approve);
+    env.fail(&["publish", "--pr", "5", "--not-own", "--only", &id], None);
+    remote
+        .reviews
+        .push(forgejo::review(701, "me", "APPROVED", &sent(env, &id)));
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "5"]);
+    let list = env.run(&["list"]);
+    let approval = &thread(&list, &id)["comments"][0];
+    assert_eq!(approval["remote"]["id"], "701", "{approval}");
+    svc.restore(env, Call::Approve);
+    let out = env.run(&["publish", "--pr", "5", "--not-own", "--only", &id]);
+    assert_eq!(svc.count(env, Call::Approve), 1, "{out}");
+    assert!(!out["skipped"].to_string().contains(&id), "{out}");
+}
+
+/// The author may not approve their own PR: a comment review carries the approval text.
+#[test]
+fn own_forgejo_formal_approval_posts_a_comment_review() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    env.run(&["resolve", &setup.finding(1), "--stale"]);
+    env.run(&["finding", "kill", &setup.finding(2), "--reason", "x"]);
+    svc.link(&setup);
+    let id = env.approve("5", &[]);
+    let comments = svc.call(Call::PostNote);
+    env.respond_nth(&strs(&comments), 1, r#"{"id":610,"html_url":"u"}"#);
+    env.run(&["publish", "--pr", "5"]);
+    env.approve("5", &["--formal"]);
+    let dry = env.run(&["publish", "--pr", "5", "--dry-run"]);
+    assert!(
+        dry["skipped"].to_string().contains(&format!("{id}/formal")),
+        "{dry}"
+    );
+    let writes = dry["writes"].as_array().unwrap();
+    assert_eq!(writes.len(), 1, "{dry}");
+    assert_eq!(writes[0]["items"], json!([format!("{id}/c1")]), "{dry}");
+    assert_eq!(writes[0]["input"]["event"], "COMMENT", "{dry}");
+    assert!(
+        writes[0]["input"]["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("Approved at"),
+        "{dry}"
+    );
+    svc.accept(env, Call::Approve, 702);
+    env.run(&["publish", "--pr", "5"]);
+    assert_eq!(svc.count(env, Call::Approve), 1);
+}
+
+/// The host refusing the review batch fails the publish, leaves the finding unposted and sends
+/// nothing else: the comments of a batch cannot be split, so there is no fallback comment.
+#[test]
+fn forgejo_a_refused_review_fails_the_publish_and_posts_nothing_else() {
+    let svc = Forgejo::new();
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    svc.link(&setup);
+    env.fail_call_with(
+        &strs(&svc.call(Call::PostInline)),
+        "tea: Unprocessable Entity (HTTP 422)",
+    );
+    let failed = env.fail(&["publish", "--pr", "5"], None);
+    assert!(failed.contains("422"), "{failed}");
+    assert_eq!(svc.count(env, Call::PostInline), 1);
+    assert_eq!(svc.count(env, Call::PostNote), 0);
+    let list = env.run(&["list"]);
+    let first = &thread(&list, &f1)["comments"][0];
+    assert_ne!(first["post"], "posted", "{first}");
+    assert_eq!(first["remote"], Value::Null, "{first}");
 }
