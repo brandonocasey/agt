@@ -704,7 +704,9 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   or reopen that `publish` has not sent yet (`resolve_pending`). The review or comment that carries an approval, whose body is only a marker or
   the rendered text, keeps the approval text stored. Local fields
   (type, severity, triage, held, killed findings, anchors of our findings) and
-  comments not yet posted stay. Remote threads match local ones by remote id,
+  comments not yet posted stay. Remote threads match local ones by remote id
+  and kind (a review, an inline comment and a general comment can share a host id on GitHub and
+  Forgejo; GitLab matches a note and its discussion by id alone),
   then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first
   comment, then by a trusted `<!-- agent-review id=<local id> attempt=<attempt> -->`
   marker that `publish` adds to every body. That marker claims only a local
@@ -741,7 +743,9 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   is cleared.
 - Threads and comments the host no longer returns are kept and flagged
   `deleted_remote: true` with `deleted_seen_at`; they are never dropped and
-  are not open. The flag clears if they come back.
+  are not open. The flag clears if they come back. A thread or comment counts as returned
+  only under its own kind, so a surviving review with the same host id does not hide a
+  deleted general comment (GitLab matches a note and its discussion by id alone).
 - Malformed GitHub connection pages or repeated pagination cursors fail the fetch.
   The failed fetch leaves stored threads and publication retry markers unchanged.
 - The authenticated login is cached in `.account.json` in the repository's

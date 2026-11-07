@@ -559,6 +559,148 @@ fn forgejo_sync_does_not_claim_an_unsent_legacy_marker() {
     assert_read_only(&Forgejo::new(), env);
 }
 
+/// Answers the Forgejo host's review 9 (with a body), its one inline comment `inline` and the
+/// pull request's general comments `general`, as the host would after a change.
+fn respond_forgejo_ids(env: &Env, inline: Value, general: Value) {
+    let mut summary = forgejo::review(9, "alice", "COMMENT", "summary");
+    summary["comments_count"] = json!(inline.as_array().map_or(0, Vec::len));
+    let respond = |path: &str, body: Value| {
+        env.respond(&env_args(&forgejo::CODEBERG.get(path)), &body.to_string());
+    };
+    respond("repos/me/proj/pulls/5/reviews", json!([summary]));
+    respond("repos/me/proj/pulls/5/reviews/9/comments", inline);
+    respond("repos/me/proj/issues/5/comments", general);
+}
+
+/// Syncs the pull request 5 of a Forgejo host that answers a review with a body (id 9), one
+/// inline comment of that review with id `inline_id` and one general comment with id
+/// `general_id`; the three ids come from separate counters on the host.
+fn sync_forgejo_ids_setup(inline_id: u64, general_id: u64) -> Setup {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    forgejo::sync_fixtures(&setup);
+    let inline = forgejo::code_comment(
+        &Comment::new(inline_id, "alice", "inline remark"),
+        3,
+        false,
+        &setup.head,
+    );
+    let general = forgejo::comment(general_id, "alice", "general remark");
+    respond_forgejo_ids(&setup.env, json!([inline]), json!([general]));
+    setup.env.pull(&["sync", "--pr", "5"]);
+    setup
+}
+
+fn sync_forgejo_ids(inline_id: u64, general_id: u64) -> Value {
+    sync_forgejo_ids_setup(inline_id, general_id)
+        .env
+        .run(&["list"])
+}
+
+/// The sorted bodies of the comments that came from the host.
+fn comment_bodies(list: &Value) -> Vec<String> {
+    let mut bodies: Vec<String> = list["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|thread| thread["comments"].as_array().unwrap())
+        .filter(|comment| !comment["remote"].is_null())
+        .map(|comment| comment["body"].as_str().unwrap().to_owned())
+        .collect();
+    bodies.sort();
+    bodies
+}
+
+#[test]
+fn forgejo_sync_keeps_a_review_and_an_inline_comment_with_the_same_host_id() {
+    let list = sync_forgejo_ids(9, 100);
+    assert_eq!(
+        comment_bodies(&list),
+        ["general remark", "inline remark", "summary"],
+        "{list}"
+    );
+}
+
+#[test]
+fn forgejo_sync_keeps_a_review_and_a_general_comment_with_the_same_host_id() {
+    let list = sync_forgejo_ids(10, 9);
+    assert_eq!(
+        comment_bodies(&list),
+        ["general remark", "inline remark", "summary"],
+        "{list}"
+    );
+}
+
+/// The `deleted_remote` flag of the thread whose first comment says `body`, and of that comment.
+fn deleted_flags(list: &Value, body: &str) -> (Value, Value) {
+    let thread = list["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|thread| thread["comments"][0]["body"] == body)
+        .unwrap_or_else(|| panic!("no thread for {body}: {list}"));
+    (
+        thread["deleted_remote"].clone(),
+        thread["comments"][0]["deleted_remote"].clone(),
+    )
+}
+
+#[test]
+fn forgejo_sync_flags_a_deleted_general_comment_that_shares_an_id_with_a_review() {
+    let setup = sync_forgejo_ids_setup(10, 9);
+    let env = &setup.env;
+    let inline = forgejo::code_comment(
+        &Comment::new(10, "alice", "inline remark"),
+        3,
+        false,
+        &setup.head,
+    );
+    respond_forgejo_ids(env, json!([inline]), json!([]));
+    let again = env.pull(&["sync", "--pr", "5"]);
+    let list = env.run(&["list"]);
+    assert_eq!(
+        deleted_flags(&list, "general remark"),
+        (json!(true), json!(true)),
+        "{list}"
+    );
+    assert_eq!(
+        deleted_flags(&list, "summary"),
+        (json!(false), json!(false)),
+        "{list}"
+    );
+    assert_eq!(
+        deleted_flags(&list, "inline remark"),
+        (json!(false), json!(false)),
+        "{list}"
+    );
+    assert_eq!(again["threads"]["deleted"], 2, "{again}");
+}
+
+#[test]
+fn forgejo_sync_flags_a_deleted_inline_comment_that_shares_an_id_with_a_review() {
+    let setup = sync_forgejo_ids_setup(9, 100);
+    let env = &setup.env;
+    let general = forgejo::comment(100, "alice", "general remark");
+    respond_forgejo_ids(env, json!([]), json!([general]));
+    let again = env.pull(&["sync", "--pr", "5"]);
+    let list = env.run(&["list"]);
+    assert_eq!(
+        deleted_flags(&list, "inline remark"),
+        (json!(true), json!(true)),
+        "{list}"
+    );
+    assert_eq!(
+        deleted_flags(&list, "summary"),
+        (json!(false), json!(false)),
+        "{list}"
+    );
+    assert_eq!(
+        deleted_flags(&list, "general remark"),
+        (json!(false), json!(false)),
+        "{list}"
+    );
+    assert_eq!(again["threads"]["deleted"], 2, "{again}");
+}
+
 fn env_args(list: &[String]) -> Vec<&str> {
     list.iter().map(String::as_str).collect()
 }

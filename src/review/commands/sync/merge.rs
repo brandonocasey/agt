@@ -7,11 +7,11 @@ use super::records::{
 };
 use super::trust::Trust;
 use crate::forge::markers::{self, agent_attempt, agent_id};
-use crate::forge::service::ReviewService;
+use crate::forge::service::{Capabilities, ReviewService};
 use crate::forge::{CommentData, Draft, Fetched, ThreadData};
 use crate::store::model::{
-    Author, Comment, ImportedRecord, PostState, QaRun, RecordPost, RemoteKind, Resolution, Run,
-    Target, Thread, ThreadType,
+    Author, Comment, ImportedRecord, PostState, QaRun, RecordPost, RemoteComment, RemoteKind,
+    RemoteThread, Resolution, Run, Target, Thread, ThreadType,
 };
 
 fn imported_comment(comment: CommentData, login: &str) -> Comment {
@@ -38,7 +38,7 @@ pub(super) fn merge(
     let seen = seen_comments(&fetched.threads);
     target
         .records
-        .retain(|record| !seen.contains(&record.comment_id));
+        .retain(|record| !seen.iter().any(|(_, id)| *id == record.comment_id));
     let Target {
         threads,
         runs,
@@ -56,11 +56,24 @@ pub(super) fn merge(
     )
 }
 
-fn seen_comments(threads: &[ThreadData]) -> Vec<String> {
+/// The kind of thread and the id of each comment the host returned: a review, an inline
+/// comment and a general comment can share an id.
+fn seen_comments(threads: &[ThreadData]) -> Vec<(RemoteKind, String)> {
     threads
         .iter()
-        .flat_map(|data| data.comments.iter().map(|comment| comment.id.clone()))
+        .flat_map(|data| {
+            data.comments
+                .iter()
+                .map(|comment| (data.info.kind, comment.id.clone()))
+        })
         .collect()
+}
+
+/// Whether a stored remote of kind `stored` is the one the host now returns as `seen`. A
+/// GitLab note that gets a reply turns from general into a discussion with the same id;
+/// GitHub and Forgejo ids of different kinds come from separate sequences.
+fn same_kind(caps: &Capabilities, stored: RemoteKind, seen: RemoteKind) -> bool {
+    stored == seen || caps.notes_become_discussions
 }
 
 /// A review that holds only agt's own marker comment, so it carries nothing to import.
@@ -82,8 +95,7 @@ fn merge_threads(
 ) -> Summary {
     let mut summary = Summary::default();
     let mut answers = Vec::new();
-    let seen_threads: Vec<String> = fetched.iter().map(|data| data.info.id.clone()).collect();
-    let seen_comments = seen_comments(&fetched);
+    let seen = Seen::new(&fetched, trust.caps);
     for data in fetched
         .into_iter()
         .filter(|data| !is_bare_review_marker(data, trust))
@@ -162,7 +174,7 @@ fn merge_threads(
             summary.drafts += 1;
         }
     }
-    summary.deleted = flag_deleted(threads, &seen_threads, &seen_comments, now);
+    summary.deleted = flag_deleted(threads, &seen, now);
     summary
 }
 
@@ -276,39 +288,78 @@ pub(crate) fn landed(record: &mut RecordPost, id: String, url: Option<String>) {
         .retain(|body| agent_id(body).as_deref() != Some(markers::SUMMARY_ID));
 }
 
+/// What the host returned, by kind and id: a review, an inline comment and a general comment
+/// can share an id.
+struct Seen<'a> {
+    caps: &'a Capabilities,
+    threads: Vec<(RemoteKind, String)>,
+    comments: Vec<(RemoteKind, String)>,
+}
+
+impl<'a> Seen<'a> {
+    fn new(fetched: &[ThreadData], caps: &'a Capabilities) -> Self {
+        Self {
+            caps,
+            threads: fetched
+                .iter()
+                .map(|data| (data.info.kind, data.info.id.clone()))
+                .collect(),
+            comments: seen_comments(fetched),
+        }
+    }
+
+    fn thread(&self, remote: &RemoteThread) -> bool {
+        self.threads
+            .iter()
+            .any(|(kind, id)| *id == remote.id && same_kind(self.caps, remote.kind, *kind))
+    }
+
+    /// A comment is of its thread's kind; with no remote thread yet, as `publish` leaves a
+    /// review's comments, it matches by id alone.
+    fn comment(&self, thread: Option<&RemoteThread>, remote: &RemoteComment) -> bool {
+        self.comments.iter().any(|(kind, id)| {
+            *id == remote.id && thread.is_none_or(|thread| same_kind(self.caps, thread.kind, *kind))
+        })
+    }
+}
+
+/// Sets the deleted flag of a thread or comment; true when it was just flagged.
+fn mark_deleted(gone: bool, deleted: &mut bool, seen_at: &mut Option<String>, now: &str) -> bool {
+    let flagged = gone && !*deleted;
+    if flagged {
+        *seen_at = Some(now.to_owned());
+    }
+    if !gone {
+        *seen_at = None;
+    }
+    *deleted = gone;
+    flagged
+}
+
 /// Marks threads and comments the host no longer returns. They are kept, never dropped.
-fn flag_deleted(
-    threads: &mut [Thread],
-    seen_threads: &[String],
-    comments: &[String],
-    now: &str,
-) -> usize {
+fn flag_deleted(threads: &mut [Thread], seen: &Seen, now: &str) -> usize {
     let mut flagged = 0;
     for thread in threads {
         if let Some(remote) = &thread.remote {
-            let gone = !seen_threads.contains(&remote.id);
-            if gone && !thread.deleted_remote {
-                thread.deleted_seen_at = Some(now.to_owned());
-                flagged += 1;
-            }
-            if !gone {
-                thread.deleted_seen_at = None;
-            }
-            thread.deleted_remote = gone;
+            let gone = !seen.thread(remote);
+            flagged += usize::from(mark_deleted(
+                gone,
+                &mut thread.deleted_remote,
+                &mut thread.deleted_seen_at,
+                now,
+            ));
         }
         for comment in &mut thread.comments {
             let Some(remote) = &comment.remote else {
                 continue;
             };
-            let gone = !comments.contains(&remote.id);
-            if gone && !comment.deleted_remote {
-                comment.deleted_seen_at = Some(now.to_owned());
-                flagged += 1;
-            }
-            if !gone {
-                comment.deleted_seen_at = None;
-            }
-            comment.deleted_remote = gone;
+            let gone = !seen.comment(thread.remote.as_ref(), remote);
+            flagged += usize::from(mark_deleted(
+                gone,
+                &mut comment.deleted_remote,
+                &mut comment.deleted_seen_at,
+                now,
+            ));
         }
     }
     flagged
@@ -327,14 +378,12 @@ fn import(
         .first()
         .filter(|first| trust.verified(first))
         .and_then(|first| markers::finding_id(&first.body));
-    let by_remote = threads.iter().position(|thread| {
-        thread.remote.as_ref().is_some_and(|remote| {
-            // A GitLab note that gets a reply turns from general into a discussion with the
-            // same id; GitHub ids of different kinds come from separate sequences.
-            remote.id == data.info.id
-                && (remote.kind == data.info.kind || trust.caps.notes_become_discussions)
-        })
-    });
+    let is_same_remote = |remote: &RemoteThread| {
+        remote.id == data.info.id && same_kind(trust.caps, remote.kind, data.info.kind)
+    };
+    let by_remote = threads
+        .iter()
+        .position(|thread| thread.remote.as_ref().is_some_and(is_same_remote));
     let by_agent = || {
         let incoming = data.comments.first()?;
         threads.iter().position(|thread| {
@@ -346,10 +395,7 @@ fn import(
                     .as_ref()
                     .is_some_and(|remote| remote.id == incoming.id)
                     || trust.claims(first, incoming)
-            }) && thread
-                .remote
-                .as_ref()
-                .is_none_or(|remote| remote.id == data.info.id)
+            }) && thread.remote.as_ref().is_none_or(is_same_remote)
         })
     };
     let by_marker = || {
