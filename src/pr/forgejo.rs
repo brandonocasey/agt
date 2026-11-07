@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result};
-use crate::forge::forgejo::{PAGE_SIZE, pull_node};
+use crate::forge::forgejo::{self, PAGE_SIZE, pull_node};
 use crate::forge::issue::names;
 use crate::forge::service::{Method, Pagination, Request};
 use crate::forge::transport::Transport;
@@ -110,6 +110,14 @@ pub fn list(t: &dyn Transport, repo: &str, query: &Query) -> Result<Vec<Pr>> {
     Ok(found)
 }
 
+/// The PR of `branch` that is in `repo` itself, not a fork: the open ones, else those of every
+/// state, newest first.
+pub fn of_branch(t: &dyn Transport, repo: &str, branch: &str) -> Result<Vec<Pr>> {
+    let in_repo = |node: &Value| pull_node(node).same_repo.unwrap_or(true);
+    let found = forgejo::pulls_of_branch(t, repo, branch, in_repo)?;
+    Ok(found.iter().map(pr).collect())
+}
+
 /// A pull request to open.
 pub struct NewPr<'a> {
     pub head: &'a str,
@@ -188,7 +196,8 @@ pub fn merge(t: &dyn Transport, repo: &str, request: &Merge) -> Result<()> {
     post_merge(t, repo, request, false)
 }
 
-/// Merges when the checks succeed; the host refuses when the head is no longer `sha`.
+/// Schedules a merge for when the checks succeed. The host answers before it compares the head
+/// with `sha`, so the only head guard is the caller's own check before this call.
 pub fn merge_when_checks_succeed(t: &dyn Transport, repo: &str, request: &Merge) -> Result<()> {
     post_merge(t, repo, request, true)
 }

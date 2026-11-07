@@ -23,7 +23,7 @@ fn bucket(state: &str) -> String {
         "success" => "pass",
         "error" | "failure" => "fail",
         "pending" => "pending",
-        "warning" => "skipping",
+        "warning" | "skipped" => "skipping",
         other => return other.to_owned(),
     }
     .to_owned()

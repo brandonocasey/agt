@@ -419,23 +419,20 @@ impl Remote {
     /// The open PR/MR of `branch`, else the newest of any state. Forgejo cannot filter by branch
     /// and lists the whole repository, so it is asked for the open ones first.
     fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
-        let states: &[State] = if self.origin.forge == Forge::Forgejo {
-            &[State::Open, State::All]
-        } else {
-            &[State::All]
+        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
+        let mut found = match self.origin.forge {
+            Forge::Forgejo => forgejo::of_branch(t, repo, branch)?,
+            _ => self.list(Some(branch), State::All, false)?,
         };
-        for state in states {
-            let mut found = self.list(Some(branch), *state, false)?;
-            found.retain(|pr| pr.same_repo);
-            let at = found
-                .iter()
-                .position(|pr| pr.state == ReviewState::Open)
-                .unwrap_or(0);
-            if !found.is_empty() {
-                return Ok(Some(found.swap_remove(at)));
-            }
+        found.retain(|pr| pr.same_repo);
+        let at = found
+            .iter()
+            .position(|pr| pr.state == ReviewState::Open)
+            .unwrap_or(0);
+        if found.is_empty() {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(found.swap_remove(at)))
     }
 
     fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
@@ -702,7 +699,7 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
                 ));
             }
             if matches!(switch, Switch::On) {
-                memo::forget(&key)?;
+                forget_paused(&key, readable)?;
             }
             Ok(Output::Json(
                 json!({"changed": changed, "merged": merged, "pr": now.json()}),
@@ -711,20 +708,35 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
     }
 }
 
+/// Drops the record of a paused auto-merge once it is back on. Where the forge cannot report
+/// auto-merge (Forgejo), the record is the only place its method lives, so it stays.
+fn forget_paused(key: &str, readable: bool) -> Result<()> {
+    if readable {
+        memo::forget(key)?;
+    }
+    Ok(())
+}
+
 /// Turns auto-merge off after recording its method; false when it was off already.
 fn pause(remote: &Remote, pr: &Pr, key: &str) -> Result<bool> {
+    let before = memo::recorded(key)?;
     let method = match &pr.auto_merge {
         Some(method) => method.clone(),
         None if pr.auto_merge_known => return Ok(false),
         // Forgejo does not say whether auto-merge is on, so cancelling it is the probe; the
         // method is the one `agt pr merge --auto` recorded, else a plain merge.
-        None => memo::recorded(key)?.unwrap_or_else(|| forgejo::method(None).to_owned()),
+        None => before
+            .clone()
+            .unwrap_or_else(|| forgejo::method(None).to_owned()),
     };
     memo::record(key, &method)?;
     if remote.disable_auto(pr)? {
         return Ok(true);
     }
-    memo::forget(key)?;
+    // Nothing was scheduled: drop the record this call made, not one an earlier pause left.
+    if before.is_none() {
+        memo::forget(key)?;
+    }
     Ok(false)
 }
 

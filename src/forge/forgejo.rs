@@ -14,7 +14,7 @@ use crate::forge::service::{
     ApproveCap, BatchPoster, Capabilities, Inline, Kind, Method, Pagination, Placement, Position,
     Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Wanted,
 };
-use crate::forge::transport::{CliTransport, Transport, tea_login_for, tea_logins};
+use crate::forge::transport::{CliTransport, Transport, TransportError, tea_login_for, tea_logins};
 use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData, anchors};
 use crate::git::Repo;
 use crate::store::model::{Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
@@ -317,26 +317,47 @@ fn unpaged(transport: &dyn Transport, path: String) -> Result<Vec<Value>> {
     }
 }
 
+/// The PRs of `repo` in `state` (`open`, `closed` or `all`), newest first.
+pub fn pulls(
+    transport: &dyn Transport,
+    repo: &str,
+    state: &str,
+) -> std::result::Result<Vec<Value>, TransportError> {
+    transport.items(
+        &Request::get(format!("repos/{repo}/pulls?state={state}")),
+        &CAPS.pagination,
+    )
+}
+
+/// The PRs of `repo` whose head branch is `branch` and that `wanted` keeps: the open ones, and
+/// every state only when none of them qualifies. The host cannot filter by head branch, so each
+/// state is listed whole.
+pub fn pulls_of_branch(
+    transport: &dyn Transport,
+    repo: &str,
+    branch: &str,
+    wanted: impl Fn(&Value) -> bool,
+) -> std::result::Result<Vec<Value>, TransportError> {
+    for state in ["open", "all"] {
+        let mut found = pulls(transport, repo, state)?;
+        found.retain(|pull| pull["head"]["ref"] == branch && wanted(pull));
+        if !found.is_empty() {
+            return Ok(found);
+        }
+    }
+    Ok(Vec::new())
+}
+
 /// Finds the PR whose head branch is `branch` of `origin`, in `origin` or, for a fork, its
-/// parent. The host cannot filter by head branch, so the repository's PRs are listed, newest
-/// first: the open ones, and every state only when none of them is the branch's.
+/// parent.
 fn find_pull(forgejo: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
     let search = |repo: &str| -> Result<Option<u64>> {
-        for state in ["open", "all"] {
-            let pulls = forgejo.items(
-                &Request::get(format!("repos/{repo}/pulls?state={state}")),
-                &CAPS.pagination,
-            )?;
-            let found = pulls.iter().find(|pull| {
-                pull["head"]["ref"] == branch
-                    && forge::text(pull, "/head/repo/full_name")
-                        .is_some_and(|head| head.eq_ignore_ascii_case(origin))
-            });
-            if let Some(pull) = found {
-                return Ok(pull["number"].as_u64());
-            }
-        }
-        Ok(None)
+        let from_origin = |pull: &Value| {
+            forge::text(pull, "/head/repo/full_name")
+                .is_some_and(|head| head.eq_ignore_ascii_case(origin))
+        };
+        let found = pulls_of_branch(forgejo, repo, branch, from_origin)?;
+        Ok(found.first().and_then(|pull| pull["number"].as_u64()))
     };
     forge::in_origin_or_parent(origin, search, || {
         let repo = forgejo.json(&Request::get(format!("repos/{origin}")))?;

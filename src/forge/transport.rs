@@ -347,8 +347,8 @@ struct TeaHost {
     login: OnceLock<std::result::Result<String, TransportError>>,
 }
 
-/// The logins `tea logins list` shows, read once per process: `agt ci wait` builds a transport
-/// for each poll. A failed read is not kept, so the next call tries again.
+/// The logins `tea logins list` shows, read once per process. A failed read is not kept, so the
+/// next call tries again.
 fn cached_tea_logins(cli: &Cli) -> std::result::Result<&'static [TeaLogin], TransportError> {
     static LOGINS: OnceLock<Vec<TeaLogin>> = OnceLock::new();
     if let Some(logins) = LOGINS.get() {

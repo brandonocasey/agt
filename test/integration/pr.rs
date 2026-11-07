@@ -1428,7 +1428,32 @@ fn forgejo_auto_merge_off_cancels_with_a_delete_and_on_restores_the_recorded_met
     assert_eq!(restored["Do"], "squash");
     assert_eq!(restored["merge_when_checks_succeed"], true);
     assert_eq!(restored["head_commit_id"], SHA);
-    assert!(!fj_record(&env).contains("squash"), "{}", fj_record(&env));
+    assert!(fj_record(&env).contains("squash"), "{}", fj_record(&env));
+
+    ok(&env, &["auto-merge", "off", "7"]);
+    ok(&env, &["auto-merge", "on", "7"]);
+    assert_eq!(inputs(&env).pop().unwrap().1["Do"], "squash");
+}
+
+#[test]
+fn forgejo_a_second_auto_merge_off_keeps_the_method_the_first_one_recorded() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    fj_merge_route(&env);
+    ok(
+        &env,
+        &["merge", "7", "--sha", SHA, "--method", "squash", "--auto"],
+    );
+    let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&delete), "");
+    assert_eq!(ok(&env, &["auto-merge", "off", "7"])["changed"], true);
+
+    env.respond(&strs(&delete), r#"{"message":"Not Found"}"#);
+    env.respond_status(&strs(&delete), "404 Not Found");
+    assert_eq!(ok(&env, &["auto-merge", "off", "7"])["changed"], false);
+
+    assert_eq!(ok(&env, &["auto-merge", "on", "7"])["changed"], true);
+    assert_eq!(inputs(&env).pop().unwrap().1["Do"], "squash");
 }
 
 #[test]

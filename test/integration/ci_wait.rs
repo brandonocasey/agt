@@ -1969,6 +1969,23 @@ fn forgejo_counts_every_status_and_lists_the_failed_ones() {
 }
 
 #[test]
+fn forgejo_passes_when_a_job_skipped_by_its_condition_reports_skipped() {
+    let outcome = forgejo_run(
+        vec![forgejo_poll(
+            json!({}),
+            &[
+                commit_status("ci/build", "success"),
+                commit_status("ci/deploy", "skipped"),
+            ],
+        )],
+        FORGEJO_TARGET,
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
 fn forgejo_reads_every_page_of_the_combined_status() {
     let statuses: Vec<Value> = (0..120)
         .map(|index| commit_status(&format!("ci/{index}"), "success"))

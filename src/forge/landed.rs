@@ -239,27 +239,11 @@ impl Source {
     /// The host lists by state only, so `branch` is matched on what it lists: the open pull
     /// requests first, and every state only when none of them is the branch's.
     fn forgejo(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
-        let states = if branch.is_some() {
-            &["open", "all"][..]
-        } else {
-            &["open"]
+        let nodes = match branch {
+            Some(branch) => forgejo::pulls_of_branch(transport, &self.repo, branch, |_| true)?,
+            None => forgejo::pulls(transport, &self.repo, "open")?,
         };
-        let mut pulls = Vec::new();
-        for state in states {
-            let path = format!("repos/{}/pulls?state={state}", self.repo);
-            for node in transport.items(
-                &Request::get(path),
-                &Pagination::PageNumbers(forgejo::PAGE_SIZE),
-            )? {
-                if branch.is_none_or(|branch| node["head"]["ref"] == branch) {
-                    pulls.push(forgejo_pull(&node)?);
-                }
-            }
-            if !pulls.is_empty() {
-                break;
-            }
-        }
-        Ok(pulls)
+        nodes.iter().map(forgejo_pull).collect()
     }
 }
 

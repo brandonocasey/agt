@@ -1227,7 +1227,7 @@ on GitHub and GitLab, with these differences:
   on, so `auto_merge` is `"unknown"`. `merge --auto` schedules the merge with
   `merge_when_checks_succeed`; `auto-merge off` cancels the schedule (a 404 means none was set)
   and `auto-merge on` schedules it again with the method `merge --auto` recorded, `merge` by default.
-- `agt ci wait` reads the combined commit status of the PR head. Every status counts; there is no
+- `agt ci wait` reads the combined commit status of the PR head. Every status counts, a `warning` or `skipped` one as `skipping` (it passes); there is no
   required-check logic. Name the PR as `#<number>`; an Actions run URL is refused.
   `agt ci failures` stays GitLab only.
 - Issues have no parent or child: `--parent` stays local and `issue push` skips it. Labels are set by name.
