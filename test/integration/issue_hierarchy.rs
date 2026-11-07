@@ -1171,7 +1171,7 @@ fn forgejo_pulls_no_hierarchy() {
 }
 
 #[test]
-fn forgejo_keeps_a_local_parent_local_and_each_push_reports_it() {
+fn forgejo_keeps_a_local_parent_local_and_a_push_skips_it() {
     let fake: &dyn IssueFake = &Forgejo;
     let env = Env::new();
     env.write_config(&fake.config(false));
@@ -1198,13 +1198,9 @@ fn forgejo_keeps_a_local_parent_local_and_each_push_reports_it() {
             if round == 0 { 2 } else { 0 },
             "{report}"
         );
-        assert_eq!(tracker["failed"].as_array().unwrap().len(), 1, "{report}");
-        assert_eq!(tracker["failed"][0]["what"], "parent");
+        assert!(tracker["failed"].as_array().unwrap().is_empty(), "{report}");
         assert!(
-            tracker["failed"][0]["message"]
-                .as_str()
-                .unwrap()
-                .contains("the parent stays local"),
+            tracker["deferred"].as_array().unwrap().is_empty(),
             "{report}"
         );
     }

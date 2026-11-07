@@ -287,11 +287,20 @@ pub fn unsent_comments(issue: &Issue) -> Vec<&Comment> {
 }
 
 pub fn has_pending(issue: &Issue) -> bool {
+    parent_queued(issue) || has_pending_apart_from_parent(issue)
+}
+
+/// A parent set here that the host does not have yet.
+pub fn parent_queued(issue: &Issue) -> bool {
+    issue
+        .base
+        .as_ref()
+        .is_some_and(|base| issue.fields.parent != base.parent)
+}
+
+/// What a push to a service without issue hierarchy still has to send.
+pub fn has_pending_apart_from_parent(issue: &Issue) -> bool {
     issue.number.is_none()
-        || issue
-            .base
-            .as_ref()
-            .is_some_and(|base| issue.fields.parent != base.parent)
         || !pending_changes(issue).is_empty()
         || !unsent_comments(issue).is_empty()
 }

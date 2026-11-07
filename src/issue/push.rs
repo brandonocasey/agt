@@ -104,7 +104,14 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
     let queued: Vec<String> = store
         .docs::<Issue>(&tracker.dir, &[TRACKER_FILE])?
         .iter()
-        .filter(|issue| merge::has_pending(issue) || (options.force && !issue.conflicts.is_empty()))
+        .filter(|issue| {
+            let pending = if tracker.sends_parent() {
+                merge::has_pending(issue)
+            } else {
+                merge::has_pending_apart_from_parent(issue)
+            };
+            pending || (options.force && !issue.conflicts.is_empty())
+        })
         .map(Issue::doc_name)
         .collect();
     push_names(store, tracker, options, queued, false)
@@ -601,6 +608,9 @@ impl Push<'_> {
     }
 
     fn parent(&mut self, name: &str, doc: &mut Issue) -> Result<Step> {
+        if !self.tracker.sends_parent() {
+            return Ok(Step::Done);
+        }
         if doc
             .conflicts
             .iter()

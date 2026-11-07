@@ -1879,7 +1879,7 @@ fn a_named_check_missing_across_polls_is_not_found_after_the_grace_from_the_firs
 const FORGEJO_TARGET: &str = "https://codeberg.org/o/r/pulls/5";
 const TEA: [(&str, &str); 1] = [("AGT_TEA_BIN", FAKE)];
 
-/// The login read tea makes before it first reaches a host; every poll makes it again.
+/// The login read tea makes before it first reaches a host; one wait makes it once.
 fn tea_login() -> Step {
     step(
         "logins list",
@@ -1905,14 +1905,13 @@ fn commit_status(context: &str, state: &str) -> Value {
     })
 }
 
-/// One poll: the login, the PR, then the combined status of its head.
+/// One poll: the PR, then the combined status of its head.
 fn forgejo_poll(fields: Value, statuses: &[Value]) -> Vec<Step> {
     let head = fields["head"]["sha"]
         .as_str()
         .unwrap_or("abc123")
         .to_owned();
     vec![
-        tea_login(),
         step("repos/o/r/pulls/5", &forgejo_pull(fields)),
         step(
             &format!("repos/o/r/commits/{head}/status"),
@@ -1922,7 +1921,9 @@ fn forgejo_poll(fields: Value, statuses: &[Value]) -> Vec<Step> {
 }
 
 fn forgejo_run(polls: Vec<Vec<Step>>, target: &str) -> Outcome {
-    let steps: Vec<Step> = polls.into_iter().flatten().collect();
+    let steps: Vec<Step> = std::iter::once(tea_login())
+        .chain(polls.into_iter().flatten())
+        .collect();
     run_with(&steps, target, &[], &TEA)
 }
 
@@ -2104,10 +2105,11 @@ fn a_missing_tea_is_a_query_error() {
 fn transient_forgejo_failures_are_retried() {
     let mut polls: Vec<Vec<Step>> = (0..4)
         .map(|_| {
-            vec![
-                tea_login(),
-                failing("repos/o/r/pulls/5", "tea: Bad Gateway (HTTP 502)", 1),
-            ]
+            vec![failing(
+                "repos/o/r/pulls/5",
+                "tea: Bad Gateway (HTTP 502)",
+                1,
+            )]
         })
         .collect();
     polls.push(forgejo_poll(
@@ -2128,10 +2130,12 @@ fn a_forgejo_actions_run_url_is_refused_as_a_usage_error() {
 
 #[test]
 fn a_bare_hash_reference_names_the_pull_request_of_a_forgejo_origin() {
-    let scenario = Scenario::new(&forgejo_poll(
+    let mut steps = vec![tea_login()];
+    steps.extend(forgejo_poll(
         json!({}),
         &[commit_status("ci/build", "success")],
     ));
+    let scenario = Scenario::new(&steps);
     scenario
         .env
         .git(&["remote", "add", "origin", "https://codeberg.org/o/r.git"]);

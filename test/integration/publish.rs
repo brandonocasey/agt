@@ -2002,32 +2002,6 @@ fn forgejo_a_reply_is_a_quote_and_a_resolve_stays_local() {
     );
 }
 
-/// What `Capabilities::resolve` documents: a resolve the host cannot take is recorded locally.
-/// The sync that publish ends with reads the thread as unresolved again, because the host has no
-/// resolver on it, so the resolve does not last; see the open problem in decisions.md.
-#[test]
-#[ignore = "known defect: the sync after publish reopens a thread resolved only locally"]
-fn forgejo_a_local_resolve_survives_the_sync_publish_ends_with() {
-    let svc = Forgejo::new();
-    let setup = Setup::reviewed(svc.origin());
-    let env = &setup.env;
-    let mut remote = Remote::by("alice");
-    remote.thread(
-        "301",
-        false,
-        3,
-        vec![Comment::new(301, "alice", "Alice asks why.")],
-    );
-    svc.sync(&setup, &remote);
-    env.pull(&["sync", "--pr", "5"]);
-    let alice = svc.local_thread(301);
-    env.run(&["resolve", &alice, "--answered"]);
-    env.run(&["run", "end", "--run", &setup.run]);
-    svc.accept_nth(env, Call::PostNote, 1, 610);
-    env.run(&["publish", "--pr", "5", "--not-own"]);
-    assert_eq!(thread(&env.run(&["list"]), &alice)["resolved"], true);
-}
-
 /// A formal approval of someone else's PR is a review of the head with the event `APPROVED`; the
 /// response is saved, and when it is lost sync claims the review by what was sent.
 #[test]

@@ -19,6 +19,7 @@ use crate::store::issues::Category;
 pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: true,
     close_reasons: false,
+    hierarchy: false,
 };
 
 fn base(subject: IssueSubject) -> String {

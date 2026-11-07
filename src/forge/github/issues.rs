@@ -23,6 +23,7 @@ const PR_FIELDS: &str = "number url state headRefName repository{nameWithOwner}"
 pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: true,
     close_reasons: true,
+    hierarchy: true,
 };
 
 /// PRs that close the issue, and PRs that mention it from the timeline (a cross reference whose

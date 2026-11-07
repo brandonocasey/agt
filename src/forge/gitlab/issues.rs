@@ -21,6 +21,7 @@ use crate::store::model::Forge;
 pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: false,
     close_reasons: false,
+    hierarchy: true,
 };
 
 fn base(subject: IssueSubject) -> String {

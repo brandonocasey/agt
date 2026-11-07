@@ -16,6 +16,16 @@ pub struct Tracker {
     pub doc: TrackerDoc,
 }
 
+impl Tracker {
+    /// Whether the tracker's service takes a parent for an issue. A tracker with no service
+    /// keeps every parent as a queued change.
+    pub fn sends_parent(&self) -> bool {
+        self.doc
+            .forge
+            .is_none_or(|forge| service::kind(forge).issue_caps.hierarchy)
+    }
+}
+
 /// `gh-<host>-<owner>-<repo>`, lowercase with slashes as dashes.
 pub fn tracker_key(forge: Forge, host: &str, repo: &str) -> String {
     let prefix = service::kind(forge).key_prefix;

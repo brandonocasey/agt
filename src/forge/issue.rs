@@ -86,6 +86,8 @@ pub struct IssueCaps {
     pub multi_assignee: bool,
     /// Closing takes a reason (`completed`, `not_planned`).
     pub close_reasons: bool,
+    /// An issue can have a parent; without it a parent stays local and is never sent.
+    pub hierarchy: bool,
 }
 
 /// Names of the `key` field of each item of the array at `pointer`.
