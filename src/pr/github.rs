@@ -2,10 +2,11 @@
 
 use serde_json::{Value, json};
 
+use super::upload::{Image, Uploaded};
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
 use crate::forge::service::{Method, Request, Var};
-use crate::forge::transport::Transport;
+use crate::forge::transport::{Transport, TransportError};
 use crate::forge::{self, github};
 use crate::store::model::ReviewState;
 
@@ -184,6 +185,44 @@ pub fn create(
     created["number"]
         .as_u64()
         .ok_or_else(|| Error("GitHub did not return the new pull request's number".into()))
+}
+
+/// The repository's numeric id, which the upload endpoint asks for.
+pub fn repository_id(t: &dyn Transport, repo: &str) -> Result<u64> {
+    t.json(&Request::get(format!("repos/{repo}")))
+        .map_err(refused)?["id"]
+        .as_u64()
+        .ok_or_else(|| Error(format!("GitHub returned no repository id for {repo}")))
+}
+
+/// Uploads through GitHub's undocumented `user-attachments` endpoint, which takes a user token
+/// only.
+pub fn upload(t: &dyn Transport, repository_id: u64, image: &Image) -> Result<Uploaded> {
+    let path = format!(
+        "https://uploads.github.com/user-attachments/assets?name={}&content_type={}&repository_id={repository_id}",
+        forge::encode(&image.name),
+        forge::encode(image.content_type)
+    );
+    let reply = t
+        .json(&Request::upload(path, image.path.clone()))
+        .map_err(refused)?;
+    let url = reply["url"]
+        .as_str()
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| Error("GitHub did not return the uploaded image's URL".into()))?;
+    Ok(Uploaded {
+        markdown: format!("![{}]({url})", image.alt()),
+        url: url.to_owned(),
+    })
+}
+
+fn refused(error: TransportError) -> Error {
+    match error.status {
+        Some(401 | 403) => Error(format!(
+            "{error}\nGitHub image uploads need a user token (a user's `gh` login or GH_TOKEN), not an app or installation token"
+        )),
+        _ => error.into(),
+    }
 }
 
 pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) -> Result<()> {

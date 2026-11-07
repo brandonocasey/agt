@@ -1206,7 +1206,7 @@ specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each fa
 `agt pr` is one GitHub/GitLab-neutral command for the PR/MR of the current repository; the forge
 comes from the tracker of the `origin` remote (or the tracker `--remote <name|host/repo>`, or a PR/MR URL, names; see
 [Issues](#issues)), and `gh` or `glab` (`AGT_GH_BIN`, `AGT_GLAB_BIN`) must be installed and logged in. `create`, `update`,
-`merge` and `auto-merge` are refused when `push` was set to `off` for the tracker. Output is JSON.
+`merge`, `auto-merge` and `upload` are refused when `push` was set to `off` for the tracker. Output is JSON.
 
 ```sh
 agt pr [--remote R] view [<n>|<url>] [--branch B]
@@ -1215,6 +1215,7 @@ agt pr create --title T [--body B] [--base BRANCH] [--draft]
 agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--draft[=false]]
 agt pr merge <n> --sha HEAD [--method merge|squash|rebase] [--auto]
 agt pr auto-merge off|on <n> [--sha HEAD]
+agt pr upload <file>...
 ```
 
 `view` without a number reads the PR/MR of `--branch` or the current branch (an open one first,
@@ -1233,6 +1234,15 @@ cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLa
 `auto-merge off` records the method it disables in `$XDG_STATE_HOME/agents/pr/auto-merge.json`
 (keyed by host, repository and number) and reads the state back; `auto-merge on` re-enables it with
 the recorded method at the current head (or `--sha`); when the checks had already passed and the forge merges at once, it reports `merged: true`. A PR/MR in a merge queue or train is refused.
+`upload` hosts each image (png, jpg, jpeg, gif, webp or svg) on the forge and prints an array of
+`file`, `url` and `markdown`; paste the Markdown into the `--body` of `create` or `update`. It checks
+every file (exists, regular, not empty, image type by its name; a symlink counts by its own name) before the first upload, and when a later upload
+fails it prints the finished ones before failing. The image belongs to the repository, not to a
+PR/MR. GitHub (github.com only) takes the upload through its undocumented `user-attachments`
+endpoint, which accepts a user token but not an app or installation token; GitLab uses the
+project's Markdown uploads API through `glab api --form` (a glab release that has it) and returns
+its own relative Markdown, with `url` made absolute from `full_path`.
+
 Failures print `agt: error: ...` and exit 1.
 
 ## Sessions
@@ -1655,7 +1665,7 @@ and `review publish` (a review of someone else's PR/MR is never published). With
 local store, on whichever tracker each belongs to (`--remote` limits it to one), and never
 imports a new PR/MR; `--pr <n|url>` starts a local review of one, as `review run` on a branch can.
 
-`agt pr create`, `update`, `merge` and `auto-merge` are refused only when `push` was set to
+`agt pr create`, `update`, `merge`, `auto-merge` and `upload` are refused only when `push` was set to
 `off` explicitly; unset, they stay allowed. Reads of any command are never refused by `push`.
 `review publish`, `qa publish` and `issue push` need `manual` or `auto`: with `off`, or unset,
 they keep everything local, exit 0 and print why on stderr, naming the key. Their `--dry-run`

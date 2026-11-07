@@ -2,6 +2,7 @@
 
 use serde_json::{Value, json};
 
+use super::upload::{Image, Uploaded};
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result, fail};
 use crate::forge::encode;
@@ -151,6 +152,27 @@ pub fn create(
     created["iid"]
         .as_u64()
         .ok_or_else(|| Error("GitLab did not return the new merge request's number".into()))
+}
+
+/// Uploads to the project; GitLab answers with Markdown that resolves inside the project.
+pub fn upload(t: &dyn Transport, host: &str, repo: &str, image: &Image) -> Result<Uploaded> {
+    let reply = t.json(&Request::upload(
+        format!("{}/uploads", project_path(repo)),
+        image.path.clone(),
+    ))?;
+    let text = |key: &str| {
+        reply[key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let (Some(markdown), Some(path)) = (text("markdown"), text("full_path")) else {
+        return fail("GitLab did not return the uploaded image's Markdown and path");
+    };
+    Ok(Uploaded {
+        url: format!("https://{host}{path}"),
+        markdown,
+    })
 }
 
 /// The title without a draft marker.

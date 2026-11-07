@@ -383,16 +383,23 @@ struct ApiFlags {
     method: &'static str,
     /// What follows the path to send the request body from stdin.
     json_input: &'static [&'static str],
+    /// What precedes the file in a file upload, and what the file path follows in its argument.
+    file_input: (&'static [&'static str], &'static str),
 }
 
 const GH_FLAGS: ApiFlags = ApiFlags {
     method: "--method",
     json_input: &["--input", "-"],
+    file_input: (
+        &["-H", "Content-Type: application/octet-stream", "--input"],
+        "",
+    ),
 };
 
 const GLAB_FLAGS: ApiFlags = ApiFlags {
     method: "-X",
     json_input: &["-H", "Content-Type: application/json", "--input", "-"],
+    file_input: (&["--form"], "file=@"),
 };
 
 fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
@@ -406,6 +413,11 @@ fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
             args.push(path.clone());
             if request.body.is_some() {
                 args.extend(flags.json_input.iter().map(|arg| (*arg).to_owned()));
+            }
+            if let Some(file) = &request.file {
+                let (before, prefix) = flags.file_input;
+                args.extend(before.iter().map(|arg| (*arg).to_owned()));
+                args.push(format!("{prefix}{}", file.display()));
             }
         }
         Endpoint::Graphql(vars) => {

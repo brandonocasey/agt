@@ -2,6 +2,8 @@
 //! [`ReviewService`] and [`Capabilities`], issue sync to [`IssueService`]; everything that is specific to GitHub, GitLab or a
 //! later service (REST paths, tool flags, GraphQL, response shapes) lives behind it.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
 use crate::core::error::Result;
@@ -87,6 +89,8 @@ pub struct Request {
     pub method: Method,
     pub endpoint: Endpoint,
     pub body: Option<Value>,
+    /// A file sent as the request body, in place of `body`.
+    pub file: Option<PathBuf>,
     /// Read every page of a list; see [`Pagination::CliPaginate`].
     pub paginate: bool,
     /// The reply is text, not JSON; the response body is a string.
@@ -99,8 +103,17 @@ impl Request {
             method,
             endpoint: Endpoint::Rest(path.into()),
             body,
+            file: None,
             paginate: false,
             raw: false,
+        }
+    }
+
+    /// A POST that sends `file` to `path`; the CLI reads it from disk.
+    pub fn upload(path: impl Into<String>, file: PathBuf) -> Self {
+        Self {
+            file: Some(file),
+            ..Self::rest(Method::Post, path, None)
         }
     }
 
@@ -113,6 +126,7 @@ impl Request {
             method: Method::Post,
             endpoint: Endpoint::Graphql(vars),
             body: None,
+            file: None,
             paginate: false,
             raw: false,
         }
