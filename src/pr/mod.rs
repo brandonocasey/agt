@@ -344,6 +344,12 @@ impl Remote {
                 let host = self.origin.host.as_str();
                 Box::new(move |image| gitlab::upload(t, host, repo, image))
             }
+            Forge::Forgejo => {
+                return fail(
+                    "Forgejo can attach an image only to an existing issue or comment, \
+                     not to a PR body being written; upload it in the web interface",
+                );
+            }
         })
     }
 

@@ -1272,7 +1272,8 @@ fails it prints the finished ones before failing. The image belongs to the repos
 PR/MR. GitHub (github.com only) takes the upload through its undocumented `user-attachments`
 endpoint, which accepts a user token but not an app or installation token; GitLab uses the
 project's Markdown uploads API through `glab api --form` (a glab release that has it) and returns
-its own relative Markdown, with `url` made absolute from `full_path`.
+its own relative Markdown, with `url` made absolute from `full_path`. Forgejo has no repository-level upload (it attaches files only to an
+existing issue or comment), so `upload` is refused there before any call.
 
 Failures print `agt: error: ...` and exit 1.
 

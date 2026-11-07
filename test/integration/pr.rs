@@ -1113,6 +1113,22 @@ fn forgejo_view_reads_the_pr_of_the_current_branch_and_reports_auto_merge_as_unk
 }
 
 #[test]
+fn forgejo_upload_is_refused_before_any_call() {
+    let env = forgejo();
+    env.write("a.png", "png");
+    let message = err(&env, &["upload", "a.png"]);
+    assert!(
+        message.contains("Forgejo can attach an image only to"),
+        "{message}"
+    );
+    assert!(
+        env.forge_calls().iter().all(|call| !call.contains("api")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
 fn forgejo_view_without_a_pr_names_the_branch() {
     let env = forgejo();
     fj_get(&env, &format!("{FJ_PULLS}?state=all"), &json!([]));
