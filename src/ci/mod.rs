@@ -68,6 +68,10 @@ enum Command {
     /// each target's state and failed jobs or checks. Exit codes: 0 all targets passed or
     /// merged, 1 a target needs action (failed, canceled, skipped or manual, head changed,
     /// closed), 2 usage or query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
+    ///
+    /// With --job, only the jobs (on GitHub, the checks) with those exact names count, whatever else
+    /// the pipeline runs. A named job that is absent while checks still run is pending; once they
+    /// are idle (GitLab: the pipeline stopped running) it is `job_not_found` (exit 1).
     #[command(verbatim_doc_comment)]
     Wait {
         #[arg(value_name = "TARGET", required = true)]
@@ -85,6 +89,9 @@ enum Command {
         /// remote name or `host/repo`; default: origin's tracker, else the only one.
         #[arg(long, value_name = "NAME|HOST/REPO")]
         remote: Option<String>,
+        /// Wait only for the job or check with this exact name; repeat for several.
+        #[arg(long = "job", value_name = "NAME")]
+        jobs: Vec<String>,
     },
 }
 
@@ -167,24 +174,46 @@ fn execute(cli: Cli) -> Result<u8> {
             interval,
             max_interval,
             remote,
-        } => return wait_targets(&targets, timeout, interval, max_interval, remote.as_deref()),
+            jobs,
+        } => {
+            let pace = Pace {
+                timeout,
+                interval,
+                max_interval,
+            };
+            return wait_targets(&targets, &jobs, &pace, remote.as_deref());
+        }
     };
     Ok(code)
 }
 
-fn wait_targets(
-    targets: &[String],
+/// The timing options of `agt ci wait`, in seconds.
+struct Pace {
     timeout: f64,
     interval: f64,
     max_interval: f64,
+}
+
+fn wait_targets(
+    targets: &[String],
+    jobs: &[String],
+    pace: &Pace,
     remote: Option<&str>,
 ) -> Result<u8> {
-    if interval > max_interval {
+    if pace.interval > pace.max_interval {
         return fail("--interval cannot exceed --max-interval");
+    }
+    if jobs.iter().any(|job| job.trim().is_empty()) {
+        return fail("--job needs a job name");
     }
     let resolved = targets
         .iter()
-        .map(|arg| target::parse(arg).and_then(|parsed| target::resolve(parsed, remote)))
+        .map(|arg| {
+            let parsed = target::parse(arg)?;
+            let mut resolved = target::resolve(parsed, remote)?;
+            resolved.jobs = jobs.to_vec();
+            Ok(resolved)
+        })
         .collect::<Result<Vec<_>>>()?;
     let mut seen = HashSet::new();
     if let Some(duplicate) = resolved.iter().find(|target| !seen.insert(&target.key)) {
@@ -192,8 +221,8 @@ fn wait_targets(
     }
     Ok(wait::run(&wait::Options {
         targets: resolved,
-        timeout: Duration::from_secs_f64(timeout),
-        interval: Duration::from_secs_f64(interval),
-        max_interval: Duration::from_secs_f64(max_interval),
+        timeout: Duration::from_secs_f64(pace.timeout),
+        interval: Duration::from_secs_f64(pace.interval),
+        max_interval: Duration::from_secs_f64(pace.max_interval),
     }))
 }

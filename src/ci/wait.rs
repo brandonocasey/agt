@@ -103,7 +103,7 @@ struct Tracked {
     transient_failures: u32,
     /// Unix seconds when the wait began.
     started: i64,
-    /// Seconds into the wait at which the rollup went idle with a required context missing, while
+    /// Seconds into the wait at which the rollup went idle with a required context or a named job missing, while
     /// it has stayed so.
     idle_since: Option<i64>,
 }

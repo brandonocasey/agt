@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::classify::{
     Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, rollup_grace_secs,
-    with,
+    select_named, with,
 };
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
@@ -54,7 +54,7 @@ fn failure(error: &TransportError) -> (State, bool) {
 
 /// The state of `target`, the head it is pinned to (the one it was given, expanded to the full
 /// head it abbreviates once the host shows it, or, when it had none, the head read now), whether the failure of the read is transient, and when the rollup went
-/// idle with a required context missing (`idle_since`, carried from the previous poll). While
+/// idle with a required context or a named job missing (`idle_since`, carried from the previous poll). While
 /// `awaiting`, a head or pipeline that has not caught up with the pinned commit is pending, not
 /// changed.
 pub fn snapshot(
@@ -123,6 +123,10 @@ fn github(
         awaiting,
         waited_secs,
     };
+    if !target.jobs.is_empty() {
+        let (state, idle_since) = watch_jobs(target, &pull, &head_state, (waited_secs, idle_since));
+        return Ok((state, head, idle_since));
+    }
     let checks = if pull.checks.is_empty() {
         &pull.all_checks
     } else {
@@ -138,6 +142,61 @@ fn github(
         (waited_secs, idle_since),
     )?;
     Ok((state, head, idle_since))
+}
+
+/// Check names that have not reported yet, and the reason the wait ends with when they never do.
+struct Missing {
+    names: Vec<String>,
+    reason: &'static str,
+}
+
+/// The state of the checks `--job` names, among every check of the head, required or not.
+/// A passed state is held back while a named check has not reported, as [`require_reported`] does.
+fn watch_jobs(
+    target: &Resolved,
+    pull: &github::ci::Pull,
+    head: &Head,
+    clock: (i64, Option<i64>),
+) -> (State, Option<i64>) {
+    let (selected, names) = select_named(&pull.all_checks, &target.jobs);
+    let state = classify(head, &pull.view, pull.rollup, &selected);
+    let missing = Missing {
+        names,
+        reason: "job_not_found",
+    };
+    hold_missing(state, missing, !pull.running, clock)
+}
+
+/// A passed state, or one with no checks, is held back while `missing` names have not reported:
+/// pending while something runs, and after `rollup_grace_secs` of continuous idleness the wait
+/// ends with `missing.reason`. Returns the idleness start to carry to the next poll: `None` while
+/// something runs, and when the state is not held.
+fn hold_missing(
+    mut state: State,
+    missing: Missing,
+    idle: bool,
+    clock: (i64, Option<i64>),
+) -> (State, Option<i64>) {
+    if missing.names.is_empty()
+        || !matches!(
+            state["reason"].as_str(),
+            Some("required_checks_passed" | "no_required_checks")
+        )
+    {
+        return (state, None);
+    }
+    let (waited_secs, idle_since) = clock;
+    let since = idle.then(|| idle_since.unwrap_or(waited_secs));
+    if since.is_some_and(|since| waited_secs - since >= rollup_grace_secs()) {
+        state["status"] = json!("blocked");
+        state["reason"] = json!(missing.reason);
+    } else {
+        state["status"] = json!("pending");
+        state["reason"] = json!("checks_pending");
+        state["idle"] = json!(idle);
+    }
+    state["missingChecks"] = json!(missing.names);
+    (state, since)
 }
 
 /// Configured contexts MUST be reported by checks GitHub marks required for this PR.
@@ -196,34 +255,26 @@ fn require_reported(
         .iter()
         .filter_map(|check| check["name"].as_str())
         .collect();
-    let missing: Vec<String> = contexts
+    let names: Vec<String> = contexts
         .into_iter()
         .filter(|context| !reported.contains(context.as_str()))
         .collect();
-    if missing.is_empty() {
+    if names.is_empty() {
         if unreadable_source {
             state["requiredContexts"] = json!("unreadable");
         }
         return Ok((state, None));
     }
-    if !matches!(
-        state["reason"].as_str(),
-        Some("required_checks_passed" | "no_required_checks")
-    ) {
-        return Ok((state, None));
-    }
-    let idle = !pull.running;
-    let since = idle.then(|| idle_since.unwrap_or(waited_secs));
-    if since.is_some_and(|since| waited_secs - since >= rollup_grace_secs()) {
-        state["status"] = json!("blocked");
-        state["reason"] = json!("required_checks_missing");
-    } else {
-        state["status"] = json!("pending");
-        state["reason"] = json!("checks_pending");
-        state["idle"] = json!(idle);
-    }
-    state["missingChecks"] = json!(missing);
-    Ok((state, since))
+    let missing = Missing {
+        names,
+        reason: "required_checks_missing",
+    };
+    Ok(hold_missing(
+        state,
+        missing,
+        !pull.running,
+        (waited_secs, idle_since),
+    ))
 }
 
 /// Whether a read failed because the token may not see it (or it does not exist), as opposed
@@ -241,7 +292,7 @@ fn pipeline(target: &Resolved) -> Result<State, TransportError> {
     let base = project_path(&target.repo);
     let pipeline = gitlab.pipeline(&base, target.target.number)?;
     let jobs = gitlab.pipeline_jobs(&base, target.target.number, false)?;
-    Ok(classify_pipeline(&pipeline, &jobs))
+    Ok(classify_pipeline(&pipeline, &jobs, &target.jobs))
 }
 
 fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
@@ -273,14 +324,14 @@ fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
         }
     }
     if mr["sha"] != expected || mr["state"] != "opened" || !present(id) {
-        return Ok((classify_gitlab(&pending, &mr, None), head));
+        return Ok((classify_gitlab(&pending, &mr, None, &target.jobs), head));
     }
     // A fork MR pipeline runs in the source project, so its jobs are not under the target project.
     let pipeline_base = mr["head_pipeline"]["project_id"]
         .as_i64()
         .map_or_else(|| base.clone(), crate::forge::gitlab::ci::base_of_id);
     let jobs = gitlab.pipeline_jobs(&pipeline_base, id.as_u64().unwrap_or(0), false)?;
-    let state = classify_gitlab(&pending, &mr, Some(&jobs));
+    let state = classify_gitlab(&pending, &mr, Some(&jobs), &target.jobs);
     if super::classify::status(&state) != "complete" {
         return Ok((state, head));
     }
@@ -298,7 +349,10 @@ fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: 
         );
         return Ok((state, head));
     }
-    Ok((classify_gitlab(&pending, &latest, Some(&jobs)), head))
+    Ok((
+        classify_gitlab(&pending, &latest, Some(&jobs), &target.jobs),
+        head,
+    ))
 }
 
 #[cfg(test)]

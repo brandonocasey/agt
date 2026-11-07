@@ -1610,3 +1610,268 @@ fn a_running_check_resets_the_idle_timer() {
     );
     assert_eq!(last(&outcome)["reason"], "checks_complete");
 }
+
+fn run_jobs(steps: &[Step], jobs: &[&str], env: &[(&str, &str)]) -> Outcome {
+    let extra: Vec<&str> = jobs.iter().flat_map(|job| ["--job", job]).collect();
+    run_with(steps, GITHUB_TARGET, &extra, env)
+}
+
+fn optional(name: &str, status: &str, conclusion: Option<&str>) -> Value {
+    let mut node = run_node(name, status, conclusion);
+    node["isRequired"] = json!(false);
+    node
+}
+
+#[test]
+fn a_named_check_passing_ends_the_wait_whatever_else_fails_or_runs() {
+    let outcome = run_jobs(
+        &[step(
+            "PullChecks",
+            &open(&[
+                run_node("lint", "COMPLETED", Some("FAILURE")),
+                optional("build", "COMPLETED", Some("SUCCESS")),
+                optional("e2e", "IN_PROGRESS", None),
+            ]),
+        )],
+        &["build"],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
+fn a_named_check_failing_needs_action_and_is_listed() {
+    let outcome = run_jobs(
+        &[step(
+            "PullChecks",
+            &open(&[
+                run_node("lint", "COMPLETED", Some("SUCCESS")),
+                run_node("build", "COMPLETED", Some("FAILURE")),
+            ]),
+        )],
+        &["build", "lint"],
+        &[],
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    let failed = &last(&outcome)["results"][0]["failed"];
+    assert_eq!(failed.as_array().unwrap().len(), 1, "{failed}");
+    assert_eq!(failed[0]["name"], "build");
+}
+
+#[test]
+fn a_named_check_that_has_not_reported_keeps_the_wait_pending() {
+    let outcome = run_jobs(
+        &[
+            step(
+                "PullChecks",
+                &open(&[run_node("lint", "IN_PROGRESS", None)]),
+            ),
+            step(
+                "PullChecks",
+                &open(&[
+                    run_node("lint", "IN_PROGRESS", None),
+                    run_node("build", "COMPLETED", Some("SUCCESS")),
+                ]),
+            ),
+        ],
+        &["build"],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["build"]));
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn a_named_check_that_never_reports_is_not_found_once_the_rollup_is_idle() {
+    let outcome = run_jobs(
+        &[step(
+            "PullChecks",
+            &open(&[run_node("lint", "COMPLETED", Some("SUCCESS"))]),
+        )],
+        &["build"],
+        &grace("0"),
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "job_not_found");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["build"]));
+}
+
+fn gitlab_jobs(jobs: &[(&str, &str)]) -> String {
+    let jobs: Vec<Value> = jobs
+        .iter()
+        .map(|(name, status)| {
+            json!({
+                "name": name, "status": status, "stage": "test",
+                "web_url": "https://gitlab.example.test/j/1", "allow_failure": false,
+            })
+        })
+        .collect();
+    json!(jobs).to_string()
+}
+
+fn gitlab_job_wait(pipeline_status: &str, jobs: &[(&str, &str)], names: &[&str]) -> Outcome {
+    let mr = mr_path("merge_requests/7");
+    let mr_reply = merge_request(json!({
+        "head_pipeline": {"id": 99, "status": pipeline_status, "web_url": "u"},
+    }));
+    let extra: Vec<&str> = names.iter().flat_map(|name| ["--job", name]).collect();
+    run_with(
+        &[
+            step(&format!("{GET} {mr}"), &mr_reply),
+            step(
+                &format!("{GET} --paginate {}", jobs_path()),
+                &gitlab_jobs(jobs),
+            ),
+            step(&format!("{GET} {mr}"), &mr_reply),
+        ],
+        GITLAB_TARGET,
+        &extra,
+        &[("GITLAB_HOST", "gitlab.example.test")],
+    )
+}
+
+#[test]
+fn a_named_gitlab_job_passing_ends_the_wait_in_a_failing_pipeline() {
+    let outcome = gitlab_job_wait(
+        "running",
+        &[("build", "success"), ("e2e", "running"), ("lint", "failed")],
+        &["build"],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["checks"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_named_gitlab_job_failing_needs_action_in_a_running_pipeline() {
+    let outcome = gitlab_job_wait(
+        "running",
+        &[("build", "failed"), ("e2e", "running")],
+        &["build", "e2e"],
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    let failed = &last(&outcome)["results"][0]["failed"];
+    assert_eq!(failed[0]["name"], "build");
+}
+
+#[test]
+fn a_named_gitlab_job_still_running_is_pending() {
+    let outcome = gitlab_job_wait(
+        "running",
+        &[("build", "success"), ("e2e", "running")],
+        &["build", "e2e"],
+    );
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+}
+
+#[test]
+fn a_missing_gitlab_job_is_pending_while_the_pipeline_runs_and_not_found_after() {
+    let running = gitlab_job_wait("running", &[("lint", "running")], &["build"]);
+    assert_eq!(running.events[0]["reason"], "checks_pending");
+    assert_eq!(running.events[0]["missingChecks"], json!(["build"]));
+    let finished = gitlab_job_wait("success", &[("lint", "success")], &["build"]);
+    assert_eq!(finished.status, 1, "{}", finished.stderr);
+    assert_eq!(finished.events[0]["reason"], "job_not_found");
+    assert_eq!(finished.events[0]["missingChecks"], json!(["build"]));
+}
+
+#[test]
+fn a_blank_job_name_is_a_usage_error() {
+    let outcome = run_jobs(&[], &[" "], &[]);
+    assert_eq!(outcome.status, 2);
+    assert!(
+        outcome.stderr.contains("--job needs a job name"),
+        "{}",
+        outcome.stderr
+    );
+}
+
+fn gitlab_job(name: &str, status: &str, allow_failure: bool) -> Value {
+    json!({
+        "name": name, "status": status, "stage": "test",
+        "web_url": "https://gitlab.example.test/j/1", "allow_failure": allow_failure,
+    })
+}
+
+fn gitlab_named(pipeline_status: &str, jobs: &[Value], names: &[&str]) -> Outcome {
+    let mr = mr_path("merge_requests/7");
+    let reply = merge_request(json!({
+        "head_pipeline": {"id": 99, "status": pipeline_status, "web_url": "u"},
+    }));
+    let extra: Vec<&str> = names.iter().flat_map(|name| ["--job", name]).collect();
+    run_with(
+        &[
+            step(&format!("{GET} {mr}"), &reply),
+            step(
+                &format!("{GET} --paginate {}", jobs_path()),
+                &json!(jobs).to_string(),
+            ),
+        ],
+        GITLAB_TARGET,
+        &extra,
+        &[("GITLAB_HOST", "gitlab.example.test")],
+    )
+}
+
+#[test]
+fn a_named_gitlab_job_behind_a_manual_job_reports_the_pipeline_block_at_once() {
+    let outcome = gitlab_named(
+        "manual",
+        &[
+            gitlab_job("build", "success", false),
+            gitlab_job("deploy", "created", false),
+        ],
+        &["deploy"],
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "manual_action_required");
+}
+
+#[test]
+fn a_cancelled_or_failed_named_gitlab_job_outranks_a_skipped_one() {
+    let jobs = [
+        gitlab_job("deploy", "skipped", false),
+        gitlab_job("test", "failed", false),
+    ];
+    let outcome = gitlab_named("failed", &jobs, &["test", "deploy"]);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    let jobs = [
+        gitlab_job("deploy", "failed", false),
+        gitlab_job("test", "canceled", false),
+    ];
+    let outcome = gitlab_named("failed", &jobs, &["test", "deploy"]);
+    assert_eq!(outcome.events[0]["reason"], "check_cancelled");
+}
+
+#[test]
+fn a_named_gitlab_job_allowed_to_fail_is_still_listed_when_it_fails() {
+    let jobs = [gitlab_job("lint", "failed", true)];
+    let outcome = gitlab_named("failed", &jobs, &["lint"]);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    let failed = &last(&outcome)["results"][0]["failed"];
+    assert_eq!(failed[0]["name"], "lint", "{failed}");
+}
+
+#[test]
+fn a_named_check_missing_across_polls_is_not_found_after_the_grace_from_the_first_idle_poll() {
+    let idle = open(&[run_node("lint", "COMPLETED", Some("SUCCESS"))]);
+    let steps = [
+        step("PullChecks", &idle).delay(1.5),
+        step("PullChecks", &idle),
+    ];
+    let extra: Vec<&str> = SLOW.iter().copied().chain(["--job", "build"]).collect();
+    let outcome = run_with(&steps, GITHUB_TARGET, &extra, &grace("1"));
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(
+        reasons(&outcome),
+        ["checks_pending", "job_not_found", "action_required"]
+    );
+}
