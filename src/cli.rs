@@ -46,7 +46,7 @@ enum Command {
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
     Cleanup(cleanup::Cli),
-    /// GitHub/GitLab PRs/MRs: view, list, create, update, merge behind a head-sha guard, pause auto-merge.
+    /// GitHub/GitLab PRs/MRs: view, list, create, update, merge behind a head-sha guard, pause auto-merge, upload images.
     Pr(pr::Cli),
     /// Cost, context, tool, cache, error and friction reports from agent transcripts, and search of what you typed.
     Sessions(sessions::Cli),

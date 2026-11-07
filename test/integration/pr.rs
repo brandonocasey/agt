@@ -1279,6 +1279,18 @@ fn github_upload_says_which_token_it_needs_when_refused() {
 }
 
 #[test]
+fn github_upload_says_which_token_it_needs_when_the_repository_lookup_is_refused() {
+    let env = github();
+    env.write("a.png", "png");
+    env.fail_call_with(
+        &["api", "--method", "GET", "repos/o/r"],
+        "gh: Resource not accessible by integration (HTTP 403)",
+    );
+    let message = err(&env, &["upload", "a.png"]);
+    assert!(message.contains("need a user token"), "{message}");
+}
+
+#[test]
 fn github_upload_refuses_an_enterprise_host_before_any_call() {
     let env = setup("https://ghe.example.org/o/r.git");
     env.write_repo_config(

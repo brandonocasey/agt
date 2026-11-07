@@ -189,7 +189,9 @@ pub fn create(
 
 /// Uploads through the endpoint behind the web UI's attachments; it takes a user token only.
 pub fn upload(t: &dyn Transport, repo: &str, image: &Image) -> Result<Uploaded> {
-    let id = t.json(&Request::get(format!("repos/{repo}")))?["id"]
+    let id = t
+        .json(&Request::get(format!("repos/{repo}")))
+        .map_err(refused)?["id"]
         .as_u64()
         .ok_or_else(|| Error(format!("GitHub returned no repository id for {repo}")))?;
     let path = format!(
