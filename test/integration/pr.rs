@@ -1131,6 +1131,20 @@ fn forgejo_upload_is_refused_before_any_call() {
 }
 
 #[test]
+fn forgejo_view_ignores_a_pr_whose_head_repository_is_gone() {
+    let env = forgejo();
+    // A contributor's merged PR from a deleted fork is not the branch's own.
+    let gone = json!({"state": "closed", "merged": true, "head": {"ref": "feat", "repo": null}});
+    fj_get(&env, &format!("{FJ_PULLS}?state=open"), &json!([]));
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=all"),
+        &json!([fj_pr(5, &gone)]),
+    );
+    assert!(err(&env, &["view"]).contains("no PR/MR for branch feat in o/r"));
+}
+
+#[test]
 fn forgejo_view_without_a_pr_names_the_branch() {
     let env = forgejo();
     for state in ["open", "all"] {

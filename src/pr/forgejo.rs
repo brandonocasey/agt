@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result};
-use crate::forge::forgejo::{self, PAGE_SIZE, pull_node};
+use crate::forge::forgejo::{self, pull_node};
 use crate::forge::issue::names;
-use crate::forge::service::{Method, Pagination, Request};
+use crate::forge::service::{Method, Request};
 use crate::forge::transport::Transport;
 use crate::store::model::ReviewState;
 
@@ -95,11 +95,7 @@ pub fn list(t: &dyn Transport, repo: &str, query: &Query) -> Result<Vec<Pr>> {
         State::Merged => "closed",
         State::All => "all",
     };
-    let mut found: Vec<Pr> = t
-        .items(
-            &Request::get(format!("{}?state={listed}", base(repo))),
-            &Pagination::PageNumbers(PAGE_SIZE),
-        )?
+    let mut found: Vec<Pr> = forgejo::pulls(t, repo, listed)?
         .iter()
         .map(pr)
         .filter(|found| branch.is_none_or(|branch| found.head_branch == branch))
@@ -113,7 +109,7 @@ pub fn list(t: &dyn Transport, repo: &str, query: &Query) -> Result<Vec<Pr>> {
 /// The PR of `branch` that is in `repo` itself, not a fork: the open ones, else those of every
 /// state, newest first.
 pub fn of_branch(t: &dyn Transport, repo: &str, branch: &str) -> Result<Vec<Pr>> {
-    let in_repo = |node: &Value| pull_node(node).same_repo.unwrap_or(true);
+    let in_repo = |node: &Value| pull_node(node).same_repo == Some(true);
     let found = forgejo::pulls_of_branch(t, repo, branch, in_repo)?;
     Ok(found.iter().map(pr).collect())
 }

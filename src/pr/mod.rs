@@ -416,8 +416,8 @@ impl Remote {
         }
     }
 
-    /// The open PR/MR of `branch`, else the newest of any state. Forgejo cannot filter by branch
-    /// and lists the whole repository, so it is asked for the open ones first.
+    /// The open PR/MR of `branch`, else the newest of any state. Forgejo is not asked to filter
+    /// by head branch and lists the whole repository, so it is asked for the open ones first.
     fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
         let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
         let mut found = match self.origin.forge {

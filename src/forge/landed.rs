@@ -109,8 +109,9 @@ impl Source {
         Ok(sources)
     }
 
-    /// Every PR/MR of the repository whose source branch is `branch`, all states, all pages.
-    /// Forgejo is searched open PRs first and stops at the first search that finds one.
+    /// The PRs/MRs of the repository whose source branch is `branch`, all pages: every state on
+    /// GitHub and GitLab; on Forgejo the open ones, and every state only when none of them is the
+    /// repository's own.
     pub fn pulls(&self, branch: &str) -> Result<Vec<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();
@@ -121,8 +122,8 @@ impl Source {
         }
     }
 
-    /// Whether `pull` can make its branch open or closed. Only Forgejo lists fork PRs of the
-    /// branch's name beside the repository's own, so only there a fork PR does not.
+    /// Whether `pull` counts as the branch's open or closed PR; Forgejo ignores fork PRs there,
+    /// GitHub and GitLab count them.
     pub fn counts(&self, pull: &Pull) -> bool {
         pull.same_repo || self.forge != Forge::Forgejo
     }
@@ -242,23 +243,27 @@ impl Source {
             .collect()
     }
 
-    /// The host lists by state only, so `branch` is matched on what it lists: the open pull
-    /// requests first, and every state only when none of them is the branch's. Pull requests
-    /// from forks are listed too; when the branch has only those, the repository's own pull
-    /// requests of it are searched as well, since the first search stops at an open fork one.
+    /// The branch is matched on what the host lists by state, open pull requests first; fork pull requests of the same name are listed too, so every state is listed as well
+    /// when none of the open ones is the repository's own.
     fn forgejo(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
-        let mut nodes = match branch {
-            Some(branch) => forgejo::pulls_of_branch(transport, &self.repo, branch, |_| true)?,
-            None => forgejo::pulls(transport, &self.repo, "open")?,
+        let Some(branch) = branch else {
+            let open = forgejo::pulls(transport, &self.repo, "open")?;
+            return open.iter().map(forgejo_pull).collect();
+        };
+        let on_branch = |state: &str| -> Result<Vec<Value>> {
+            let mut nodes = forgejo::pulls(transport, &self.repo, state)?;
+            nodes.retain(|node| node["head"]["ref"] == branch);
+            Ok(nodes)
         };
         let is_own = |node: &Value| forgejo::pull_node(node).same_repo == Some(true);
-        if let Some(branch) = branch
-            && !nodes.is_empty()
-            && !nodes.iter().any(is_own)
-        {
-            nodes.extend(forgejo::pulls_of_branch(
-                transport, &self.repo, branch, is_own,
-            )?);
+        let mut nodes = on_branch("open")?;
+        if !nodes.iter().any(is_own) {
+            let all = on_branch("all")?;
+            if nodes.is_empty() {
+                nodes = all;
+            } else {
+                nodes.extend(all.into_iter().filter(is_own));
+            }
         }
         nodes.iter().map(forgejo_pull).collect()
     }

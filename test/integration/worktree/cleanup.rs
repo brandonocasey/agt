@@ -663,6 +663,74 @@ fn a_forgejo_pull_request_proves_a_squash_and_a_fork_one_does_not() {
     assert_eq!(site.branches(), ["fork", "main"]);
 }
 
+/// How many times the fake tea was asked for a pull request list.
+fn forgejo_list_calls(site: &Site) -> usize {
+    site.env
+        .forge_calls()
+        .iter()
+        .filter(|call| call.contains("pulls?state="))
+        .count()
+}
+
+#[test]
+fn a_forgejo_branch_with_only_fork_pull_requests_lists_each_state_once() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("fork");
+    let fork = site.tip("fork");
+    site.squash("fork");
+    forgejo::logins(&site.env);
+    site.env
+        .respond(&strs(&tea_get("repos/acme/app/pulls?state=open")), "[]");
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([forgejo_pull(
+            12,
+            "merged",
+            Head {
+                branch: "fork",
+                sha: &fork,
+                repo: "someone/app",
+            },
+        )])
+        .to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "fork")["verdict"], "unmerged");
+    assert_eq!(forgejo_list_calls(&site), 2, "{:?}", site.env.forge_calls());
+}
+
+#[test]
+fn a_forgejo_open_fork_pull_request_then_an_own_closed_one_lists_each_state_once() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("both");
+    let both = site.tip("both");
+    forgejo::logins(&site.env);
+    let on = |number, state, repo| {
+        forgejo_pull(
+            number,
+            state,
+            Head {
+                branch: "both",
+                sha: &both,
+                repo,
+            },
+        )
+    };
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=open")),
+        &json!([on(5, "open", "someone/app")]).to_string(),
+    );
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([on(5, "open", "someone/app"), on(4, "closed", "acme/app")]).to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "both")["verdict"], "closed");
+    assert_eq!(forgejo_list_calls(&site), 2, "{:?}", site.env.forge_calls());
+}
+
 #[test]
 fn a_forgejo_branch_with_an_open_pull_request_is_kept_without_listing_every_state() {
     let site = Site::at("git@codeberg.org:acme/app.git");

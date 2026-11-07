@@ -330,8 +330,8 @@ pub fn pulls(
 }
 
 /// The PRs of `repo` whose head branch is `branch` and that `wanted` keeps: the open ones, and
-/// every state only when none of them qualifies. The host cannot filter by head branch, so each
-/// state is listed whole.
+/// every state only when none of them qualifies. agt does not send the host's `head` filter, so
+/// each state is listed whole and matched on its head branch.
 pub fn pulls_of_branch(
     transport: &dyn Transport,
     repo: &str,
