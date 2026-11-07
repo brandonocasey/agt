@@ -23,7 +23,7 @@ Meanwhile, branches, worktrees, and background jobs accumulate.
 - **See what still needs review.** Track reviewed changes across commits, rebases, and squashes.
 - **Work on several tasks.** Give each branch its own checkout, dependencies, and development port.
 - **Find earlier work.** Search past prompts and inspect running Claude Code and Codex sessions.
-- **Control what gets shared.** Keep issues and reviews local, with optional GitHub or GitLab sync.
+- **Control what gets shared.** Keep issues and reviews local, with optional GitHub, GitLab or Forgejo/Gitea sync.
 
 You can adopt one command without setting up the rest.
 Local issues and reviews need a Git repository, but no hosted project or login.
@@ -49,7 +49,7 @@ summary shows them beside the review.
 ### Issues and tasks you can pick up later
 
 `agt issue` keeps a local backlog with comments, private notes, and links to related work.
-It can also mirror GitHub and GitLab issues and send queued updates.
+It can also mirror GitHub, GitLab and Forgejo/Gitea issues and send queued updates.
 Create sub-issues with `--parent`; GitLab children publish as native Tasks.
 Private notes and local links stay on your machine.
 
@@ -82,7 +82,7 @@ These reports help you find earlier decisions and understand where agent time an
 
 [Running agents](docs/reference.md#ps) · [Session reports](docs/reference.md#sessions)
 
-### Routine checks and GitHub/GitLab workflows
+### Routine checks and GitHub/GitLab/Forgejo workflows
 
 - `agt pr` views, creates, updates, and merges pull requests and merge requests, and uploads images for their descriptions.
 - `agt ci` waits for checks; its GitLab failure report compares failures against default-branch history.
@@ -95,7 +95,7 @@ These reports help you find earlier decisions and understand where agent time an
 
 ## How it fits into your workflow
 
-`agt` is one Rust binary that uses Git and the GitHub/GitLab command-line tools.
+`agt` is one Rust binary that uses Git and the GitHub, GitLab and Forgejo/Gitea command-line tools.
 Most commands return JSON for agents and scripts.
 Activity and diagnostic commands also provide readable tables or text.
 
@@ -106,9 +106,9 @@ One `[[tracker]]` list, filled from all your git remotes (`[sync] remotes = "all
 
 Repository records live in the main checkout's `.agt/` directory, shared by linked worktrees.
 Keep that directory out of Git; it contains your local review and issue data.
-You choose when to share records through GitHub or GitLab.
+You choose when to share records through GitHub, GitLab or Forgejo/Gitea.
 
-GitHub integration needs an authenticated `gh`; GitLab integration needs an authenticated `glab`.
+GitHub integration needs an authenticated `gh`; GitLab integration needs an authenticated `glab`; Forgejo and Gitea integration needs a logged-in `tea` ([details](docs/reference.md#forgejo-and-gitea)).
 Session reports support Claude Code and Codex transcripts.
 Release binaries cover Apple Silicon macOS and Linux on x64 or arm64.
 Windows is not supported.
