@@ -46,6 +46,7 @@ fn pr(node: &Value) -> Pr {
             .flatten()
             .filter_map(|label| label["name"].as_str().map(str::to_owned))
             .collect(),
+        auto_merge_known: true,
         auto_merge: node
             .pointer("/autoMergeRequest/mergeMethod")
             .and_then(Value::as_str)

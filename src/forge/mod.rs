@@ -2,6 +2,7 @@ pub mod anchors;
 pub mod auto;
 #[cfg(test)]
 mod contract;
+pub mod forgejo;
 pub mod github;
 pub mod gitlab;
 pub mod hosts;
@@ -18,7 +19,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::service::SERVICES;
 use crate::forge::transport::TransportError;
 use crate::store::model::{
-    Author, Comment, Forge, PostState, RemoteComment, RemoteThread, Review, ReviewState,
+    Author, Comment, Forge, PostState, RemoteComment, RemoteKind, RemoteThread, Review, ReviewState,
 };
 
 /// A `--pr` argument: a number, or a PR/MR URL that also names the host and repository.
@@ -48,7 +49,7 @@ pub fn parse_ref(arg: &str, pipelines: bool) -> Result<PrRef> {
     let invalid = || Error(format!("--pr must be a number or a PR/MR URL: {arg}"));
     let (_, rest) = arg.split_once("://").ok_or_else(invalid)?;
     let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
-    let (kind, marker, pipeline) = SERVICES
+    let mut candidates: Vec<_> = SERVICES
         .iter()
         .flat_map(|kind| {
             let pipeline = kind.pipeline_marker.filter(|_| pipelines);
@@ -57,15 +58,21 @@ pub fn parse_ref(arg: &str, pipelines: bool) -> Result<PrRef> {
                 .chain(pipeline.map(|marker| (kind, marker, true)))
         })
         .filter(|(_, marker, _)| path.contains(marker))
-        // The longest marker is the most specific, so a project named `pull` on GitLab is not
-        // mistaken for a GitHub PR path.
-        .max_by_key(|(_, marker, _)| marker.len())
-        .ok_or_else(invalid)?;
-    let (repo, number) = path.split_once(marker).ok_or_else(invalid)?;
-    let number = number
-        .split(['/', '#', '?'])
-        .next()
-        .and_then(|number| number.parse().ok())
+        .collect();
+    // The longest marker is the most specific, so a project named `pull` on GitLab is not
+    // mistaken for a GitHub PR path. One that no number follows is a project named like it
+    // (`pulls` on GitHub holds Forgejo's marker), so the next one is tried.
+    candidates.sort_by_key(|(_, marker, _)| std::cmp::Reverse(marker.len()));
+    let (kind, repo, number, pipeline) = candidates
+        .into_iter()
+        .find_map(|(kind, marker, pipeline)| {
+            let (repo, number) = path.split_once(marker)?;
+            let number = number
+                .split(['/', '#', '?'])
+                .next()
+                .and_then(|number| number.parse().ok())?;
+            Some((kind, repo, number, pipeline))
+        })
         .ok_or_else(invalid)?;
     let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
     Ok(PrRef {
@@ -115,6 +122,7 @@ pub fn head_has_pipeline(
             let gitlab = gitlab::connect(host);
             gitlab.head_pipeline_runs(&gitlab::project_path(repo), number, head_sha)
         }
+        Forge::Forgejo => forgejo::connect(host).has_statuses(repo, head_sha),
     }
 }
 
@@ -243,6 +251,20 @@ pub struct ThreadData {
     pub position_head: Option<String>,
 }
 
+/// A thread of one comment that has nothing to resolve: a general comment or a review body.
+pub fn general(kind: RemoteKind, comment: CommentData, review_state: Option<String>) -> ThreadData {
+    ThreadData {
+        info: RemoteThread {
+            url: comment.url.clone(),
+            review_state,
+            ..RemoteThread::new(kind, comment.id.clone(), false)
+        },
+        resolved: false,
+        comments: vec![comment],
+        position_head: None,
+    }
+}
+
 pub struct Draft {
     pub id: String,
     pub body: String,
@@ -320,6 +342,28 @@ mod tests {
             Some(("gitlab.example.com".into(), "g/s/p".into()))
         );
         assert!(parse_pr("nope").is_err());
+    }
+
+    #[test]
+    fn a_forgejo_url_names_its_forge_and_pipelines_are_opt_in() {
+        let pr = parse_pr("https://codeberg.org/o/r/pulls/12/files").unwrap();
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.location, Some(("codeberg.org".into(), "o/r".into())));
+        assert!(pr.forge == Some(Forge::Forgejo));
+        assert!(parse_pr("https://codeberg.org/o/r/actions/runs/4").is_err());
+        let run = parse_ref("https://codeberg.org/o/r/actions/runs/4", true).unwrap();
+        assert!(run.pipeline && run.number == 4);
+    }
+
+    #[test]
+    fn a_github_repository_named_pulls_is_still_a_pull_request() {
+        let pr = parse_pr("https://github.com/o/pulls/pull/3").unwrap();
+        assert_eq!(pr.number, 3);
+        assert_eq!(pr.location, Some(("github.com".into(), "o/pulls".into())));
+        assert!(pr.forge == Some(Forge::Github));
+        let forgejo = parse_pr("https://git.example.com/o/pull/pulls/5").unwrap();
+        assert_eq!(forgejo.number, 5);
+        assert!(forgejo.forge == Some(Forge::Forgejo));
     }
 
     #[test]

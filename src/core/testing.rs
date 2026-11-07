@@ -53,6 +53,7 @@ impl Sandbox {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("AGT_GH_BIN", root.join("no-forge"))
             .env("AGT_GLAB_BIN", root.join("no-forge"))
+            .env("AGT_TEA_BIN", root.join("no-forge"))
             .current_dir(self.repo());
         command
     }

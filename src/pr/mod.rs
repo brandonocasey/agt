@@ -1,9 +1,10 @@
-//! `agt pr`: one GitHub/GitLab-neutral command for the PR/MR of the current repository: view,
-//! list, create, update, merge behind a head-sha guard, pause or restore auto-merge, and upload
-//! images for a body. The
+//! `agt pr`: one GitHub/GitLab/Forgejo-neutral command for the PR/MR of the current repository:
+//! view, list, create, update, merge behind a head-sha guard, pause or restore auto-merge, and
+//! upload images for a body. The
 //! forge comes from the tracker of the origin remote, or the one `--remote` or a PR/MR URL
 //! names; writes are refused where `push` is `off`. Output is JSON.
 
+mod forgejo;
 mod github;
 mod gitlab;
 mod memo;
@@ -25,7 +26,7 @@ use crate::forge::{PrRef, parse_pr};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
-/// View, list, create, update and merge the PRs/MRs of this repository, on GitHub or GitLab.
+/// View, list, create, update and merge the PRs/MRs of this repository, on GitHub, GitLab or Forgejo.
 #[derive(Args)]
 pub struct Cli {
     /// Tracker to use: a git remote name or `host/repo` [default: the repository of a PR/MR
@@ -189,6 +190,9 @@ pub struct Pr {
     pub labels: Vec<String>,
     /// The method auto-merge will use, when it is on.
     pub auto_merge: Option<String>,
+    /// The host says whether auto-merge is on; Forgejo does not, so `auto_merge` is `None`
+    /// whatever its state.
+    pub auto_merge_known: bool,
     /// The merge queue or train state, when queued.
     pub queue: Option<String>,
     pub mergeable: String,
@@ -215,7 +219,11 @@ impl Pr {
             "head_sha": self.head_sha,
             "author": self.author,
             "labels": self.labels,
-            "auto_merge": if self.auto_merge.is_some() { "on" } else { "off" },
+            "auto_merge": match (self.auto_merge_known, self.auto_merge.is_some()) {
+                (false, _) => "unknown",
+                (true, true) => "on",
+                (true, false) => "off",
+            },
             "auto_merge_method": self.auto_merge,
             "queue": self.queue,
             "mergeable": self.mergeable,
@@ -278,6 +286,7 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::view(t, repo, number),
             Forge::Gitlab => gitlab::view(t, repo, number),
+            Forge::Forgejo => forgejo::view(t, repo, number),
         }
     }
 
@@ -286,6 +295,7 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::list(t, repo, branch, state, mine),
             Forge::Gitlab => gitlab::list(t, repo, branch, state, mine),
+            Forge::Forgejo => forgejo::list(t, repo, branch, state, mine),
         }
     }
 
@@ -301,6 +311,7 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::create(t, repo, branch, base, title, body, draft),
             Forge::Gitlab => gitlab::create(t, repo, branch, base, title, body, draft),
+            Forge::Forgejo => forgejo::create(t, repo, branch, base, title, body, draft),
         }
     }
 
@@ -324,6 +335,7 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::update(t, repo, current, changes),
             Forge::Gitlab => gitlab::update(t, repo, current, changes),
+            Forge::Forgejo => forgejo::update(t, repo, current, changes),
         }
     }
 
@@ -333,14 +345,17 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::merge(t, repo, pr.number, sha, method),
             Forge::Gitlab => gitlab::merge(t, repo, pr, sha, method, false),
+            Forge::Forgejo => forgejo::merge(t, repo, pr.number, sha, method, false),
         }
     }
 
-    fn disable_auto(&self, pr: &Pr) -> Result<()> {
+    /// Turns auto-merge off; false when it was off already, which only Forgejo can tell.
+    fn disable_auto(&self, pr: &Pr) -> Result<bool> {
         let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
         match self.origin.forge {
-            Forge::Github => github::disable_auto(t, pr),
-            Forge::Gitlab => gitlab::disable_auto(t, repo, pr.number),
+            Forge::Github => github::disable_auto(t, pr).map(|()| true),
+            Forge::Gitlab => gitlab::disable_auto(t, repo, pr.number).map(|()| true),
+            Forge::Forgejo => forgejo::disable_auto(t, repo, pr.number),
         }
     }
 
@@ -373,6 +388,11 @@ impl Remote {
                 github::enable_auto(t, pr, sha, how)
             }
             Forge::Gitlab => gitlab::merge(t, repo, pr, sha, how, true),
+            Forge::Forgejo => {
+                forgejo::merge(t, repo, pr.number, sha, how, true)?;
+                // The host cannot be asked how auto-merge was set, so pausing it needs this.
+                memo::record(&self.key(pr.number), forgejo::method(how))
+            }
         }
     }
 }
@@ -410,7 +430,7 @@ fn not_queued(pr: &Pr) -> Result<()> {
     }
 }
 
-/// Names a missing or unauthenticated gh/glab instead of repeating the raw tool error.
+/// Names a missing or unauthenticated gh/glab/tea instead of repeating the raw tool error.
 fn explain(error: Error) -> Error {
     let message = &error.0;
     for tool in SERVICES.iter().map(|kind| kind.tool) {
@@ -420,12 +440,23 @@ fn explain(error: Error) -> Error {
             ));
         }
         if message.starts_with(&format!("{tool} "))
-            && ["auth login", "HTTP 401", "not logged in", "authentication"]
-                .iter()
-                .any(|hint| message.contains(hint))
+            && [
+                "auth login",
+                "login add",
+                "HTTP 401",
+                "not logged in",
+                "authentication",
+            ]
+            .iter()
+            .any(|hint| message.contains(hint))
         {
+            let login = if tool == "tea" {
+                "login add"
+            } else {
+                "auth login"
+            };
             return Error(format!(
-                "{tool} is not authenticated: run `{tool} auth login`\n{message}"
+                "{tool} is not authenticated: run `{tool} {login}`\n{message}"
             ));
         }
     }
@@ -584,13 +615,14 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
             };
             let now = remote.view(at)?;
             let on = now.auto_merge.is_some();
+            let readable = now.auto_merge_known;
             // Turning auto-merge on merges at once when the checks already passed.
             let merged =
                 matches!(switch, Switch::On) && changed && now.state == ReviewState::Merged;
             if merged {
                 *merged_text = Some(format!("{}\n{}", now.title, now.body));
             }
-            if changed && !merged && on == matches!(switch, Switch::Off) {
+            if readable && changed && !merged && on == matches!(switch, Switch::Off) {
                 return fail(format!(
                     "auto-merge is still {} on #{at} after the change",
                     if on { "on" } else { "off" }
@@ -608,12 +640,19 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
 
 /// Turns auto-merge off after recording its method; false when it was off already.
 fn pause(remote: &Remote, pr: &Pr, key: &str) -> Result<bool> {
-    let Some(method) = &pr.auto_merge else {
-        return Ok(false);
+    let method = match &pr.auto_merge {
+        Some(method) => method.clone(),
+        None if pr.auto_merge_known => return Ok(false),
+        // Forgejo does not say whether auto-merge is on, so cancelling it is the probe; the
+        // method is the one `agt pr merge --auto` recorded, else a plain merge.
+        None => memo::recorded(key)?.unwrap_or_else(|| forgejo::method(None).to_owned()),
     };
-    memo::record(key, method)?;
-    remote.disable_auto(pr)?;
-    Ok(true)
+    memo::record(key, &method)?;
+    if remote.disable_auto(pr)? {
+        return Ok(true);
+    }
+    memo::forget(key)?;
+    Ok(false)
 }
 
 /// Turns auto-merge back on with the recorded method; false when it is on already.

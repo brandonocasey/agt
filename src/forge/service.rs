@@ -1,5 +1,5 @@
 //! The seam between the workflows and a git hosting service. `sync` and `publish` speak only to
-//! [`ReviewService`] and [`Capabilities`], issue sync to [`IssueService`]; everything that is specific to GitHub, GitLab or a
+//! [`ReviewService`] and [`Capabilities`], issue sync to [`IssueService`]; everything that is specific to GitHub, GitLab, Forgejo or a
 //! later service (REST paths, tool flags, GraphQL, response shapes) lives behind it.
 
 use std::path::PathBuf;
@@ -140,6 +140,9 @@ pub enum Pagination {
     GraphqlCursor,
     /// The CLI joins the pages (`--paginate`).
     CliPaginate,
+    /// `limit` and `page` query parameters, for a CLI with no `--paginate`; a page shorter than
+    /// the size is the last.
+    PageNumbers(usize),
     /// A `Link: <url>; rel="next"` header.
     #[cfg_attr(
         not(test),
@@ -196,13 +199,6 @@ pub trait DraftPoster {
 pub enum ReplyCap {
     All,
     ReviewThreads,
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "no service lacks native replies yet; a unit test builds it"
-        )
-    )]
     None,
 }
 
@@ -271,7 +267,7 @@ pub struct Posted {
 /// host are `login` and `send`.
 pub trait Service {
     fn forge(&self) -> Forge;
-    /// For messages: `GitHub`, `GitLab`.
+    /// For messages: `GitHub`, `GitLab`, `Forgejo`.
     fn name(&self) -> &'static str {
         kind(self.forge()).name
     }
@@ -381,13 +377,13 @@ pub trait IssueService: Service {
 /// means adding its entry to [`SERVICES`].
 pub struct Kind {
     pub forge: Forge,
-    /// The service's name in messages: `GitHub`, `GitLab`.
+    /// The service's name in messages: `GitHub`, `GitLab`, `Forgejo`.
     pub name: &'static str,
     /// Start of the ref on `origin` that holds the head of PR/MR `n`: `<prefix>n/head`.
     pub head_ref_prefix: &'static str,
-    /// Prefix of the keys and imported ids: `gh-42`, `gl-7`.
+    /// Prefix of the keys and imported ids: `gh-42`, `gl-7`, `fg-3`.
     pub key_prefix: &'static str,
-    /// The command line tool that talks to the service: `gh`, `glab`.
+    /// The command line tool that talks to the service: `gh`, `glab`, `tea`.
     pub tool: &'static str,
     /// Path segment of a PR/MR URL between the repository and the number.
     pub url_marker: &'static str,
@@ -406,7 +402,11 @@ pub struct Kind {
     pub connect_issue: fn(&str) -> Box<dyn IssueService>,
 }
 
-pub const SERVICES: &[Kind] = &[crate::forge::github::KIND, crate::forge::gitlab::KIND];
+pub const SERVICES: &[Kind] = &[
+    crate::forge::github::KIND,
+    crate::forge::gitlab::KIND,
+    crate::forge::forgejo::KIND,
+];
 
 fn by(host: &str, check: fn(&Kind) -> fn(&str) -> bool) -> Option<Forge> {
     SERVICES
@@ -452,6 +452,15 @@ mod tests {
         assert!(forge(detect("gitlab.com", None, None)) == Forge::Gitlab);
         assert!(forge(detect_known("gitlab.com", None, None)) == Forge::Gitlab);
         assert!(detect_known("git.example.invalid", None, None).is_none());
+        // codeberg.org is Forgejo without asking tea; any other host needs a login or a name.
+        assert!(forge(detect_known("codeberg.org", None, None)) == Forge::Forgejo);
+        assert!(
+            forge(detect_known(
+                "git.example.invalid",
+                Some(Forge::Forgejo),
+                None
+            )) == Forge::Forgejo
+        );
         // A cached host needs no probe of any CLI.
         assert!(forge(detect("git.example.invalid", None, Some(Forge::Gitlab))) == Forge::Gitlab);
         assert!(

@@ -11,7 +11,7 @@ use super::classify::{
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
 use crate::forge::transport::TransportError;
-use crate::forge::{github, gitlab};
+use crate::forge::{forgejo, github, gitlab};
 use crate::store::model::Forge;
 
 /// Whether repeating the read may succeed: a rate limit, a timeout, a server error or a failure
@@ -70,6 +70,8 @@ pub fn snapshot(
             pipeline(target).map(|state| (state, head.clone(), None))
         }
         Forge::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs)
+            .map(|(state, head)| (state, head, None)),
+        Forge::Forgejo => forgejo(target, head.clone(), awaiting, waited_secs)
             .map(|(state, head)| (state, head, None)),
     };
     match result {
@@ -285,6 +287,21 @@ fn unreadable(error: &TransportError) -> bool {
             .message
             .to_lowercase()
             .contains("resource not accessible")
+}
+
+/// The PR's statuses are all the evidence: Forgejo marks none of them required.
+fn forgejo(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {
+    let forgejo = forgejo::connect(&target.host);
+    let pull = forgejo.pull_checks(&target.repo, target.target.number)?;
+    let head = pin(head, &pull.view["headRefOid"]);
+    let expected = head.as_deref().unwrap_or("");
+    let head_state = Head {
+        expected,
+        awaiting,
+        waited_secs,
+    };
+    let state = classify(&head_state, &pull.view, pull.checks.len(), &pull.checks);
+    Ok((state, head))
 }
 
 fn pipeline(target: &Resolved) -> Result<State, TransportError> {

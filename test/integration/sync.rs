@@ -345,19 +345,19 @@ fn an_unknown_service_in_the_hosts_file_only_matters_for_its_own_host() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("hosts.json"),
-        r#"{"git.example.org": {"service": "forgejo"}, "gitlab.example.com": {"service": "gitlab"}}"#,
+        r#"{"git.example.org": {"service": "bitbucket"}, "gitlab.example.com": {"service": "gitlab"}}"#,
     )
     .unwrap();
     assert_eq!(env.pull(&["sync", "--pr", "3"])["target"], "gl-3");
 
     std::fs::write(
         dir.join("hosts.json"),
-        r#"{"gitlab.example.com": {"service": "forgejo"}}"#,
+        r#"{"gitlab.example.com": {"service": "bitbucket"}}"#,
     )
     .unwrap();
     let refused = env.fail(&["sync", "--pr", "3"], None);
     assert!(
-        refused.contains("gitlab.example.com") && refused.contains("forgejo"),
+        refused.contains("gitlab.example.com") && refused.contains("bitbucket"),
         "{refused}"
     );
 }
@@ -490,11 +490,18 @@ fn forge_comes_from_the_host_never_a_guess() {
         !env.forge_calls().iter().any(|call| call.contains("user")),
         "nothing is asked of an unknown host"
     );
-    let forgejo = env.fail(
-        &["sync", "--pr", "https://codeberg.org/me/repo/pulls/5"],
+    let bitbucket = env.fail(
+        &[
+            "sync",
+            "--pr",
+            "https://bitbucket.org/me/repo/pull-requests/5",
+        ],
         None,
     );
-    assert!(forgejo.contains("--pr must be a number or a"), "{forgejo}");
+    assert!(
+        bitbucket.contains("--pr must be a number or a"),
+        "{bitbucket}"
+    );
 
     // A host `gh auth status` knows is GitHub (Enterprise).
     env.respond(&["auth", "status", "--hostname", "code.example.org"], "");

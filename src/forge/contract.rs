@@ -144,6 +144,7 @@ pub fn capabilities(service: &dyn ReviewService) -> Value {
         "pagination": match caps.pagination {
             Pagination::GraphqlCursor => "graphql_cursor",
             Pagination::CliPaginate => "cli_paginate",
+            Pagination::PageNumbers(_) => "page_numbers",
             Pagination::LinkHeader => "link_header",
             Pagination::NextUrlInBody(_) => "next_url_in_body",
             Pagination::ContinuationHeader(_) => "continuation_header",

@@ -116,8 +116,8 @@ pub fn select_tracker(
     {
         return Ok(Some(Selected::of_tracker(origin)));
     }
-    // An origin only a CLI login identifies (GitHub Enterprise, a self-hosted GitLab) is still
-    // origin, and wins over other remotes.
+    // An origin only a CLI login identifies (GitHub Enterprise, a self-hosted GitLab or Forgejo)
+    // is still origin, and wins over other remotes.
     if !trackers.is_empty()
         && let Some(origin) = origin_only(config, kind, &locations)
         && service::detect(&origin.host, hosts::named(&origin.host)?, None).is_some()
@@ -182,7 +182,7 @@ pub fn require_tracker(
             ""
         };
         Error(format!(
-            "no tracker for {}: add a GitHub or GitLab origin remote, a [[tracker]], or pass a PR/MR URL{hint}",
+            "no tracker for {}: add a GitHub, GitLab or Forgejo origin remote, a [[tracker]], or pass a PR/MR URL{hint}",
             kind_name(kind)
         ))
     })

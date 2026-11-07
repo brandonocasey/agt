@@ -8,7 +8,7 @@ use crate::core::error::{Error, Result};
 use crate::forge::select::{self, Selected};
 use crate::forge::service::{self, Pagination, Request, Var};
 use crate::forge::transport::{Transport, TransportError};
-use crate::forge::{self, PullNode, encode, github, gitlab, hosts};
+use crate::forge::{self, PullNode, encode, forgejo, github, gitlab, hosts};
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
@@ -54,7 +54,7 @@ impl Source {
             None => service::detect(&selected.host, hosts::named(&selected.host)?, None)
                 .ok_or_else(|| {
                     Error(format!(
-                        "origin is not a GitHub or GitLab host that gh or glab is logged in to ({} is an unknown forge, or gh/glab is not authenticated for it)",
+                        "origin is not a GitHub or GitLab host that gh or glab is logged in to, or a Forgejo host that tea is logged in to ({} is an unknown forge, or gh/glab/tea is not authenticated for it)",
                         selected.host
                     ))
                 })?,
@@ -116,6 +116,7 @@ impl Source {
         match self.forge {
             Forge::Github => self.github(transport, Some(branch)),
             Forge::Gitlab => self.gitlab(transport, Some(branch)),
+            Forge::Forgejo => self.forgejo(transport, Some(branch)),
         }
     }
 
@@ -126,6 +127,7 @@ impl Source {
         match self.forge {
             Forge::Github => self.github(transport, None),
             Forge::Gitlab => self.gitlab(transport, None),
+            Forge::Forgejo => self.forgejo(transport, None),
         }
     }
 
@@ -133,8 +135,8 @@ impl Source {
     pub fn pull(&self, number: u64) -> Result<Option<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
         let transport = service.transport();
-        // Only GitHub says which object is missing; a GitLab 404 may be the project itself, so
-        // it stays an error the caller can report.
+        // Only GitHub says which object is missing; a GitLab or Forgejo 404 may be the project
+        // itself, so it stays an error the caller can report.
         let missing = |error: &TransportError| {
             self.forge == Forge::Github
                 && error.message.contains("Could not resolve to a PullRequest")
@@ -168,6 +170,10 @@ impl Source {
                     Err(error) if missing(&error) => Ok(None),
                     Err(error) => Err(error.into()),
                 }
+            }
+            Forge::Forgejo => {
+                let path = format!("repos/{}/pulls/{number}", self.repo);
+                forgejo_pull(&transport.json(&Request::get(path))?).map(Some)
             }
         }
     }
@@ -228,6 +234,29 @@ impl Source {
             .map(gitlab_pull)
             .collect()
     }
+
+    /// The host lists by state only, so `branch` is matched on what it lists.
+    fn forgejo(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
+        let state = if branch.is_some() { "all" } else { "open" };
+        let path = format!("repos/{}/pulls?state={state}", self.repo);
+        let mut pulls = Vec::new();
+        for node in transport.items(
+            &Request::get(path),
+            &Pagination::PageNumbers(forgejo::PAGE_SIZE),
+        )? {
+            if branch.is_none_or(|branch| node["head"]["ref"] == branch) {
+                pulls.push(forgejo_pull(&node)?);
+            }
+        }
+        Ok(pulls)
+    }
+}
+
+fn forgejo_pull(node: &Value) -> Result<Pull> {
+    pull(
+        forgejo::pull_node(node),
+        "a Forgejo pull request has no number",
+    )
 }
 
 fn github_pull(node: &Value) -> Result<Pull> {
