@@ -83,15 +83,21 @@ pub fn view(t: &dyn Transport, repo: &str, number: u64) -> Result<Pr> {
     ))
 }
 
+/// What `list` keeps.
+pub struct Query<'a> {
+    pub branch: Option<&'a str>,
+    pub state: State,
+    pub mine: bool,
+}
+
 /// Pull requests newest first; the host filters by state only, so `branch` and `mine` are
 /// applied to what it lists.
-pub fn list(
-    t: &dyn Transport,
-    repo: &str,
-    branch: Option<&str>,
-    state: State,
-    mine: bool,
-) -> Result<Vec<Pr>> {
+pub fn list(t: &dyn Transport, repo: &str, query: &Query) -> Result<Vec<Pr>> {
+    let Query {
+        branch,
+        state,
+        mine,
+    } = *query;
     let listed = match state {
         State::Open => "open",
         State::Merged => "closed",
@@ -117,21 +123,22 @@ fn forge_login(t: &dyn Transport) -> Result<String> {
     crate::forge::required(&t.json(&Request::get("user"))?, "/login", "tea api user")
 }
 
-pub fn create(
-    t: &dyn Transport,
-    repo: &str,
-    head: &str,
-    base_branch: &str,
-    title: &str,
-    body: &str,
-    draft: bool,
-) -> Result<u64> {
-    let title = if draft {
-        format!("{DRAFT_PREFIX}{title}")
+/// A pull request to open.
+pub struct NewPr<'a> {
+    pub head: &'a str,
+    pub base: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub draft: bool,
+}
+
+pub fn create(t: &dyn Transport, repo: &str, new: &NewPr) -> Result<u64> {
+    let title = if new.draft {
+        format!("{DRAFT_PREFIX}{}", new.title)
     } else {
-        title.to_owned()
+        new.title.to_owned()
     };
-    let body = json!({"head": head, "base": base_branch, "title": title, "body": body});
+    let body = json!({"head": new.head, "base": new.base, "title": title, "body": new.body});
     let created = t.json(&Request::rest(Method::Post, base(repo), Some(body)))?;
     created["number"]
         .as_u64()
@@ -192,16 +199,25 @@ pub fn method(how: Option<How>) -> &'static str {
     }
 }
 
-/// Merges, or with `auto` merges when the checks succeed; the host refuses when the head is no
-/// longer `sha`.
-pub fn merge(
-    t: &dyn Transport,
-    repo: &str,
-    number: u64,
-    sha: &str,
-    how: Option<How>,
-    auto: bool,
-) -> Result<()> {
+/// The PR to merge and the head it must still have.
+pub struct Merge<'a> {
+    pub number: u64,
+    pub sha: &'a str,
+    pub how: Option<How>,
+}
+
+/// Merges now; the host refuses when the head is no longer `sha`.
+pub fn merge(t: &dyn Transport, repo: &str, request: &Merge) -> Result<()> {
+    post_merge(t, repo, request, false)
+}
+
+/// Merges when the checks succeed; the host refuses when the head is no longer `sha`.
+pub fn merge_when_checks_succeed(t: &dyn Transport, repo: &str, request: &Merge) -> Result<()> {
+    post_merge(t, repo, request, true)
+}
+
+fn post_merge(t: &dyn Transport, repo: &str, request: &Merge, auto: bool) -> Result<()> {
+    let Merge { number, sha, how } = *request;
     let mut body = json!({
         "Do": method(how),
         "head_commit_id": sha,

@@ -138,8 +138,13 @@ fn tracker(platform: Forge, remote: Option<&str>) -> Result<(String, String, For
         None,
     )?)?;
     if !names_same_forge(platform, source.forge) {
+        let hint = if source.forge == Forge::Forgejo {
+            "; name a Forgejo pull request as #PR, for example #7"
+        } else {
+            ""
+        };
         return fail(format!(
-            "{}/{} is {}, but the target is a {} reference",
+            "{}/{} is {}, but the target is a {} reference{hint}",
             source.host,
             source.repo,
             service::kind(source.forge).name,

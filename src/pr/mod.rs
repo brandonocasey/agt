@@ -295,7 +295,15 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::list(t, repo, branch, state, mine),
             Forge::Gitlab => gitlab::list(t, repo, branch, state, mine),
-            Forge::Forgejo => forgejo::list(t, repo, branch, state, mine),
+            Forge::Forgejo => forgejo::list(
+                t,
+                repo,
+                &forgejo::Query {
+                    branch,
+                    state,
+                    mine,
+                },
+            ),
         }
     }
 
@@ -311,7 +319,16 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::create(t, repo, branch, base, title, body, draft),
             Forge::Gitlab => gitlab::create(t, repo, branch, base, title, body, draft),
-            Forge::Forgejo => forgejo::create(t, repo, branch, base, title, body, draft),
+            Forge::Forgejo => {
+                let new = forgejo::NewPr {
+                    head: branch,
+                    base,
+                    title,
+                    body,
+                    draft,
+                };
+                forgejo::create(t, repo, &new)
+            }
         }
     }
 
@@ -345,7 +362,14 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::merge(t, repo, pr.number, sha, method),
             Forge::Gitlab => gitlab::merge(t, repo, pr, sha, method, false),
-            Forge::Forgejo => forgejo::merge(t, repo, pr.number, sha, method, false),
+            Forge::Forgejo => {
+                let request = forgejo::Merge {
+                    number: pr.number,
+                    sha,
+                    how: method,
+                };
+                forgejo::merge(t, repo, &request)
+            }
         }
     }
 
@@ -389,7 +413,12 @@ impl Remote {
             }
             Forge::Gitlab => gitlab::merge(t, repo, pr, sha, how, true),
             Forge::Forgejo => {
-                forgejo::merge(t, repo, pr.number, sha, how, true)?;
+                let request = forgejo::Merge {
+                    number: pr.number,
+                    sha,
+                    how,
+                };
+                forgejo::merge_when_checks_succeed(t, repo, &request)?;
                 // The host cannot be asked how auto-merge was set, so pausing it needs this.
                 memo::record(&self.key(pr.number), forgejo::method(how))
             }

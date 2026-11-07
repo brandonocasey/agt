@@ -2129,6 +2129,22 @@ fn a_forgejo_actions_run_url_is_refused_as_a_usage_error() {
 }
 
 #[test]
+fn a_bare_number_on_a_forgejo_origin_says_to_write_the_pull_request_as_hash_number() {
+    let scenario = Scenario::new(&[]);
+    scenario
+        .env
+        .git(&["remote", "add", "origin", "https://codeberg.org/o/r.git"]);
+    let output = scenario.command(&["7"], &TEA).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("codeberg.org/o/r is Forgejo, but"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("#7"), "{stderr}");
+}
+
+#[test]
 fn a_bare_hash_reference_names_the_pull_request_of_a_forgejo_origin() {
     let mut steps = vec![tea_login()];
     steps.extend(forgejo_poll(

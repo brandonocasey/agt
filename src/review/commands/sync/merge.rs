@@ -63,6 +63,12 @@ fn seen_comments(threads: &[ThreadData]) -> Vec<String> {
         .collect()
 }
 
+/// A review that holds only agt's own marker comment, so it carries nothing to import.
+fn is_bare_review_marker(data: &ThreadData, trust: &Trust) -> bool {
+    matches!(data.comments.as_slice(), [comment]
+        if data.info.kind == RemoteKind::Review && trust.is_review_marker(comment))
+}
+
 /// Merges the host's threads and drafts into `threads`. `take_record` claims a verified
 /// general comment as a run record, which only a review has; the rest needs nothing from the
 /// subject, so issue threads merge the same way.
@@ -78,13 +84,10 @@ fn merge_threads(
     let mut answers = Vec::new();
     let seen_threads: Vec<String> = fetched.iter().map(|data| data.info.id.clone()).collect();
     let seen_comments = seen_comments(&fetched);
-    for data in fetched {
-        if let [comment] = data.comments.as_slice()
-            && data.info.kind == RemoteKind::Review
-            && trust.is_review_marker(comment)
-        {
-            continue;
-        }
+    for data in fetched
+        .into_iter()
+        .filter(|data| !is_bare_review_marker(data, trust))
+    {
         if let [comment] = data.comments.as_slice()
             && trust.verified(comment)
         {

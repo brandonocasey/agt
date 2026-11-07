@@ -529,9 +529,17 @@ fn a_gitlab_merge_request_proves_a_squash_and_a_cross_project_one_does_not() {
     assert_eq!(site.branches(), ["fork", "main"]);
 }
 
-/// A Forgejo pull request of `acme/app` as the list route shows it; `head_repo` is the
-/// repository the head branch lives in.
-fn forgejo_pull(number: u64, state: &str, branch: &str, head: &str, head_repo: &str) -> Value {
+/// The head of a Forgejo pull request: `repo` is the repository the branch lives in.
+#[derive(Clone, Copy)]
+struct Head<'a> {
+    branch: &'a str,
+    sha: &'a str,
+    repo: &'a str,
+}
+
+/// A Forgejo pull request of `acme/app` as the list route shows it.
+fn forgejo_pull(number: u64, state: &str, head: Head) -> Value {
+    let Head { branch, sha, repo } = head;
     json!({
         "number": number,
         "html_url": format!("https://codeberg.org/acme/app/pulls/{number}"),
@@ -541,7 +549,7 @@ fn forgejo_pull(number: u64, state: &str, branch: &str, head: &str, head_repo: &
         "merged_at": (state == "merged").then_some("2026-01-01T00:00:00Z"),
         "closed_at": (state == "closed").then_some("2026-03-04T05:06:07Z"),
         "base": {"ref": "main", "repo": {"full_name": "acme/app"}},
-        "head": {"ref": branch, "sha": head, "repo": {"full_name": head_repo}},
+        "head": {"ref": branch, "sha": sha, "repo": {"full_name": repo}},
     })
 }
 
@@ -557,8 +565,24 @@ fn a_forgejo_pull_request_proves_a_squash_and_a_fork_one_does_not() {
     site.env.respond(
         &strs(&tea_get("repos/acme/app/pulls?state=all")),
         &json!([
-            forgejo_pull(11, "merged", "sq", &sq, "acme/app"),
-            forgejo_pull(12, "merged", "fork", &fork, "someone/app"),
+            forgejo_pull(
+                11,
+                "merged",
+                Head {
+                    branch: "sq",
+                    sha: &sq,
+                    repo: "acme/app",
+                },
+            ),
+            forgejo_pull(
+                12,
+                "merged",
+                Head {
+                    branch: "fork",
+                    sha: &fork,
+                    repo: "someone/app",
+                },
+            ),
         ])
         .to_string(),
     );
@@ -578,7 +602,16 @@ fn a_closed_forgejo_pull_request_row_carries_head_title_and_closed_at() {
     forgejo::logins(&site.env);
     site.env.respond(
         &strs(&tea_get("repos/acme/app/pulls?state=all")),
-        &json!([forgejo_pull(7, "closed", "shelved", &head, "acme/app")]).to_string(),
+        &json!([forgejo_pull(
+            7,
+            "closed",
+            Head {
+                branch: "shelved",
+                sha: &head,
+                repo: "acme/app",
+            }
+        )])
+        .to_string(),
     );
     let report = site.run(&["--yes"]);
     let row = site.kept(&report, "shelved");
