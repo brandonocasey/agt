@@ -1192,7 +1192,7 @@ checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
 query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
 
-`--job NAME` (repeatable, exact and case-sensitive) waits only for the jobs of that name, for every target: on GitHub any check of the head, required or not, and on GitLab the jobs of the head pipeline, whose own status is ignored. All named jobs must pass (`required_checks_passed`); a failed one is `check_failed` or `check_cancelled` and is listed under `failed`. A named job that has not appeared is `checks_pending` with `missingChecks` while checks run (GitHub: until the rollup has been idle for 120 seconds; GitLab: until the pipeline stops running, including when it waits on a manual job), then `job_not_found` (exit 1). A named GitLab job that has not started when the pipeline is blocked, for instance behind a manual job, gives the pipeline's reason (`manual_action_required`, `check_failed`) at once. A named job that failed counts even when GitLab allows it to fail. A skipped job passes on GitHub (`skipping`) but needs action on GitLab (`unknown_check_state`). Without `--job` nothing changes.
+`--job NAME` (repeatable, exact and case-sensitive) waits only for the jobs of that name, for every target: on GitHub any check of the head, required or not, on Forgejo the statuses of the head, by exact context name, and on GitLab the jobs of the head pipeline, whose own status is ignored. All named jobs must pass (`required_checks_passed`); a failed one is `check_failed` or `check_cancelled` and is listed under `failed`. A named job that has not appeared is `checks_pending` with `missingChecks` while checks run (GitHub and Forgejo: until no check or status of the head has been pending for 120 seconds; GitLab: until the pipeline stops running, including when it waits on a manual job), then `job_not_found` (exit 1). A named GitLab job that has not started when the pipeline is blocked, for instance behind a manual job, gives the pipeline's reason (`manual_action_required`, `check_failed`) at once. A named job that failed counts even when GitLab allows it to fail. A skipped job passes on GitHub and Forgejo (`skipping`) but needs action on GitLab (`unknown_check_state`). Without `--job` nothing changes.
 
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
@@ -1272,8 +1272,10 @@ fails it prints the finished ones before failing. The image belongs to the repos
 PR/MR. GitHub (github.com only) takes the upload through its undocumented `user-attachments`
 endpoint, which accepts a user token but not an app or installation token; GitLab uses the
 project's Markdown uploads API through `glab api --form` (a glab release that has it) and returns
-its own relative Markdown, with `url` made absolute from `full_path`. Forgejo has no repository-level upload (it attaches files only to an
-existing issue or comment), so `upload` is refused there before any call.
+its own relative Markdown, with `url` made absolute from `full_path`.
+
+Forgejo has no repository-level upload (it attaches files only to an existing issue or comment), so `upload` is refused there
+before any call.
 
 Failures print `agt: error: ...` and exit 1.
 

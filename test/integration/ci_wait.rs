@@ -2061,6 +2061,111 @@ fn forgejo_reports_a_head_change_after_the_first_read() {
     assert_eq!(outcome.events[1]["observedHead"], "def456");
 }
 
+fn forgejo_jobs(polls: Vec<Vec<Step>>, jobs: &[&str], env: &[(&str, &str)]) -> Outcome {
+    let env: Vec<(&str, &str)> = TEA.iter().chain(env).copied().collect();
+    let steps: Vec<Step> = std::iter::once(tea_login())
+        .chain(polls.into_iter().flatten())
+        .collect();
+    let extra: Vec<&str> = jobs.iter().flat_map(|job| ["--job", job]).collect();
+    run_with(&steps, FORGEJO_TARGET, &extra, &env)
+}
+
+#[test]
+fn a_named_forgejo_status_passing_ends_the_wait_whatever_else_fails_or_runs() {
+    let outcome = forgejo_jobs(
+        vec![forgejo_poll(
+            json!({}),
+            &[
+                commit_status("ci/lint", "failure"),
+                commit_status("ci/build", "success"),
+                commit_status("ci/e2e", "pending"),
+            ],
+        )],
+        &["ci/build"],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
+fn a_named_forgejo_status_still_pending_keeps_the_wait_pending() {
+    let outcome = forgejo_jobs(
+        vec![
+            forgejo_poll(
+                json!({}),
+                &[
+                    commit_status("ci/lint", "failure"),
+                    commit_status("ci/build", "pending"),
+                ],
+            ),
+            forgejo_poll(
+                json!({}),
+                &[
+                    commit_status("ci/lint", "failure"),
+                    commit_status("ci/build", "success"),
+                ],
+            ),
+        ],
+        &["ci/build"],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn a_named_forgejo_status_that_never_reports_is_not_found_once_the_head_is_idle() {
+    let outcome = forgejo_jobs(
+        vec![
+            forgejo_poll(json!({}), &[commit_status("ci/lint", "pending")]),
+            forgejo_poll(json!({}), &[commit_status("ci/lint", "success")]),
+        ],
+        &["ci/build"],
+        &grace("0"),
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(
+        reasons(&outcome),
+        ["checks_pending", "job_not_found", "action_required"]
+    );
+    assert_eq!(outcome.events[0]["idle"], false);
+    assert_eq!(outcome.events[1]["missingChecks"], json!(["ci/build"]));
+}
+
+#[test]
+fn a_forgejo_status_named_in_another_case_is_missing() {
+    let outcome = forgejo_jobs(
+        vec![forgejo_poll(
+            json!({}),
+            &[commit_status("CI/Build", "success")],
+        )],
+        &["ci/build"],
+        &grace("0"),
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "job_not_found");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["ci/build"]));
+}
+
+#[test]
+fn every_forgejo_status_named_passing_but_one_missing_is_not_a_pass() {
+    let outcome = forgejo_jobs(
+        vec![forgejo_poll(
+            json!({}),
+            &[commit_status("ci/lint", "success")],
+        )],
+        &["ci/lint", "ci/build"],
+        &grace("0"),
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "job_not_found");
+    assert_eq!(outcome.events[0]["missingChecks"], json!(["ci/build"]));
+}
+
 #[test]
 fn forgejo_query_failures_name_their_cause_and_exit_2() {
     let cases = [

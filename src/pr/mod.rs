@@ -124,7 +124,7 @@ enum Command {
     ///
     /// Takes png, jpg, jpeg, gif, webp and svg files. GitHub (github.com only) needs a user
     /// token, not an app or installation token. The images belong to the repository, not to a
-    /// PR/MR.
+    /// PR/MR. Forgejo is refused: it attaches an image only to an existing issue or comment.
     Upload {
         #[arg(required = true, value_name = "FILE")]
         files: Vec<PathBuf>,
