@@ -1,11 +1,15 @@
 //! `agt pr`: one GitHub/GitLab-neutral command for the PR/MR of the current repository: view,
-//! list, create, update, merge behind a head-sha guard, and pause or restore auto-merge. The
+//! list, create, update, merge behind a head-sha guard, pause or restore auto-merge, and upload
+//! images for a body. The
 //! forge comes from the tracker of the origin remote, or the one `--remote` or a PR/MR URL
 //! names; writes are refused where `push` is `off`. Output is JSON.
 
 mod github;
 mod gitlab;
 mod memo;
+mod upload;
+
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
@@ -113,6 +117,16 @@ enum Command {
         /// Convert to a draft; `--draft=false` marks it ready for review.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         draft: Option<bool>,
+    },
+    /// Host images on the forge and print JSON with each one's `file`, `url` and `markdown`;
+    /// paste the Markdown into the body of `create` or `update`.
+    ///
+    /// Takes png, jpg, jpeg, gif, webp and svg files. GitHub (github.com only) needs a user
+    /// token, not an app or installation token. The images belong to the repository, not to a
+    /// PR/MR.
+    Upload {
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
     },
     /// Merge only while the head is --sha (the forge enforces it too). Never deletes the branch
     /// or bypasses protections.
@@ -290,6 +304,14 @@ impl Remote {
         }
     }
 
+    fn upload(&self, image: &upload::Image) -> Result<upload::Uploaded> {
+        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
+        match self.origin.forge {
+            Forge::Github => github::upload(t, repo, image),
+            Forge::Gitlab => gitlab::upload(t, &self.origin.host, repo, image),
+        }
+    }
+
     fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {
         let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
         match self.origin.forge {
@@ -419,7 +441,7 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
         | Command::Merge { number, .. }
         | Command::AutoMerge { number, .. } => Some(number.as_str()),
         Command::View { number, .. } => number.as_deref(),
-        Command::List { .. } | Command::Create { .. } => None,
+        Command::List { .. } | Command::Create { .. } | Command::Upload { .. } => None,
     };
     let pr_ref = given.map(parse_pr).transpose()?;
     let remote = Remote::connect(&repo, &config, cli.remote.as_deref(), pr_ref.as_ref())?;
@@ -481,6 +503,7 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
             let made = remote.create(&branch, &base, &title, &body, draft)?;
             shown(remote.view(made)?)
         }
+        Command::Upload { files } => upload::run(&remote, &files),
         Command::Update {
             number: given,
             title,

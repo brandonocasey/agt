@@ -383,16 +383,23 @@ struct ApiFlags {
     method: &'static str,
     /// What follows the path to send the request body from stdin.
     json_input: &'static [&'static str],
+    /// What precedes the file in a file upload, and what the file path follows in its argument.
+    file_input: (&'static [&'static str], &'static str),
 }
 
 const GH_FLAGS: ApiFlags = ApiFlags {
     method: "--method",
     json_input: &["--input", "-"],
+    file_input: (
+        &["-H", "Content-Type: application/octet-stream", "--input"],
+        "",
+    ),
 };
 
 const GLAB_FLAGS: ApiFlags = ApiFlags {
     method: "-X",
     json_input: &["-H", "Content-Type: application/json", "--input", "-"],
+    file_input: (&["--form"], "file=@"),
 };
 
 fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
@@ -406,6 +413,11 @@ fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
             args.push(path.clone());
             if request.body.is_some() {
                 args.extend(flags.json_input.iter().map(|arg| (*arg).to_owned()));
+            }
+            if let Some(file) = &request.file {
+                let (before, prefix) = flags.file_input;
+                args.extend(before.iter().map(|arg| (*arg).to_owned()));
+                args.push(format!("{prefix}{}", file.display()));
             }
         }
         Endpoint::Graphql(vars) => {
@@ -475,6 +487,7 @@ pub(crate) fn as_seen_by_retries(status: u16, text: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
 
     use serde_json::json;
 
@@ -540,6 +553,35 @@ mod tests {
                 "number=7",
                 "-f",
                 "query=query Q{x}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_request_sends_the_file_with_each_clis_flags() {
+        let upload = Request::upload("p/uploads", PathBuf::from("/tmp/a b.png"));
+        assert_eq!(
+            gh_args(&upload),
+            [
+                "api",
+                "--method",
+                "POST",
+                "p/uploads",
+                "-H",
+                "Content-Type: application/octet-stream",
+                "--input",
+                "/tmp/a b.png"
+            ]
+        );
+        assert_eq!(
+            glab_args(&upload),
+            [
+                "api",
+                "-X",
+                "POST",
+                "p/uploads",
+                "--form",
+                "file=@/tmp/a b.png"
             ]
         );
     }

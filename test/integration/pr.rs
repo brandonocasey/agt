@@ -1176,6 +1176,7 @@ fn a_pull_requests_push_of_off_blocks_every_write_and_no_call_is_made() {
         vec!["update", "7", "--title", "T"],
         vec!["merge", "7", "--sha", SHA],
         vec!["auto-merge", "off", "7"],
+        vec!["upload", "a.png"],
     ] {
         let message = err(&env, &args);
         assert!(
@@ -1217,4 +1218,137 @@ fn an_unset_push_leaves_pr_writes_allowed() {
     env.write_config("");
     let message = err(&env, &["update", "7", "--title", "T"]);
     assert!(!message.contains("refused"), "{message}");
+}
+
+const GH_UPLOAD: &str = "https://uploads.github.com/user-attachments/assets?name=my%20shot%20%5B1%5D.PNG&content_type=image%2Fpng&repository_id=42";
+
+/// The absolute path agt hands to the CLI for `name` in the repository.
+fn absolute(env: &Env, name: &str) -> String {
+    std::fs::canonicalize(env.repo.join(name))
+        .unwrap()
+        .display()
+        .to_string()
+}
+
+fn gh_upload_args<'a>(url: &'a str, file: &'a str) -> Vec<&'a str> {
+    vec![
+        "api",
+        "--method",
+        "POST",
+        url,
+        "-H",
+        "Content-Type: application/octet-stream",
+        "--input",
+        file,
+    ]
+}
+
+#[test]
+fn github_upload_sends_the_file_and_prints_markdown() {
+    let env = github();
+    env.write("my shot [1].PNG", "png");
+    env.respond(&["api", "--method", "GET", "repos/o/r"], r#"{"id": 42}"#);
+    let file = absolute(&env, "my shot [1].PNG");
+    env.respond(
+        &gh_upload_args(GH_UPLOAD, &file),
+        r#"{"url": "https://github.com/user-attachments/assets/abc-1"}"#,
+    );
+    let uploaded = ok(&env, &["upload", "my shot [1].PNG"]);
+    assert_eq!(
+        uploaded,
+        json!([{
+            "file": file,
+            "url": "https://github.com/user-attachments/assets/abc-1",
+            "markdown": "![my shot \\[1\\]](https://github.com/user-attachments/assets/abc-1)",
+        }])
+    );
+}
+
+#[test]
+fn github_upload_says_which_token_it_needs_when_refused() {
+    let env = github();
+    env.write("my shot [1].PNG", "png");
+    env.respond(&["api", "--method", "GET", "repos/o/r"], r#"{"id": 42}"#);
+    let file = absolute(&env, "my shot [1].PNG");
+    env.fail_call_with(
+        &gh_upload_args(GH_UPLOAD, &file),
+        "gh: Resource not accessible by integration (HTTP 403)",
+    );
+    let message = err(&env, &["upload", "my shot [1].PNG"]);
+    assert!(message.contains("need a user token"), "{message}");
+}
+
+#[test]
+fn github_upload_refuses_an_enterprise_host_before_any_call() {
+    let env = setup("https://ghe.example.org/o/r.git");
+    env.write_repo_config(
+        "[[tracker]]\nforge = \"github\"\nhost = \"ghe.example.org\"\nrepo = \"o/r\"\n",
+    );
+    env.write("a.png", "png");
+    let message = err(&env, &["upload", "a.png"]);
+    assert!(message.contains("only on github.com"), "{message}");
+    assert!(
+        env.forge_calls().iter().all(|call| !call.contains("api")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn gitlab_upload_posts_a_form_and_prints_markdown() {
+    let env = gitlab();
+    env.write("a.png", "png");
+    let file = absolute(&env, "a.png");
+    let form = format!("file=@{file}");
+    env.respond(
+        &["api", "-X", "POST", "projects/g%2Fp/uploads", "--form", &form],
+        r#"{"alt": "a", "url": "/uploads/x/a.png", "full_path": "/-/project/1/uploads/x/a.png", "markdown": "![a](/uploads/x/a.png)"}"#,
+    );
+    assert_eq!(
+        ok(&env, &["upload", "a.png"]),
+        json!([{
+            "file": file,
+            "url": "https://gitlab.com/-/project/1/uploads/x/a.png",
+            "markdown": "![a](/uploads/x/a.png)",
+        }])
+    );
+}
+
+#[test]
+fn upload_checks_every_file_before_the_first_call() {
+    let env = github();
+    env.write("ok.png", "png");
+    env.write("notes.txt", "text");
+    env.write("empty.png", "");
+    std::fs::create_dir(env.repo.join("dir.png")).unwrap();
+    for (bad, wanted) in [
+        ("notes.txt", "not an image type"),
+        ("missing.png", "missing.png"),
+        ("empty.png", "is empty"),
+        ("dir.png", "is not a file"),
+    ] {
+        let message = err(&env, &["upload", "ok.png", bad]);
+        assert!(message.contains(wanted), "{bad}: {message}");
+        assert!(message.contains(bad), "{bad}: {message}");
+    }
+    assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn upload_prints_the_finished_images_when_a_later_one_fails() {
+    let env = gitlab();
+    env.write("a.png", "png");
+    env.write("b.png", "png");
+    let form = format!("file=@{}", absolute(&env, "a.png"));
+    env.respond(
+        &["api", "-X", "POST", "projects/g%2Fp/uploads", "--form", &form],
+        r#"{"url": "/uploads/x/a.png", "full_path": "/-/project/1/uploads/x/a.png", "markdown": "![a](/uploads/x/a.png)"}"#,
+    );
+    let output = pr(&env, &["upload", "a.png", "b.png"]);
+    assert_eq!(output.status.code(), Some(1));
+    let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(printed.as_array().unwrap().len(), 1);
+    assert_eq!(printed[0]["markdown"], "![a](/uploads/x/a.png)");
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("upload of b.png failed"), "{message}");
 }

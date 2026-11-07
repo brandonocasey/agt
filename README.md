@@ -84,7 +84,7 @@ These reports help you find earlier decisions and understand where agent time an
 
 ### Routine checks and GitHub/GitLab workflows
 
-- `agt pr` views, creates, updates, and merges pull requests and merge requests.
+- `agt pr` views, creates, updates, and merges pull requests and merge requests, and uploads images for their descriptions.
 - `agt ci` waits for checks; its GitLab failure report compares failures against default-branch history.
 - `agt secrets` scans repository files for credential patterns without printing matched values.
 - `agt doctor` checks host tools and repository setup, with hints for problems it finds.
