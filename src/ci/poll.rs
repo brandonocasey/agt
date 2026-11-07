@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::classify::{
     Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, rollup_grace_secs,
-    with,
+    select_named, with,
 };
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
@@ -54,7 +54,7 @@ fn failure(error: &TransportError) -> (State, bool) {
 
 /// The state of `target`, the head it is pinned to (the one it was given, expanded to the full
 /// head it abbreviates once the host shows it, or, when it had none, the head read now), whether the failure of the read is transient, and when the rollup went
-/// idle with a required context missing (`idle_since`, carried from the previous poll). While
+/// idle with a required context or a named job missing (`idle_since`, carried from the previous poll). While
 /// `awaiting`, a head or pipeline that has not caught up with the pinned commit is pending, not
 /// changed.
 pub fn snapshot(
@@ -158,25 +158,8 @@ fn watch_jobs(
     head: &Head,
     clock: (i64, Option<i64>),
 ) -> (State, Option<i64>) {
-    let named = |check: &Value| target.jobs.iter().any(|job| check["name"] == job.as_str());
-    let selected: Vec<Value> = pull
-        .all_checks
-        .iter()
-        .filter(|check| named(check))
-        .cloned()
-        .collect();
+    let (selected, names) = select_named(&pull.all_checks, &target.jobs);
     let state = classify(head, &pull.view, pull.rollup, &selected);
-    let names = target
-        .jobs
-        .iter()
-        .filter(|job| {
-            !pull
-                .all_checks
-                .iter()
-                .any(|check| check["name"] == job.as_str())
-        })
-        .cloned()
-        .collect();
     let missing = Missing {
         names,
         reason: "job_not_found",
@@ -186,8 +169,8 @@ fn watch_jobs(
 
 /// A passed state, or one with no checks, is held back while `missing` names have not reported:
 /// pending while something runs, and after `rollup_grace_secs` of continuous idleness the wait
-/// ends with `missing.reason`. Returns the idleness start to carry to the next poll, `None` when
-/// the state is not held.
+/// ends with `missing.reason`. Returns the idleness start to carry to the next poll: `None` while
+/// something runs, and when the state is not held.
 fn hold_missing(
     mut state: State,
     missing: Missing,

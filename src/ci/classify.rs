@@ -55,6 +55,22 @@ pub fn present(value: &Value) -> bool {
     }
 }
 
+/// The items whose `name` is in `wanted`, and the wanted names no item has.
+pub fn select_named(items: &[Value], wanted: &[String]) -> (Vec<Value>, Vec<String>) {
+    let has = |item: &Value, name: &String| item["name"] == name.as_str();
+    let selected: Vec<Value> = items
+        .iter()
+        .filter(|item| wanted.iter().any(|name| has(item, name)))
+        .cloned()
+        .collect();
+    let missing = wanted
+        .iter()
+        .filter(|name| !selected.iter().any(|item| has(item, name)))
+        .cloned()
+        .collect();
+    (selected, missing)
+}
+
 fn sorted(mut items: Vec<Value>) -> Vec<Value> {
     items.sort_by_cached_key(Value::to_string);
     items
@@ -226,8 +242,11 @@ fn pipeline_reason(status: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// The reason for the jobs named in `wanted`, from their own statuses; the pipeline's status only
-/// says whether a job that is not there yet can still appear.
+/// Reasons ranked as GitHub ranks them: a cancelled job over a failed one over any other blocker.
+const BLOCKER_RANK: [&str; 3] = ["check_cancelled", "check_failed", "manual_action_required"];
+
+/// The reason for the named jobs, from their own statuses; `pipeline_status` says whether a
+/// `missing` job can still appear, and whether a job that has not started ever will.
 fn named_jobs_reason(
     pipeline_status: &str,
     checks: &[Value],
@@ -237,12 +256,24 @@ fn named_jobs_reason(
         .iter()
         .map(|check| pipeline_reason(check["state"].as_str().unwrap_or("")))
         .collect();
-    if let Some(blocker) = reasons.iter().find(|(status, _)| *status == "blocked") {
+    let blocker = reasons
+        .iter()
+        .filter(|(status, _)| *status == "blocked")
+        .min_by_key(|(_, reason)| {
+            BLOCKER_RANK
+                .iter()
+                .position(|ranked| ranked == reason)
+                .unwrap_or(BLOCKER_RANK.len())
+        });
+    if let Some(blocker) = blocker {
         return *blocker;
     }
     let pending = reasons.iter().any(|(status, _)| *status == "pending");
-    let pipeline_finished = pipeline_reason(pipeline_status).0 != "pending";
-    if !missing.is_empty() && pipeline_finished {
+    let (pipeline_kind, pipeline_why) = pipeline_reason(pipeline_status);
+    if pending && pipeline_kind == "blocked" {
+        return (pipeline_kind, pipeline_why);
+    }
+    if !missing.is_empty() && pipeline_kind != "pending" {
         return ("blocked", "job_not_found");
     }
     if pending || !missing.is_empty() {
@@ -275,13 +306,20 @@ fn pipeline_state(
             .extend(extra.as_object().cloned().unwrap_or_default());
         fields
     };
-    let named = |job: &Value| wanted.iter().any(|name| job["name"] == name.as_str());
-    let selected: Vec<Value> = if wanted.is_empty() {
-        jobs.to_vec()
+    let (selected, missing) = if wanted.is_empty() {
+        (jobs.to_vec(), Vec::new())
     } else {
-        jobs.iter().filter(|job| named(job)).cloned().collect()
+        select_named(jobs, wanted)
     };
-    let checks = normalize_jobs(&selected);
+    let mut checks = normalize_jobs(&selected);
+    if !wanted.is_empty() {
+        // A job asked for by name is reported when it fails, even if the pipeline allows it to.
+        for check in &mut checks {
+            if let Some(fields) = check.as_object_mut() {
+                fields.remove("allowFailure");
+            }
+        }
+    }
     if !present(&pipeline["id"])
         || !present(&pipeline["status"])
         || checks
@@ -299,11 +337,6 @@ fn pipeline_state(
         let (status, reason) = pipeline_reason(pipeline_status);
         return with(status, reason, head(json!({"checks": checks})));
     }
-    let missing: Vec<String> = wanted
-        .iter()
-        .filter(|name| !checks.iter().any(|check| check["name"] == name.as_str()))
-        .cloned()
-        .collect();
     let (status, reason) = named_jobs_reason(pipeline_status, &checks, &missing);
     let mut extra = json!({"checks": checks});
     if !missing.is_empty() {

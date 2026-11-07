@@ -69,9 +69,9 @@ enum Command {
     /// merged, 1 a target needs action (failed, canceled, skipped or manual, head changed,
     /// closed), 2 usage or query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
     ///
-    /// With --job, only the jobs (GitHub checks) with those exact names count, whatever else the
-    /// pipeline runs. A named job that is absent while checks still run is pending; once they are
-    /// idle it is `job_not_found` (exit 1).
+    /// With --job, only the jobs (on GitHub, the checks) with those exact names count, whatever else
+    /// the pipeline runs. A named job that is absent while checks still run is pending; once they
+    /// are idle (GitLab: the pipeline stopped running) it is `job_not_found` (exit 1).
     #[command(verbatim_doc_comment)]
     Wait {
         #[arg(value_name = "TARGET", required = true)]
@@ -176,22 +176,31 @@ fn execute(cli: Cli) -> Result<u8> {
             remote,
             jobs,
         } => {
-            let pace = (timeout, interval, max_interval);
-            return wait_targets(&targets, &jobs, pace, remote.as_deref());
+            let pace = Pace {
+                timeout,
+                interval,
+                max_interval,
+            };
+            return wait_targets(&targets, &jobs, &pace, remote.as_deref());
         }
     };
     Ok(code)
 }
 
-/// `pace` is the timeout, interval and maximum interval in seconds.
+/// The timing options of `agt ci wait`, in seconds.
+struct Pace {
+    timeout: f64,
+    interval: f64,
+    max_interval: f64,
+}
+
 fn wait_targets(
     targets: &[String],
     jobs: &[String],
-    pace: (f64, f64, f64),
+    pace: &Pace,
     remote: Option<&str>,
 ) -> Result<u8> {
-    let (timeout, interval, max_interval) = pace;
-    if interval > max_interval {
+    if pace.interval > pace.max_interval {
         return fail("--interval cannot exceed --max-interval");
     }
     if jobs.iter().any(|job| job.trim().is_empty()) {
@@ -212,8 +221,8 @@ fn wait_targets(
     }
     Ok(wait::run(&wait::Options {
         targets: resolved,
-        timeout: Duration::from_secs_f64(timeout),
-        interval: Duration::from_secs_f64(interval),
-        max_interval: Duration::from_secs_f64(max_interval),
+        timeout: Duration::from_secs_f64(pace.timeout),
+        interval: Duration::from_secs_f64(pace.interval),
+        max_interval: Duration::from_secs_f64(pace.max_interval),
     }))
 }
