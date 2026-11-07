@@ -121,6 +121,12 @@ impl Source {
         }
     }
 
+    /// Whether `pull` can make its branch open or closed. Only Forgejo lists fork PRs of the
+    /// branch's name beside the repository's own, so only there a fork PR does not.
+    pub fn counts(&self, pull: &Pull) -> bool {
+        pull.same_repo || self.forge != Forge::Forgejo
+    }
+
     /// Every open PR/MR of the repository, all pages.
     pub fn open_pulls(&self) -> Result<Vec<Pull>> {
         let service = (forge::service::kind(self.forge).connect)(&self.host);
@@ -237,12 +243,23 @@ impl Source {
     }
 
     /// The host lists by state only, so `branch` is matched on what it lists: the open pull
-    /// requests first, and every state only when none of them is the branch's.
+    /// requests first, and every state only when none of them is the branch's. Pull requests
+    /// from forks are listed too; when the branch has only those, the repository's own pull
+    /// requests of it are searched as well, since the first search stops at an open fork one.
     fn forgejo(&self, transport: &dyn Transport, branch: Option<&str>) -> Result<Vec<Pull>> {
-        let nodes = match branch {
+        let mut nodes = match branch {
             Some(branch) => forgejo::pulls_of_branch(transport, &self.repo, branch, |_| true)?,
             None => forgejo::pulls(transport, &self.repo, "open")?,
         };
+        let is_own = |node: &Value| forgejo::pull_node(node).same_repo == Some(true);
+        if let Some(branch) = branch
+            && !nodes.is_empty()
+            && !nodes.iter().any(is_own)
+        {
+            nodes.extend(forgejo::pulls_of_branch(
+                transport, &self.repo, branch, is_own,
+            )?);
+        }
         nodes.iter().map(forgejo_pull).collect()
     }
 }
