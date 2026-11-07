@@ -10,7 +10,7 @@ use crate::core::error::{Error, Result, fail};
 use crate::forge::anchors;
 use crate::forge::service::{
     ApproveCap, BatchPoster, Capabilities, Inline, Kind, Method, Pagination, Placement, Position,
-    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Var,
+    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Var, Wanted,
 };
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData};
@@ -162,15 +162,8 @@ impl ReviewService for Github {
         }
     }
 
-    fn place(
-        &self,
-        repo: &Repo,
-        review: &Review,
-        anchor: &Anchor,
-        commit: &str,
-        line: u32,
-    ) -> Option<Placement> {
-        place(repo, review, anchor, commit, line)
+    fn place(&self, repo: &Repo, review: &Review, wanted: Wanted) -> Option<Placement> {
+        place(repo, review, wanted.anchor, wanted.commit, wanted.line)
     }
 
     fn inline(&self) -> Inline<'_> {

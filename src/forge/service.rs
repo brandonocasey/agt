@@ -242,6 +242,14 @@ impl Capabilities {
     }
 }
 
+/// The line of `anchor`'s file at `commit` that a comment is wanted on.
+#[derive(Clone, Copy)]
+pub struct Wanted<'a> {
+    pub anchor: &'a Anchor,
+    pub commit: &'a str,
+    pub line: u32,
+}
+
 /// Where an in-diff comment goes, opaque to the core. Comments with the same `commit` can be
 /// batched in one review.
 pub struct Position {
@@ -294,16 +302,8 @@ pub trait ReviewService: Service {
     /// The local id a thread with no agent marker gets, from the host's first comment id.
     fn imported_id(&self, kind: RemoteKind, first: &str) -> String;
 
-    /// Where `anchor`, at `line` of `commit`, goes in the PR/MR diff, or `None` when it does
-    /// not fit.
-    fn place(
-        &self,
-        repo: &Repo,
-        review: &Review,
-        anchor: &Anchor,
-        commit: &str,
-        line: u32,
-    ) -> Option<Placement>;
+    /// Where the `wanted` line goes in the PR/MR diff, or `None` when it does not fit.
+    fn place(&self, repo: &Repo, review: &Review, wanted: Wanted) -> Option<Placement>;
     /// How in-diff comments are posted, and the calls for it.
     fn inline(&self) -> Inline<'_>;
     /// A new general thread.

@@ -12,12 +12,12 @@ use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::service::{
     ApproveCap, BatchPoster, Capabilities, Inline, Kind, Method, Pagination, Placement, Position,
-    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service,
+    Posted, ReplyCap, Request, ReviewService, ReviewSubject, Service, Wanted,
 };
 use crate::forge::transport::{CliTransport, Transport, tea_login_for, tea_logins};
 use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData, anchors};
 use crate::git::Repo;
-use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
+use crate::store::model::{Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
 
 /// Items per page: the most a default Forgejo or Gitea answers with (`MAX_RESPONSE_ITEMS`).
 pub const PAGE_SIZE: usize = 50;
@@ -168,9 +168,11 @@ impl ReviewService for Forgejo {
         &self,
         repo: &Repo,
         review: &Review,
-        anchor: &Anchor,
-        commit: &str,
-        line: u32,
+        Wanted {
+            anchor,
+            commit,
+            line,
+        }: Wanted,
     ) -> Option<Placement> {
         // The file and the line number on the new side, or on the old side for a removed line,
         // as the host takes them.
