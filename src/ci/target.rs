@@ -44,6 +44,8 @@ pub struct Resolved {
     /// The name of the target in events: `owner/repo#1`, `group/project!1` or
     /// `group/project/-/pipelines/1`.
     pub key: String,
+    /// The job or check names to wait for; empty waits for every checked job.
+    pub jobs: Vec<String>,
 }
 
 fn number(text: &str) -> Result<u64> {
@@ -166,6 +168,7 @@ pub fn resolve(target: Target, remote: Option<&str>) -> Result<Resolved> {
         host,
         repo,
         key,
+        jobs: Vec::new(),
     })
 }
 

@@ -1164,7 +1164,7 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 `agt ci` waits for PR/MR checks and triages GitLab failures.
 
 ```sh
-agt ci wait TARGET... [--timeout SEC] [--interval SEC] [--max-interval SEC] [--remote NAME|HOST/REPO]
+agt ci wait TARGET... [--job NAME]... [--timeout SEC] [--interval SEC] [--max-interval SEC] [--remote NAME|HOST/REPO]
 agt ci failures <mr> [--limit N] [--remote NAME|HOST/REPO]
 ```
 
@@ -1190,6 +1190,8 @@ checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 15 second interval doubling up to 120 seconds. A GitHub head whose status check rollup holds no checks at all is `checks_pending` during the first 120 seconds of the wait (right after a push the checks may not exist yet) and `no_required_checks` after; a rollup that has checks but none required waits for all checks and passes or fails from their results. Exit status: 0 all targets passed or merged, 1 a
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
 query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
+
+`--job NAME` (repeatable, exact and case-sensitive) waits only for the jobs of that name, for every target: on GitHub any check of the head, required or not, and on GitLab the jobs of the head pipeline, whose own status is ignored. All named jobs must pass (`required_checks_passed`); a failed one is `check_failed` or `check_cancelled` and is listed under `failed`. A named job that has not appeared is `checks_pending` with `missingChecks` while checks run (GitHub: until the rollup has been idle for 120 seconds; GitLab: until the pipeline finishes), then `job_not_found` (exit 1). Without `--job` nothing changes.
 
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 

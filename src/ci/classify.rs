@@ -226,9 +226,39 @@ fn pipeline_reason(status: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// The state of a pipeline and its jobs. `merge_status` is the MR's `detailed_merge_status`;
-/// a pipeline of its own has none.
-fn pipeline_state(pipeline: &Value, jobs: &[Value], merge_status: Option<&Value>) -> State {
+/// The reason for the jobs named in `wanted`, from their own statuses; the pipeline's status only
+/// says whether a job that is not there yet can still appear.
+fn named_jobs_reason(
+    pipeline_status: &str,
+    checks: &[Value],
+    missing: &[String],
+) -> (&'static str, &'static str) {
+    let reasons: Vec<_> = checks
+        .iter()
+        .map(|check| pipeline_reason(check["state"].as_str().unwrap_or("")))
+        .collect();
+    if let Some(blocker) = reasons.iter().find(|(status, _)| *status == "blocked") {
+        return *blocker;
+    }
+    let pending = reasons.iter().any(|(status, _)| *status == "pending");
+    let pipeline_finished = pipeline_reason(pipeline_status).0 != "pending";
+    if !missing.is_empty() && pipeline_finished {
+        return ("blocked", "job_not_found");
+    }
+    if pending || !missing.is_empty() {
+        return ("pending", "checks_pending");
+    }
+    ("complete", "required_checks_passed")
+}
+
+/// The state of a pipeline and its jobs, or, when `wanted` names jobs, of those jobs alone.
+/// `merge_status` is the MR's `detailed_merge_status`; a pipeline of its own has none.
+fn pipeline_state(
+    pipeline: &Value,
+    jobs: &[Value],
+    merge_status: Option<&Value>,
+    wanted: &[String],
+) -> State {
     let summary = json!({
         "id": pipeline["id"],
         "status": pipeline["status"],
@@ -245,7 +275,13 @@ fn pipeline_state(pipeline: &Value, jobs: &[Value], merge_status: Option<&Value>
             .extend(extra.as_object().cloned().unwrap_or_default());
         fields
     };
-    let checks = normalize_jobs(jobs);
+    let named = |job: &Value| wanted.iter().any(|name| job["name"] == name.as_str());
+    let selected: Vec<Value> = if wanted.is_empty() {
+        jobs.to_vec()
+    } else {
+        jobs.iter().filter(|job| named(job)).cloned().collect()
+    };
+    let checks = normalize_jobs(&selected);
     if !present(&pipeline["id"])
         || !present(&pipeline["status"])
         || checks
@@ -258,16 +294,35 @@ fn pipeline_state(pipeline: &Value, jobs: &[Value], merge_status: Option<&Value>
             head(json!({"checks": checks})),
         );
     }
-    let (status, reason) = pipeline_reason(pipeline["status"].as_str().unwrap_or(""));
-    with(status, reason, head(json!({"checks": checks})))
+    let pipeline_status = pipeline["status"].as_str().unwrap_or("");
+    if wanted.is_empty() {
+        let (status, reason) = pipeline_reason(pipeline_status);
+        return with(status, reason, head(json!({"checks": checks})));
+    }
+    let missing: Vec<String> = wanted
+        .iter()
+        .filter(|name| !checks.iter().any(|check| check["name"] == name.as_str()))
+        .cloned()
+        .collect();
+    let (status, reason) = named_jobs_reason(pipeline_status, &checks, &missing);
+    let mut extra = json!({"checks": checks});
+    if !missing.is_empty() {
+        extra["missingChecks"] = json!(missing);
+    }
+    with(status, reason, head(extra))
 }
 
-pub fn classify_pipeline(pipeline: &Value, jobs: &[Value]) -> State {
-    pipeline_state(pipeline, jobs, None)
+pub fn classify_pipeline(pipeline: &Value, jobs: &[Value], wanted: &[String]) -> State {
+    pipeline_state(pipeline, jobs, None, wanted)
 }
 
 /// An MR whose head pipeline's jobs were read, or `None` when it has no pipeline.
-pub fn classify_gitlab(head: &Head, mr: &Value, jobs: Option<&[Value]>) -> State {
+pub fn classify_gitlab(
+    head: &Head,
+    mr: &Value,
+    jobs: Option<&[Value]>,
+    wanted: &[String],
+) -> State {
     let state_text = &mr["state"];
     if !mr["sha"].is_string() || !state_text.is_string() {
         return with("blocked", "missing_pull_request_data", json!({"view": mr}));
@@ -317,7 +372,7 @@ pub fn classify_gitlab(head: &Head, mr: &Value, jobs: Option<&[Value]>) -> State
             }),
         );
     };
-    pipeline_state(pipeline, jobs, Some(merge_status))
+    pipeline_state(pipeline, jobs, Some(merge_status), wanted)
 }
 
 /// The checks of a final state that failed or were canceled; GitLab jobs allowed to fail do not
