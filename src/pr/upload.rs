@@ -2,7 +2,7 @@
 //! PR/MR body.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{self, Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -37,11 +37,15 @@ pub struct Uploaded {
     pub markdown: String,
 }
 
+/// Uploads one image per call.
+pub type Uploader<'a> = Box<dyn Fn(&Image) -> Result<Uploaded> + 'a>;
+
 impl Image {
     fn open(given: &Path) -> Result<Self> {
         let shown = given.display();
-        // An absolute path also keeps glab from reading stdin for a file named `-`.
-        let path = fs::canonicalize(given).map_err(|error| Error(format!("{shown}: {error}")))?;
+        // An absolute path also keeps glab from reading stdin for a file named `-`. A symlink
+        // keeps its own name, which names the upload and decides its type.
+        let path = path::absolute(given).map_err(|error| Error(format!("{shown}: {error}")))?;
         let meta = fs::metadata(&path).map_err(|error| Error(format!("{shown}: {error}")))?;
         if !meta.is_file() {
             return fail(format!("{shown} is not a file"));
@@ -100,9 +104,10 @@ pub fn run(remote: &Remote, files: &[PathBuf]) -> Result<Output> {
         .iter()
         .map(|file| Image::open(file))
         .collect::<Result<Vec<_>>>()?;
+    let upload = remote.uploader()?;
     let mut done = Vec::new();
     for image in &images {
-        match remote.upload(image) {
+        match upload(image) {
             Ok(uploaded) => done.push(json!({
                 "file": image.path,
                 "url": uploaded.url,
@@ -112,7 +117,8 @@ pub fn run(remote: &Remote, files: &[PathBuf]) -> Result<Output> {
                 if !done.is_empty() {
                     output::print(Output::Json(Value::Array(done)))?;
                 }
-                return fail(format!("upload of {} failed: {}", image.name, error.0));
+                // The cause stays first: `explain` names a missing or logged-out gh/glab from it.
+                return fail(format!("{}\nupload of {} failed", error.0, image.name));
             }
         }
     }

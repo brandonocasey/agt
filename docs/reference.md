@@ -1234,11 +1234,12 @@ cannot rebase, and refuses `--method merge` on an MR with squash on, which GitLa
 the recorded method at the current head (or `--sha`); when the checks had already passed and the forge merges at once, it reports `merged: true`. A PR/MR in a merge queue or train is refused.
 `upload` hosts each image (png, jpg, jpeg, gif, webp or svg) on the forge and prints an array of
 `file`, `url` and `markdown`; paste the Markdown into the `--body` of `create` or `update`. It checks
-every file (exists, regular, not empty, image type) before the first upload, and when a later upload
+every file (exists, regular, not empty, image type by its name; a symlink counts by its own name) before the first upload, and when a later upload
 fails it prints the finished ones before failing. The image belongs to the repository, not to a
-PR/MR. GitHub (github.com only) takes the upload through the endpoint behind the web UI's
-attachments, which accepts a user token but not an app or installation token; GitLab uses the
-project's Markdown uploads API and returns its own relative Markdown, with `url` made absolute.
+PR/MR. GitHub (github.com only) takes the upload through its undocumented `user-attachments`
+endpoint, which accepts a user token but not an app or installation token; GitLab uses the
+project's Markdown uploads API through `glab api --form` (a glab release that has it) and returns
+its own relative Markdown, with `url` made absolute from `full_path`.
 
 Failures print `agt: error: ...` and exit 1.
 

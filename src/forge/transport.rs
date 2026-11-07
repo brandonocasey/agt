@@ -487,7 +487,6 @@ pub(crate) fn as_seen_by_retries(status: u16, text: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::path::PathBuf;
 
     use serde_json::json;
 
@@ -553,35 +552,6 @@ mod tests {
                 "number=7",
                 "-f",
                 "query=query Q{x}"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_file_request_sends_the_file_with_each_clis_flags() {
-        let upload = Request::upload("p/uploads", PathBuf::from("/tmp/a b.png"));
-        assert_eq!(
-            gh_args(&upload),
-            [
-                "api",
-                "--method",
-                "POST",
-                "p/uploads",
-                "-H",
-                "Content-Type: application/octet-stream",
-                "--input",
-                "/tmp/a b.png"
-            ]
-        );
-        assert_eq!(
-            glab_args(&upload),
-            [
-                "api",
-                "-X",
-                "POST",
-                "p/uploads",
-                "--form",
-                "file=@/tmp/a b.png"
             ]
         );
     }

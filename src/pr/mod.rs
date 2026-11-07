@@ -304,12 +304,19 @@ impl Remote {
         }
     }
 
-    fn upload(&self, image: &upload::Image) -> Result<upload::Uploaded> {
+    /// Uploads one image per call; the one lookup the forge needs happens here, not per image.
+    fn uploader(&self) -> Result<upload::Uploader<'_>> {
         let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::upload(t, repo, image),
-            Forge::Gitlab => gitlab::upload(t, &self.origin.host, repo, image),
-        }
+        Ok(match self.origin.forge {
+            Forge::Github => {
+                let id = github::repository_id(t, repo)?;
+                Box::new(move |image| github::upload(t, id, image))
+            }
+            Forge::Gitlab => {
+                let host = self.origin.host.as_str();
+                Box::new(move |image| gitlab::upload(t, host, repo, image))
+            }
+        })
     }
 
     fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {

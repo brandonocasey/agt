@@ -166,7 +166,7 @@ pub fn upload(t: &dyn Transport, host: &str, repo: &str, image: &Image) -> Resul
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     };
-    let (Some(markdown), Some(path)) = (text("markdown"), text("full_path").or(text("url"))) else {
+    let (Some(markdown), Some(path)) = (text("markdown"), text("full_path")) else {
         return fail("GitLab did not return the uploaded image's Markdown and path");
     };
     Ok(Uploaded {

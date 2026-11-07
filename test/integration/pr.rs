@@ -1276,6 +1276,7 @@ fn github_upload_says_which_token_it_needs_when_refused() {
     );
     let message = err(&env, &["upload", "my shot [1].PNG"]);
     assert!(message.contains("need a user token"), "{message}");
+    assert!(!message.contains("not authenticated"), "{message}");
 }
 
 #[test]
@@ -1363,4 +1364,93 @@ fn upload_prints_the_finished_images_when_a_later_one_fails() {
     assert_eq!(printed[0]["markdown"], "![a](/uploads/x/a.png)");
     let message = String::from_utf8_lossy(&output.stderr);
     assert!(message.contains("upload of b.png failed"), "{message}");
+}
+
+const GL_UPLOADED: &str = r#"{"url": "/uploads/x/a.png", "full_path": "/-/project/1/uploads/x/a.png", "markdown": "![a](/uploads/x/a.png)"}"#;
+
+fn gl_upload_args(file: &str) -> Vec<String> {
+    vec![
+        "api".to_owned(),
+        "-X".to_owned(),
+        "POST".to_owned(),
+        "projects/g%2Fp/uploads".to_owned(),
+        "--form".to_owned(),
+        format!("file=@{file}"),
+    ]
+}
+
+#[test]
+fn upload_names_and_types_a_symlink_by_the_link_not_its_target() {
+    let env = gitlab();
+    env.write("blob", "png");
+    std::os::unix::fs::symlink(env.repo.join("blob"), env.repo.join("shot.png")).unwrap();
+    let link = std::fs::canonicalize(&env.repo)
+        .unwrap()
+        .join("shot.png")
+        .display()
+        .to_string();
+    let args = gl_upload_args(&link);
+    env.respond(
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        GL_UPLOADED,
+    );
+    assert_eq!(ok(&env, &["upload", "shot.png"])[0]["file"], link);
+}
+
+#[test]
+fn gitlab_upload_without_a_full_path_fails_instead_of_guessing_an_address() {
+    let env = gitlab();
+    env.write("a.png", "png");
+    let args = gl_upload_args(&absolute(&env, "a.png"));
+    env.respond(
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        r#"{"url": "/uploads/x/a.png", "markdown": "![a](/uploads/x/a.png)"}"#,
+    );
+    let message = err(&env, &["upload", "a.png"]);
+    assert!(message.contains("did not return"), "{message}");
+}
+
+#[test]
+fn upload_names_a_logged_out_glab_as_other_commands_do() {
+    let env = gitlab();
+    env.write("a.png", "png");
+    let args = gl_upload_args(&absolute(&env, "a.png"));
+    env.fail_call_with(
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        "glab: 401 Unauthorized (HTTP 401)",
+    );
+    let message = err(&env, &["upload", "a.png"]);
+    assert!(message.contains("glab is not authenticated"), "{message}");
+    assert!(message.contains("upload of a.png failed"), "{message}");
+}
+
+#[test]
+fn github_upload_looks_the_repository_up_once_for_many_images() {
+    let env = github();
+    env.write("a.png", "png");
+    env.write("b.png", "png");
+    env.respond(&["api", "--method", "GET", "repos/o/r"], r#"{"id": 42}"#);
+    for name in ["a.png", "b.png"] {
+        let url = format!(
+            "https://uploads.github.com/user-attachments/assets?name={name}&content_type=image%2Fpng&repository_id=42"
+        );
+        let file = absolute(&env, name);
+        env.respond(
+            &gh_upload_args(&url, &file),
+            &format!(r#"{{"url": "https://github.com/user-attachments/assets/{name}"}}"#),
+        );
+    }
+    assert_eq!(
+        ok(&env, &["upload", "a.png", "b.png"])
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let lookups = env
+        .forge_calls()
+        .iter()
+        .filter(|call| call.ends_with("api --method GET repos/o/r"))
+        .count();
+    assert_eq!(lookups, 1, "{:?}", env.forge_calls());
 }
