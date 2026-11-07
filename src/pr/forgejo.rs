@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::{Changes, How, Pr, State};
 use crate::core::error::{Error, Result};
 use crate::forge::forgejo::{PAGE_SIZE, pull_node};
+use crate::forge::issue::names;
 use crate::forge::service::{Method, Pagination, Request};
 use crate::forge::transport::Transport;
 use crate::store::model::ReviewState;
@@ -54,7 +55,7 @@ fn pr(node: &Value) -> Pr {
         base_branch: shared.base,
         head_sha: shared.head_sha,
         author: shared.author.unwrap_or_default(),
-        labels: names(node),
+        labels: names(node, "/labels", "name"),
         auto_merge: None,
         auto_merge_known: false,
         queue: None,
@@ -67,16 +68,6 @@ fn pr(node: &Value) -> Pr {
     }
 }
 
-/// The names of the labels of a PR node.
-fn names(node: &Value) -> Vec<String> {
-    node["labels"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|label| label["name"].as_str().map(str::to_owned))
-        .collect()
-}
-
 pub fn view(t: &dyn Transport, repo: &str, number: u64) -> Result<Pr> {
     Ok(pr(
         &t.json(&Request::get(format!("{}/{number}", base(repo))))?
@@ -87,7 +78,8 @@ pub fn view(t: &dyn Transport, repo: &str, number: u64) -> Result<Pr> {
 pub struct Query<'a> {
     pub branch: Option<&'a str>,
     pub state: State,
-    pub mine: bool,
+    /// Only the PRs this login opened.
+    pub author: Option<&'a str>,
 }
 
 /// Pull requests newest first; the host filters by state only, so `branch` and `mine` are
@@ -96,14 +88,13 @@ pub fn list(t: &dyn Transport, repo: &str, query: &Query) -> Result<Vec<Pr>> {
     let Query {
         branch,
         state,
-        mine,
+        author,
     } = *query;
     let listed = match state {
         State::Open => "open",
         State::Merged => "closed",
         State::All => "all",
     };
-    let login = if mine { Some(forge_login(t)?) } else { None };
     let mut found: Vec<Pr> = t
         .items(
             &Request::get(format!("{}?state={listed}", base(repo))),
@@ -112,15 +103,11 @@ pub fn list(t: &dyn Transport, repo: &str, query: &Query) -> Result<Vec<Pr>> {
         .iter()
         .map(pr)
         .filter(|found| branch.is_none_or(|branch| found.head_branch == branch))
-        .filter(|found| login.as_ref().is_none_or(|login| found.author == *login))
+        .filter(|found| author.is_none_or(|author| found.author == author))
         .filter(|found| !matches!(state, State::Merged) || found.state == ReviewState::Merged)
         .collect();
     found.truncate(LIST_LIMIT);
     Ok(found)
-}
-
-fn forge_login(t: &dyn Transport) -> Result<String> {
-    crate::forge::required(&t.json(&Request::get("user"))?, "/login", "tea api user")
 }
 
 /// A pull request to open.
@@ -169,19 +156,9 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
             Some(Value::Object(body)),
         ))?;
     }
-    if changes.add_labels.is_empty() && changes.remove_labels.is_empty() {
+    let Some(labels) = changes.merged_labels(&current.labels) else {
         return Ok(());
-    }
-    let mut labels: Vec<&String> = current
-        .labels
-        .iter()
-        .filter(|label| !changes.remove_labels.contains(label))
-        .collect();
-    for label in &changes.add_labels {
-        if !labels.contains(&label) {
-            labels.push(label);
-        }
-    }
+    };
     t.send(&Request::rest(
         Method::Put,
         format!("repos/{repo}/issues/{}/labels", current.number),

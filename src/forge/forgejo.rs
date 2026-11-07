@@ -263,10 +263,7 @@ impl ReviewService for Forgejo {
         let review = forge::id(response, "/id")
             .ok_or_else(|| Error("Forgejo returned no review id".into()))?;
         let path = format!("{}/{review}/comments", reviews_path(subject));
-        let listed = self
-            .transport()
-            .items(&Request::get(path), &CAPS.pagination)?;
-        let posted = listed
+        let posted = unpaged(self.transport(), path)?
             .iter()
             .filter_map(|item| {
                 Some(Posted {
@@ -309,28 +306,37 @@ impl BatchPoster for Forgejo {
     }
 }
 
+/// Every item of a list the host does not page: the comment endpoints of an issue and of a
+/// review take no `page` or `limit`, so a paged read would get the same items again and again.
+fn unpaged(transport: &dyn Transport, path: String) -> Result<Vec<Value>> {
+    match transport.json(&Request::get(path))? {
+        Value::Array(items) => Ok(items),
+        other => Err(Error(format!(
+            "the host sent a list that is not an array: {other}"
+        ))),
+    }
+}
+
 /// Finds the PR whose head branch is `branch` of `origin`, in `origin` or, for a fork, its
-/// parent. The host cannot filter by head branch, so every PR of the repository is listed, newest
-/// first.
+/// parent. The host cannot filter by head branch, so the repository's PRs are listed, newest
+/// first: the open ones, and every state only when none of them is the branch's.
 fn find_pull(forgejo: &dyn Transport, origin: &str, branch: &str) -> Result<Option<(String, u64)>> {
     let search = |repo: &str| -> Result<Option<u64>> {
-        let pulls = forgejo.items(
-            &Request::get(format!("repos/{repo}/pulls?state=all")),
-            &CAPS.pagination,
-        )?;
-        let ours: Vec<&Value> = pulls
-            .iter()
-            .filter(|pull| {
+        for state in ["open", "all"] {
+            let pulls = forgejo.items(
+                &Request::get(format!("repos/{repo}/pulls?state={state}")),
+                &CAPS.pagination,
+            )?;
+            let found = pulls.iter().find(|pull| {
                 pull["head"]["ref"] == branch
                     && forge::text(pull, "/head/repo/full_name")
                         .is_some_and(|head| head.eq_ignore_ascii_case(origin))
-            })
-            .collect();
-        let found = ours
-            .iter()
-            .find(|pull| pull["state"] == "open")
-            .or(ours.first());
-        Ok(found.and_then(|pull| pull["number"].as_u64()))
+            });
+            if let Some(pull) = found {
+                return Ok(pull["number"].as_u64());
+            }
+        }
+        Ok(None)
     };
     forge::in_origin_or_parent(origin, search, || {
         let repo = forgejo.json(&Request::get(format!("repos/{origin}")))?;
@@ -462,17 +468,11 @@ fn fetch(forgejo: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
         }
         let id =
             forge::id(review, "/id").ok_or_else(|| Error("Forgejo review has no id".into()))?;
-        inline.extend(forgejo.items(
-            &Request::get(format!("{path}/reviews/{id}/comments")),
-            &CAPS.pagination,
-        )?);
+        inline.extend(unpaged(forgejo, format!("{path}/reviews/{id}/comments"))?);
     }
     let mut all = code_threads(&inline)?;
     all.append(&mut threads);
-    let notes = forgejo.items(
-        &Request::get(format!("repos/{repo}/issues/{number}/comments")),
-        &CAPS.pagination,
-    )?;
+    let notes = unpaged(forgejo, format!("repos/{repo}/issues/{number}/comments"))?;
     for node in &notes {
         all.push(forge::general(RemoteKind::General, comment(node)?, None));
     }

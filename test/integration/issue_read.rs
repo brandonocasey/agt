@@ -47,6 +47,25 @@ matrix!(
     a_second_tracker_is_found_by_key_or_repo,
 );
 
+#[test]
+fn a_forgejo_issue_with_more_comments_than_a_page_reads_them_all_with_one_request() {
+    let fake: Fake = &Forgejo;
+    let spec = (1..=120).fold(Spec::new(1, "Chatty"), |spec, id| {
+        spec.comment(id, "bob", &format!("note {id}"))
+    });
+    let env = synced(fake, &[spec]);
+    let shown = env.issue(&["show", "1"]);
+    let notes = shown["comments"].as_array().unwrap();
+    assert_eq!(notes.len(), 120, "{shown}");
+    let reads: Vec<String> = env
+        .forge_calls()
+        .into_iter()
+        .filter(|call| call.contains("issues/1/comments"))
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert!(!reads[0].contains("page="), "{reads:?}");
+}
+
 pub fn synced(fake: Fake, specs: &[Spec]) -> Env {
     let env = Env::new();
     env.write_config(&fake.config(false));

@@ -562,6 +562,8 @@ fn a_forgejo_pull_request_proves_a_squash_and_a_fork_one_does_not() {
     site.squash("sq");
     site.squash("fork");
     forgejo::logins(&site.env);
+    site.env
+        .respond(&strs(&tea_get("repos/acme/app/pulls?state=open")), "[]");
     site.env.respond(
         &strs(&tea_get("repos/acme/app/pulls?state=all")),
         &json!([
@@ -595,11 +597,41 @@ fn a_forgejo_pull_request_proves_a_squash_and_a_fork_one_does_not() {
 }
 
 #[test]
+fn a_forgejo_branch_with_an_open_pull_request_is_kept_without_listing_every_state() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("wip");
+    let head = site.tip("wip");
+    forgejo::logins(&site.env);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=open")),
+        &json!([forgejo_pull(
+            7,
+            "open",
+            Head {
+                branch: "wip",
+                sha: &head,
+                repo: "acme/app",
+            }
+        )])
+        .to_string(),
+    );
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "wip")["verdict"], "open");
+    let reads = site.env.forge_calls();
+    assert!(
+        reads.iter().all(|call| !call.contains("state=all")),
+        "{reads:?}"
+    );
+}
+
+#[test]
 fn a_closed_forgejo_pull_request_row_carries_head_title_and_closed_at() {
     let site = Site::at("git@codeberg.org:acme/app.git");
     site.branch("shelved");
     let head = site.tip("shelved");
     forgejo::logins(&site.env);
+    site.env
+        .respond(&strs(&tea_get("repos/acme/app/pulls?state=open")), "[]");
     site.env.respond(
         &strs(&tea_get("repos/acme/app/pulls?state=all")),
         &json!([forgejo_pull(

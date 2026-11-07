@@ -1223,3 +1223,85 @@ fn automatic_push_rejects_colliding_policy_and_attachment_destinations() {
         );
     }
 }
+
+const FORGEJO: &crate::support::issue::Forgejo = &crate::support::issue::Forgejo;
+
+#[test]
+fn a_forgejo_edit_answered_500_stays_queued_with_its_error() {
+    let fake: Fake = FORGEJO;
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["edit", "1", "--title", "New title"]);
+    let call = fake.update_call(1);
+    let patch = strs(&call);
+    env.respond(&patch, r#"{"message":"boom"}"#);
+    env.respond_status(&patch, "500 Internal Server Error");
+    let report = env.issue(&["push"]);
+    assert!(writes(&report, "sent").is_empty(), "{report}");
+    assert_eq!(writes(&report, "failed")[0]["what"], "update", "{report}");
+    let stored = doc(&env, fake, "1");
+    assert_eq!(stored["errors"][0]["what"], "update");
+    assert_ne!(stored["base"], stored["fields"]);
+    assert_eq!(env.issue(&["show", "1"])["pending"], true);
+}
+
+#[test]
+fn a_forgejo_retitle_with_a_relabel_goes_out_as_two_requests_and_the_next_issue_still_goes() {
+    let fake: Fake = FORGEJO;
+    let env = pushable(fake, &[issue(), Spec::new(2, "Second")]);
+    env.issue(&["edit", "1", "--title", "New title", "--add-label", "triage"]);
+    env.issue(&["edit", "2", "--title", "Other"]);
+    fake.accept_update(&env, 1);
+    fake.accept_update(&env, 2);
+    let report = env.issue(&["push"]);
+    assert!(writes(&report, "failed").is_empty(), "{report}");
+    let labels = Update {
+        labels: Some(vec!["bug", "triage"]),
+        ..Update::default()
+    };
+    assert_eq!(
+        env.forge_writes(fake),
+        [
+            fake.update_call(1).join(" "),
+            fake.update_call_for(1, &labels).join(" "),
+            fake.update_call(2).join(" "),
+        ]
+    );
+    let title = Update {
+        title: Some("New title"),
+        ..Update::default()
+    };
+    assert_eq!(
+        fake.sent(&env, &fake.update_call(1)),
+        [fake.update_body(&title)]
+    );
+    assert_eq!(
+        fake.sent(&env, &fake.update_call_for(1, &labels)),
+        [fake.update_body(&labels)]
+    );
+    for key in ["1", "2"] {
+        let stored = doc(&env, fake, key);
+        assert_eq!(stored["base"], stored["fields"], "{key}");
+        assert_eq!(env.issue(&["show", key])["pending"], false);
+    }
+}
+
+#[test]
+fn a_forgejo_label_change_that_is_refused_keeps_the_sent_title_and_queues_only_the_labels() {
+    let fake: Fake = FORGEJO;
+    let env = pushable(fake, &[issue()]);
+    env.issue(&["edit", "1", "--title", "New title", "--add-label", "triage"]);
+    let labels = Update {
+        labels: Some(vec!["bug", "triage"]),
+        ..Update::default()
+    };
+    let call = fake.update_call_for(1, &labels);
+    let put = strs(&call);
+    env.respond(&strs(&fake.update_call(1)), "{}");
+    env.respond(&put, r#"{"message":"no"}"#);
+    env.respond_status(&put, "403 Forbidden");
+    let report = env.issue(&["push"]);
+    assert_eq!(writes(&report, "failed")[0]["what"], "update", "{report}");
+    let stored = doc(&env, fake, "1");
+    assert_eq!(stored["base"]["title"], "New title");
+    assert_eq!(stored["base"]["labels"], json!(["bug"]));
+}

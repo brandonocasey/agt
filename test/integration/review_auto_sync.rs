@@ -178,14 +178,20 @@ fn unsynced_forgejo_pr() -> Setup {
     setup
 }
 
+/// The pull requests of the repository, all open: the lookup reads the open ones first.
 fn forgejo_pulls(env: &Env, body: &str) {
-    env.respond(&strs(&tea_get("repos/me/proj/pulls?state=all")), body);
+    for state in ["open", "all"] {
+        env.respond(
+            &strs(&tea_get(&format!("repos/me/proj/pulls?state={state}"))),
+            body,
+        );
+    }
 }
 
 fn forgejo_lookups(env: &Env) -> usize {
     env.forge_calls()
         .iter()
-        .filter(|call| call.contains("pulls?state=all"))
+        .filter(|call| call.contains("pulls?state=open"))
         .count()
 }
 

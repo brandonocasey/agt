@@ -20,6 +20,8 @@ use super::Row;
 
 /// `git merge-tree --write-tree` arrived in this git version.
 const MIN_GIT: [u64; 2] = [2, 38];
+/// `tea api` first shipped in this tea version.
+const MIN_TEA: [u64; 2] = [0, 12];
 const MISE_PIN: &str = "github:brandonocasey/agt";
 const IGNORED: [(&str, &str); 3] = [
     (".worktrees/", ".worktrees/probe"),
@@ -57,6 +59,11 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
+/// Whether the version in `text` is `min` or newer.
+fn at_least(text: &str, min: [u64; 2]) -> bool {
+    numbers(text).is_some_and(|have| have[..] >= min[..])
+}
+
 fn git() -> Cli {
     Cli::other("git", "AGT_GIT_BIN")
 }
@@ -87,9 +94,7 @@ fn version(cli: &Cli) -> Option<String> {
 fn tools() -> Vec<Row> {
     let mut rows = Vec::new();
     rows.push(match version(&git()) {
-        Some(found) if numbers(&found).is_some_and(|have| have[..] >= MIN_GIT[..]) => {
-            Row::ok("git", found)
-        }
+        Some(found) if at_least(&found, MIN_GIT) => Row::ok("git", found),
         Some(found) => Row::fail(
             "git",
             format!("{found}, older than 2.38 (needed for `git merge-tree --write-tree`)"),
@@ -116,6 +121,15 @@ fn tools() -> Vec<Row> {
         ("mise", mise(), "install mise: https://mise.jdx.dev"),
     ] {
         rows.push(match version(&cli) {
+            Some(found)
+                if name == service::kind(Forge::Forgejo).tool && !at_least(&found, MIN_TEA) =>
+            {
+                Row::warn(
+                    name,
+                    format!("{found}, older than 0.12 (it has no `tea api`)"),
+                    "upgrade tea to 0.12 or newer",
+                )
+            }
             Some(found) => Row::ok(name, found),
             None => Row::warn(name, "not found", hint),
         });
@@ -203,7 +217,7 @@ fn forge_auth(origin_host: Option<&str>) -> Vec<Row> {
             // It may still be GitHub Enterprise or self-hosted GitLab that nobody logged in to.
             None => Row::warn(
                 &name,
-                format!("no gh or glab login for {host}; forge features unavailable"),
+                format!("no gh, glab or tea login for {host}; forge features unavailable"),
                 format!(
                     "{}, {} or {}",
                     login_hint(Forge::Github, Some(host)),

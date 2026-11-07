@@ -157,6 +157,13 @@ impl Env {
         fs::write(self.forge_file(args, "glab.json"), body).unwrap();
     }
 
+    /// Makes the fake tea answer the call with the HTTP status line `status`, such as
+    /// `404 Not Found`, as `tea api -i` prints it to stderr; the body stays what
+    /// [`Env::respond`] set, and the exit status is 0 as tea's always is.
+    pub fn respond_status(&self, args: &[&str], status: &str) {
+        fs::write(self.forge_file(args, "status"), status).unwrap();
+    }
+
     /// Like [`Env::respond`], for the `call`-th call with these arguments only (from 1, counted
     /// since the last [`Env::reset_calls`]).
     pub fn respond_nth(&self, args: &[&str], call: usize, body: &str) {

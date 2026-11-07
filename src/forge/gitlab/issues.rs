@@ -22,6 +22,7 @@ pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: false,
     close_reasons: false,
     hierarchy: true,
+    labels_apart: false,
 };
 
 fn base(subject: IssueSubject) -> String {

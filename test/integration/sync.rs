@@ -4,6 +4,7 @@ use crate::support::forge::assert_read_only;
 use crate::support::forge::forgejo::{self, Forgejo, SELF_HOSTED};
 use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
+use crate::support::forge::{Comment, FakeService, Remote};
 use crate::support::scenario::{Setup, ids, thread};
 use crate::support::{Env, fixture};
 
@@ -500,6 +501,45 @@ fn forgejo_sync_imports_threads_reviews_and_comments() {
 }
 
 #[test]
+fn forgejo_sync_reads_the_comments_of_a_pr_and_of_a_review_whole_with_one_request_each() {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    let env = &setup.env;
+    let mut remote = Remote::new();
+    let notes = |first: u64| -> Vec<Comment> {
+        (first..first + 120)
+            .map(|id| Comment::new(id, "alice", &format!("note {id}")))
+            .collect()
+    };
+    remote.thread("t", false, 3, notes(6000));
+    for comment in notes(7000) {
+        remote.general(&comment.id.to_string(), comment);
+    }
+    Forgejo::new().sync_with(&setup, None, &remote);
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["threads"]["imported"], 121, "{synced}");
+    let list = env.run(&["list"]);
+    assert_eq!(
+        thread(&list, "fg-t6000")["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        120
+    );
+    for path in ["issues/5/comments", "reviews/700/comments"] {
+        let reads: Vec<String> = env
+            .forge_calls()
+            .into_iter()
+            .filter(|call| call.contains(path))
+            .collect();
+        assert_eq!(reads.len(), 1, "{path}: {reads:?}");
+        assert!(
+            reads.iter().all(|call| !call.contains("page=")),
+            "{reads:?}"
+        );
+    }
+}
+
+#[test]
 fn forgejo_sync_does_not_claim_an_unsent_legacy_marker() {
     let setup = Setup::synced_branch(forgejo::ORIGIN);
     let env = &setup.env;
@@ -529,10 +569,12 @@ fn forgejo_fork_pr_found_in_parent() {
     let env = &setup.env;
     forgejo::login(env);
     // The host cannot filter pull requests by head branch: every one is listed.
-    env.respond(
-        &env_args(&forgejo::CODEBERG.get("repos/me/proj/pulls?state=all")),
-        "[]",
-    );
+    for state in ["open", "all"] {
+        env.respond(
+            &env_args(&forgejo::CODEBERG.get(&format!("repos/me/proj/pulls?state={state}"))),
+            "[]",
+        );
+    }
     env.respond(
         &env_args(&forgejo::CODEBERG.get("repos/me/proj")),
         r#"{"fork":true,"parent":{"full_name":"up/proj"}}"#,
@@ -543,15 +585,23 @@ fn forgejo_fork_pr_found_in_parent() {
             "head": {"ref": branch, "repo": {"full_name": full_name}},
         })
     };
+    let parent_pulls = [
+        head("someone/proj", "feat", 9, "open"),
+        head("me/proj", "feat", 7, "closed"),
+        head("me/proj", "feat", 8, "open"),
+        head("me/proj", "other", 10, "open"),
+    ];
+    let open: Vec<&Value> = parent_pulls
+        .iter()
+        .filter(|pull| pull["state"] == "open")
+        .collect();
+    env.respond(
+        &env_args(&forgejo::CODEBERG.get("repos/up/proj/pulls?state=open")),
+        &json!(open).to_string(),
+    );
     env.respond(
         &env_args(&forgejo::CODEBERG.get("repos/up/proj/pulls?state=all")),
-        &json!([
-            head("someone/proj", "feat", 9, "open"),
-            head("me/proj", "feat", 7, "closed"),
-            head("me/proj", "feat", 8, "open"),
-            head("me/proj", "other", 10, "open"),
-        ])
-        .to_string(),
+        &json!(parent_pulls).to_string(),
     );
     let vars = [
         ("HOST", "codeberg.org"),
@@ -572,6 +622,14 @@ fn forgejo_fork_pr_found_in_parent() {
     assert_eq!(status["target"], "fg-8");
     assert_eq!(status["review"]["repo"], "up/proj");
     assert_read_only(&Forgejo::new(), env);
+    // The parent's open pull requests hold the branch's, so its other states are not listed.
+    let calls = env.forge_calls();
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.contains("up/proj/pulls?state=all")),
+        "{calls:?}"
+    );
 }
 
 /// A Forgejo that only the hosts file or a tea login names: a repository on it, with its tea

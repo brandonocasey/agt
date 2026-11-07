@@ -55,7 +55,7 @@ pub fn tea_get(path: &str) -> Vec<String> {
 /// `page` added to the path; the fake tea leaves them out of the key, so a list is registered
 /// by its plain path.
 pub fn tea_get_as(login: &str, path: &str) -> Vec<String> {
-    args(&["api", "--login", login, "-X", "GET", path])
+    args(&["api", "--login", login, "-i", "-X", "GET", path])
 }
 
 pub fn tea_write(method: &str, path: &str) -> Vec<String> {
@@ -63,6 +63,7 @@ pub fn tea_write(method: &str, path: &str) -> Vec<String> {
         "api",
         "--login",
         TEA_LOGIN,
+        "-i",
         "-X",
         method,
         "-H",
@@ -75,7 +76,7 @@ pub fn tea_write(method: &str, path: &str) -> Vec<String> {
 
 /// A write that sends no body, such as a DELETE.
 pub fn tea_bodyless(method: &str, path: &str) -> Vec<String> {
-    args(&["api", "--login", TEA_LOGIN, "-X", method, path])
+    args(&["api", "--login", TEA_LOGIN, "-i", "-X", method, path])
 }
 
 /// A read of the host, or tea's own list of its logins.

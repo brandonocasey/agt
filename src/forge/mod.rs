@@ -49,10 +49,26 @@ pub fn parse_ref(arg: &str, pipelines: bool) -> Result<PrRef> {
     let invalid = || Error(format!("--pr must be a number or a PR/MR URL: {arg}"));
     let (_, rest) = arg.split_once("://").ok_or_else(invalid)?;
     let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
+    let host = host
+        .rsplit_once('@')
+        .map_or(host, |(_, host)| host)
+        .to_ascii_lowercase();
+    // A host known to be one service has no pipelines of another: GitHub's Actions run URL is not
+    // a Forgejo pipeline.
+    let known = if pipelines {
+        hosts::named(&host)
+            .ok()
+            .flatten()
+            .or_else(|| service::well_known(&host))
+    } else {
+        None
+    };
     let mut candidates: Vec<_> = SERVICES
         .iter()
         .flat_map(|kind| {
-            let pipeline = kind.pipeline_marker.filter(|_| pipelines);
+            let pipeline = kind
+                .pipeline_marker
+                .filter(|_| pipelines && known.is_none_or(|known| known == kind.forge));
             [(kind, kind.url_marker, false)]
                 .into_iter()
                 .chain(pipeline.map(|marker| (kind, marker, true)))
@@ -66,7 +82,8 @@ pub fn parse_ref(arg: &str, pipelines: bool) -> Result<PrRef> {
     let (kind, repo, number, pipeline) = candidates
         .into_iter()
         .find_map(|(kind, marker, pipeline)| {
-            let (repo, number) = path.split_once(marker)?;
+            // The last marker: the repository's own name may contain one (`o/pulls/pulls/5`).
+            let (repo, number) = path.rsplit_once(marker)?;
             let number = number
                 .split(['/', '#', '?'])
                 .next()
@@ -74,10 +91,9 @@ pub fn parse_ref(arg: &str, pipelines: bool) -> Result<PrRef> {
             Some((kind, repo, number, pipeline))
         })
         .ok_or_else(invalid)?;
-    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
     Ok(PrRef {
         number,
-        location: Some((host.to_ascii_lowercase(), repo.trim_matches('/').to_owned())),
+        location: Some((host, repo.trim_matches('/').to_owned())),
         forge: Some(kind.forge),
         pipeline,
     })
@@ -364,6 +380,26 @@ mod tests {
         let forgejo = parse_pr("https://git.example.com/o/pull/pulls/5").unwrap();
         assert_eq!(forgejo.number, 5);
         assert!(forgejo.forge == Some(Forge::Forgejo));
+    }
+
+    #[test]
+    fn a_forgejo_repository_named_pulls_is_still_a_pull_request() {
+        let pr = parse_pr("https://codeberg.org/o/pulls/pulls/5/files").unwrap();
+        assert_eq!(pr.number, 5);
+        assert_eq!(pr.location, Some(("codeberg.org".into(), "o/pulls".into())));
+        assert!(pr.forge == Some(Forge::Forgejo));
+    }
+
+    #[test]
+    fn a_pipeline_url_names_a_service_that_has_pipelines_on_that_host() {
+        assert!(parse_ref("https://github.com/o/r/actions/runs/1", true).is_err());
+        for url in [
+            "https://gitlab.com/g/p/-/pipelines/9",
+            "https://gitlab.example.com/g/p/-/pipelines/9",
+        ] {
+            let run = parse_ref(url, true).unwrap();
+            assert!(run.pipeline && run.number == 9 && run.forge == Some(Forge::Gitlab));
+        }
     }
 
     #[test]

@@ -66,8 +66,8 @@ enum Switch {
 #[derive(Subcommand)]
 enum Command {
     /// One PR/MR as JSON: number, url, title, state (open, merged, closed), draft, head and base
-    /// branch, head sha, author, labels, auto_merge (on or off) with its method, merge queue or
-    /// train state, mergeable and conflicts.
+    /// branch, head sha, author, labels, auto_merge (on, off, or unknown where the forge does not say) with its method, merge
+    /// queue or train state, mergeable and conflicts.
     ///
     /// `mergeable` is mergeable, conflicting, blocked (checks, approvals, discussions, draft or
     /// behind: see `merge_state`) or unknown (the forge has not computed it yet).
@@ -170,6 +170,26 @@ pub struct Changes {
     pub remove_labels: Vec<String>,
     /// `Some(true)` converts to a draft, `Some(false)` marks it ready.
     pub draft: Option<bool>,
+}
+
+impl Changes {
+    /// The labels `current` has after the removals and then the additions, each once; `None`
+    /// when there is nothing to add or remove.
+    pub fn merged_labels<'a>(&'a self, current: &'a [String]) -> Option<Vec<&'a String>> {
+        if self.add_labels.is_empty() && self.remove_labels.is_empty() {
+            return None;
+        }
+        let mut labels: Vec<&String> = current
+            .iter()
+            .filter(|label| !self.remove_labels.contains(label))
+            .collect();
+        for label in &self.add_labels {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        Some(labels)
+    }
 }
 
 /// A PR/MR as every subcommand reports it.
@@ -295,15 +315,22 @@ impl Remote {
         match self.origin.forge {
             Forge::Github => github::list(t, repo, branch, state, mine),
             Forge::Gitlab => gitlab::list(t, repo, branch, state, mine),
-            Forge::Forgejo => forgejo::list(
-                t,
-                repo,
-                &forgejo::Query {
-                    branch,
-                    state,
-                    mine,
-                },
-            ),
+            Forge::Forgejo => {
+                let login = if mine {
+                    Some(self.service.login()?)
+                } else {
+                    None
+                };
+                forgejo::list(
+                    t,
+                    repo,
+                    &forgejo::Query {
+                        branch,
+                        state,
+                        author: login.as_deref(),
+                    },
+                )
+            }
         }
     }
 
@@ -389,15 +416,26 @@ impl Remote {
         }
     }
 
-    /// The open PR/MR of `branch`, else the newest of any state.
+    /// The open PR/MR of `branch`, else the newest of any state. Forgejo cannot filter by branch
+    /// and lists the whole repository, so it is asked for the open ones first.
     fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
-        let mut found = self.list(Some(branch), State::All, false)?;
-        found.retain(|pr| pr.same_repo);
-        let at = found
-            .iter()
-            .position(|pr| pr.state == ReviewState::Open)
-            .unwrap_or(0);
-        Ok((!found.is_empty()).then(|| found.swap_remove(at)))
+        let states: &[State] = if self.origin.forge == Forge::Forgejo {
+            &[State::Open, State::All]
+        } else {
+            &[State::All]
+        };
+        for state in states {
+            let mut found = self.list(Some(branch), *state, false)?;
+            found.retain(|pr| pr.same_repo);
+            let at = found
+                .iter()
+                .position(|pr| pr.state == ReviewState::Open)
+                .unwrap_or(0);
+            if !found.is_empty() {
+                return Ok(Some(found.swap_remove(at)));
+            }
+        }
+        Ok(None)
     }
 
     fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {

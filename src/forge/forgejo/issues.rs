@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use super::{CAPS, Forgejo};
+use super::{CAPS, Forgejo, unpaged};
 use crate::core::clock;
 use crate::core::config::Scope;
 use crate::core::error::{Error, Result};
@@ -20,6 +20,7 @@ pub(super) const ISSUE_CAPS: IssueCaps = IssueCaps {
     multi_assignee: true,
     close_reasons: false,
     hierarchy: false,
+    labels_apart: true,
 };
 
 fn base(subject: IssueSubject) -> String {
@@ -69,11 +70,7 @@ impl IssueService for Forgejo {
                 subject.repo, subject.number
             )));
         }
-        let items = transport.items(
-            &Request::get(format!("{}/comments", base(subject))),
-            &CAPS.pagination,
-        )?;
-        let comments = items
+        let comments = unpaged(transport, format!("{}/comments", base(subject)))?
             .iter()
             .map(parse_comment)
             .collect::<Result<Vec<_>>>()?;

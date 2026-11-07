@@ -303,11 +303,18 @@ const FORGEJO_ORIGIN: &str = "git@codeberg.org:acme/app.git";
 fn forgejo_site(pulls: &[Value]) -> Site {
     let site = Site::at(FORGEJO_ORIGIN);
     forgejo::logins(&site.env);
-    site.env.respond(
-        &strs(&tea_get("repos/acme/app/pulls?state=all")),
-        &Value::Array(pulls.to_vec()).to_string(),
-    );
+    forgejo_pulls(&site, pulls);
     site
+}
+
+/// Answers the pull requests of `acme/app`, all open, to the open listing and to the full one.
+fn forgejo_pulls(site: &Site, pulls: &[Value]) {
+    for state in ["open", "all"] {
+        site.env.respond(
+            &strs(&tea_get(&format!("repos/acme/app/pulls?state={state}"))),
+            &Value::Array(pulls.to_vec()).to_string(),
+        );
+    }
 }
 
 fn forgejo_pull(head: &str) -> Value {
@@ -335,10 +342,7 @@ fn pushed_reports_a_forgejo_pull_request_head_and_whether_its_head_has_statuses(
     let site = forgejo_site(&[]);
     let tip = site.commit("a");
     site.env.git(&["push", "-q", "origin", "topic"]);
-    site.env.respond(
-        &strs(&tea_get("repos/acme/app/pulls?state=all")),
-        &json!([forgejo_pull(&tip)]).to_string(),
-    );
+    forgejo_pulls(&site, &[forgejo_pull(&tip)]);
     forgejo_statuses(&site, &tip, 1);
     let (report, code) = site.pushed(&[]);
     assert_eq!(code, 0);
@@ -350,10 +354,7 @@ fn pushed_reports_a_forgejo_pull_request_head_and_whether_its_head_has_statuses(
     );
 
     let stale = "b".repeat(40);
-    site.env.respond(
-        &strs(&tea_get("repos/acme/app/pulls?state=all")),
-        &json!([forgejo_pull(&stale)]).to_string(),
-    );
+    forgejo_pulls(&site, &[forgejo_pull(&stale)]);
     forgejo_statuses(&site, &stale, 0);
     let (report, code) = site.pushed(&[]);
     assert_eq!(code, 4);

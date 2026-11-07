@@ -1094,11 +1094,13 @@ fn forgejo_view_reads_the_pr_of_the_current_branch_and_reports_auto_merge_as_unk
     let env = forgejo();
     // A fork's PR with the same head name is not the branch's PR.
     let fork = json!({"head": {"ref": "feat", "sha": SHA, "repo": {"full_name": "fork/r"}}});
-    fj_get(
-        &env,
-        &format!("{FJ_PULLS}?state=all"),
-        &json!([fj_pr(6, &fork), fj_pr(7, &json!({}))]),
-    );
+    for state in ["open", "all"] {
+        fj_get(
+            &env,
+            &format!("{FJ_PULLS}?state={state}"),
+            &json!([fj_pr(6, &fork), fj_pr(7, &json!({}))]),
+        );
+    }
     fj_view(&env, 7, &json!({"mergeable": false}));
     let view = ok(&env, &["view"]);
     assert_eq!(view["number"], 7);
@@ -1131,8 +1133,52 @@ fn forgejo_upload_is_refused_before_any_call() {
 #[test]
 fn forgejo_view_without_a_pr_names_the_branch() {
     let env = forgejo();
-    fj_get(&env, &format!("{FJ_PULLS}?state=all"), &json!([]));
+    for state in ["open", "all"] {
+        fj_get(&env, &format!("{FJ_PULLS}?state={state}"), &json!([]));
+    }
     assert!(err(&env, &["view"]).contains("no PR/MR for branch feat in o/r"));
+}
+
+#[test]
+fn forgejo_view_of_a_branch_lists_the_open_pulls_and_every_state_only_when_none_is_open() {
+    let pulls = |env: &Env| -> Vec<String> {
+        env.forge_calls()
+            .into_iter()
+            .filter(|call| call.contains("repos/o/r/pulls?"))
+            .map(|call| call.rsplit_once("state=").unwrap().1.to_owned())
+            .collect()
+    };
+    let merged = json!({"state": "closed", "merged": true, "merged_at": "2026-10-01T00:00:00Z"});
+
+    let env = forgejo();
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=open"),
+        &json!([fj_pr(7, &json!({}))]),
+    );
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=all"),
+        &json!([fj_pr(5, &merged)]),
+    );
+    fj_view(&env, 7, &json!({}));
+    assert_eq!(ok(&env, &["view"])["number"], 7);
+    assert_eq!(pulls(&env), ["open&limit=50&page=1"]);
+
+    let env = forgejo();
+    fj_get(&env, &format!("{FJ_PULLS}?state=open"), &json!([]));
+    fj_get(
+        &env,
+        &format!("{FJ_PULLS}?state=all"),
+        &json!([fj_pr(5, &merged)]),
+    );
+    fj_view(&env, 5, &merged);
+    let view = ok(&env, &["view"]);
+    assert_eq!(
+        (view["number"].clone(), view["state"].clone()),
+        (json!(5), json!("merged"))
+    );
+    assert_eq!(pulls(&env), ["open&limit=50&page=1", "all&limit=50&page=1"]);
 }
 
 #[test]
@@ -1390,7 +1436,8 @@ fn forgejo_auto_merge_off_that_finds_none_scheduled_changes_nothing_and_keeps_no
     let env = forgejo();
     fj_view(&env, 7, &json!({}));
     let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
-    env.fail_call_with(&strs(&delete), "tea: Not Found (HTTP 404)");
+    env.respond(&strs(&delete), r#"{"message":"Not Found"}"#);
+    env.respond_status(&strs(&delete), "404 Not Found");
     let off = ok(&env, &["auto-merge", "off", "7"]);
     assert_eq!(off["changed"], false);
     assert!(!fj_record(&env).contains("merge"), "{}", fj_record(&env));
@@ -1419,9 +1466,23 @@ fn forgejo_auto_merge_off_reports_a_host_failure_that_is_not_a_missing_schedule(
     let env = forgejo();
     fj_view(&env, 7, &json!({}));
     let delete = tea_bodyless("DELETE", &format!("{FJ_PULLS}/7/merge"));
-    env.fail_call_with(&strs(&delete), "tea: Internal Server Error (HTTP 500)");
+    env.respond(&strs(&delete), r#"{"message":"boom"}"#);
+    env.respond_status(&strs(&delete), "500 Internal Server Error");
     let message = err(&env, &["auto-merge", "off", "7"]);
     assert!(message.contains("500"), "{message}");
+    assert!(message.contains("boom"), "{message}");
+}
+
+#[test]
+fn forgejo_merge_that_the_host_refuses_is_an_error_and_leaves_the_pr_open() {
+    let env = forgejo();
+    fj_view(&env, 7, &json!({}));
+    let merge = tea_write("POST", &format!("{FJ_PULLS}/7/merge"));
+    env.respond(&strs(&merge), r#"{"message":"Please try again later"}"#);
+    env.respond_status(&strs(&merge), "405 Method Not Allowed");
+    let message = err(&env, &["merge", "7", "--sha", SHA]);
+    assert!(message.contains("405"), "{message}");
+    assert!(message.contains("Please try again later"), "{message}");
 }
 
 #[test]

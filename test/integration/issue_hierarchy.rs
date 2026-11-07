@@ -1220,3 +1220,26 @@ fn forgejo_keeps_a_local_parent_local_and_a_push_skips_it() {
         env.forge_calls()
     );
 }
+
+#[test]
+fn forgejo_issue_whose_only_change_is_a_local_parent_is_not_pending() {
+    let fake: &dyn IssueFake = &Forgejo;
+    let env = Env::new();
+    env.write_config(&fake.config(true));
+    fake.serve(&env, &[Spec::new(1, "Parent"), Spec::new(2, "Child")]);
+    env.issue(&["sync"]);
+    env.issue(&["edit", "2", "--parent", "1"]);
+    assert_eq!(env.issue(&["show", "2"])["parent"], "o/r#1");
+    assert_eq!(env.issue(&["show", "2"])["pending"], false);
+    assert_eq!(env.issue(&["list", "--pending"])["count"], 0);
+    let status = env.issue(&["status"]);
+    assert_eq!(status["trackers"][0]["pending"], json!([]), "{status}");
+    // A tracker with hierarchy still counts the queued parent.
+    let github: &dyn IssueFake = &Github;
+    let queued = Env::new();
+    queued.write_config(&github.config(true));
+    github.serve(&queued, &[Spec::new(1, "Parent"), Spec::new(2, "Child")]);
+    queued.issue(&["sync"]);
+    queued.issue(&["edit", "2", "--parent", "1"]);
+    assert_eq!(queued.issue(&["show", "2"])["pending"], true);
+}

@@ -4,6 +4,7 @@
 use crate::forge::CommentData;
 use crate::forge::issue::{Changes, IssueData, IssueFetched};
 use crate::forge::markers::{is_landed_as, strip_agent};
+use crate::forge::service::SERVICES;
 use crate::store::issues::{
     Conflict, Fields, Issue, LinkSource, Links, PrLink, RemoteInfo, VERSION,
 };
@@ -286,8 +287,24 @@ pub fn unsent_comments(issue: &Issue) -> Vec<&Comment> {
         .collect()
 }
 
+/// Whether a push has anything to send for `issue`. A parent counts only where the issue's
+/// tracker takes one: a push never sends it to a service without hierarchy.
 pub fn has_pending(issue: &Issue) -> bool {
-    parent_queued(issue) || has_pending_apart_from_parent(issue)
+    (parent_queued(issue) && tracker_takes_parent(issue)) || has_pending_apart_from_parent(issue)
+}
+
+/// Whether the service named by the issue's tracker key takes a parent; a local issue keeps every
+/// parent as a queued change.
+fn tracker_takes_parent(issue: &Issue) -> bool {
+    SERVICES
+        .iter()
+        .find(|kind| {
+            issue
+                .tracker
+                .strip_prefix(kind.key_prefix)
+                .is_some_and(|rest| rest.starts_with('-'))
+        })
+        .is_none_or(|kind| kind.issue_caps.hierarchy)
 }
 
 /// A parent set here that the host does not have yet.
@@ -298,8 +315,8 @@ pub fn parent_queued(issue: &Issue) -> bool {
         .is_some_and(|base| issue.fields.parent != base.parent)
 }
 
-/// What a push to a service without issue hierarchy still has to send.
-pub fn has_pending_apart_from_parent(issue: &Issue) -> bool {
+/// What a push still has to send, apart from the parent.
+fn has_pending_apart_from_parent(issue: &Issue) -> bool {
     issue.number.is_none()
         || !pending_changes(issue).is_empty()
         || !unsent_comments(issue).is_empty()

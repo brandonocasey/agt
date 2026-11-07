@@ -1221,16 +1221,25 @@ on GitHub and GitLab, with these differences:
   `sync` reopens a thread resolved only locally.
 - `agt pr` marks a draft by the `WIP: ` title prefix. The PR does not say whether auto-merge is
   on, so `auto_merge` is `"unknown"`. `merge --auto` schedules the merge with
-  `merge_when_checks_succeed`; `auto-merge pause` cancels the schedule (a 404 means none was set)
-  and `restore` schedules it again with the method `merge --auto` recorded, `merge` by default.
+  `merge_when_checks_succeed`; `auto-merge off` cancels the schedule (a 404 means none was set)
+  and `auto-merge on` schedules it again with the method `merge --auto` recorded, `merge` by default.
 - `agt ci wait` reads the combined commit status of the PR head. Every status counts; there is no
   required-check logic. Name the PR as `#<number>`; an Actions run URL is refused.
   `agt ci failures` stays GitLab only.
 - Issues have no parent or child: `--parent` stays local and `issue push` skips it. Labels are set by name.
-- Lists are read page by page (`limit` and `page`) until a short page. The page size is 50.
+- The lists the API pages (pull requests, reviews, issues, labels, commit statuses) are read page by page
+  (`limit` and `page`) until a short page; the page size is 50. The comments of an issue or PR and
+  the comments of a review take no paging parameters, so one request reads all of them.
+- `tea api` exits 0 whatever the host answered, so agt passes `-i` and reads the `HTTP/1.1 <status>`
+  line tea prints to stderr: a status of 400 or more is an error that carries the status (a 404 on
+  `auto-merge off` means no schedule). `tea` 0.12.0 is the first release with `tea api`;
+  `agt doctor` warns about an older one.
+- A tea login with a port (`https://git.example.com:3000`) serves a remote on that host name; a
+  login on the exact host is preferred.
 
-unverified: the `tea` flags and JSON shapes (`tea logins list --output json`, `tea api --login`) come
-from tea's documentation and the Forgejo API description. No test ran a real `tea` or Forgejo host.
+unverified: the JSON shapes (`tea logins list --output json`, the REST routes) come from tea's source
+and the Forgejo API description. No test ran a real `tea` or Forgejo host; the test fake `tea`
+(see [Testing](#testing)) answers as that source says tea does.
 
 ## PR
 
@@ -1251,8 +1260,8 @@ agt pr upload <file>...
 
 `view` without a number reads the PR/MR of `--branch` or the current branch (an open one first,
 else the newest) and prints `number`, `url`, `title`, `state` (`open`, `merged`, `closed`),
-`draft`, `head_branch`, `base_branch`, `head_sha`, `author`, `labels`, `auto_merge` (`on` or
-`off`) with `auto_merge_method`, `queue` (the merge queue or train state, `null` when not
+`draft`, `head_branch`, `base_branch`, `head_sha`, `author`, `labels`, `auto_merge` (`on`, `off`, or `unknown` where the forge does not say, as on Forgejo)
+with `auto_merge_method`, `queue` (the merge queue or train state, `null` when not
 queued), `mergeable` (`mergeable`, `conflicting`, `blocked` or `unknown` while the forge computes it), the forge's own `merge_state` and `conflicts`. `list` prints an array of the same rows
 (newest first, at most 100). `create` fails, printing the existing one, when the branch has an
 open PR/MR. `merge` fails unless the PR/MR is open, not a draft and its head starts with `--sha`
@@ -1609,7 +1618,7 @@ are terminated; a check finishing after the deadline cannot report success.
 check (name, `ok`/`warn`/`fail`, detail, fix hint), as a table or, with `--json`,
 `{"status", "checks": [...]}`. It is read-only: it writes nothing, reads no credentials (a forge
 login is only the exit status and account name of `gh auth status` / `glab auth status`, or the account `tea logins list` names) and
-makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `tea`, `mise` and their versions; the
+makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `tea` (>= 0.12.0, the first with `tea api`; older is a warning), `mise` and their versions; the
 login for the origin forge (a fail when missing) and for the other installed forge CLIs (a
 warning); the running agt version against the one `mise ls --current` pins for
 `github:brandonocasey/agt` (older: warn, `mise install`; when `mise ls` fails, the detail is its first stderr line containing `ERROR`, else its last line and the fix is
@@ -1860,7 +1869,7 @@ failure does not make `push` exit non-zero: it is listed under `failed`. A creat
 
 `AGT_GH_BIN`, `AGT_GLAB_BIN` and `AGT_TEA_BIN` replace the `gh`, `glab` and `tea`
 executables; tests point the first two at `test/fixtures/fake-forge.sh`, which replays
-canned responses and fails on any other call, and the third at `test/fixtures/fake-tea.sh`, which answers `tea logins list` and hands every other call to the same script. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
+canned responses and fails on any other call, and the third at `test/fixtures/fake-tea.sh`, which answers `tea logins list` and hands every other call to the same script, which behaves as `tea api -i` does: it exits 0 and prints `HTTP/1.1 <status>` to stderr, `404 Not Found` and the like for a `<key>.status` file, and serves a list without a `page` parameter whole. `test/fixtures/fake-steps.sh` replays numbered steps in call order for `agt ci wait`, and `test/fixtures/ci/*.json` hold the responses and the output for `agt ci failures`. `AGT_NOW=<unix seconds>` replaces the current time. It exists only so
 tests can check age pruning and sync age; do not set it otherwise. `AGT_SYNC_CAP_MS` replaces the 15 seconds an auto-sync may take, for the same
 reason. Default issue/review tests assert local operation; automatic-sync tests opt in explicitly. `AGT_OFFLINE=1` (`Env::offline`) also blocks explicit remote calls. Tests use temporary
 `HOME`, `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and git repositories with

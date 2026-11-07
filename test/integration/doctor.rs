@@ -189,10 +189,9 @@ fn an_origin_that_is_not_a_forge_warns_instead_of_failing() {
     let auth = row(&report, "auth git.example.invalid");
     assert_eq!(auth["status"], "warn", "{report}");
     assert!(
-        auth["detail"]
-            .as_str()
-            .unwrap()
-            .contains("no gh or glab login for git.example.invalid; forge features unavailable")
+        auth["detail"].as_str().unwrap().contains(
+            "no gh, glab or tea login for git.example.invalid; forge features unavailable"
+        )
     );
     assert_ne!(report["status"], "fail", "{report}");
 }
@@ -242,8 +241,26 @@ fn forgejo_setup() -> Env {
         "origin",
         "https://codeberg.org/o/r.git",
     ]);
-    env.respond(&["--version"], "tea version 0.9.2");
+    env.respond(&["--version"], "tea version 0.12.0");
     env
+}
+
+#[test]
+fn a_tea_without_the_api_subcommand_warns_with_the_minimum_version() {
+    let env = forgejo_setup();
+    forgejo::logins(&env);
+    env.respond(&["--version"], "tea version 0.11.1");
+    let (_, report) = doctor(&env);
+    let tea = row(&report, "tea");
+    assert_eq!(tea["status"], "warn", "{report}");
+    assert!(
+        tea["detail"]
+            .as_str()
+            .unwrap()
+            .contains("0.11.1, older than 0.12"),
+        "{tea}"
+    );
+    assert!(tea["fix"].as_str().unwrap().contains("0.12"), "{tea}");
 }
 
 #[test]
@@ -252,7 +269,7 @@ fn a_forgejo_origin_checks_the_tea_tool_and_its_login() {
     forgejo::logins(&env);
     let (_, report) = doctor(&env);
     assert_eq!(row(&report, "tea")["status"], "ok", "{report}");
-    assert_eq!(row(&report, "tea")["detail"], "0.9.2");
+    assert_eq!(row(&report, "tea")["detail"], "0.12.0");
     let auth = row(&report, "auth codeberg.org");
     assert_eq!(auth["status"], "ok", "{report}");
     assert_eq!(auth["detail"], "tea as me");

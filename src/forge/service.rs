@@ -415,13 +415,18 @@ fn by(host: &str, check: fn(&Kind) -> fn(&str) -> bool) -> Option<Forge> {
         .map(|kind| kind.forge)
 }
 
+/// The forge of a host every service knows by name, such as `github.com`.
+pub fn well_known(host: &str) -> Option<Forge> {
+    by(host, |kind| kind.well_known)
+}
+
 /// The forge of `host` from what is known without asking a CLI whether it is logged in. In
 /// order: `named`, a forge the user named for the host, hosts every service knows by name,
 /// `cached`, a forge this repository last used the host with, then each service's own
 /// configuration.
 pub fn detect_known(host: &str, named: Option<Forge>, cached: Option<Forge>) -> Option<Forge> {
     named
-        .or_else(|| by(host, |kind| kind.well_known))
+        .or_else(|| well_known(host))
         .or(cached)
         .or_else(|| by(host, |kind| kind.configured))
 }

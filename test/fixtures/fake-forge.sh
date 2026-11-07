@@ -9,10 +9,14 @@
 # {{LAST_NOTE}}, {{LAST_BODY}} and {{LAST_DESCRIPTION}} stand for the JSON-escaped "note",
 # "body" or "description" of the latest request that sent one, the text the host then shows. A glab call (one with GITLAB_HOST set)
 # first tries <key>.glab.json, so gh and glab can answer the same arguments differently. Any
-# other call fails. With FAKE_FORGE_PAGED set (fake-tea.sh does) a trailing `limit=<n>&page=<p>`
-# is not part of the key and calls.log keeps it: `<key>.items` (one JSON value per line) answers
-# page <p> of <n> items, while a `<key>.json` answers every page, and only page 1 counts as a
-# call for the n-th response.
+# other call fails. With FAKE_FORGE_TEA set (fake-tea.sh does) the fake behaves like `tea api`: a
+# trailing `limit=<n>&page=<p>` is not part of the key and calls.log keeps it, `<key>.items` (one
+# JSON value per line) answers page <p> of <n> items, or every item for a request without a page,
+# while a `<key>.json` answers every page, and only page 1 counts as a call for the n-th
+# response; and the call exits 0 whatever the host answered, printing `HTTP/1.1 <status>` to
+# stderr under `-i`: `200 OK`, or the content of `<key>.status` such as `404 Not Found` with
+# the body of the answer on stdout. A `<key>.fail` whose text names `HTTP <code>` is such an
+# answer with that status and an empty body; any other `<key>.fail` is tea itself failing.
 set -eu
 dir=$FAKE_FORGE_DIR
 body=
@@ -21,6 +25,7 @@ stdin=0
 previous=
 page=
 limit=
+include=0
 logged=$*
 for arg do
   shift
@@ -40,8 +45,11 @@ for arg do
     @-)
       [ "$previous" = -d ] && stdin=1
       ;;
+    -i)
+      include=1
+      ;;
     *limit=[0-9]*\&page=[0-9]*)
-      if [ -n "${FAKE_FORGE_PAGED:-}" ]; then
+      if [ -n "${FAKE_FORGE_TEA:-}" ]; then
         page=${arg##*page=}
         rest=${arg%\&page=*}
         limit=${rest##*limit=}
@@ -52,9 +60,14 @@ for arg do
   previous=$arg
   set -- "$@" "$arg"
 done
-[ -n "${FAKE_FORGE_PAGED:-}" ] || logged=$*
+[ -n "${FAKE_FORGE_TEA:-}" ] || logged=$*
 printf '%s\t%s\n' "${GITLAB_HOST:-}" "$logged" >> "$dir/calls.log"
 call=$(wc -l < "$dir/calls.log" | tr -d ' ')
+# A request loop that never ends in the tool under test stops here instead of hanging the suite.
+if [ "$call" -gt 2000 ]; then
+  echo "fake-forge: more than 2000 calls" >&2
+  exit 1
+fi
 if [ "$stdin" = 1 ]; then
   cat > "$dir/input-$call"
 elif [ "$has_body" = 1 ]; then
@@ -68,7 +81,21 @@ else
   [ -f "$dir/$key.count" ] && count=$(($(cat "$dir/$key.count") + 1))
   printf '%s\n' "$count" > "$dir/$key.count"
 fi
+# Prints the status line `tea api -i` writes to stderr before the body.
+announce() {
+  [ -n "${FAKE_FORGE_TEA:-}" ] && [ "$include" = 1 ] || return 0
+  if [ -f "$dir/$key.status" ]; then
+    printf 'HTTP/1.1 %s\n\n' "$(cat "$dir/$key.status")" >&2
+  else
+    printf 'HTTP/1.1 200 OK\n\n' >&2
+  fi
+}
 if [ -f "$dir/$key.fail" ]; then
+  code=$(sed -n 's/.*HTTP \([0-9][0-9][0-9]\).*/\1/p' "$dir/$key.fail" | head -n 1)
+  if [ -n "${FAKE_FORGE_TEA:-}" ] && [ "$include" = 1 ] && [ -n "$code" ]; then
+    printf 'HTTP/1.1 %s %s\n\n' "$code" "$(cat "$dir/$key.fail")" >&2
+    exit 0
+  fi
   if [ -s "$dir/$key.fail" ]; then
     cat "$dir/$key.fail" >&2
   else
@@ -116,15 +143,18 @@ reply() {
     print line
   }' "$1"
 }
-if [ -n "$page" ] && [ -f "$dir/$key.items" ]; then
-  awk -v from=$(((page - 1) * limit + 1)) -v to=$((page * limit)) \
-    'NR >= from && NR <= to { out = out (n++ ? "," : "") $0 } END { print "[" out "]" }' "$dir/$key.items"
+if [ -f "$dir/$key.items" ]; then
+  announce
+  # Without a page the endpoint is not paged: every item.
+  awk -v from=$(((${page:-1} - 1) * ${limit:-0} + 1)) -v to=$((${page:-1} * ${limit:-0})) -v all="$([ -n "$page" ] || echo 1)" \
+    'all || (NR >= from && NR <= to) { out = out (n++ ? "," : "") $0 } END { print "[" out "]" }' "$dir/$key.items"
   exit 0
 fi
 glab=
 [ -n "${GITLAB_HOST:-}" ] && glab=$dir/$key.glab.json
 for file in $glab "$dir/$key.$count.json" "$dir/$key.json"; do
   if [ -f "$file" ]; then
+    announce
     reply "$file"
     exit 0
   fi

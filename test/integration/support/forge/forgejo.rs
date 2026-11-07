@@ -1,11 +1,11 @@
 //! The fake Forgejo: pull request, review and comment reads, REST writes, and the `tea api`
 //! argument lists the CLI transport renders for them.
 //!
-//! Nothing here has met a real tea or a real Forgejo. The flags (`--login`, `-X`, `-H`, `-d @-`
-//! before the endpoint), the `tea logins list --output json` shape and the REST routes and JSON
-//! are the assumptions marked `unverified:` in `src/forge/transport.rs` and the Forgejo service
-//! files; this fake mirrors them, so a passing test shows agt is consistent with them, not that
-//! tea or Forgejo behave so.
+//! Nothing here has met a real tea or a real Forgejo. The flags (`--login`, `-i`, `-X`, `-H`,
+//! `-d @-` before the endpoint) follow tea's `api` source; the `tea logins list --output json`
+//! shape and the REST routes and JSON are the assumptions marked `unverified:` in
+//! `src/forge/transport.rs` and the Forgejo service files. This fake mirrors them, so a passing
+//! test shows agt is consistent with them, not that tea or Forgejo behave so.
 
 use std::fs;
 

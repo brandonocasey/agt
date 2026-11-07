@@ -104,14 +104,7 @@ fn push_tracker(store: &Store, tracker: &Tracker, options: &Options) -> Result<V
     let queued: Vec<String> = store
         .docs::<Issue>(&tracker.dir, &[TRACKER_FILE])?
         .iter()
-        .filter(|issue| {
-            let pending = if tracker.sends_parent() {
-                merge::has_pending(issue)
-            } else {
-                merge::has_pending_apart_from_parent(issue)
-            };
-            pending || (options.force && !issue.conflicts.is_empty())
-        })
+        .filter(|issue| merge::has_pending(issue) || (options.force && !issue.conflicts.is_empty()))
         .map(Issue::doc_name)
         .collect();
     push_names(store, tracker, options, queued, false)
@@ -577,7 +570,25 @@ impl Push<'_> {
         {
             *reason = Some("completed".to_owned());
         }
-        let request = self.service().update(self.subject(doc)?, &changes)?;
+        let labels_apart = crate::forge::service::kind(
+            self.tracker
+                .doc
+                .forge
+                .ok_or_else(|| Error("local tracker has no remote destination".into()))?,
+        )
+        .issue_caps
+        .labels_apart;
+        for part in changes.into_requests(labels_apart) {
+            if let Step::Stopped = self.send_update(name, doc, &part)? {
+                return Ok(Step::Stopped);
+            }
+        }
+        Ok(Step::Done)
+    }
+
+    /// Sends one edit of the issue and records what went out.
+    fn send_update(&mut self, name: &str, doc: &mut Issue, changes: &Changes) -> Result<Step> {
+        let request = self.service().update(self.subject(doc)?, changes)?;
         if self.options.dry_run {
             self.show(doc, "update", &request, json!({}));
             return Ok(Step::Done);
@@ -586,7 +597,7 @@ impl Push<'_> {
             Ok(_) => {
                 self.mutate(name, doc, |issue| {
                     if let Some(base) = issue.base.as_mut() {
-                        record_sent(base, &changes);
+                        record_sent(base, changes);
                     }
                     // The local copy takes the reason that went out, so nothing is left to send.
                     if let Some((state, Some(reason))) = &changes.state
