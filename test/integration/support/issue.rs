@@ -1,7 +1,7 @@
-//! `agt issue` in the isolated environment, and a fake GitHub and GitLab that answer an issue
-//! tracker's calls. A scenario describes the host's state with [`Spec`]s, comments and PR links;
-//! the [`IssueFake`] turns it into the argument lists and response bodies the fake `gh`/`glab`
-//! replays, so one scenario runs against both services.
+//! `agt issue` in the isolated environment, and a fake GitHub, GitLab and Forgejo that answer an
+//! issue tracker's calls. A scenario describes the host's state with [`Spec`]s, comments and PR
+//! links; the [`IssueFake`] turns it into the argument lists and response bodies the fake
+//! `gh`/`glab`/`tea` replays, so one scenario runs against every service.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 
 use super::forge::argv::{
     gh_get, gh_is_get, gh_paginate, gh_write, glab_get, glab_is_get, glab_paginate, glab_write,
+    tea_get, tea_is_read, tea_write,
 };
+use super::forge::forgejo;
 use super::{Env, args, strs};
 
 /// `AGT_NOW` of every issue command: 2026-10-17T12:00:00Z.
@@ -82,6 +84,7 @@ impl Env {
                 ("AGT_OFFLINE", "1"),
                 ("AGT_GH_BIN", "/nonexistent/gh"),
                 ("AGT_GLAB_BIN", "/nonexistent/glab"),
+                ("AGT_TEA_BIN", "/nonexistent/tea"),
             ],
         );
         assert!(
@@ -245,6 +248,8 @@ pub trait IssueFake {
     fn name(&self) -> &'static str;
     /// The tracker's `owner/repo`.
     fn repo(&self) -> &'static str;
+    /// The host of the tracker.
+    fn host(&self) -> &'static str;
     /// The directory of the tracker in the store.
     fn tracker(&self) -> &'static str;
     fn config(&self, push: bool) -> String;
@@ -272,6 +277,49 @@ pub trait IssueFake {
     fn created_body_placeholder(&self) -> &'static str;
     /// Answers the lookups an update with assignees needs.
     fn assignee_lookups(&self, _env: &Env, _logins: &[&str]) {}
+    /// What the host's listing of `listed` answers: a CLI that pages by itself prints one array
+    /// per page, which the first issue and the rest make here.
+    fn listing(&self, listed: &[Value]) -> String {
+        let (first, rest) = listed.split_at(listed.len().min(1));
+        let mut text = Value::Array(first.to_vec()).to_string();
+        if !rest.is_empty() {
+            text.push('\n');
+            text.push_str(&Value::Array(rest.to_vec()).to_string());
+        }
+        text
+    }
+    /// Makes the CLI able to reach the host, before any answer.
+    fn log_in(&self, _env: &Env) {}
+    /// The field of an issue or a create that holds the text.
+    fn text_field(&self) -> &'static str {
+        "body"
+    }
+    /// The URL of the pull request `number` of the tracker.
+    fn pr_url(&self, number: u64) -> String;
+    /// The host lists the PRs that close an issue, so a sync imports them as links.
+    fn links_prs(&self) -> bool {
+        true
+    }
+    /// Closing an issue takes a reason.
+    fn close_reasons(&self) -> bool {
+        false
+    }
+    /// An issue takes more than one assignee.
+    fn multi_assignee(&self) -> bool {
+        true
+    }
+    /// One update can set the labels together with other fields.
+    fn labels_with_other_fields(&self) -> bool {
+        true
+    }
+    /// The calls that answer an update; labels may go through a call of their own.
+    fn update_calls(&self, number: u64) -> Vec<Vec<String>> {
+        vec![self.update_call(number)]
+    }
+    /// The call of an update that sets the fields of `change`.
+    fn update_call_for(&self, number: u64, _change: &Update) -> Vec<String> {
+        self.update_call(number)
+    }
 }
 
 /// The fields of an update, in the terms a scenario uses.
@@ -290,16 +338,10 @@ impl dyn IssueFake + '_ {
     /// Registers the host's answers for a sync that lists `specs` since `since`, and every
     /// call a fetch of each would make.
     pub fn serve_since(&self, env: &Env, since: &str, specs: &[Spec]) {
+        self.log_in(env);
         env.respond(&strs(&self.user_call()), &self.user_body());
         let listed: Vec<Value> = specs.iter().map(|spec| self.issue_json(spec)).collect();
-        // A listing is read with --paginate, so two pages arrive as two JSON arrays.
-        let (first, rest) = listed.split_at(listed.len().min(1));
-        let mut text = Value::Array(first.to_vec()).to_string();
-        if !rest.is_empty() {
-            text.push('\n');
-            text.push_str(&Value::Array(rest.to_vec()).to_string());
-        }
-        env.respond(&strs(&self.list_call(since)), &text);
+        env.respond(&strs(&self.list_call(since)), &self.listing(&listed));
         for spec in specs.iter().filter(|spec| !spec.is_pr) {
             self.serve_issue(env, spec);
         }
@@ -331,7 +373,7 @@ impl dyn IssueFake + '_ {
                 &strs(&gh_paginate(&format!("{path}/sub_issues?per_page=100"))),
                 &json!(children).to_string(),
             );
-        } else {
+        } else if self.name() == "gitlab" {
             let item = |number: u64| json!({"id":format!("gid://gitlab/WorkItem/{}",1000+number),"iid":number.to_string(),"project":{"fullPath":self.repo()},"webUrl":format!("https://gitlab.com/{}/-/issues/{number}",self.repo())});
             let mut work_item = item(spec.number);
             work_item["workItemType"] = json!({"name":if spec.task {"Task"} else {"Issue"}});
@@ -355,15 +397,17 @@ impl dyn IssueFake + '_ {
         }
     }
 
-    fn user_body(&self) -> String {
+    pub fn user_body(&self) -> String {
         match self.name() {
-            "github" => r#"{"login":"me"}"#.to_owned(),
-            _ => r#"{"username":"me"}"#.to_owned(),
+            "gitlab" => r#"{"username":"me"}"#.to_owned(),
+            _ => r#"{"login":"me"}"#.to_owned(),
         }
     }
 
     pub fn accept_update(&self, env: &Env, number: u64) {
-        env.respond(&strs(&self.update_call(number)), "{}");
+        for call in self.update_calls(number) {
+            env.respond(&strs(&call), "{}");
+        }
     }
 
     pub fn accept_comment(&self, env: &Env, number: u64, id: u64) {
@@ -394,6 +438,7 @@ impl dyn IssueFake + '_ {
 
 pub struct Github;
 pub struct Gitlab;
+pub struct Forgejo;
 
 impl IssueFake for Github {
     fn name(&self) -> &'static str {
@@ -402,6 +447,10 @@ impl IssueFake for Github {
 
     fn repo(&self) -> &'static str {
         "o/r"
+    }
+
+    fn host(&self) -> &'static str {
+        "github.com"
     }
 
     fn tracker(&self) -> &'static str {
@@ -553,6 +602,14 @@ impl IssueFake for Github {
     fn created_body_placeholder(&self) -> &'static str {
         "{{LAST_BODY}}"
     }
+
+    fn pr_url(&self, number: u64) -> String {
+        format!("https://github.com/o/r/pull/{number}")
+    }
+
+    fn close_reasons(&self) -> bool {
+        true
+    }
 }
 
 impl IssueFake for Gitlab {
@@ -562,6 +619,10 @@ impl IssueFake for Gitlab {
 
     fn repo(&self) -> &'static str {
         "g/p"
+    }
+
+    fn host(&self) -> &'static str {
+        "gitlab.com"
     }
 
     fn tracker(&self) -> &'static str {
@@ -693,6 +754,18 @@ impl IssueFake for Gitlab {
         "{{LAST_DESCRIPTION}}"
     }
 
+    fn text_field(&self) -> &'static str {
+        "description"
+    }
+
+    fn pr_url(&self, number: u64) -> String {
+        format!("https://gitlab.com/g/p/-/merge_requests/{number}")
+    }
+
+    fn multi_assignee(&self) -> bool {
+        false
+    }
+
     fn assignee_lookups(&self, env: &Env, logins: &[&str]) {
         for (index, login) in logins.iter().enumerate() {
             env.respond(
@@ -701,6 +774,186 @@ impl IssueFake for Gitlab {
             );
         }
     }
+}
+
+impl IssueFake for Forgejo {
+    fn name(&self) -> &'static str {
+        "forgejo"
+    }
+
+    fn repo(&self) -> &'static str {
+        "o/r"
+    }
+
+    fn host(&self) -> &'static str {
+        "codeberg.org"
+    }
+
+    fn tracker(&self) -> &'static str {
+        "fg-codeberg.org-o-r"
+    }
+
+    fn config(&self, push: bool) -> String {
+        format!(
+            "[[tracker]]\nforge = \"forgejo\"\nhost = \"codeberg.org\"\nrepo = \"o/r\"\nissues = {{ scope = \"all\", push = \"{}\" }}\n",
+            mode(push)
+        )
+    }
+
+    fn is_read(&self, args: &str) -> bool {
+        tea_is_read(args)
+    }
+
+    fn user_call(&self) -> Vec<String> {
+        tea_get("user")
+    }
+
+    fn list_call(&self, since: &str) -> Vec<String> {
+        tea_get(&format!(
+            "repos/o/r/issues?state=all&type=issues&since={since}"
+        ))
+    }
+
+    fn issue_call(&self, number: u64) -> Vec<String> {
+        tea_get(&format!("repos/o/r/issues/{number}"))
+    }
+
+    fn update_call(&self, number: u64) -> Vec<String> {
+        tea_write("PATCH", &format!("repos/o/r/issues/{number}"))
+    }
+
+    fn comment_call(&self, number: u64) -> Vec<String> {
+        tea_write("POST", &format!("repos/o/r/issues/{number}/comments"))
+    }
+
+    fn create_call(&self) -> Vec<String> {
+        tea_write("POST", "repos/o/r/issues")
+    }
+
+    fn fetch_rest(&self, spec: &Spec) -> Vec<(Vec<String>, String)> {
+        let comments: Vec<Value> = spec
+            .comments
+            .iter()
+            .map(|cm| self.comment_json(cm.id, cm.login, &cm.body))
+            .collect();
+        vec![(
+            tea_get(&format!("repos/o/r/issues/{}/comments", spec.number)),
+            Value::Array(comments).to_string(),
+        )]
+    }
+
+    fn issue_json(&self, spec: &Spec) -> Value {
+        let mut issue = json!({
+            "number": spec.number,
+            "id": 1000 + spec.number,
+            "html_url": format!("https://codeberg.org/o/r/issues/{}", spec.number),
+            "title": spec.title,
+            "body": spec.body,
+            "state": if spec.closed { "closed" } else { "open" },
+            "labels": spec.labels.iter().map(|name| json!({"name": name})).collect::<Vec<_>>(),
+            "assignees": spec.assignees.iter().map(|login| json!({"login": login})).collect::<Vec<_>>(),
+            "user": {"login": spec.author},
+            "milestone": null,
+            "created_at": "2026-10-01T00:00:00Z",
+            "updated_at": spec.updated,
+        });
+        if spec.is_pr {
+            issue["pull_request"] = json!({"merged": false});
+        }
+        issue
+    }
+
+    fn update_body(&self, change: &Update) -> Value {
+        let mut body = json!({});
+        if let Some(title) = change.title {
+            body["title"] = json!(title);
+        }
+        if let Some(text) = change.body {
+            body["body"] = json!(text);
+        }
+        if let Some(close) = change.close {
+            body["state"] = json!(if close { "closed" } else { "open" });
+        }
+        if let Some(assignees) = &change.assignees {
+            body["assignees"] = json!(assignees);
+        }
+        if let Some(labels) = &change.labels {
+            body = json!({ "labels": labels });
+        }
+        body
+    }
+
+    fn create_body(&self, title: &str, body: &str, labels: &[&str], assignees: &[&str]) -> Value {
+        let ids: Vec<u64> = labels.iter().map(|name| label_id(name)).collect();
+        json!({"title": title, "body": body, "labels": ids, "assignees": assignees})
+    }
+
+    fn comment_response(&self, id: u64) -> String {
+        json!({"id": id, "html_url": format!("https://codeberg.org/o/r/issues/1#issuecomment-{id}")})
+            .to_string()
+    }
+
+    fn comment_json(&self, id: u64, login: &str, body: &str) -> Value {
+        json!({"id": id, "html_url": format!("https://codeberg.org/o/r/issues/1#issuecomment-{id}"),
+            "body": body, "created_at": "2026-10-05T00:00:00Z", "user": {"login": login}})
+    }
+
+    fn created_body_placeholder(&self) -> &'static str {
+        "{{LAST_BODY}}"
+    }
+
+    fn listing(&self, listed: &[Value]) -> String {
+        Value::Array(listed.to_vec()).to_string()
+    }
+
+    fn log_in(&self, env: &Env) {
+        forgejo::logins(env);
+        let labels: Vec<Value> = LABELS
+            .iter()
+            .map(|(name, id)| json!({"id": id, "name": name}))
+            .collect();
+        env.respond(
+            &strs(&tea_get("repos/o/r/labels")),
+            &Value::Array(labels).to_string(),
+        );
+    }
+
+    fn pr_url(&self, number: u64) -> String {
+        format!("https://codeberg.org/o/r/pulls/{number}")
+    }
+
+    fn links_prs(&self) -> bool {
+        false
+    }
+
+    fn labels_with_other_fields(&self) -> bool {
+        false
+    }
+
+    fn update_calls(&self, number: u64) -> Vec<Vec<String>> {
+        vec![
+            self.update_call(number),
+            tea_write("PUT", &format!("repos/o/r/issues/{number}/labels")),
+        ]
+    }
+
+    fn update_call_for(&self, number: u64, change: &Update) -> Vec<String> {
+        if change.labels.is_some() {
+            return tea_write("PUT", &format!("repos/o/r/issues/{number}/labels"));
+        }
+        self.update_call(number)
+    }
+}
+
+/// The labels of the fake Forgejo repository: a new issue names them by id.
+const LABELS: [(&str, u64); 4] = [("bug", 4), ("triage", 9), ("docs", 12), ("p1", 15)];
+
+fn label_id(name: &str) -> u64 {
+    LABELS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .unwrap_or_else(|| panic!("the fake repository has no label {name}"))
+        .1
 }
 
 /// The `push` mode a fake tracker's configuration sets.

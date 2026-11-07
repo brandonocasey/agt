@@ -80,6 +80,12 @@ fn merge_threads(
     let seen_comments = seen_comments(&fetched);
     for data in fetched {
         if let [comment] = data.comments.as_slice()
+            && data.info.kind == RemoteKind::Review
+            && trust.is_review_marker(comment)
+        {
+            continue;
+        }
+        if let [comment] = data.comments.as_slice()
             && trust.verified(comment)
         {
             let own = trust.own_id(comment);

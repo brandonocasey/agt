@@ -22,6 +22,11 @@ macro_rules! matrix {
                 fn gitlab() {
                     super::$scenario(&crate::support::issue::Gitlab);
                 }
+
+                #[test]
+                fn forgejo() {
+                    super::$scenario(&crate::support::issue::Forgejo);
+                }
             }
         )*
     };
@@ -59,7 +64,7 @@ fn comment_close_and_edit_queue_locally_and_show_as_queued(fake: Fake) {
     assert_eq!(shown["queued"]["body"], "New body\n");
     assert_eq!(
         shown["queued"]["state"],
-        json!({"state": "closed", "reason": if fake.name() == "github" { json!("completed") } else { Value::Null }})
+        json!({"state": "closed", "reason": if fake.close_reasons() { json!("completed") } else { Value::Null }})
     );
     assert_eq!(shown["queued"]["comments"], json!(["c1", "c2"]));
     assert_eq!(shown["comments"][0]["post"], "pending");
@@ -87,7 +92,7 @@ fn comment_close_and_edit_queue_locally_and_show_as_queued(fake: Fake) {
 
 fn close_with_a_reason_only_where_the_service_takes_one(fake: Fake) {
     let env = synced(fake, &[issue()]);
-    if fake.name() == "github" {
+    if fake.close_reasons() {
         let shown = env.issue(&["edit", "1", "--state", "closed", "--reason", "not-planned"]);
         assert_eq!(shown["reason"], "not_planned");
     } else {
@@ -103,7 +108,7 @@ fn close_with_a_reason_only_where_the_service_takes_one(fake: Fake) {
     let reason = env.issue(&["edit", "1", "--state", "closed"])["reason"].clone();
     assert_eq!(
         reason,
-        if fake.name() == "github" {
+        if fake.close_reasons() {
             json!("completed")
         } else {
             Value::Null
@@ -113,7 +118,7 @@ fn close_with_a_reason_only_where_the_service_takes_one(fake: Fake) {
 
 fn assignees_follow_the_service_capability(fake: Fake) {
     let env = synced(fake, &[issue().assignees(&["zed"])]);
-    if fake.name() == "github" {
+    if fake.multi_assignee() {
         let shown = env.issue(&[
             "edit",
             "1",
@@ -187,10 +192,8 @@ fn labels_add_and_remove_by_set(fake: Fake) {
 
 fn link_comment_queues_a_comment_and_a_local_link_once(fake: Fake) {
     let env = synced(fake, &[issue()]);
-    let url = match fake.name() {
-        "github" => "https://github.com/o/r/pull/7",
-        _ => "https://gitlab.com/g/p/-/merge_requests/7",
-    };
+    let url = fake.pr_url(7);
+    let url = url.as_str();
     // A PR linked first without `--comment` still gets its comment later.
     env.issue(&["link", "1", "--pr", "7"]);
     assert_eq!(doc(&env, fake)["comments"], json!([]));
@@ -204,7 +207,8 @@ fn link_comment_queues_a_comment_and_a_local_link_once(fake: Fake) {
     assert_eq!(stored["comments"][0]["body"], format!("Linked: {url}"));
     let elsewhere = url
         .replace("github.com", "git.example.com")
-        .replace("gitlab.com", "git.example.com");
+        .replace("gitlab.com", "git.example.com")
+        .replace("codeberg.org", "git.example.com");
     let error = env.issue_fail(&["link", "1", "--pr", &elsewhere, "--comment"]);
     assert!(error.contains("not on the tracker's host"), "{error}");
 }
@@ -284,7 +288,7 @@ fn queue_commands_reject_bad_input(fake: Fake) {
 fn other_tracker(fake: Fake) -> String {
     let own = fake.config(false);
     match fake.name() {
-        "github" => own.replace("o/r", "o/other"),
+        "github" | "forgejo" => own.replace("o/r", "o/other"),
         _ => own.replace("g/p", "g/other"),
     }
 }

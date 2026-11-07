@@ -1,11 +1,13 @@
 //! `agt branch check` (its `pushed` and `landable` checks) against a local bare repository as origin (reached through
-//! `insteadOf`, so `origin` reads as a GitHub URL) and the fake `gh`.
+//! `insteadOf`, so `origin` reads as a GitHub URL) and the fake `gh` and `tea`.
 
 use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::Env;
+use crate::support::forge::argv::tea_get;
+use crate::support::forge::forgejo;
+use crate::support::{Env, strs};
 
 struct Site {
     env: Env,
@@ -14,9 +16,13 @@ struct Site {
 impl Site {
     /// A repository with `main` pushed to a bare origin, and the branch `topic` on it.
     fn new() -> Self {
+        Self::at("git@github.com:acme/app.git")
+    }
+
+    /// Like [`Site::new`], with origin at `url`.
+    fn at(url: &str) -> Self {
         let env = Env::new();
         let bare = env.path("origin.git");
-        let url = "git@github.com:acme/app.git";
         env.git(&["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
         env.write("base.txt", "base\n");
         env.commit_all("base");
@@ -289,6 +295,116 @@ fn pushed_keeps_the_pull_request_when_only_the_checks_query_fails() {
         stderr.contains("warning: pipeline lookup failed"),
         "{stderr}"
     );
+}
+
+const FORGEJO_ORIGIN: &str = "git@codeberg.org:acme/app.git";
+
+/// A Forgejo site with tea logged in and the pull requests of `acme/app` answered as `pulls`.
+fn forgejo_site(pulls: &[Value]) -> Site {
+    let site = Site::at(FORGEJO_ORIGIN);
+    forgejo::logins(&site.env);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &Value::Array(pulls.to_vec()).to_string(),
+    );
+    site
+}
+
+fn forgejo_pull(head: &str) -> Value {
+    json!({
+        "number": 7, "html_url": "https://codeberg.org/acme/app/pulls/7", "title": "t",
+        "state": "open", "merged": false,
+        "base": {"ref": "main", "repo": {"full_name": "acme/app"}},
+        "head": {"ref": "topic", "sha": head, "repo": {"full_name": "acme/app"}},
+    })
+}
+
+/// Answers the combined status of `head` with `count` statuses.
+fn forgejo_statuses(site: &Site, head: &str, count: usize) {
+    let statuses: Vec<Value> = (0..count)
+        .map(|index| json!({"context": format!("ci/{index}"), "status": "success"}))
+        .collect();
+    site.env.respond(
+        &strs(&tea_get(&format!("repos/acme/app/commits/{head}/status"))),
+        &json!({"statuses": statuses}).to_string(),
+    );
+}
+
+#[test]
+fn pushed_reports_a_forgejo_pull_request_head_and_whether_its_head_has_statuses() {
+    let site = forgejo_site(&[]);
+    let tip = site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([forgejo_pull(&tip)]).to_string(),
+    );
+    forgejo_statuses(&site, &tip, 1);
+    let (report, code) = site.pushed(&[]);
+    assert_eq!(code, 0);
+    assert_eq!(report["pr"]["number"], 7);
+    assert_eq!(report["pr"]["head_matches"], true);
+    assert_eq!(
+        report["pr"]["pipeline"],
+        json!({"sha": tip, "exists": true})
+    );
+
+    let stale = "b".repeat(40);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([forgejo_pull(&stale)]).to_string(),
+    );
+    forgejo_statuses(&site, &stale, 0);
+    let (report, code) = site.pushed(&[]);
+    assert_eq!(code, 4);
+    assert_eq!(report["pr"]["head_matches"], false);
+    assert_eq!(report["pr"]["pipeline"]["exists"], false);
+}
+
+#[test]
+fn pushed_keeps_a_forgejo_pull_request_when_only_the_status_query_fails() {
+    let stale = "b".repeat(40);
+    let site = forgejo_site(&[forgejo_pull(&stale)]);
+    site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    let output = site.agt(&["check", "--checks", "pushed"]);
+    assert_eq!(output.status.code(), Some(4));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report = &report["checks"]["pushed"]["report"];
+    assert_eq!(report["pr"]["head"], stale);
+    assert_eq!(report["pr"]["pipeline"]["exists"], Value::Null);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: pipeline lookup failed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn pushed_prints_the_git_state_when_tea_has_no_login_or_is_missing() {
+    let site = Site::at(FORGEJO_ORIGIN);
+    site.commit("a");
+    site.env.git(&["push", "-q", "origin", "topic"]);
+    let missing = site.env.path("no-such-tea");
+    for (tea, cause) in [
+        (None, "tea has no login for codeberg.org"),
+        (Some(&missing), "run tea: No such file"),
+    ] {
+        let mut command = site.env.bin(&site.env.repo);
+        command.args(["branch", "check", "--checks", "pushed"]);
+        if let Some(tea) = tea {
+            command.env("AGT_TEA_BIN", tea);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let report = &report["checks"]["pushed"]["report"];
+        assert_eq!(report["state"], "equal");
+        assert_eq!(report["pr"], Value::Null);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("warning: PR/MR lookup failed"), "{stderr}");
+        assert!(stderr.contains(cause), "{stderr}");
+    }
 }
 
 #[test]

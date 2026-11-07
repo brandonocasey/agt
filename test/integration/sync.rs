@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::support::forge::assert_read_only;
+use crate::support::forge::forgejo::{self, Forgejo, SELF_HOSTED};
 use crate::support::forge::github::{self, Github};
 use crate::support::forge::gitlab::{self, Gitlab};
 use crate::support::scenario::{Setup, ids, thread};
@@ -440,6 +441,238 @@ fn gitlab_self_hosted_sync() {
         .collect();
     assert!(!open.contains(&f1.as_str()) && open.contains(&"gl-n4007000002"));
     assert!(!open.contains(&"gl-n4007000001"));
+}
+
+#[test]
+fn forgejo_sync_imports_threads_reviews_and_comments() {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    let env = &setup.env;
+    let branch_key = env.run(&["status", "--full"])["target"].clone();
+    forgejo::sync_fixtures(&setup);
+
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["target"], "fg-5");
+    assert_eq!(synced["renamed_from"], branch_key);
+    assert_eq!(synced["login"], "me");
+    assert_eq!(
+        synced["review"]["url"],
+        "https://codeberg.org/me/proj/pulls/5"
+    );
+    assert_eq!(synced["review"]["host"], "codeberg.org");
+    assert_read_only(&Forgejo::new(), env);
+
+    let list = env.run(&["list"]);
+    // Two comments on one line are one thread, resolved by the host's resolver.
+    let thread_on_line = thread(&list, "fg-t6001");
+    assert_eq!(thread_on_line["resolved"], true);
+    assert_eq!(thread_on_line["comments"].as_array().unwrap().len(), 2);
+    assert_eq!(thread_on_line["remote"]["kind"], "review-thread");
+    assert_eq!(thread_on_line["remote"]["line"], 3);
+    assert_eq!(thread_on_line["remote"]["side"], "new");
+    // A comment on a removed line is on the old side, at its old line.
+    let removed = thread(&list, "fg-t6003");
+    assert_eq!(removed["resolved"], false);
+    assert_eq!(removed["remote"]["side"], "old");
+    assert_eq!(removed["remote"]["line"], Value::Null);
+    assert_eq!(removed["remote"]["old_line"], 2);
+    // A review with text is a thread of its own; a pending or empty one is not.
+    assert_eq!(
+        thread(&list, "fg-r5003")["remote"]["review_state"],
+        "APPROVED"
+    );
+    let all = ids(&list);
+    for dropped in ["fg-r5001", "fg-r5002", "fg-r5004"] {
+        assert!(!all.contains(&dropped.to_owned()), "{dropped}: {all:?}");
+    }
+    // The timestamp of a comment is normalized to UTC.
+    assert_eq!(
+        thread(&list, "fg-t6001")["comments"][1]["created_at"],
+        "2026-10-13T09:05:00Z"
+    );
+    for general in ["fg-c7001", "fg-c7002"] {
+        assert_eq!(thread(&list, general)["remote"]["kind"], "general");
+    }
+
+    let again = env.pull(&["sync"]);
+    assert_eq!(again["threads"]["imported"], 0);
+    assert_eq!(again["threads"]["total"], synced["threads"]["total"]);
+    assert!(again["renamed_from"].is_null());
+}
+
+#[test]
+fn forgejo_sync_does_not_claim_an_unsent_legacy_marker() {
+    let setup = Setup::synced_branch(forgejo::ORIGIN);
+    let env = &setup.env;
+    let f1 = format!("{}.c1p0.r1.f1", setup.run);
+    forgejo::sync_fixtures(&setup);
+    // A host that shows no edits cannot say this text is not an edit of someone else's.
+    let edited = format!("Edited text\n<!-- review-finding v1 id={f1} -->");
+    env.respond(
+        &env_args(&forgejo::CODEBERG.get("repos/me/proj/issues/5/comments")),
+        &json!([forgejo::comment(8000, "me", &edited)]).to_string(),
+    );
+    env.pull(&["sync", "--pr", "5"]);
+    let list = env.run(&["list"]);
+    let local = thread(&list, &f1);
+    assert_unsent_finding(local);
+    assert_eq!(thread(&list, "fg-c8000")["type"], "comment");
+    assert_read_only(&Forgejo::new(), env);
+}
+
+fn env_args(list: &[String]) -> Vec<&str> {
+    list.iter().map(String::as_str).collect()
+}
+
+#[test]
+fn forgejo_fork_pr_found_in_parent() {
+    let setup = Setup::synced_branch("https://codeberg.org/me/proj.git");
+    let env = &setup.env;
+    forgejo::login(env);
+    // The host cannot filter pull requests by head branch: every one is listed.
+    env.respond(
+        &env_args(&forgejo::CODEBERG.get("repos/me/proj/pulls?state=all")),
+        "[]",
+    );
+    env.respond(
+        &env_args(&forgejo::CODEBERG.get("repos/me/proj")),
+        r#"{"fork":true,"parent":{"full_name":"up/proj"}}"#,
+    );
+    let head = |full_name: &str, branch: &str, number: u64, state: &str| {
+        json!({
+            "number": number, "state": state,
+            "head": {"ref": branch, "repo": {"full_name": full_name}},
+        })
+    };
+    env.respond(
+        &env_args(&forgejo::CODEBERG.get("repos/up/proj/pulls?state=all")),
+        &json!([
+            head("someone/proj", "feat", 9, "open"),
+            head("me/proj", "feat", 7, "closed"),
+            head("me/proj", "feat", 8, "open"),
+            head("me/proj", "other", 10, "open"),
+        ])
+        .to_string(),
+    );
+    let vars = [
+        ("HOST", "codeberg.org"),
+        ("REPO", "up/proj"),
+        ("NUMBER", "8"),
+        ("HEAD", setup.head.as_str()),
+        ("BASE", setup.base.as_str()),
+        ("AUTHOR", "me"),
+    ];
+    for (path, body) in [
+        ("repos/up/proj/pulls/8", fixture("forgejo/pr.json", &vars)),
+        ("repos/up/proj/pulls/8/reviews", "[]".to_owned()),
+        ("repos/up/proj/issues/8/comments", "[]".to_owned()),
+    ] {
+        env.respond(&env_args(&forgejo::CODEBERG.get(path)), &body);
+    }
+    let status = env.run(&["status", "--sync"]);
+    assert_eq!(status["target"], "fg-8");
+    assert_eq!(status["review"]["repo"], "up/proj");
+    assert_read_only(&Forgejo::new(), env);
+}
+
+/// A Forgejo that only the hosts file or a tea login names: a repository on it, with its tea
+/// login `work`, whose fixtures are served.
+fn self_hosted(setup: &Setup) -> Vec<String> {
+    forgejo::sync_fixtures_at(setup, &SELF_HOSTED);
+    SELF_HOSTED.get("user")
+}
+
+#[test]
+fn forgejo_self_hosted_sync_uses_the_login_of_its_host() {
+    let setup = Setup::synced_branch(&SELF_HOSTED.origin());
+    let env = &setup.env;
+    let f1 = format!("{}.c1p0.r1.f1", setup.run);
+    env.run(&["resolve", &f1, "--answered"]);
+    self_hosted(&setup);
+    let dir = env.path("config/agt");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("hosts.json"),
+        r#"{"git.example.com": {"service": "forgejo"}}"#,
+    )
+    .unwrap();
+
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["target"], "fg-5");
+    assert_eq!(synced["review"]["host"], "git.example.com");
+    assert_read_only(&Forgejo::new(), env);
+    for call in env.forge_calls() {
+        let args = call.split('\t').nth(1).unwrap();
+        assert!(
+            args.starts_with("logins list") || args.starts_with("api --login work "),
+            "{call}"
+        );
+    }
+    let list = env.run(&["list"]);
+    let mine = thread(&list, &f1);
+    assert_eq!(mine["resolved"], true, "an unpublished local resolve stays");
+    assert_eq!(mine["resolve_pending"], true);
+    assert_unsent_finding(mine);
+    assert_eq!(env.run(&["status"])["review"]["host"], "git.example.com");
+}
+
+#[test]
+fn forgejo_host_comes_from_the_hosts_file_or_a_tea_login() {
+    for service in ["forgejo", "gitea"] {
+        let setup = Setup::synced_branch(&SELF_HOSTED.origin());
+        let env = &setup.env;
+        self_hosted(&setup);
+        // No tea login names this host and nothing else does: it is not guessed.
+        std::fs::write(env.path("forge").join("tea-logins.json"), "[]").unwrap();
+        let refused = env.fail(&["sync", "--pr", "5"], None);
+        assert!(
+            refused.contains("unsupported forge git.example.com"),
+            "{refused}"
+        );
+        // The hosts file names the service, and the login is still tea's.
+        let dir = env.path("config/agt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("hosts.json"),
+            format!(r#"{{"Git.Example.com": {{"service": "{service}"}}}}"#),
+        )
+        .unwrap();
+        let without_login = env.fail(&["sync", "--pr", "5"], None);
+        assert!(
+            without_login.contains("tea has no login for git.example.com")
+                && without_login.contains("tea login add"),
+            "{service}: {without_login}"
+        );
+        self_hosted(&setup);
+        let synced = env.pull(&["sync", "--pr", "5"]);
+        assert_eq!(synced["target"], "fg-5", "{service}");
+    }
+}
+
+#[test]
+fn forgejo_host_is_found_through_a_tea_login() {
+    // Neither well known nor in the hosts file: the login of tea is how it is found.
+    let setup = Setup::synced_branch(&SELF_HOSTED.origin());
+    let env = &setup.env;
+    self_hosted(&setup);
+    let synced = env.pull(&["sync", "--pr", "5"]);
+    assert_eq!(synced["target"], "fg-5");
+    assert!(
+        env.forge_calls()
+            .iter()
+            .any(|call| call.ends_with("\tlogins list --output json")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn a_forgejo_host_synced_before_is_remembered_without_asking_tea_for_logins() {
+    let setup = Setup::synced_branch(&SELF_HOSTED.origin());
+    let env = &setup.env;
+    self_hosted(&setup);
+    env.pull(&["sync", "--pr", "5"]);
+    let again = env.pull(&["sync"]);
+    assert_eq!(again["target"], "fg-5");
 }
 
 #[test]

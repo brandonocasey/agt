@@ -7,7 +7,9 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{Env, Sealed, proc_start, unix_now};
+use crate::support::forge::argv::tea_get;
+use crate::support::forge::forgejo;
+use crate::support::{Env, Sealed, proc_start, strs, unix_now};
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -525,6 +527,81 @@ fn a_gitlab_merge_request_proves_a_squash_and_a_cross_project_one_does_not() {
     assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
     assert_eq!(site.kept(&report, "fork")["verdict"], "unmerged");
     assert_eq!(site.branches(), ["fork", "main"]);
+}
+
+/// A Forgejo pull request of `acme/app` as the list route shows it; `head_repo` is the
+/// repository the head branch lives in.
+fn forgejo_pull(number: u64, state: &str, branch: &str, head: &str, head_repo: &str) -> Value {
+    json!({
+        "number": number,
+        "html_url": format!("https://codeberg.org/acme/app/pulls/{number}"),
+        "title": format!("Title of {number}"),
+        "state": if state == "open" { "open" } else { "closed" },
+        "merged": state == "merged",
+        "merged_at": (state == "merged").then_some("2026-01-01T00:00:00Z"),
+        "closed_at": (state == "closed").then_some("2026-03-04T05:06:07Z"),
+        "base": {"ref": "main", "repo": {"full_name": "acme/app"}},
+        "head": {"ref": branch, "sha": head, "repo": {"full_name": head_repo}},
+    })
+}
+
+#[test]
+fn a_forgejo_pull_request_proves_a_squash_and_a_fork_one_does_not() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("sq");
+    site.branch("fork");
+    let (sq, fork) = (site.tip("sq"), site.tip("fork"));
+    site.squash("sq");
+    site.squash("fork");
+    forgejo::logins(&site.env);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([
+            forgejo_pull(11, "merged", "sq", &sq, "acme/app"),
+            forgejo_pull(12, "merged", "fork", &fork, "someone/app"),
+        ])
+        .to_string(),
+    );
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(report["deleted"][0]["branch"], "sq");
+    assert_eq!(report["deleted"][0]["verdict"], "squash-merged");
+    assert_eq!(site.kept(&report, "fork")["verdict"], "unmerged");
+    assert_eq!(site.branches(), ["fork", "main"]);
+}
+
+#[test]
+fn a_closed_forgejo_pull_request_row_carries_head_title_and_closed_at() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("shelved");
+    let head = site.tip("shelved");
+    forgejo::logins(&site.env);
+    site.env.respond(
+        &strs(&tea_get("repos/acme/app/pulls?state=all")),
+        &json!([forgejo_pull(7, "closed", "shelved", &head, "acme/app")]).to_string(),
+    );
+    let report = site.run(&["--yes"]);
+    let row = site.kept(&report, "shelved");
+    assert_eq!(row["verdict"], "closed");
+    assert_eq!(row["head"], head.as_str());
+    assert_eq!(row["title"], "Title of 7");
+    assert_eq!(row["closed_at"], "2026-03-04T05:06:07Z");
+}
+
+#[test]
+fn a_forgejo_origin_without_a_tea_login_keeps_every_branch_and_says_why() {
+    let site = Site::at("git@codeberg.org:acme/app.git");
+    site.branch("sq");
+    site.squash("sq");
+    let report = site.run(&["--yes"]);
+    assert_eq!(report["deleted"], json!([]));
+    let row = site.kept(&report, "sq");
+    assert_ne!(row["verdict"], "squash-merged");
+    assert!(
+        row.to_string()
+            .contains("tea has no login for codeberg.org"),
+        "{row}"
+    );
 }
 
 #[test]

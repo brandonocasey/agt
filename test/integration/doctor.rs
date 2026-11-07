@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 
+use crate::support::forge::forgejo;
 use crate::support::{Env, executable};
 
 const AUTH: [&str; 4] = ["auth", "status", "--hostname", "github.com"];
@@ -227,6 +228,117 @@ fn offline_skips_the_login_checks() {
         !env.forge_calls()
             .iter()
             .any(|call| call.contains("auth status")),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+/// Like [`setup`], with an origin on codeberg.org and a tea that prints its version.
+fn forgejo_setup() -> Env {
+    let env = setup("99.0.0");
+    env.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://codeberg.org/o/r.git",
+    ]);
+    env.respond(&["--version"], "tea version 0.9.2");
+    env
+}
+
+#[test]
+fn a_forgejo_origin_checks_the_tea_tool_and_its_login() {
+    let env = forgejo_setup();
+    forgejo::logins(&env);
+    let (_, report) = doctor(&env);
+    assert_eq!(row(&report, "tea")["status"], "ok", "{report}");
+    assert_eq!(row(&report, "tea")["detail"], "0.9.2");
+    let auth = row(&report, "auth codeberg.org");
+    assert_eq!(auth["status"], "ok", "{report}");
+    assert_eq!(auth["detail"], "tea as me");
+    assert_eq!(row(&report, "origin")["detail"], "codeberg.org/o/r");
+}
+
+#[test]
+fn a_forgejo_origin_without_a_tea_login_fails_with_the_login_command() {
+    let env = forgejo_setup();
+    let (code, report) = doctor(&env);
+    assert_eq!(code, Some(1), "{report}");
+    let auth = row(&report, "auth codeberg.org");
+    assert_eq!(auth["status"], "fail");
+    assert_eq!(auth["detail"], "tea: not logged in");
+    assert_eq!(auth["fix"], "tea login add --url https://codeberg.org");
+}
+
+#[test]
+fn a_missing_tea_warns_for_the_tool_and_fails_the_forgejo_origin_login() {
+    let env = forgejo_setup();
+    let output = env
+        .bin(&env.repo)
+        .env("AGT_MISE_BIN", env.path("mise"))
+        .env("AGT_TEA_BIN", "/nonexistent/agt-test-tea")
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let tool = row(&report, "tea");
+    assert_eq!(tool["status"], "warn", "{report}");
+    assert!(
+        tool["fix"]
+            .as_str()
+            .unwrap()
+            .contains("https://gitea.com/gitea/tea")
+    );
+    assert_eq!(
+        row(&report, "auth codeberg.org")["detail"],
+        "tea: not installed"
+    );
+}
+
+#[test]
+fn a_self_hosted_origin_that_only_a_tea_login_names_is_checked_with_tea() {
+    let env = forgejo_setup();
+    env.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://git.example.invalid/o/r.git",
+    ]);
+    forgejo::logins_of(&env, &[("selfhost", "https://git.example.invalid")]);
+    let (_, report) = doctor(&env);
+    let auth = row(&report, "auth git.example.invalid");
+    assert_eq!(auth["status"], "ok", "{report}");
+    assert_eq!(auth["detail"], "tea as me");
+}
+
+#[test]
+fn a_github_origin_reports_a_tea_that_is_not_logged_in_as_a_warning_only() {
+    let env = setup("99.0.0");
+    env.respond(&AUTH, "Logged in to github.com account octo (keyring)");
+    let (_, report) = doctor(&env);
+    let auth = row(&report, "auth tea");
+    assert_eq!(auth["status"], "warn", "{report}");
+    assert_eq!(auth["fix"], "tea login add");
+    forgejo::logins(&env);
+    let (_, report) = doctor(&env);
+    assert_eq!(row(&report, "auth tea")["detail"], "logged in as me");
+}
+
+#[test]
+fn offline_does_not_ask_tea_for_its_logins() {
+    let env = forgejo_setup();
+    let output = env
+        .bin(&env.repo)
+        .env("AGT_MISE_BIN", env.path("mise"))
+        .args(["--offline", "doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(row(&report, "auth")["detail"], "skipped: offline");
+    assert!(
+        !env.forge_calls()
+            .iter()
+            .any(|call| call.contains("logins list")),
         "{:?}",
         env.forge_calls()
     );

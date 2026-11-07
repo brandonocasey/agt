@@ -14,6 +14,7 @@ pub mod scenario;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agt");
 pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
+pub const FAKE_TEA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-tea.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
 /// Non-Git variables that can change a test. Tests that need one set it after `Env::command`.
@@ -117,6 +118,7 @@ impl Env {
             .env("TZ", "UTC")
             .env("AGT_GH_BIN", FAKE_FORGE)
             .env("AGT_GLAB_BIN", FAKE_FORGE)
+            .env("AGT_TEA_BIN", FAKE_TEA)
             .env("FAKE_FORGE_DIR", self.root.join("forge"))
             // `agt cleanup` must see only this environment: its cache, its tmp, no processes.
             .env("XDG_CACHE_HOME", self.root.join("cache"))

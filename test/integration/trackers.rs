@@ -3,7 +3,10 @@
 
 use crate::support::forge::FakeService;
 use crate::support::forge::github::Github;
-use crate::support::issue::{Github as GithubIssues, Gitlab as GitlabIssues, IssueFake, Spec};
+use crate::support::issue::{
+    FIRST_SINCE, Forgejo as ForgejoIssues, Github as GithubIssues, Gitlab as GitlabIssues,
+    IssueFake, Spec,
+};
 use crate::support::scenario::{Setup, kinds};
 use crate::support::{Env, strs};
 
@@ -125,6 +128,102 @@ fn sync_reports_the_trackers_that_keep_changes_local_when_only_some_do() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let kept = report["push"]["kept_local"].as_str().unwrap_or_default();
     assert!(kept.contains("gitlab.com/g/p"), "{report}");
+}
+
+/// Like [`two_remotes`], with a Forgejo project on codeberg.org as `upstream`.
+fn github_and_forgejo() -> Env {
+    let env = Env::new();
+    env.respond(&strs(&GithubIssues.user_call()), r#"{"login":"me"}"#);
+    ForgejoIssues.log_in(&env);
+    env.respond(&strs(&ForgejoIssues.user_call()), r#"{"login":"me"}"#);
+    env.git(&["remote", "add", "origin", "https://github.com/o/r.git"]);
+    env.git(&["remote", "add", "upstream", "https://codeberg.org/o/r.git"]);
+    env
+}
+
+/// Both remotes as trackers reading every issue; `forgejo` is extra keys of Forgejo's issues table.
+fn github_and_forgejo_all(forgejo: &str) -> String {
+    format!(
+        "[sync]\npush = \"manual\"\n\
+         [[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\nissues = {{ scope = \"all\" }}\n\
+         [[tracker]]\nhost = \"codeberg.org\"\nrepo = \"o/r\"\nissues = {{ {forgejo}scope = \"all\" }}\n"
+    )
+}
+
+#[test]
+fn a_forgejo_remote_is_a_tracker_unless_remotes_says_origin() {
+    let env = github_and_forgejo();
+    let github: &dyn IssueFake = &GithubIssues;
+    github.serve(&env, &[Spec::new(1, "One")]);
+    env.write_config(
+        "[[tracker]]\nhost = \"github.com\"\nrepo = \"o/r\"\nissues = { scope = \"all\" }\n",
+    );
+    env.issue_exec(&["sync"], "", &[]);
+    assert!(reached(&env, "repos/o/r"), "{:?}", env.forge_calls());
+    assert!(
+        reached(&env, "api --login codeberg"),
+        "{:?}",
+        env.forge_calls()
+    );
+
+    let env = github_and_forgejo();
+    env.write_config("[sync]\nremotes = \"origin\"\n");
+    env.issue_exec(&["sync"], "", &[]);
+    assert!(reached(&env, "repos/o/r"), "{:?}", env.forge_calls());
+    assert!(
+        !reached(&env, "api --login codeberg"),
+        "{:?}",
+        env.forge_calls()
+    );
+}
+
+#[test]
+fn a_failing_forgejo_tracker_is_named_and_the_others_still_sync() {
+    let env = github_and_forgejo();
+    let github: &dyn IssueFake = &GithubIssues;
+    github.serve(&env, &[Spec::new(1, "One")]);
+    let forgejo: &dyn IssueFake = &ForgejoIssues;
+    env.fail_call_with(
+        &strs(&forgejo.list_call(FIRST_SINCE)),
+        "tea: Internal Server Error (HTTP 500)",
+    );
+    env.write_config(&github_and_forgejo_all(""));
+    let output = env.issue_exec(&["sync"], "", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("codeberg.org/o/r"), "{stderr}");
+    assert!(stderr.contains("500"), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let trackers = report["trackers"].as_array().unwrap();
+    assert_eq!(trackers.len(), 2, "{report}");
+    assert!(
+        trackers.iter().any(|tracker| tracker["error"].is_string()),
+        "{report}"
+    );
+    assert!(
+        trackers
+            .iter()
+            .any(|tracker| tracker.get("error").is_none()),
+        "{report}"
+    );
+}
+
+#[test]
+fn sync_reports_a_forgejo_tracker_that_keeps_changes_local() {
+    let env = github_and_forgejo();
+    let github: &dyn IssueFake = &GithubIssues;
+    github.serve(&env, &[Spec::new(1, "One")]);
+    let forgejo: &dyn IssueFake = &ForgejoIssues;
+    forgejo.serve(&env, &[Spec::new(1, "One")]);
+    env.write_config(&github_and_forgejo_all("push = \"off\", "));
+    let output = env.issue_exec(&["sync"], "", &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("kept local") && stderr.contains("codeberg.org/o/r"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("github.com/o/r"), "{stderr}");
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use crate::forge::CommentData;
-use crate::forge::markers::{agent_id, is_landed_as};
+use crate::forge::markers::{self, agent_id, is_landed_as, is_review_id};
 use crate::forge::service::{Capabilities, ReviewService};
 use crate::review::commands::killed;
 use crate::store::model::{Comment, Target};
@@ -82,6 +82,15 @@ impl<'a> Trust<'a> {
     pub(super) fn verified(&self, comment: &CommentData) -> bool {
         trusted(comment, self.login)
             && (self.caps.edits_attributed || self.sent.contains(comment.body.trim()))
+    }
+
+    /// A review of mine whose whole body is the marker of its commit. It carries no text, so
+    /// even where no sent text can vouch for it, nobody can have changed what it says.
+    pub(super) fn is_review_marker(&self, comment: &CommentData) -> bool {
+        trusted(comment, self.login)
+            && agent_id(&comment.body).is_some_and(|id| {
+                is_review_id(&id) && comment.body.trim() == markers::agent(&id, None)
+            })
     }
 
     /// The agent-review id of a verified comment.

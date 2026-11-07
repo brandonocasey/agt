@@ -1,0 +1,14 @@
+{
+  "number": {{NUMBER}},
+  "html_url": "https://{{HOST}}/{{REPO}}/pulls/{{NUMBER}}",
+  "title": "Change line three",
+  "state": "open",
+  "merged": false,
+  "merged_at": null,
+  "closed_at": null,
+  "created_at": "2026-10-12T09:00:00Z",
+  "draft": false,
+  "user": { "login": "{{AUTHOR}}" },
+  "base": { "ref": "main", "sha": "{{BASE}}", "repo": { "full_name": "{{REPO}}" } },
+  "head": { "ref": "feat", "sha": "{{HEAD}}", "repo": { "full_name": "{{REPO}}" } }
+}

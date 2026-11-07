@@ -1875,3 +1875,282 @@ fn a_named_check_missing_across_polls_is_not_found_after_the_grace_from_the_firs
         ["checks_pending", "job_not_found", "action_required"]
     );
 }
+
+const FORGEJO_TARGET: &str = "https://codeberg.org/o/r/pulls/5";
+const TEA: [(&str, &str); 1] = [("AGT_TEA_BIN", FAKE)];
+
+/// The login read tea makes before it first reaches a host; every poll makes it again.
+fn tea_login() -> Step {
+    step(
+        "logins list",
+        r#"[{"name":"codeberg","url":"https://codeberg.org","user":"me","default":true}]"#,
+    )
+}
+
+fn forgejo_pull(fields: Value) -> String {
+    let mut pull = json!({
+        "number": 5, "html_url": FORGEJO_TARGET, "state": "open", "merged": false,
+        "merged_at": null, "head": {"ref": "feat", "sha": "abc123"},
+    });
+    for (key, value) in fields.as_object().unwrap() {
+        pull[key] = value.clone();
+    }
+    pull.to_string()
+}
+
+fn commit_status(context: &str, state: &str) -> Value {
+    json!({
+        "context": context, "status": state, "description": format!("{context} {state}"),
+        "target_url": "https://codeberg.org/o/r/actions/runs/1",
+    })
+}
+
+/// One poll: the login, the PR, then the combined status of its head.
+fn forgejo_poll(fields: Value, statuses: &[Value]) -> Vec<Step> {
+    let head = fields["head"]["sha"]
+        .as_str()
+        .unwrap_or("abc123")
+        .to_owned();
+    vec![
+        tea_login(),
+        step("repos/o/r/pulls/5", &forgejo_pull(fields)),
+        step(
+            &format!("repos/o/r/commits/{head}/status"),
+            &json!({"statuses": statuses}).to_string(),
+        ),
+    ]
+}
+
+fn forgejo_run(polls: Vec<Vec<Step>>, target: &str) -> Outcome {
+    let steps: Vec<Step> = polls.into_iter().flatten().collect();
+    run_with(&steps, target, &[], &TEA)
+}
+
+#[test]
+fn forgejo_emits_initial_changed_and_final_events_from_the_combined_status() {
+    let outcome = forgejo_run(
+        vec![
+            forgejo_poll(json!({}), &[commit_status("ci/build", "pending")]),
+            forgejo_poll(json!({}), &[commit_status("ci/build", "success")]),
+        ],
+        FORGEJO_TARGET,
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "change", "final"]);
+    assert_eq!(outcome.events[0]["target"], "o/r#5");
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
+fn forgejo_counts_every_status_and_lists_the_failed_ones() {
+    let outcome = forgejo_run(
+        vec![forgejo_poll(
+            json!({}),
+            &[
+                commit_status("ci/build", "success"),
+                commit_status("ci/lint", "failure"),
+                commit_status("ci/deploy", "error"),
+            ],
+        )],
+        FORGEJO_TARGET,
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    let failed: Vec<&str> = last(&outcome)["results"][0]["failed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(failed, ["ci/deploy", "ci/lint"]);
+}
+
+#[test]
+fn forgejo_reads_every_page_of_the_combined_status() {
+    let statuses: Vec<Value> = (0..120)
+        .map(|index| commit_status(&format!("ci/{index}"), "success"))
+        .collect();
+    let page = |from: usize, to: usize| {
+        step(
+            &format!("commits/abc123/status?limit=50&page={}", from / 50 + 1),
+            &json!({"statuses": &statuses[from..to]}).to_string(),
+        )
+    };
+    let steps = vec![
+        tea_login(),
+        step("repos/o/r/pulls/5", &forgejo_pull(json!({}))),
+        page(0, 50),
+        page(50, 100),
+        page(100, 120),
+    ];
+    let outcome = run_with(&steps, FORGEJO_TARGET, &[], &TEA);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(
+        outcome.events[0]["checks"].as_array().map(Vec::len),
+        Some(120)
+    );
+}
+
+#[test]
+fn forgejo_without_statuses_is_pending_right_after_the_wait_starts() {
+    let outcome = forgejo_run(
+        vec![
+            forgejo_poll(json!({}), &[]),
+            forgejo_poll(json!({}), &[commit_status("ci/build", "success")]),
+        ],
+        FORGEJO_TARGET,
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn forgejo_reports_merged_and_closed_pull_requests() {
+    let cases = [
+        (
+            json!({"state": "closed", "merged": true, "merged_at": "2026-10-02T12:00:00Z"}),
+            0,
+            "merged",
+        ),
+        (json!({"state": "closed"}), 1, "closed"),
+    ];
+    for (fields, status, reason) in cases {
+        let outcome = forgejo_run(vec![forgejo_poll(fields, &[])], FORGEJO_TARGET);
+        assert_eq!(outcome.status, status, "{}", outcome.stderr);
+        assert_eq!(outcome.events[0]["reason"], reason);
+    }
+}
+
+#[test]
+fn forgejo_waits_for_the_head_to_reach_the_commit_the_target_names() {
+    let outcome = forgejo_run(
+        vec![
+            forgejo_poll(
+                json!({"head": {"ref": "feat", "sha": "old111"}}),
+                &[commit_status("ci/build", "success")],
+            ),
+            forgejo_poll(json!({}), &[commit_status("ci/build", "success")]),
+        ],
+        "https://codeberg.org/o/r/pulls/5@abc123",
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "waiting_for_pipeline");
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn forgejo_reports_a_head_change_after_the_first_read() {
+    let outcome = forgejo_run(
+        vec![
+            forgejo_poll(json!({}), &[commit_status("ci/build", "pending")]),
+            forgejo_poll(
+                json!({"head": {"ref": "feat", "sha": "def456"}}),
+                &[commit_status("ci/build", "pending")],
+            ),
+        ],
+        FORGEJO_TARGET,
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[1]["reason"], "head_changed");
+    assert_eq!(outcome.events[1]["expectedHead"], "abc123");
+    assert_eq!(outcome.events[1]["observedHead"], "def456");
+}
+
+#[test]
+fn forgejo_query_failures_name_their_cause_and_exit_2() {
+    let cases = [
+        ("tea: Unauthorized (HTTP 401)", "authentication_error"),
+        ("tea: Forbidden (HTTP 403)", "permission_error"),
+        ("tea: Not Found (HTTP 404)", "query_error"),
+    ];
+    for (stderr, reason) in cases {
+        let steps = [tea_login(), failing("repos/o/r/pulls/5", stderr, 1)];
+        let outcome = run_with(&steps, FORGEJO_TARGET, &[], &TEA);
+        assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+        assert_eq!(outcome.events[0]["reason"], reason, "{stderr}");
+        assert_eq!(last(&outcome)["reason"], "action_required");
+    }
+}
+
+#[test]
+fn forgejo_without_a_tea_login_is_a_query_error_that_names_the_login_command() {
+    let steps = [step("logins list", "[]")];
+    let outcome = run_with(&steps, FORGEJO_TARGET, &[], &TEA);
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    let detail = outcome.events[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("tea has no login for codeberg.org"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_missing_tea_is_a_query_error() {
+    let outcome = run_with(
+        &[],
+        FORGEJO_TARGET,
+        &[],
+        &[("AGT_TEA_BIN", "/nonexistent/agt-test-tea")],
+    );
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "query_error");
+}
+
+#[test]
+fn transient_forgejo_failures_are_retried() {
+    let mut polls: Vec<Vec<Step>> = (0..4)
+        .map(|_| {
+            vec![
+                tea_login(),
+                failing("repos/o/r/pulls/5", "tea: Bad Gateway (HTTP 502)", 1),
+            ]
+        })
+        .collect();
+    polls.push(forgejo_poll(
+        json!({}),
+        &[commit_status("ci/build", "success")],
+    ));
+    let outcome = forgejo_run(polls, FORGEJO_TARGET);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "final"]);
+}
+
+#[test]
+fn a_forgejo_actions_run_url_is_refused_as_a_usage_error() {
+    let outcome = run_with(&[], "https://codeberg.org/o/r/actions/runs/4", &[], &TEA);
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    assert!(outcome.stderr.contains("Actions run"), "{}", outcome.stderr);
+}
+
+#[test]
+fn a_bare_hash_reference_names_the_pull_request_of_a_forgejo_origin() {
+    let scenario = Scenario::new(&forgejo_poll(
+        json!({}),
+        &[commit_status("ci/build", "success")],
+    ));
+    scenario
+        .env
+        .git(&["remote", "add", "origin", "https://codeberg.org/o/r.git"]);
+    let mut args = vec!["#5"];
+    args.extend(FAST);
+    let output = scenario.command(&args, &TEA).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(events(&output.stdout)[0]["target"], "o/r#5");
+
+    let scenario = Scenario::new(&[]);
+    scenario
+        .env
+        .git(&["remote", "add", "origin", "https://codeberg.org/o/r.git"]);
+    let output = scenario.command(&["!5"], &TEA).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is Forgejo, but"), "{stderr}");
+}

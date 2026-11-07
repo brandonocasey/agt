@@ -2,20 +2,26 @@
 # Fake gh/glab for tests. Replays $FAKE_FORGE_DIR/<key>.<n>.json for the n-th call with a key,
 # else <key>.json, where the key is the git hash-object of the argument list. A GraphQL
 # `query=query Name(...)` or `query=mutation Name(...)` argument is keyed as `query=Name` and a
-# `body=<text>` argument as `body=`. The request body (`--input -` stdin or the `body=` text) of
+# `body=<text>` argument as `body=`. The request body (`--input -` or tea's `-d @-` stdin, or the `body=` text) of
 # call number <c> in calls.log is saved as input-<c>. <key>.fail makes the call fail after its
 # input is read, as when a write reaches the host but its response is lost; a non-empty
 # <key>.fail is printed to stderr as the tool's error, such as `glab: 403 Forbidden (HTTP 403)`. In a response,
 # {{LAST_NOTE}}, {{LAST_BODY}} and {{LAST_DESCRIPTION}} stand for the JSON-escaped "note",
 # "body" or "description" of the latest request that sent one, the text the host then shows. A glab call (one with GITLAB_HOST set)
 # first tries <key>.glab.json, so gh and glab can answer the same arguments differently. Any
-# other call fails.
+# other call fails. With FAKE_FORGE_PAGED set (fake-tea.sh does) a trailing `limit=<n>&page=<p>`
+# is not part of the key and calls.log keeps it: `<key>.items` (one JSON value per line) answers
+# page <p> of <n> items, while a `<key>.json` answers every page, and only page 1 counts as a
+# call for the n-th response.
 set -eu
 dir=$FAKE_FORGE_DIR
 body=
 has_body=0
 stdin=0
 previous=
+page=
+limit=
+logged=$*
 for arg do
   shift
   case $arg in
@@ -31,11 +37,23 @@ for arg do
     -)
       [ "$previous" = --input ] && stdin=1
       ;;
+    @-)
+      [ "$previous" = -d ] && stdin=1
+      ;;
+    *limit=[0-9]*\&page=[0-9]*)
+      if [ -n "${FAKE_FORGE_PAGED:-}" ]; then
+        page=${arg##*page=}
+        rest=${arg%\&page=*}
+        limit=${rest##*limit=}
+        arg=${rest%[?\&]limit=*}
+      fi
+      ;;
   esac
   previous=$arg
   set -- "$@" "$arg"
 done
-printf '%s\t%s\n' "${GITLAB_HOST:-}" "$*" >> "$dir/calls.log"
+[ -n "${FAKE_FORGE_PAGED:-}" ] || logged=$*
+printf '%s\t%s\n' "${GITLAB_HOST:-}" "$logged" >> "$dir/calls.log"
 call=$(wc -l < "$dir/calls.log" | tr -d ' ')
 if [ "$stdin" = 1 ]; then
   cat > "$dir/input-$call"
@@ -44,8 +62,12 @@ elif [ "$has_body" = 1 ]; then
 fi
 key=$(printf '%s\n' "$@" | git hash-object --stdin)
 count=1
-[ -f "$dir/$key.count" ] && count=$(($(cat "$dir/$key.count") + 1))
-printf '%s\n' "$count" > "$dir/$key.count"
+if [ -n "$page" ] && [ "$page" != 1 ]; then
+  count=$(cat "$dir/$key.count")
+else
+  [ -f "$dir/$key.count" ] && count=$(($(cat "$dir/$key.count") + 1))
+  printf '%s\n' "$count" > "$dir/$key.count"
+fi
 if [ -f "$dir/$key.fail" ]; then
   if [ -s "$dir/$key.fail" ]; then
     cat "$dir/$key.fail" >&2
@@ -94,6 +116,11 @@ reply() {
     print line
   }' "$1"
 }
+if [ -n "$page" ] && [ -f "$dir/$key.items" ]; then
+  awk -v from=$(((page - 1) * limit + 1)) -v to=$((page * limit)) \
+    'NR >= from && NR <= to { out = out (n++ ? "," : "") $0 } END { print "[" out "]" }' "$dir/$key.items"
+  exit 0
+fi
 glab=
 [ -n "${GITLAB_HOST:-}" ] && glab=$dir/$key.glab.json
 for file in $glab "$dir/$key.$count.json" "$dir/$key.json"; do

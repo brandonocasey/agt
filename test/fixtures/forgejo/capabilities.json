@@ -1,0 +1,14 @@
+{
+  "approve": "review",
+  "approve_self_allowed": false,
+  "edits_attributed": false,
+  "general_kind": "general",
+  "general_resolvable": false,
+  "inline": "review_batch",
+  "notes_become_discussions": false,
+  "pagination": "page_numbers",
+  "ranges": false,
+  "reply": "none",
+  "resolve": false,
+  "unresolve": false
+}
