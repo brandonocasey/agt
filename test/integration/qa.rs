@@ -325,9 +325,8 @@ fn a_failed_check_no_thread_explains_is_left_to_fix() {
         "{summary}"
     );
     assert!(
-        summary.contains(
-            "1. 🧪 **pay with a card failed.**\n   [evidence](https://example.com/log)\n"
-        ),
+        summary
+            .contains("1. 🧪 **pay with a card failed.** · [evidence](https://example.com/log)\n"),
         "{summary}"
     );
     assert!(
@@ -470,7 +469,7 @@ fn publish_adds_a_qa_section_to_the_summary() {
     let summary = write_text(&dry, "body", "qa-record");
     assert!(summary.starts_with("**⚠️ 1 to fix** at `"), "{summary}");
     assert!(
-        summary.contains("1. 🧪 **Payment hangs.**\n   High · QA: pay with a card · whole PR · not posted as a thread, full text below"),
+        summary.contains("1. 🧪 **Payment hangs.** · High · QA: pay with a card · whole PR\n"),
         "{summary}"
     );
     assert!(
@@ -574,4 +573,86 @@ fn a_headless_target_still_reports_qa() {
     assert_eq!(review["head"], Value::Null, "{review}");
     assert_eq!(review["qa"], qa(&env, &["--target", &key, "status"])["qa"]);
     assert_eq!(review["qa"]["stale"], 1, "{review}");
+}
+
+/// Five findings (four in the diff, one on the whole PR) and a QA run with two passes and a
+/// failure that found a bug. The text the PR gets before this layout took 63 lines.
+#[test]
+fn published_text_is_short_and_actionable_findings_are_threads() {
+    let svc = Github::new();
+    let setup = Setup::branch(
+        svc.origin(),
+        &Review {
+            reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+            findings: r#"[
+  {"type":"bug","severity":"high","path":"a.txt","line":3,"scenario":"Bug one. Details about the failure that are long enough to matter for the reader here."},
+  {"type":"bug","severity":"low","path":"a.txt","line":4,"scenario":"Bug two. More details."},
+  {"type":"nit","path":"a.txt","line":5,"scenario":"Nit three. Rename it."},
+  {"type":"question","path":"a.txt","line":6,"scenario":"Why four? Explain."},
+  {"type":"nit","scenario":"General five. Whole PR remark."}
+]"#,
+        },
+        false,
+        false,
+    );
+    svc.link(&setup);
+    let env = &setup.env;
+    let run = start(env, &[]);
+    check(env, &run, "login works", "pass", &["--note", "fine"]);
+    check(env, &run, "logout works", "pass", &[]);
+    let failed = check(
+        env,
+        &run,
+        "pay with a card",
+        "fail",
+        &["--evidence", "https://example.com/log"],
+    );
+    qa(
+        env,
+        &[
+            "finding",
+            "--check",
+            &failed,
+            "--type",
+            "bug",
+            "--severity",
+            "high",
+            "--body",
+            "Payment hangs. The spinner never stops.",
+        ],
+    );
+    qa(env, &["run", "end", "--run", &run]);
+    let dry = qa(env, &["publish", "--pr", "42", "--dry-run"]);
+
+    // The four in-diff findings are review comments, which the host lets a person resolve; the
+    // two it cannot resolve are not posted as comments and live in the summary.
+    let writes = dry["writes"].as_array().unwrap();
+    let kinds: Vec<&str> = writes
+        .iter()
+        .map(|write| write["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["review", "summary"], "{dry}");
+    assert_eq!(writes[0]["input"]["comments"].as_array().unwrap().len(), 4);
+
+    let mut texts = vec![writes[0]["input"]["body"].as_str().unwrap().to_owned()];
+    for comment in writes[0]["input"]["comments"].as_array().unwrap() {
+        texts.push(comment["body"].as_str().unwrap().to_owned());
+    }
+    texts.push(writes[1]["input"]["body"].as_str().unwrap().to_owned());
+    let lines: usize = texts.iter().map(|text| text.lines().count()).sum();
+    assert!(lines <= 55, "{lines} lines:\n{}", texts.join("\n=====\n"));
+
+    let summary = write_text(&dry, "body", "qa-record");
+    assert!(
+        summary.contains(
+            "\n1. 🐛 **Bug one.** · High · `a.txt:3`\n2. 🐛 **Bug two.** · Low · `a.txt:4`\n"
+        ),
+        "{summary}"
+    );
+    assert!(
+        summary.contains(
+            "5. ✏️ **General five.** · whole PR\n   > General five. Whole PR remark.\n\n"
+        ),
+        "{summary}"
+    );
 }

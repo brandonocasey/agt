@@ -329,8 +329,8 @@ fn approvals<'a>(target: &'a Target, covered: &[Covered], qa: &QaSummary) -> App
     }
 }
 
-/// One open finding or QA thread: its first sentence, then severity, place and thread link.
-/// One that is not posted as its own thread shows its whole text below.
+/// One open finding or QA thread on one line: its first sentence, then severity, place and
+/// thread link. One that is not posted as its own thread shows its whole text below.
 fn open_item(number: usize, qa: &QaSummary, thread: &Thread) -> String {
     let first = thread.comments.first();
     let said = first.map_or("", |first| first.body.as_str());
@@ -364,7 +364,6 @@ fn open_item(number: usize, qa: &QaSummary, thread: &Thread) -> String {
         Some(url) => meta.push(format!("[thread]({url})")),
         // Text the first sentence already says in full needs no quote.
         None if remote.is_none() && gist != said.trim() => {
-            meta.push("not posted as a thread, full text below".to_owned());
             let mut full = clip(said.trim(), MAX_NOTE);
             close_fence(&mut full);
             quote = Some(full);
@@ -372,9 +371,8 @@ fn open_item(number: usize, qa: &QaSummary, thread: &Thread) -> String {
         None => {}
     }
     let pad = indent(number);
-    let mut text = format!("{number}. {emoji} **{gist}**\n{pad}{}", meta.join(" · "));
+    let mut text = format!("{number}. {emoji} **{gist}** · {}", meta.join(" · "));
     if let Some(full) = quote {
-        text.push('\n');
         for line in full.lines() {
             let _ = write!(text, "\n{pad}> {line}");
         }
@@ -383,7 +381,8 @@ fn open_item(number: usize, qa: &QaSummary, thread: &Thread) -> String {
     text
 }
 
-/// A failed or blocked check no thread explains, with its environment and first evidence link.
+/// A failed or blocked check no thread explains, on one line with its environment and first
+/// evidence link.
 fn check_item(number: usize, state: &CheckState) -> String {
     let check = state.check;
     let result = match check.outcome {
@@ -400,7 +399,7 @@ fn check_item(number: usize, state: &CheckState) -> String {
         meta.push(format!("[evidence]({url})"));
     }
     if !meta.is_empty() {
-        let _ = write!(text, "\n{}{}", indent(number), meta.join(" · "));
+        let _ = write!(text, " · {}", meta.join(" · "));
     }
     text
 }
@@ -503,40 +502,54 @@ fn details(text: &mut String, qa: &QaSummary, reported: &[&Thread], approvals: &
         if !qa.checks.is_empty() {
             text.push('\n');
         }
-        text.push_str("| 🔍 Closed finding | Outcome |\n|---|---|\n");
-        for thread in &posted {
-            let first = thread.comments.first();
-            let said = gist(first.map_or("", |first| first.body.as_str()));
-            let emoji = if thread.check.is_some() {
-                "🧪"
-            } else {
-                kind_emoji(thread.kind)
-            };
-            let finding = match first
-                .and_then(|first| first.remote.as_ref())
-                .and_then(|remote| remote.url.as_deref())
-            {
-                Some(url) => format!("[{}]({url})", cell(&said)),
-                None => cell(&said),
-            };
-            let _ = writeln!(text, "| {emoji} {finding} | {} |", cell(&outcome(thread)));
-        }
+        closed_table(text, &posted);
     }
     if !unposted.is_empty() {
-        let (verb, pronoun) = match unposted.len() {
-            1 => ("was", "it was"),
-            _ => ("were", "they were"),
-        };
         if !qa.checks.is_empty() || !posted.is_empty() {
             text.push('\n');
         }
-        let _ = writeln!(
-            text,
-            "{} {verb} fixed or dropped before {pronoun} posted.",
-            count(unposted.len(), "more finding")
-        );
+        unposted_note(text, unposted.len());
     }
     text.push_str("\n</details>");
+}
+
+/// The table of the closed findings posted as threads, each with its outcome.
+fn closed_table(text: &mut String, posted: &[&Thread]) {
+    text.push_str("| 🔍 Closed finding | Outcome |\n|---|---|\n");
+    for thread in posted {
+        let first = thread.comments.first();
+        let said = gist(first.map_or("", |first| first.body.as_str()));
+        let emoji = if thread.check.is_some() {
+            "🧪"
+        } else {
+            kind_emoji(thread.kind)
+        };
+        let finding = match first
+            .and_then(|first| first.remote.as_ref())
+            .and_then(|remote| remote.url.as_deref())
+        {
+            Some(url) => format!("[{}]({url})", cell(&said)),
+            None => cell(&said),
+        };
+        let mut result = outcome(thread);
+        if let Some(issue) = &thread.issue {
+            let _ = write!(result, " · Related: {issue}");
+        }
+        let _ = writeln!(text, "| {emoji} {finding} | {} |", cell(&result));
+    }
+}
+
+/// The line saying how many closed findings were fixed or dropped before they were posted.
+fn unposted_note(text: &mut String, unposted: usize) {
+    let (verb, pronoun) = match unposted {
+        1 => ("was", "it was"),
+        _ => ("were", "they were"),
+    };
+    let _ = writeln!(
+        text,
+        "{} {verb} fixed or dropped before {pronoun} posted.",
+        count(unposted, "more finding")
+    );
 }
 
 /// The table of the latest check of each name.
@@ -943,6 +956,52 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_finding_names_its_related_issue() {
+        let author = crate::store::model::Author::Human {
+            login: "me".into(),
+            git_name: false,
+        };
+        let remote = crate::store::model::RemoteComment {
+            id: "9".into(),
+            url: Some("https://h/c/9".into()),
+            login: Some("me".into()),
+            is_me: true,
+            editor: None,
+            review_id: None,
+        };
+        let comment = crate::store::model::Comment::new(
+            "f1/c1".into(),
+            author,
+            "Why so? More.".into(),
+            "2026-01-01T00:00:00Z".into(),
+            crate::store::model::PostState::Posted,
+            Some(remote),
+        );
+        let mut thread = Thread::new(
+            "f1".into(),
+            crate::store::model::ThreadType::Question,
+            vec![comment],
+            "2026-01-01T00:00:00Z".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        thread.resolved = true;
+        thread.resolution = Some(Resolution::Answered);
+        thread.issue = Some("o/r#12".into());
+        let qa = QaSummary {
+            runs: Vec::new(),
+            checks: Vec::new(),
+            head: "abc".into(),
+        };
+        let open = approvals(false, false, false, None);
+        let mut text = String::new();
+        details(&mut text, &qa, &[&thread], &open);
+        assert!(
+            text.contains("| ❓ [Why so?](https://h/c/9) | 💬 Answered · Related: o/r#12 |"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn items_are_indented_under_their_number() {
         assert_eq!(indent(3), "   ");
         assert_eq!(indent(12), "    ");
@@ -951,7 +1010,7 @@ mod tests {
     #[test]
     fn a_long_summary_continues_in_parts_at_item_boundaries() {
         let items: Vec<String> = (1..=300)
-            .map(|number| format!("{number}. ✏️ **Item.**\n   whole PR\n{}", "x".repeat(400)))
+            .map(|number| format!("{number}. ✏️ **Item.** · whole PR\n{}", "x".repeat(420)))
             .collect();
         let head = "**⚠️ 300 to fix** at `abc1234`";
         let tail = "\n\n> <sub>agt</sub>";

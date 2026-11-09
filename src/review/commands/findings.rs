@@ -14,7 +14,7 @@ use crate::store::{Namespace, Store};
 
 use super::input::{AnchorInput, build_anchor, limited, read_body};
 use super::qa::{check_run, qa_author};
-use super::{Ctx, find_pass, find_pass_mut, find_thread_mut, killed, major_found};
+use super::{Ctx, Scope, find_pass, find_pass_mut, find_thread_mut, killed, major_found};
 
 /// A comment written here, numbered after the thread's other local comments.
 pub(super) fn local_comment(
@@ -218,6 +218,9 @@ pub(super) struct FindingInput {
     pub(super) reason: Option<String>,
     /// Reviewer id; `pass end --reviewer` names it for findings that carry none.
     pub(super) reviewer: Option<String>,
+    /// A related issue (`owner/repo#12`, `#12` or `12`) the posted text names. `pass end` swaps
+    /// it for the host key before the finding is stored.
+    pub(super) issue: Option<String>,
 }
 
 pub(super) fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<FindingInput>> {
@@ -233,29 +236,40 @@ pub(super) fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<Find
     for (index, item) in items.into_iter().enumerate() {
         let finding: FindingInput =
             serde_json::from_value(item).map_err(ctx(format!("finding {index}")))?;
-        if finding.scenario.trim().is_empty() {
-            return fail(format!("finding {index}: scenario must not be empty"));
-        }
-        if finding.kind == ThreadType::Bug && finding.severity.is_none() {
-            return fail(format!("finding {index}: a bug needs a severity"));
-        }
-        match (&finding.reason, finding.killed) {
-            (None, true) => {
-                return fail(format!("finding {index}: a killed finding needs a reason"));
-            }
-            (Some(_), false) => {
-                return fail(format!(
-                    "finding {index}: reason is only for killed findings"
-                ));
-            }
-            (Some(reason), true) if reason.trim().is_empty() => {
-                return fail(format!("finding {index}: reason must not be empty"));
-            }
-            _ => {}
-        }
+        check_finding(index, &finding)?;
         findings.push(finding);
     }
     Ok(findings)
+}
+
+/// Refuses a finding whose fields contradict each other; `index` names it in the error.
+fn check_finding(index: usize, finding: &FindingInput) -> Result<()> {
+    if finding.scenario.trim().is_empty() {
+        return fail(format!("finding {index}: scenario must not be empty"));
+    }
+    if finding.kind == ThreadType::Bug && finding.severity.is_none() {
+        return fail(format!("finding {index}: a bug needs a severity"));
+    }
+    match (&finding.reason, finding.killed) {
+        (None, true) => {
+            return fail(format!("finding {index}: a killed finding needs a reason"));
+        }
+        (Some(_), false) => {
+            return fail(format!(
+                "finding {index}: reason is only for killed findings"
+            ));
+        }
+        (Some(reason), true) if reason.trim().is_empty() => {
+            return fail(format!("finding {index}: reason must not be empty"));
+        }
+        _ => {}
+    }
+    if finding.killed && finding.issue.is_some() {
+        return fail(format!(
+            "finding {index}: a killed finding is never posted, so it takes no issue"
+        ));
+    }
+    Ok(())
 }
 
 /// Stores one reviewer's findings on a pass; returns the new thread and killed ids.
@@ -341,7 +355,7 @@ pub(super) fn add_findings(
                 });
                 continue;
             }
-            threads.push(local_thread(
+            let mut thread = local_thread(
                 NewThread {
                     id,
                     kind: finding.kind,
@@ -360,7 +374,9 @@ pub(super) fn add_findings(
                 agent.clone(),
                 finding.scenario,
                 now,
-            ));
+            );
+            thread.issue = finding.issue;
+            threads.push(thread);
         }
         let added: Vec<String> = threads.iter().map(|thread| thread.id.clone()).collect();
         let killed_ids: Vec<String> = killed.iter().map(|finding| finding.id.clone()).collect();
@@ -389,31 +405,7 @@ pub(super) fn comment(
         side: args.side,
         start_line: args.start_line,
     };
-    let anchor = if anchor_input.path.is_some() {
-        let (commit, tree) = match &args.commit {
-            Some(rev) => {
-                let commit = ctx.repo.commit(rev)?;
-                let tree = ctx.repo.tree_of(&commit)?;
-                (Some(commit), tree)
-            }
-            None => ctx.reviewed_state(&scope)?,
-        };
-        let anchor = build_anchor(&anchor_input, commit, tree)?;
-        if let Some(anchor) = &anchor
-            && anchor.side == Side::New
-        {
-            let state = anchor.commit.as_deref().unwrap_or(&anchor.tree);
-            if !ctx
-                .repo
-                .object_exists(&format!("{state}:{}", anchor.path))?
-            {
-                return fail(format!("{} does not exist at {state}", anchor.path));
-            }
-        }
-        anchor
-    } else {
-        build_anchor(&anchor_input, None, String::new())?
-    };
+    let anchor = comment_anchor(ctx, &scope, args, &anchor_input)?;
     let issue = args
         .issue
         .as_deref()
@@ -454,7 +446,43 @@ pub(super) fn comment(
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
+    if let Some(issue) = &thread.issue {
+        link_review(ctx, issue, &scope.key)?;
+    }
     Ok(json!({ "target": scope.key, "thread": thread }))
+}
+
+/// The anchor a comment's `--path` options name, checked against the commit it is read at.
+fn comment_anchor(
+    ctx: &Ctx,
+    scope: &Scope,
+    args: &CommentArgs,
+    anchor_input: &AnchorInput,
+) -> Result<Option<Anchor>> {
+    if anchor_input.path.is_none() {
+        return build_anchor(anchor_input, None, String::new());
+    }
+    let (commit, tree) = match &args.commit {
+        Some(rev) => {
+            let commit = ctx.repo.commit(rev)?;
+            let tree = ctx.repo.tree_of(&commit)?;
+            (Some(commit), tree)
+        }
+        None => ctx.reviewed_state(scope)?,
+    };
+    let anchor = build_anchor(anchor_input, commit, tree)?;
+    if let Some(anchor) = &anchor
+        && anchor.side == Side::New
+    {
+        let state = anchor.commit.as_deref().unwrap_or(&anchor.tree);
+        if !ctx
+            .repo
+            .object_exists(&format!("{state}:{}", anchor.path))?
+        {
+            return fail(format!("{} does not exist at {state}", anchor.path));
+        }
+    }
+    Ok(anchor)
 }
 
 /// The host key (`owner/repo#12`) of the stored issue `text` names. An issue only stored here is
@@ -488,7 +516,7 @@ pub(super) fn issue_key(ctx: &Ctx, text: &str) -> Result<String> {
 }
 
 /// Records review target `key` in the links of issue `issue`, so the issue points back.
-fn link_review(ctx: &Ctx, issue: &str, key: &str) -> Result<()> {
+pub(super) fn link_review(ctx: &Ctx, issue: &str, key: &str) -> Result<()> {
     let reference = parse_ref(issue)?;
     let store = Store::open_repo(Namespace::Issues, &ctx.repo, false)?;
     for (dir, doc) in store.issue_trackers()? {

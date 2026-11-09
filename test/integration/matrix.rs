@@ -1365,7 +1365,7 @@ fn the_summary_of_one_open_finding_leads_with_what_to_fix(svc: Svc) {
         "{summary}"
     );
     assert!(
-        summary.contains("1. 🐛 **In-diff text of f1.**\n   High · `a.txt:3`"),
+        summary.contains("1. 🐛 **In-diff text of f1.** · High · `a.txt:3`"),
         "{summary}"
     );
     assert!(

@@ -290,8 +290,10 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   posted is not posted; the summary counts it, and lists one moved to an issue under
   follow-up issues. Another store that syncs a reply to a general comment reads a fix or
   rejection back.
-- `comment --issue <issue>` and `agt qa finding --issue <issue>` record a related issue; the
-  posted text and the summary end with `Related: <owner/repo#n>` and the thread stays open. `--reply <text>`
+- `comment --issue <issue>`, `agt qa finding --issue <issue>` and the `issue` field of a `pass end
+  --findings` entry record a related issue and add the target to the issue's `links.reviews`; the
+  posted text and the summary (open items and the closed findings table) name
+  `Related: <owner/repo#n>` and the thread stays open. `--reply <text>`
   replaces the default reply, or adds a reply to any `resolve`; the author flags sign it.
   `resolve` takes several ids and changes them all in one write, or none when one is
   missing. With one id the output is the `thread`; with more, `threads` lists each id with
@@ -871,9 +873,10 @@ local reads continue.
   in the local repository, `<head>` is the newest head a run read and the head is listed under
   `Not reviewed` as not in the local repository. "To fix" counts open findings and current
   failed or blocked QA checks no open thread explains; out-of-date checks never count. Each
-  item has two lines: the emoji and the first sentence in bold, then severity, `Waiting on
+  item is one line: the emoji and the first sentence in bold, then severity, `Waiting on
   the PR author`, `QA: <check>`, the place (`path:line` or `whole PR`), `Related: <issue>`
-  and `[thread](url)`, or `not posted as a thread, full text below` and the text quoted.
+  and `[thread](url)`; a finding that is not posted as a thread has its whole text quoted
+  under the line.
   `Not reviewed: ...` names the commits no run read. Findings moved to issues are listed under
   **📋 Follow-up issues**. A collapsed Details section holds the QA checks table (a result
   that tested an older head says `(out of date)`) and the closed findings with their outcome,
@@ -1075,6 +1078,7 @@ described above). Unknown fields are rejected.
 | `post_reveal` | boolean | no | Found during the cycle 2 reveal |
 | `killed` | boolean | no | `true` stores it as a killed finding on the pass |
 | `reason` | string | when `killed` | Why it was killed; only for killed findings |
+| `issue` | string | no | A related issue on the host (`owner/repo#12`, `#12` or `12`), as `comment --issue`; not for killed findings |
 
 ```json
 [

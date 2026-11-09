@@ -397,7 +397,7 @@ fn github_a_general_finding_is_skipped_and_listed_in_the_summary() {
     let summary = dry["writes"][1]["input"]["body"].as_str().unwrap();
     assert!(summary.starts_with("**⚠️ 2 to fix** at `"), "{summary}");
     assert!(
-        summary.contains("2. ✏️ **General text of f2.**\n   whole PR\n"),
+        summary.contains("2. ✏️ **General text of f2.** · whole PR\n"),
         "{summary}"
     );
     assert!(!summary.contains("   > General text of f2."), "{summary}");

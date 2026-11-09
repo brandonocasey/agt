@@ -452,7 +452,7 @@ impl FakeService for Github {
         // quote repeats it.
         let summary = writes.last().unwrap()["input"]["body"].as_str().unwrap();
         assert!(
-            summary.contains("1. ✏️ **General text of f2.**\n   whole PR\n"),
+            summary.contains("1. ✏️ **General text of f2.** · whole PR\n"),
             "{summary}"
         );
         assert!(!summary.contains("   > General text of f2."), "{summary}");

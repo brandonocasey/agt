@@ -12,7 +12,7 @@ use crate::store::model::{
     Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, Risk, RoleUsage, Run, TaskType, Thread,
 };
 
-use super::findings::{FindingInput, add_findings, parse_findings};
+use super::findings::{FindingInput, add_findings, issue_key, link_review, parse_findings};
 use super::input::implementer_name;
 use super::prune::prune_dir;
 use super::status::{Requested, already_reviewed};
@@ -578,6 +578,7 @@ pub(super) fn pass_end(
     // output lists ids in input order.
     let mut groups: Vec<(String, Vec<usize>, Vec<FindingInput>)> = Vec::new();
     let mut is_killed = Vec::new();
+    let mut linked: Vec<String> = Vec::new();
     for (index, mut finding) in findings.into_iter().enumerate() {
         let id = finding
             .reviewer
@@ -589,6 +590,7 @@ pub(super) fn pass_end(
                 ))
             })?;
         is_killed.push(finding.reason.is_some());
+        resolve_issue(ctx, &mut finding, &mut linked)?;
         match groups.iter_mut().find(|(known, _, _)| *known == id) {
             Some((_, indexes, group)) => {
                 indexes.push(index);
@@ -622,20 +624,15 @@ pub(super) fn pass_end(
         if pass.ended_at.is_some() {
             return fail(format!("pass {run_id}.{pass_id} already ended"));
         }
-        for spent in &usage {
-            let id = spent.who("reviewer")?;
-            let reviewer = pass
-                .reviewers
-                .iter_mut()
-                .find(|reviewer| reviewer.id == id)
-                .ok_or_else(|| Error(format!("usage: reviewer {id} is not in pass {pass_id}")))?;
-            reviewer.usage = Some(spent.usage());
-        }
+        record_usage(pass, &usage, pass_id)?;
         pass.ended_at = Some(now.to_owned());
         pass.locked = lock;
         pass.major_found = major;
         Ok((pass.clone(), added, killed))
     })?;
+    for issue in &linked {
+        link_review(ctx, issue, &scope.key)?;
+    }
     Ok(json!({
         "target": scope.key,
         "run": run_id,
@@ -643,6 +640,35 @@ pub(super) fn pass_end(
         "added": added,
         "killed": killed,
     }))
+}
+
+/// Stores each reported usage on the reviewer it names in the pass.
+fn record_usage(pass: &mut Pass, usage: &[UsageInput], pass_id: &str) -> Result<()> {
+    for spent in usage {
+        let id = spent.who("reviewer")?;
+        let reviewer = pass
+            .reviewers
+            .iter_mut()
+            .find(|reviewer| reviewer.id == id)
+            .ok_or_else(|| Error(format!("usage: reviewer {id} is not in pass {pass_id}")))?;
+        reviewer.usage = Some(spent.usage());
+    }
+    Ok(())
+}
+
+/// Swaps the finding's issue text for its host key and adds a key not yet in `linked`.
+fn resolve_issue(ctx: &Ctx, finding: &mut FindingInput, linked: &mut Vec<String>) -> Result<()> {
+    finding.issue = finding
+        .issue
+        .take()
+        .map(|text| issue_key(ctx, &text))
+        .transpose()?;
+    if let Some(issue) = &finding.issue
+        && !linked.contains(issue)
+    {
+        linked.push(issue.clone());
+    }
+    Ok(())
 }
 
 /// `pass end --findings` input: a findings array, or `{"findings": [...], "usage": [...]}`.

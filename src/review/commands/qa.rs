@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::approve::is_open;
-use super::findings::{self, NewThread, author, issue_key, local_thread};
+use super::findings::{self, NewThread, author, issue_key, link_review, local_thread};
 use super::input::{implementer_name, limited, read_body};
 use super::report::{self, Section};
 use super::{
@@ -501,6 +501,9 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
+    if let Some(issue) = &thread.issue {
+        link_review(ctx, issue, &scope.key)?;
+    }
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 

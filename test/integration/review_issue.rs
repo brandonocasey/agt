@@ -8,7 +8,7 @@ use crate::support::Env;
 use crate::support::forge::FakeService;
 use crate::support::forge::github::Github;
 use crate::support::issue::{Github as GithubIssues, IssueFake, Spec};
-use crate::support::scenario::{Setup, thread, write_text};
+use crate::support::scenario::{Review, Setup, start_review, thread, write_text};
 
 /// A reviewed branch whose repository also tracks the issues of `o/r`, with issue 1 on the host.
 fn setup_with_issue() -> Setup {
@@ -20,7 +20,13 @@ fn setup_with_issue() -> Setup {
         "{}\n[[tracker]]\nhost = \"github.com\"\nrepo = \"me/repo\"\nissues = false\n",
         tracker.config(false)
     ));
-    tracker.serve(env, &[Spec::new(1, "Follow up the login race")]);
+    tracker.serve(
+        env,
+        &[
+            Spec::new(1, "Follow up the login race"),
+            Spec::new(2, "Slow checkout"),
+        ],
+    );
     env.issue(&["sync"]);
     setup
 }
@@ -151,11 +157,13 @@ fn comment_and_qa_finding_issue_name_a_related_issue() {
             "--body",
             "Login hangs.",
             "--issue",
-            "o/r#1",
+            "o/r#2",
         ],
     );
-    assert_eq!(found["thread"]["issue"], "o/r#1", "{found}");
+    assert_eq!(found["thread"]["issue"], "o/r#2", "{found}");
 
+    // The issue names the target as it was stored when the thread was written.
+    let target = env.run(&["status"])["target"].as_str().unwrap().to_owned();
     // A QA run counts for the PR only when it ends after the PR is linked.
     Github::new().link(&setup);
     qa(env, &["run", "end", "--run", &run]);
@@ -164,7 +172,96 @@ fn comment_and_qa_finding_issue_name_a_related_issue() {
     assert!(posted.contains("\n\nRelated: o/r#1"), "{posted}");
     let summary = write_text(&dry, "body", "qa-record");
     assert!(
-        summary.contains("3. 🧪 **Login hangs.**\n   High · QA: login · whole PR · Related: o/r#1"),
+        summary.contains("3. 🧪 **Login hangs.** · High · QA: login · whole PR · Related: o/r#2\n"),
         "{summary}"
+    );
+    // Each thread points its issue back at the review.
+    for number in ["1", "2"] {
+        let issue = env.issue_doc(GithubIssues.tracker(), number);
+        assert_eq!(issue["links"]["reviews"], json!([target]), "{issue}");
+    }
+}
+
+/// A review finding in the `--findings` JSON can name an issue as `comment --issue` does.
+#[test]
+fn a_finding_in_the_pass_input_names_a_related_issue() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let target = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    let run = start_review(
+        env,
+        &Review {
+            reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+            findings: r#"[{"type":"bug","severity":"high","path":"a.txt","line":3,
+              "scenario":"Races the login again.","issue":"o/r#1"}]"#,
+        },
+        false,
+    );
+    let list = env.run(&["list"]);
+    let linked = thread(&list, &format!("{run}.c1p0.r1.f1"));
+    assert_eq!(linked["issue"], "o/r#1", "{list}");
+    assert_eq!(linked["resolved"], false);
+    let issue = env.issue_doc(GithubIssues.tracker(), "1");
+    assert_eq!(issue["links"]["reviews"], json!([target]), "{issue}");
+
+    // The summary covers a run once it has ended.
+    Github::new().link(&setup);
+    env.run(&["run", "end", "--run", &run]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let posted = dry["writes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|write| write["input"]["comments"].as_array().into_iter().flatten())
+        .map(|comment| comment["body"].as_str().unwrap())
+        .find(|body| body.contains("Races the login again."))
+        .unwrap();
+    assert!(posted.contains("\n\nRelated: o/r#1"), "{posted}");
+    let summary = write_text(&dry, "body", "review-record");
+    assert!(
+        summary.contains("**Races the login again.** · High · `a.txt:3` · Related: o/r#1\n"),
+        "{summary}"
+    );
+}
+
+/// An issue the host does not have, or on a finding that is never posted, stops `pass end`
+/// before anything is stored.
+#[test]
+fn a_finding_issue_that_cannot_be_posted_is_refused() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let run = env.run_stdin(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+    )["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let end = |findings: &str| {
+        env.fail(
+            &[
+                "pass",
+                "end",
+                "--run",
+                &run,
+                "--pass",
+                "c1p0",
+                "--findings",
+                "-",
+                "--reviewer",
+                "r1",
+            ],
+            Some(findings),
+        )
+    };
+    let error = end(r#"[{"type":"nit","scenario":"x","issue":"o/r#99"}]"#);
+    assert!(error.contains("no issue o/r#99"), "{error}");
+    let error =
+        end(r#"[{"type":"nit","scenario":"x","issue":"o/r#1","killed":true,"reason":"not real"}]"#);
+    assert!(error.contains("takes no issue"), "{error}");
+    let list = env.run(&["list"]);
+    assert!(
+        !list.to_string().contains(&format!("{run}.c1p0.r1.f")),
+        "nothing was stored: {list}"
     );
 }
