@@ -907,6 +907,22 @@ fn a_pass_start_dry_run_refuses_the_reviewers_a_real_start_refuses() {
     assert_eq!(stored(env), before, "a refused pass wrote");
 }
 
+/// The same holds for the pass that starts the run.
+#[test]
+fn a_first_pass_dry_run_refuses_the_reviewers_a_real_start_refuses() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let before = stored(env);
+    for (reviewers, message) in BAD_REVIEWERS {
+        let args = ["pass", "start", "--kind", "full", "--reviewers", "-"];
+        let real = env.fail(&args, Some(reviewers));
+        assert!(real.contains(message), "{reviewers}: {real}");
+        let dry = env.fail(&[&args[..], &["--dry-run"]].concat(), Some(reviewers));
+        assert_eq!(dry, real, "{reviewers}");
+    }
+    assert_eq!(stored(env), before, "a refused pass wrote");
+}
+
 /// A check whose reviewed state cannot be read links nothing.
 #[test]
 fn a_qa_check_whose_tree_cannot_be_read_links_no_issue() {

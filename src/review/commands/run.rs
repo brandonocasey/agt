@@ -328,6 +328,9 @@ pub(super) fn pass_dry_run(
     if run_id.is_none() && kind != PassKind::Full {
         return fail("--run is required unless --kind is full, which starts the run");
     }
+    if run_id.is_none() {
+        meta.check_reviewers(&[])?;
+    }
     let plan = plan(ctx, run_id, kind, base, head)?;
     if let Some(run_id) = run_id {
         ctx.check_first(&plan.scope, |target| check_pass_start(target, run_id, meta))?;
