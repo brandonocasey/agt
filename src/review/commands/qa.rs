@@ -475,6 +475,9 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
         .as_deref()
         .map(|text| issue_key(ctx, text))
         .transpose()?;
+    if let Some(issue) = &issue {
+        link_review(ctx, issue, &scope.key)?;
+    }
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
         let run = check_run(target, &args.check)?;
@@ -501,9 +504,6 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
-    if let Some(issue) = &thread.issue {
-        link_review(ctx, issue, &scope.key)?;
-    }
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 

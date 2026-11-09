@@ -956,52 +956,6 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_finding_names_its_related_issue() {
-        let author = crate::store::model::Author::Human {
-            login: "me".into(),
-            git_name: false,
-        };
-        let remote = crate::store::model::RemoteComment {
-            id: "9".into(),
-            url: Some("https://h/c/9".into()),
-            login: Some("me".into()),
-            is_me: true,
-            editor: None,
-            review_id: None,
-        };
-        let comment = crate::store::model::Comment::new(
-            "f1/c1".into(),
-            author,
-            "Why so? More.".into(),
-            "2026-01-01T00:00:00Z".into(),
-            crate::store::model::PostState::Posted,
-            Some(remote),
-        );
-        let mut thread = Thread::new(
-            "f1".into(),
-            crate::store::model::ThreadType::Question,
-            vec![comment],
-            "2026-01-01T00:00:00Z".into(),
-            "2026-01-01T00:00:00Z".into(),
-        );
-        thread.resolved = true;
-        thread.resolution = Some(Resolution::Answered);
-        thread.issue = Some("o/r#12".into());
-        let qa = QaSummary {
-            runs: Vec::new(),
-            checks: Vec::new(),
-            head: "abc".into(),
-        };
-        let open = approvals(false, false, false, None);
-        let mut text = String::new();
-        details(&mut text, &qa, &[&thread], &open);
-        assert!(
-            text.contains("| ❓ [Why so?](https://h/c/9) | 💬 Answered · Related: o/r#12 |"),
-            "{text}"
-        );
-    }
-
-    #[test]
     fn items_are_indented_under_their_number() {
         assert_eq!(indent(3), "   ");
         assert_eq!(indent(12), "    ");

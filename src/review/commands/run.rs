@@ -9,7 +9,8 @@ use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::read_source;
 use crate::git::CommitInfo;
 use crate::store::model::{
-    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, Risk, RoleUsage, Run, TaskType, Thread,
+    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, Risk, RoleUsage, Run, Target, TaskType,
+    Thread,
 };
 
 use super::findings::{FindingInput, add_findings, issue_key, link_review, parse_findings};
@@ -576,7 +577,7 @@ pub(super) fn pass_end(
     };
     // Group by reviewer, keeping input order, so each reviewer's ids number in order; the
     // output lists ids in input order.
-    let mut groups: Vec<(String, Vec<usize>, Vec<FindingInput>)> = Vec::new();
+    let mut groups: Vec<ReviewerGroup> = Vec::new();
     let mut is_killed = Vec::new();
     let mut linked: Vec<String> = Vec::new();
     for (index, mut finding) in findings.into_iter().enumerate() {
@@ -590,29 +591,18 @@ pub(super) fn pass_end(
                 ))
             })?;
         is_killed.push(finding.reason.is_some());
-        resolve_issue(ctx, &mut finding, &mut linked)?;
-        match groups.iter_mut().find(|(known, _, _)| *known == id) {
-            Some((_, indexes, group)) => {
-                indexes.push(index);
-                group.push(finding);
-            }
-            None => groups.push((id, vec![index], vec![finding])),
+        if let Some(issue) = swap_in_host_issue_key(ctx, &mut finding)?
+            && !linked.contains(&issue)
+        {
+            linked.push(issue);
         }
+        add_to_group(&mut groups, id, index, finding);
+    }
+    for issue in &linked {
+        link_review(ctx, issue, &scope.key)?;
     }
     let (pass, added, killed) = ctx.update(&scope, |target, now| {
-        let mut ids = vec![String::new(); is_killed.len()];
-        for (reviewer, indexes, group) in groups {
-            let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
-            let (mut new, mut dead) = (new.into_iter(), dead.into_iter());
-            for index in indexes {
-                let next = if is_killed[index] {
-                    dead.next()
-                } else {
-                    new.next()
-                };
-                ids[index] = next.unwrap_or_default();
-            }
-        }
+        let ids = store_findings(target, (run_id, pass_id), groups, now)?;
         let (killed, added): (Vec<_>, Vec<_>) = ids
             .into_iter()
             .enumerate()
@@ -630,9 +620,6 @@ pub(super) fn pass_end(
         pass.major_found = major;
         Ok((pass.clone(), added, killed))
     })?;
-    for issue in &linked {
-        link_review(ctx, issue, &scope.key)?;
-    }
     Ok(json!({
         "target": scope.key,
         "run": run_id,
@@ -640,6 +627,46 @@ pub(super) fn pass_end(
         "added": added,
         "killed": killed,
     }))
+}
+
+/// One reviewer's id, the input positions of its findings and the findings.
+type ReviewerGroup = (String, Vec<usize>, Vec<FindingInput>);
+
+/// Appends `finding`, the one at input position `index`, to the group of `reviewer`.
+fn add_to_group(
+    groups: &mut Vec<ReviewerGroup>,
+    reviewer: String,
+    index: usize,
+    finding: FindingInput,
+) {
+    match groups.iter_mut().find(|(known, _, _)| *known == reviewer) {
+        Some((_, indexes, group)) => {
+            indexes.push(index);
+            group.push(finding);
+        }
+        None => groups.push((reviewer, vec![index], vec![finding])),
+    }
+}
+
+/// Adds each group's findings to the pass `(run, pass)` and returns the new ids in input order.
+fn store_findings(
+    target: &mut Target,
+    (run_id, pass_id): (&str, &str),
+    groups: Vec<ReviewerGroup>,
+    now: &str,
+) -> Result<Vec<String>> {
+    let total = groups.iter().map(|(_, indexes, _)| indexes.len()).sum();
+    let mut ids = vec![String::new(); total];
+    for (reviewer, indexes, group) in groups {
+        let killed: Vec<bool> = group.iter().map(|item| item.reason.is_some()).collect();
+        let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
+        let (mut new, mut dead) = (new.into_iter(), dead.into_iter());
+        for (index, is_killed) in indexes.into_iter().zip(killed) {
+            let next = if is_killed { dead.next() } else { new.next() };
+            ids[index] = next.unwrap_or_default();
+        }
+    }
+    Ok(ids)
 }
 
 /// Stores each reported usage on the reviewer it names in the pass.
@@ -656,19 +683,14 @@ fn record_usage(pass: &mut Pass, usage: &[UsageInput], pass_id: &str) -> Result<
     Ok(())
 }
 
-/// Swaps the finding's issue text for its host key and adds a key not yet in `linked`.
-fn resolve_issue(ctx: &Ctx, finding: &mut FindingInput, linked: &mut Vec<String>) -> Result<()> {
+/// Replaces the finding's issue text with its host key and returns that key.
+fn swap_in_host_issue_key(ctx: &Ctx, finding: &mut FindingInput) -> Result<Option<String>> {
     finding.issue = finding
         .issue
         .take()
         .map(|text| issue_key(ctx, &text))
         .transpose()?;
-    if let Some(issue) = &finding.issue
-        && !linked.contains(issue)
-    {
-        linked.push(issue.clone());
-    }
-    Ok(())
+    Ok(finding.issue.clone())
 }
 
 /// `pass end --findings` input: a findings array, or `{"findings": [...], "usage": [...]}`.

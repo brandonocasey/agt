@@ -5,10 +5,11 @@
 use serde_json::{Value, json};
 
 use crate::support::Env;
-use crate::support::forge::FakeService;
 use crate::support::forge::github::Github;
+use crate::support::forge::github::own_review;
+use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::issue::{Github as GithubIssues, IssueFake, Spec};
-use crate::support::scenario::{Review, Setup, start_review, thread, write_text};
+use crate::support::scenario::{Review, Setup, sent, start_review, thread, write_text};
 
 /// A reviewed branch whose repository also tracks the issues of `o/r`, with issue 1 on the host.
 fn setup_with_issue() -> Setup {
@@ -17,7 +18,7 @@ fn setup_with_issue() -> Setup {
     let tracker: &dyn IssueFake = &GithubIssues;
     // The review's origin is a tracker too; its issues are not the ones under test.
     env.write_config(&format!(
-        "{}\n[[tracker]]\nhost = \"github.com\"\nrepo = \"me/repo\"\nissues = false\n",
+        "[sync]\npush = \"manual\"\n{}\n[[tracker]]\nhost = \"github.com\"\nrepo = \"me/repo\"\nissues = false\n",
         tracker.config(false)
     ));
     tracker.serve(
@@ -264,4 +265,114 @@ fn a_finding_issue_that_cannot_be_posted_is_refused() {
         !list.to_string().contains(&format!("{run}.c1p0.r1.f")),
         "nothing was stored: {list}"
     );
+}
+
+/// The issue is linked before the thread is stored: when the link fails (the issue document
+/// carries a field this build does not know), nothing is stored, so a retry cannot duplicate.
+#[test]
+fn a_comment_whose_issue_cannot_be_linked_stores_no_thread() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let path = env
+        .issue_state()
+        .join(GithubIssues.tracker())
+        .join("1.json");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["field_from_a_newer_build"] = json!(true);
+    std::fs::write(&path, doc.to_string()).unwrap();
+    let before = env.run(&["list"]);
+
+    let args = [
+        "comment",
+        "--body",
+        "Same race as before.",
+        "--issue",
+        "o/r#1",
+    ];
+    let error = env.fail(&args, None);
+    assert!(error.contains("field_from_a_newer_build"), "{error}");
+    assert_eq!(
+        env.run(&["list"]),
+        before,
+        "the failed comment stored a thread"
+    );
+}
+
+/// A killed finding is never posted, so `finding kill` refuses one that names an issue, as
+/// `pass end` does, and leaves it in place.
+#[test]
+fn finding_kill_refuses_a_finding_that_names_an_issue() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let run = start_review(
+        env,
+        &Review {
+            reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+            findings: r#"[{"type":"bug","severity":"high","path":"a.txt","line":3,
+              "scenario":"Races the login again.","issue":"o/r#1"}]"#,
+        },
+        false,
+    );
+    let id = format!("{run}.c1p0.r1.f1");
+    let before = env.run(&["list"]);
+    let error = env.fail(&["finding", "kill", &id, "--reason", "not real"], None);
+    assert!(
+        error.contains(&format!(
+            "finding {id}: a killed finding is never posted, so it takes no issue"
+        )),
+        "{error}"
+    );
+    assert_eq!(
+        env.run(&["list"]),
+        before,
+        "the refused kill changed the target"
+    );
+}
+
+/// A finding that was posted and then answered is listed among the closed findings, with the
+/// issue it names.
+#[test]
+fn a_closed_finding_names_its_related_issue() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let run = start_review(
+        env,
+        &Review {
+            reviewers: r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#,
+            findings: r#"[{"type":"question","path":"a.txt","line":3,
+              "scenario":"Why so? More.","issue":"o/r#1"}]"#,
+        },
+        false,
+    );
+    let id = format!("{run}.c1p0.r1.f1");
+    let svc = Github::new();
+    svc.link(&setup);
+    env.run(&["run", "end", "--run", &run]);
+    // The host loses the response to the review; a sync finds the comments by their markers.
+    svc.lose(env, Call::PostInline);
+    env.fail(&["publish", "--pr", "42"], None);
+    let mut remote = Remote::new();
+    for (remote_id, number, finding) in [
+        ("PRRT_f1", 501, setup.finding(1)),
+        ("PRRT_q", 502, id.clone()),
+    ] {
+        remote.thread(
+            remote_id,
+            false,
+            3,
+            vec![Comment::new(number, "me", &sent(env, &finding))],
+        );
+    }
+    remote.reviews.push(own_review(&setup.head));
+    svc.sync(&setup, &remote);
+    env.pull(&["sync", "--pr", "42"]);
+    svc.restore(env, Call::PostInline);
+    env.run(&["resolve", &id, "--answered"]);
+    let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let summary = write_text(&dry, "body", "closed finding");
+    let row = summary
+        .lines()
+        .find(|line| line.contains("Why so?"))
+        .unwrap_or_else(|| panic!("no closed row: {summary}"));
+    assert!(row.ends_with("· Related: o/r#1 |"), "{row}");
 }

@@ -575,8 +575,10 @@ fn a_headless_target_still_reports_qa() {
     assert_eq!(review["qa"]["stale"], 1, "{review}");
 }
 
-/// Five findings (four in the diff, one on the whole PR) and a QA run with two passes and a
-/// failure that found a bug. The text the PR gets before this layout took 63 lines.
+/// Line count of all text the fixture below posts, hidden markers included, as measured on a
+/// GitHub dry run.
+const FIXTURE_POSTED_LINES: usize = 55;
+
 #[test]
 fn published_text_is_short_and_actionable_findings_are_threads() {
     let svc = Github::new();
@@ -640,7 +642,11 @@ fn published_text_is_short_and_actionable_findings_are_threads() {
     }
     texts.push(writes[1]["input"]["body"].as_str().unwrap().to_owned());
     let lines: usize = texts.iter().map(|text| text.lines().count()).sum();
-    assert!(lines <= 55, "{lines} lines:\n{}", texts.join("\n=====\n"));
+    assert!(
+        lines <= FIXTURE_POSTED_LINES,
+        "{lines} lines:\n{}",
+        texts.join("\n=====\n")
+    );
 
     let summary = write_text(&dry, "body", "qa-record");
     assert!(

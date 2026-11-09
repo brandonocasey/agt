@@ -166,6 +166,9 @@ pub(super) fn finding_kill(ctx: &Ctx, id: &str, reason: &str) -> Result<Value> {
                 "finding {id} is posted or being posted; resolve it with --triage stale instead"
             ));
         }
+        if thread.issue.is_some() {
+            return fail(format!("finding {id}: {KILLED_TAKES_NO_ISSUE}"));
+        }
         let thread = target.threads.remove(index);
         let finding = thread
             .finding
@@ -242,6 +245,8 @@ pub(super) fn parse_findings(value: Value, allow_empty: bool) -> Result<Vec<Find
     Ok(findings)
 }
 
+const KILLED_TAKES_NO_ISSUE: &str = "a killed finding is never posted, so it takes no issue";
+
 /// Refuses a finding whose fields contradict each other; `index` names it in the error.
 fn check_finding(index: usize, finding: &FindingInput) -> Result<()> {
     if finding.scenario.trim().is_empty() {
@@ -265,9 +270,7 @@ fn check_finding(index: usize, finding: &FindingInput) -> Result<()> {
         _ => {}
     }
     if finding.killed && finding.issue.is_some() {
-        return fail(format!(
-            "finding {index}: a killed finding is never posted, so it takes no issue"
-        ));
+        return fail(format!("finding {index}: {KILLED_TAKES_NO_ISSUE}"));
     }
     Ok(())
 }
@@ -411,6 +414,9 @@ pub(super) fn comment(
         .as_deref()
         .map(|text| issue_key(ctx, text))
         .transpose()?;
+    if let Some(issue) = &issue {
+        link_review(ctx, issue, &scope.key)?;
+    }
     let default = ctx.default_author()?;
     let thread = ctx.update(&scope, |target, now| {
         let author = if qa {
@@ -446,9 +452,6 @@ pub(super) fn comment(
         target.threads.push(thread.clone());
         Ok(thread)
     })?;
-    if let Some(issue) = &thread.issue {
-        link_review(ctx, issue, &scope.key)?;
-    }
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 
