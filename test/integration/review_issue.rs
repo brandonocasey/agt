@@ -299,6 +299,27 @@ fn a_comment_whose_issue_cannot_be_linked_stores_no_thread() {
     );
 }
 
+/// A target holding a field from a newer build refuses every write, so a command that would
+/// write it links no issue first.
+#[test]
+fn a_target_from_a_newer_build_links_no_issue() {
+    let setup = setup_with_issue();
+    let env = &setup.env;
+    let key = env.run(&["status"])["target"].as_str().unwrap().to_owned();
+    let path = env.state().join(format!("{key}.json"));
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc["field_from_a_newer_build"] = json!(true);
+    std::fs::write(&path, doc.to_string()).unwrap();
+    let before = stored(env);
+
+    let comment = env.fail(&["comment", "--body", "Again.", "--issue", "o/r#1"], None);
+    let qa_run = qa_fails(env, &["run", "start", "--issue", "o/r#1"]);
+    for error in [comment, qa_run] {
+        assert!(error.contains("field_from_a_newer_build"), "{error}");
+    }
+    assert_eq!(stored(env), before, "a refused command wrote");
+}
+
 /// A killed finding is never posted, so `finding kill` refuses one that names an issue, as
 /// `pass end` does, and leaves it in place.
 #[test]
