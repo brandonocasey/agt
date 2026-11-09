@@ -599,3 +599,59 @@ fn help_describes_the_fields() {
         assert!(help.contains(text), "{text}");
     }
 }
+
+/// A target written without `issue` (any run, QA run or check started without the flag) loads,
+/// takes more writes, and never gains the key.
+#[test]
+fn a_target_without_issue_fields_loads_and_stays_without_them() {
+    let env = changed_branch();
+    let started = json(&pass_start(&env, &[]));
+    let run = started["run"].as_str().unwrap().to_owned();
+    let qa_run = qa(&env, &["run", "start"])["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    qa(
+        &env,
+        &[
+            "check",
+            "--run",
+            &qa_run,
+            "--name",
+            "one",
+            "--outcome",
+            "pass",
+        ],
+    );
+    // Written by this build and read back by it, as a store from before the field would be.
+    edit_document(&env, |document| {
+        assert!(document["runs"][0].get("issue").is_none(), "{document}");
+        assert!(document["qa_runs"][0].get("issue").is_none(), "{document}");
+        assert!(
+            document["qa_runs"][0]["checks"][0].get("issue").is_none(),
+            "{document}"
+        );
+    });
+    qa(
+        &env,
+        &[
+            "check",
+            "--run",
+            &qa_run,
+            "--name",
+            "two",
+            "--outcome",
+            "fail",
+        ],
+    );
+    end_pass(&env, &run, "c1p0");
+    assert!(env.run(&["show", &run])["run"].get("issue").is_none());
+    assert!(qa(&env, &["list"])["runs"][0].get("issue").is_none());
+    edit_document(&env, |document| {
+        assert!(document["runs"][0].get("issue").is_none(), "{document}");
+        assert!(
+            document["qa_runs"][0]["checks"][1].get("issue").is_none(),
+            "{document}"
+        );
+    });
+}

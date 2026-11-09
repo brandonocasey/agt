@@ -144,6 +144,13 @@ impl Store {
         read_target(&doc_path(dir, key), self.schema)
     }
 
+    /// Fails when [`Store::update`] would refuse the target `key` as it is stored, without
+    /// writing or locking.
+    pub fn check_writable(&self, dir: &Path, key: &str) -> Result<()> {
+        validate_key(key)?;
+        read_target_for_write(&doc_path(dir, key), self.schema).map(drop)
+    }
+
     pub fn targets(&self, dir: &Path) -> Result<Vec<Target>> {
         let entries = read_entries(dir)?;
         let mut targets = Vec::new();

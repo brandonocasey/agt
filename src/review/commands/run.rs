@@ -9,16 +9,18 @@ use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::local::read_source;
 use crate::git::CommitInfo;
 use crate::store::model::{
-    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, Risk, RoleUsage, Run, TaskType, Thread,
+    Author, CommitPatch, Pass, PassKind, Reveal, Reviewer, Risk, RoleUsage, Run, Target, TaskType,
+    Thread,
 };
 
-use super::findings::{FindingInput, add_findings, parse_findings};
+use super::findings::{FindingInput, add_findings, issue_key, link_review, parse_findings};
 use super::input::implementer_name;
 use super::prune::prune_dir;
 use super::status::{Requested, already_reviewed};
 use super::usage::{UsageInput, run_spend};
 use super::{
-    Ctx, Scope, find_pass_mut, find_run_mut, fresh_id, major_found, pass_missing, random_id,
+    Ctx, Scope, find_pass_mut, find_run, find_run_mut, fresh_id, major_found, pass_missing,
+    random_id,
 };
 
 pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
@@ -49,6 +51,7 @@ pub(super) fn run_start(ctx: &Ctx) -> Result<Value> {
             usage: Vec::new(),
             task_type: None,
             implementer: None,
+            issue: None,
         });
         Ok(id)
     })?;
@@ -117,7 +120,7 @@ pub(super) fn run_end(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReviewerInput {
     pub(super) id: Option<String>,
@@ -144,8 +147,8 @@ pub(super) fn reviewer_number(id: &str) -> Option<u32> {
     id.strip_prefix('r')?.parse().ok()
 }
 
-pub(super) fn assign_reviewers(run: &Run, inputs: Vec<ReviewerInput>) -> Result<Vec<Reviewer>> {
-    let known: Vec<&Reviewer> = run.passes.iter().flat_map(|pass| &pass.reviewers).collect();
+fn assign_reviewers(passes: &[Pass], inputs: Vec<ReviewerInput>) -> Result<Vec<Reviewer>> {
+    let known: Vec<&Reviewer> = passes.iter().flat_map(|pass| &pass.reviewers).collect();
     let mut next = known
         .iter()
         .filter_map(|reviewer| reviewer_number(&reviewer.id))
@@ -303,6 +306,14 @@ fn check_startable(run: &Run, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fails when `pass start` would refuse to add a pass for `meta` to run `run_id`.
+fn check_pass_start(target: &Target, run_id: &str, meta: &PassMeta) -> Result<()> {
+    let run = find_run(target, run_id)?;
+    check_startable(run, run_id)?;
+    meta.check(run, run_id)?;
+    meta.check_reviewers(&run.passes)
+}
+
 /// `pass start --dry-run`: the report `pass start` adds, and nothing written.
 pub(super) fn pass_dry_run(
     ctx: &Ctx,
@@ -315,21 +326,12 @@ pub(super) fn pass_dry_run(
     if run_id.is_none() && kind != PassKind::Full {
         return fail("--run is required unless --kind is full, which starts the run");
     }
+    if run_id.is_none() {
+        meta.check_reviewers(&[])?;
+    }
     let plan = plan(ctx, run_id, kind, base, head)?;
     if let Some(run_id) = run_id {
-        let run = plan
-            .scope
-            .existing
-            .as_ref()
-            .and_then(|target| target.runs.iter().find(|run| run.id == run_id))
-            .ok_or_else(|| {
-                Error(format!(
-                    "run {run_id} not found in target {}",
-                    plan.scope.key
-                ))
-            })?;
-        check_startable(run, run_id)?;
-        meta.check(run, run_id)?;
+        ctx.check_first(&plan.scope, |target| check_pass_start(target, run_id, meta))?;
     }
     let already_reviewed = overlap(ctx, &plan, run_id, kind)?;
     Ok(json!({
@@ -344,12 +346,15 @@ pub(super) fn pass_dry_run(
     }))
 }
 
-/// The optional analysis fields of `pass start`: `task_type` and `implementer` belong to the
-/// run, `risk` to the pass.
+/// The optional inputs of `pass start`: `task_type`, `implementer` and `issue` belong to the run,
+/// `risk` and the reviewers to the pass.
 pub(super) struct PassMeta {
     task_type: Option<TaskType>,
     risk: Option<Risk>,
     implementer: Option<String>,
+    /// The host key of the issue, once `with_issue` resolved it.
+    issue: Option<String>,
+    reviewers: Vec<ReviewerInput>,
 }
 
 impl PassMeta {
@@ -362,7 +367,26 @@ impl PassMeta {
             task_type,
             risk,
             implementer: implementer.map(implementer_name).transpose()?,
+            issue: None,
+            reviewers: Vec::new(),
         })
+    }
+
+    /// Reads `--reviewers`; a bad file fails before anything is written.
+    pub(super) fn with_reviewers(mut self, source: Option<&Path>) -> Result<Self> {
+        self.reviewers = read_reviewers(source)?;
+        Ok(self)
+    }
+
+    /// Fails when the reviewers cannot join a run whose passes so far are `passes`.
+    pub(super) fn check_reviewers(&self, passes: &[Pass]) -> Result<()> {
+        assign_reviewers(passes, self.reviewers.clone()).map(drop)
+    }
+
+    /// Resolves `--issue` to its host key; a bad key fails before anything is written.
+    pub(super) fn with_issue(mut self, ctx: &Ctx, issue: Option<&str>) -> Result<Self> {
+        self.issue = issue.map(|text| issue_key(ctx, text)).transpose()?;
+        Ok(self)
     }
 
     /// A pass after the run's first may repeat the run-level fields, never differ, and cannot add
@@ -392,7 +416,32 @@ impl PassMeta {
                 ),
             });
         }
-        Ok(())
+        self.check_issue(run, run_id)
+    }
+
+    /// Records the review in the links of `--issue`, if given, once `check_pass_start` accepts the
+    /// pass.
+    fn link(&self, ctx: &Ctx, scope: &Scope, run_id: &str) -> Result<()> {
+        let Some(issue) = &self.issue else {
+            return Ok(());
+        };
+        ctx.check_first(scope, |target| check_pass_start(target, run_id, self))?;
+        link_review(ctx, issue, &scope.key)
+    }
+
+    /// Like `--implementer`: a later pass may repeat the run's issue, never change or add one.
+    fn check_issue(&self, run: &Run, run_id: &str) -> Result<()> {
+        if self.issue.is_none() || self.issue == run.issue {
+            return Ok(());
+        }
+        fail(match &run.issue {
+            Some(stored) => format!(
+                "run {run_id} has issue {stored}; --issue is set by the pass that starts the run and cannot change"
+            ),
+            None => format!(
+                "run {run_id} has no issue; only the pass that starts the run can set --issue"
+            ),
+        })
     }
 
     /// The pass that starts a run sets its run-level fields; `check` refuses a later pass that
@@ -402,6 +451,7 @@ impl PassMeta {
         if run.passes.is_empty() {
             run.task_type = self.task_type;
             run.implementer.clone_from(&self.implementer);
+            run.issue.clone_from(&self.issue);
         }
         Ok(())
     }
@@ -412,11 +462,9 @@ pub(super) fn pass_start(
     run_id: &str,
     kind: PassKind,
     base: Option<&str>,
-    reviewers: Option<&Path>,
     head: Option<&str>,
     meta: &PassMeta,
 ) -> Result<Value> {
-    let inputs = read_reviewers(reviewers)?;
     let plan = plan(ctx, Some(run_id), kind, base, head)?;
     let already_reviewed = overlap(ctx, &plan, Some(run_id), kind)?;
     let Plan {
@@ -430,6 +478,7 @@ pub(super) fn pass_start(
         head_patch_id,
         ..
     } = plan;
+    meta.link(ctx, &scope, run_id)?;
     let pass = ctx.update(&scope, |target, now| {
         let run = find_run_mut(target, run_id)?;
         check_startable(run, run_id)?;
@@ -448,7 +497,7 @@ pub(super) fn pass_start(
             }
             (_, None) => return fail("a fix-check or reveal pass needs a full pass first"),
         };
-        let reviewers = assign_reviewers(run, inputs)?;
+        let reviewers = assign_reviewers(&run.passes, meta.reviewers.clone())?;
         let pass = Pass {
             id: format!("c{cycle}p{number}"),
             cycle,
@@ -576,8 +625,9 @@ pub(super) fn pass_end(
     };
     // Group by reviewer, keeping input order, so each reviewer's ids number in order; the
     // output lists ids in input order.
-    let mut groups: Vec<(String, Vec<usize>, Vec<FindingInput>)> = Vec::new();
+    let mut groups: Vec<ReviewerGroup> = Vec::new();
     let mut is_killed = Vec::new();
+    let mut linked: Vec<String> = Vec::new();
     for (index, mut finding) in findings.into_iter().enumerate() {
         let id = finding
             .reviewer
@@ -589,53 +639,30 @@ pub(super) fn pass_end(
                 ))
             })?;
         is_killed.push(finding.reason.is_some());
-        match groups.iter_mut().find(|(known, _, _)| *known == id) {
-            Some((_, indexes, group)) => {
-                indexes.push(index);
-                group.push(finding);
-            }
-            None => groups.push((id, vec![index], vec![finding])),
+        if let Some(issue) = swap_in_host_issue_key(ctx, &mut finding)?
+            && !linked.contains(&issue)
+        {
+            linked.push(issue);
         }
+        add_to_group(&mut groups, id, index, finding);
     }
-    let (pass, added, killed) = ctx.update(&scope, |target, now| {
-        let mut ids = vec![String::new(); is_killed.len()];
-        for (reviewer, indexes, group) in groups {
-            let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
-            let (mut new, mut dead) = (new.into_iter(), dead.into_iter());
-            for index in indexes {
-                let next = if is_killed[index] {
-                    dead.next()
-                } else {
-                    new.next()
-                };
-                ids[index] = next.unwrap_or_default();
-            }
-        }
-        let (killed, added): (Vec<_>, Vec<_>) = ids
-            .into_iter()
-            .enumerate()
-            .partition(|(index, _)| is_killed[*index]);
-        let added: Vec<String> = added.into_iter().map(|(_, id)| id).collect();
-        let killed: Vec<String> = killed.into_iter().map(|(_, id)| id).collect();
-        let major = major_found(target, run_id, pass_id);
-        let pass = find_pass_mut(target, run_id, pass_id)?;
-        if pass.ended_at.is_some() {
-            return fail(format!("pass {run_id}.{pass_id} already ended"));
-        }
-        for spent in &usage {
-            let id = spent.who("reviewer")?;
-            let reviewer = pass
-                .reviewers
-                .iter_mut()
-                .find(|reviewer| reviewer.id == id)
-                .ok_or_else(|| Error(format!("usage: reviewer {id} is not in pass {pass_id}")))?;
-            reviewer.usage = Some(spent.usage());
-        }
-        pass.ended_at = Some(now.to_owned());
-        pass.locked = lock;
-        pass.major_found = major;
-        Ok((pass.clone(), added, killed))
-    })?;
+    let end = PassEnd {
+        ids: (run_id, pass_id),
+        is_killed,
+        usage,
+        lock,
+    };
+    if !linked.is_empty() {
+        // A pass end its run or pass refuses links nothing: dry-run it on a copy first.
+        ctx.check_first(&scope, |target| {
+            end.apply(&mut target.clone(), groups.clone(), &clock::now()?)
+                .map(drop)
+        })?;
+    }
+    for issue in &linked {
+        link_review(ctx, issue, &scope.key)?;
+    }
+    let (pass, added, killed) = ctx.update(&scope, |target, now| end.apply(target, groups, now))?;
     Ok(json!({
         "target": scope.key,
         "run": run_id,
@@ -643,6 +670,108 @@ pub(super) fn pass_end(
         "added": added,
         "killed": killed,
     }))
+}
+
+/// What `pass end` writes to the pass `ids`: its findings, usage and closing fields.
+struct PassEnd<'a> {
+    ids: (&'a str, &'a str),
+    /// Whether the finding at each input position is a killed one.
+    is_killed: Vec<bool>,
+    usage: Vec<UsageInput>,
+    lock: bool,
+}
+
+impl PassEnd<'_> {
+    /// Stores the findings and closes the pass; returns it with the new and the killed ids.
+    fn apply(
+        &self,
+        target: &mut Target,
+        groups: Vec<ReviewerGroup>,
+        now: &str,
+    ) -> Result<(Pass, Vec<String>, Vec<String>)> {
+        let (run_id, pass_id) = self.ids;
+        let ids = store_findings(target, self.ids, groups, now)?;
+        let (killed, added): (Vec<_>, Vec<_>) = ids
+            .into_iter()
+            .enumerate()
+            .partition(|(index, _)| self.is_killed[*index]);
+        let added: Vec<String> = added.into_iter().map(|(_, id)| id).collect();
+        let killed: Vec<String> = killed.into_iter().map(|(_, id)| id).collect();
+        let major = major_found(target, run_id, pass_id);
+        let pass = find_pass_mut(target, run_id, pass_id)?;
+        if pass.ended_at.is_some() {
+            return fail(format!("pass {run_id}.{pass_id} already ended"));
+        }
+        record_usage(pass, &self.usage, pass_id)?;
+        pass.ended_at = Some(now.to_owned());
+        pass.locked = self.lock;
+        pass.major_found = major;
+        Ok((pass.clone(), added, killed))
+    }
+}
+
+/// One reviewer's id, the input positions of its findings and the findings.
+type ReviewerGroup = (String, Vec<usize>, Vec<FindingInput>);
+
+/// Appends `finding`, the one at input position `index`, to the group of `reviewer`.
+fn add_to_group(
+    groups: &mut Vec<ReviewerGroup>,
+    reviewer: String,
+    index: usize,
+    finding: FindingInput,
+) {
+    match groups.iter_mut().find(|(known, _, _)| *known == reviewer) {
+        Some((_, indexes, group)) => {
+            indexes.push(index);
+            group.push(finding);
+        }
+        None => groups.push((reviewer, vec![index], vec![finding])),
+    }
+}
+
+/// Adds each group's findings to the pass `(run, pass)` and returns the new ids in input order.
+fn store_findings(
+    target: &mut Target,
+    (run_id, pass_id): (&str, &str),
+    groups: Vec<ReviewerGroup>,
+    now: &str,
+) -> Result<Vec<String>> {
+    let total = groups.iter().map(|(_, indexes, _)| indexes.len()).sum();
+    let mut ids = vec![String::new(); total];
+    for (reviewer, indexes, group) in groups {
+        let killed: Vec<bool> = group.iter().map(|item| item.reason.is_some()).collect();
+        let (new, dead) = add_findings(target, run_id, pass_id, &reviewer, group, now)?;
+        let (mut new, mut dead) = (new.into_iter(), dead.into_iter());
+        for (index, is_killed) in indexes.into_iter().zip(killed) {
+            let next = if is_killed { dead.next() } else { new.next() };
+            ids[index] = next.unwrap_or_default();
+        }
+    }
+    Ok(ids)
+}
+
+/// Stores each reported usage on the reviewer it names in the pass.
+fn record_usage(pass: &mut Pass, usage: &[UsageInput], pass_id: &str) -> Result<()> {
+    for spent in usage {
+        let id = spent.who("reviewer")?;
+        let reviewer = pass
+            .reviewers
+            .iter_mut()
+            .find(|reviewer| reviewer.id == id)
+            .ok_or_else(|| Error(format!("usage: reviewer {id} is not in pass {pass_id}")))?;
+        reviewer.usage = Some(spent.usage());
+    }
+    Ok(())
+}
+
+/// Replaces the finding's issue text with its host key and returns that key.
+fn swap_in_host_issue_key(ctx: &Ctx, finding: &mut FindingInput) -> Result<Option<String>> {
+    finding.issue = finding
+        .issue
+        .take()
+        .map(|text| issue_key(ctx, &text))
+        .transpose()?;
+    Ok(finding.issue.clone())
 }
 
 /// `pass end --findings` input: a findings array, or `{"findings": [...], "usage": [...]}`.

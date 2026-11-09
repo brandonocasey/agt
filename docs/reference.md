@@ -157,6 +157,14 @@ byte for byte as before. Agt 0.33.0 and older read a target that carries the fie
 refuse to write to it ("has field ... that this agt does not know"), so give the flags only
 once every host that touches the repository runs an agt that knows them.
 
+`pass start --issue <issue>` (`owner/repo#12`, `#12` or `12`; the issue MUST be on the host, as for
+`comment --issue`) links the whole run to an issue. It belongs to the run like `--task-type`: the pass
+that starts the run sets it, and a later pass may repeat it but never change it or add one (`--dry-run`
+checks the same). The issue's `links.reviews` gains the target, the issue is checked and linked before
+anything is written, and `show <run>` and `status --full` print it. The posted summary names it in its
+footer as `Related: <owner/repo#n>`, once per distinct issue. A target written without it loads
+unchanged. Agt 0.37.0 and older refuse to write to a target that carries the field, as above.
+
 A first pass that fails to start leaves no run behind. A pass left open blocks `run end`
 and another `pass start --run` on that run; `pass abort --run <run> [--pass <id>]`
 deletes the open pass (an ended pass is refused, and so is one with findings or replies from its reviewers), and the
@@ -290,8 +298,10 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   posted is not posted; the summary counts it, and lists one moved to an issue under
   follow-up issues. Another store that syncs a reply to a general comment reads a fix or
   rejection back.
-- `comment --issue <issue>` and `agt qa finding --issue <issue>` record a related issue; the
-  posted text and the summary end with `Related: <owner/repo#n>` and the thread stays open. `--reply <text>`
+- `comment --issue <issue>`, `agt qa finding --issue <issue>` and the `issue` field of a `pass end
+  --findings` entry record a related issue and add the target to the issue's `links.reviews`; the
+  posted text and the summary (open items and the closed findings table) name
+  `Related: <owner/repo#n>` and the thread stays open. `--reply <text>`
   replaces the default reply, or adds a reply to any `resolve`; the author flags sign it.
   `resolve` takes several ids and changes them all in one write, or none when one is
   missing. With one id the output is the `thread`; with more, `threads` lists each id with
@@ -425,6 +435,14 @@ agt qa publish --dry-run            # as agt review publish
 2 and up are retests after fixes. Both are optional. `qa show <run>`, `qa list` (its
 `runs`) and the `qa` part of `status` print them when set. The same older-agt limit as
 for review runs applies: agt 0.33.0 and older cannot write to a target that has them.
+
+`qa run start --issue <issue>` links the whole QA run to an issue and `qa check --issue <issue>`
+links one check (same forms and checks as `pass start --issue`: the issue MUST be on the host, it is
+linked into the issue's `links.reviews` before the write, and a bad key stores nothing). `qa show`,
+`qa list` and the output of both commands print it when set. The summary names a run's issue in its
+footer, once with any equal review run issue, and a check's issue in its row of the QA check table,
+both as `Related: <owner/repo#n>`. A target written without them loads unchanged; agt 0.37.0 and older
+cannot write to a target that has them.
 
 - A check records its name, kind (`manual`, `automated`, `exploratory`), outcome (`pass`, `fail`,
   `blocked`, `skipped`), steps, command, environment, evidence and note, against the current
@@ -871,9 +889,10 @@ local reads continue.
   in the local repository, `<head>` is the newest head a run read and the head is listed under
   `Not reviewed` as not in the local repository. "To fix" counts open findings and current
   failed or blocked QA checks no open thread explains; out-of-date checks never count. Each
-  item has two lines: the emoji and the first sentence in bold, then severity, `Waiting on
+  item is one line: the emoji and the first sentence in bold, then severity, `Waiting on
   the PR author`, `QA: <check>`, the place (`path:line` or `whole PR`), `Related: <issue>`
-  and `[thread](url)`, or `not posted as a thread, full text below` and the text quoted.
+  and `[thread](url)`; a finding that is not posted as a thread has its whole text quoted
+  under the line.
   `Not reviewed: ...` names the commits no run read. Findings moved to issues are listed under
   **📋 Follow-up issues**. A collapsed Details section holds the QA checks table (a result
   that tested an older head says `(out of date)`) and the closed findings with their outcome,
@@ -1075,6 +1094,7 @@ described above). Unknown fields are rejected.
 | `post_reveal` | boolean | no | Found during the cycle 2 reveal |
 | `killed` | boolean | no | `true` stores it as a killed finding on the pass |
 | `reason` | string | when `killed` | Why it was killed; only for killed findings |
+| `issue` | string | no | A related issue on the host (`owner/repo#12`, `#12` or `12`), as `comment --issue`; not for killed findings |
 
 ```json
 [

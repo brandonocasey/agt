@@ -231,14 +231,18 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
                     kind,
                     base,
                     head,
+                    reviewers,
                     task_type,
                     risk,
                     implementer,
+                    issue,
                     dry_run,
                     ..
                 },
         } if dry_run => {
-            let meta = PassMeta::new(task_type, risk, implementer)?;
+            let meta = PassMeta::new(task_type, risk, implementer)?
+                .with_issue(&ctx, issue.as_deref())?
+                .with_reviewers(reviewers.as_deref())?;
             pass_dry_run(
                 &ctx,
                 run.as_deref(),
@@ -259,32 +263,22 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
                     task_type,
                     risk,
                     implementer,
+                    issue,
                     dry_run: _,
                 },
         } => {
-            let meta = PassMeta::new(task_type, risk, implementer)?;
+            let meta = PassMeta::new(task_type, risk, implementer)?
+                .with_issue(&ctx, issue.as_deref())?
+                .with_reviewers(reviewers.as_deref())?;
             match run {
-                Some(run) => pass_start(
-                    &ctx,
-                    &run,
-                    kind,
-                    base.as_deref(),
-                    reviewers.as_deref(),
-                    head.as_deref(),
-                    &meta,
-                )?,
+                Some(run) => pass_start(&ctx, &run, kind, base.as_deref(), head.as_deref(), &meta)?,
                 None if kind == PassKind::Full => {
+                    // Checked before the run exists, so a refusal leaves nothing behind.
+                    meta.check_reviewers(&[])?;
                     let started = run_start(&ctx)?;
                     let run = started["run"].as_str().unwrap_or_default().to_owned();
-                    let pass = pass_start(
-                        &ctx,
-                        &run,
-                        kind,
-                        base.as_deref(),
-                        reviewers.as_deref(),
-                        head.as_deref(),
-                        &meta,
-                    );
+                    let pass =
+                        pass_start(&ctx, &run, kind, base.as_deref(), head.as_deref(), &meta);
                     // A first pass that fails leaves no empty run behind.
                     if pass.is_err() {
                         let scope = ctx.scope()?;
@@ -494,6 +488,14 @@ fn pass_missing(run: &Run, pass: &str) -> Error {
     ))
 }
 
+fn find_run<'a>(target: &'a Target, id: &str) -> Result<&'a Run> {
+    target
+        .runs
+        .iter()
+        .find(|run| run.id == id)
+        .ok_or_else(|| run_missing(target, id))
+}
+
 fn find_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Run> {
     match target.runs.iter().position(|run| run.id == id) {
         Some(index) => Ok(&mut target.runs[index]),
@@ -502,11 +504,7 @@ fn find_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Run> {
 }
 
 fn find_pass<'a>(target: &'a Target, run: &str, pass: &str) -> Result<&'a Pass> {
-    let run = target
-        .runs
-        .iter()
-        .find(|candidate| candidate.id == run)
-        .ok_or_else(|| run_missing(target, run))?;
+    let run = find_run(target, run)?;
     run.passes
         .iter()
         .find(|candidate| candidate.id == pass)

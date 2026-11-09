@@ -208,6 +208,10 @@ pub enum PassAction {
         /// `--task-type`).
         #[arg(long, value_name = "MODEL")]
         implementer: Option<String>,
+        /// A related issue on the host (`owner/repo#12`, `#12` or `12`) the summary names
+        /// (run-level, like `--task-type`).
+        #[arg(long, value_name = "ISSUE")]
+        issue: Option<String>,
         /// Print which of the requested commits earlier passes already reviewed, and start
         /// nothing.
         #[arg(long)]
@@ -530,6 +534,9 @@ pub enum QaRunAction {
         /// 1 is the first QA after the implementer handed back; 2 and up retest after fixes.
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         round: Option<u32>,
+        /// A related issue on the host (`owner/repo#12`, `#12` or `12`) the summary names.
+        #[arg(long, value_name = "ISSUE")]
+        issue: Option<String>,
     },
     /// End a QA run.
     End {
@@ -568,6 +575,9 @@ pub struct CheckArgs {
     pub evidence: Vec<String>,
     #[arg(long)]
     pub note: Option<String>,
+    /// A related issue on the host (`owner/repo#12`, `#12` or `12`) the summary names.
+    #[arg(long, value_name = "ISSUE")]
+    pub issue: Option<String>,
 }
 
 #[derive(Args)]

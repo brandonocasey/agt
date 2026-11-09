@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::approve::is_open;
-use super::findings::{self, NewThread, author, issue_key, local_thread};
+use super::findings::{self, NewThread, author, linked_issue, local_thread};
 use super::input::{implementer_name, limited, read_body};
 use super::report::{self, Section};
 use super::{
@@ -64,8 +64,18 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
                     tester,
                     implementer,
                     round,
+                    issue,
                 },
-        } => run_start(&ctx, env, &tester, implementer, round)?,
+        } => run_start(
+            &ctx,
+            RunStart {
+                env,
+                tester,
+                implementer,
+                round,
+                issue,
+            },
+        )?,
         QaCommand::Run {
             action: QaRunAction::End { run, usage },
         } => {
@@ -215,9 +225,10 @@ fn blockers(target: &Target, tree: Option<&str>) -> Vec<String> {
     reasons
 }
 
+/// A check's report; its `issue` appears only when set.
 fn check_view(state: &CheckState) -> Value {
     let check = state.check;
-    json!({
+    let mut view = json!({
         "id": check.id,
         "name": check.name,
         "kind": check.kind,
@@ -228,7 +239,11 @@ fn check_view(state: &CheckState) -> Value {
         "evidence": check.evidence,
         "note": check.note,
         "recorded_at": check.recorded_at,
-    })
+    });
+    if let (Some(fields), Some(issue)) = (view.as_object_mut(), &check.issue) {
+        fields.insert("issue".to_owned(), json!(issue));
+    }
+    view
 }
 
 fn thread_view(thread: &Thread) -> Value {
@@ -282,14 +297,14 @@ pub(super) fn qa_state(target: Option<&Target>, head: &str, tree: Option<&str>) 
     })
 }
 
-/// A QA run's id, whether it ended and, when set, its `implementer` and `round`.
+/// A QA run's id, whether it ended and, when set, its `implementer`, `round` and `issue`.
 fn run_summary(run: &QaRun) -> Value {
     let mut summary = json!({ "id": run.id, "ended": run.ended_at.is_some() });
     add_qa_meta(&mut summary, run);
     summary
 }
 
-/// Adds the run's `implementer` and `round` to `view`; an unset field adds nothing.
+/// Adds the run's `implementer`, `round` and `issue` to `view`; an unset field adds nothing.
 fn add_qa_meta(view: &mut Value, run: &QaRun) {
     if let Some(fields) = view.as_object_mut() {
         if let Some(implementer) = &run.implementer {
@@ -297,6 +312,9 @@ fn add_qa_meta(view: &mut Value, run: &QaRun) {
         }
         if let Some(round) = run.round {
             fields.insert("round".to_owned(), json!(round));
+        }
+        if let Some(issue) = &run.issue {
+            fields.insert("issue".to_owned(), json!(issue));
         }
     }
 }
@@ -338,17 +356,30 @@ pub(super) fn qa_author(
     Ok(found)
 }
 
-fn run_start(
-    ctx: &Ctx,
+/// The flags of `qa run start`.
+struct RunStart {
     env: Vec<String>,
-    tester: &AuthorArgs,
+    tester: AuthorArgs,
     implementer: Option<String>,
     round: Option<u32>,
-) -> Result<Value> {
+    issue: Option<String>,
+}
+
+fn run_start(ctx: &Ctx, start: RunStart) -> Result<Value> {
+    let RunStart {
+        env,
+        tester,
+        implementer,
+        round,
+        issue,
+    } = start;
     let scope = ctx.scope()?;
     let env = facts(env)?;
     let implementer = implementer.map(implementer_name).transpose()?;
     let default = ctx.default_author()?;
+    ctx.check_first(&scope, |target| {
+        qa_author(&tester, target, default.clone(), None).map(drop)
+    })?;
     // QA run ids are unique in the repository, so `--run` alone finds the target.
     let taken: HashSet<String> = ctx
         .store
@@ -356,6 +387,7 @@ fn run_start(
         .into_iter()
         .flat_map(|target| target.qa_runs.into_iter().map(|run| run.id))
         .collect();
+    let issue = linked_issue(ctx, issue.as_deref(), &scope.key)?;
     let run = ctx.update(&scope, |target, now| {
         let id = fresh_id(
             &taken,
@@ -363,7 +395,7 @@ fn run_start(
             || crate::core::random::token(QA_ID_PREFIX, QA_ID_CHARS),
         );
         let run = QaRun {
-            tester: qa_author(tester, target, default, Some(&id))?,
+            tester: qa_author(&tester, target, default, Some(&id))?,
             id,
             started_at: now.to_owned(),
             ended_at: None,
@@ -375,6 +407,7 @@ fn run_start(
             usage: Vec::new(),
             implementer,
             round,
+            issue,
         };
         target.qa_runs.push(run.clone());
         Ok(run)
@@ -384,18 +417,33 @@ fn run_start(
     Ok(started)
 }
 
+fn qa_run_missing(target: &Target, id: &str) -> Error {
+    let open = target
+        .qa_runs
+        .iter()
+        .filter(|run| run.ended_at.is_none())
+        .map(|run| run.id.as_str());
+    run_not_found("QA run", id, target, open)
+}
+
 fn find_qa_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut QaRun> {
     match target.qa_runs.iter().position(|run| run.id == id) {
         Some(index) => Ok(&mut target.qa_runs[index]),
-        None => {
-            let open = target
-                .qa_runs
-                .iter()
-                .filter(|run| run.ended_at.is_none())
-                .map(|run| run.id.as_str());
-            Err(run_not_found("QA run", id, target, open))
-        }
+        None => Err(qa_run_missing(target, id)),
     }
+}
+
+/// Fails unless QA run `id` exists and has not ended.
+fn open_qa_run<'a>(target: &'a Target, id: &str) -> Result<&'a QaRun> {
+    let run = target
+        .qa_runs
+        .iter()
+        .find(|run| run.id == id)
+        .ok_or_else(|| qa_run_missing(target, id))?;
+    if run.ended_at.is_some() {
+        return fail(format!("QA run {id} already ended"));
+    }
+    Ok(run)
 }
 
 fn run_end(ctx: &Ctx, id: &str, usage: Vec<crate::store::model::RoleUsage>) -> Result<Value> {
@@ -436,12 +484,12 @@ fn check(ctx: &Ctx, args: CheckArgs) -> Result<Value> {
         .map(|item| limited(item, "evidence"))
         .collect::<Result<Vec<_>>>()?;
     let env = facts(args.env)?;
+    ctx.check_first(&scope, |target| open_qa_run(target, &args.run).map(drop))?;
     let (head, tree) = ctx.reviewed_state(&scope)?;
+    let issue = linked_issue(ctx, args.issue.as_deref(), &scope.key)?;
     let check = ctx.update(&scope, |target, now| {
+        open_qa_run(target, &args.run)?;
         let run = find_qa_run_mut(target, &args.run)?;
-        if run.ended_at.is_some() {
-            return fail(format!("QA run {} already ended", run.id));
-        }
         let prefix = format!("{}.k", run.id);
         let number = last_number(run.checks.iter().map(|check| &check.id), &prefix) + 1;
         let check = Check {
@@ -457,11 +505,27 @@ fn check(ctx: &Ctx, args: CheckArgs) -> Result<Value> {
             head,
             tree,
             recorded_at: now.to_owned(),
+            issue,
         };
         run.checks.push(check.clone());
         Ok(check)
     })?;
     Ok(json!({ "target": scope.key, "check": check }))
+}
+
+/// Who found a QA finding on `check`: the author flags, else the tester of the check's run.
+pub(super) fn finding_author(
+    flags: &AuthorArgs,
+    target: &Target,
+    default: Option<Author>,
+    check: &str,
+) -> Result<Author> {
+    let run = check_run(target, check)?;
+    if flags.is_set() {
+        qa_author(flags, target, default, Some(&run.id))
+    } else {
+        Ok(run.tester.clone())
+    }
 }
 
 fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
@@ -470,19 +534,13 @@ fn finding(ctx: &Ctx, args: &QaFindingArgs) -> Result<Value> {
         return fail("a bug needs --severity");
     }
     let body = read_body(&args.body)?;
-    let issue = args
-        .issue
-        .as_deref()
-        .map(|text| issue_key(ctx, text))
-        .transpose()?;
     let default = ctx.default_author()?;
+    ctx.check_first(&scope, |target| {
+        finding_author(&args.author, target, default.clone(), &args.check).map(drop)
+    })?;
+    let issue = linked_issue(ctx, args.issue.as_deref(), &scope.key)?;
     let thread = ctx.update(&scope, |target, now| {
-        let run = check_run(target, &args.check)?;
-        let finder = if args.author.is_set() {
-            qa_author(&args.author, target, default, Some(&run.id))?
-        } else {
-            run.tester.clone()
-        };
+        let finder = finding_author(&args.author, target, default, &args.check)?;
         let mut thread = local_thread(
             NewThread {
                 id: target.next_thread_id(),

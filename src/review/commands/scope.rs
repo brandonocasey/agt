@@ -437,6 +437,22 @@ impl Ctx {
         }
     }
 
+    /// Runs `check` on the target as `update` would see it (a new one when none exists yet),
+    /// without writing, after the refusals of the write itself. A command that links an issue
+    /// first MUST pass everything that would refuse its write through here: a command its target
+    /// refuses links nothing.
+    pub(super) fn check_first<R>(
+        &self,
+        scope: &Scope,
+        check: impl FnOnce(&Target) -> Result<R>,
+    ) -> Result<R> {
+        self.store.check_writable(&self.dir, &scope.key)?;
+        match &scope.existing {
+            Some(target) => check(target),
+            None => check(&self.new_target(scope, &clock::now()?)),
+        }
+    }
+
     pub(super) fn update<R>(
         &self,
         scope: &Scope,
