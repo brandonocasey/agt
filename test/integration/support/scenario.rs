@@ -91,16 +91,20 @@ impl Setup {
     }
 }
 
+/// Starts a run with an open full pass by `reviewers` and `extra` flags, and returns the run id.
+pub fn start_pass(env: &Env, reviewers: &str, extra: &[&str]) -> String {
+    let mut args = vec!["pass", "start", "--kind", "full", "--reviewers", "-"];
+    args.extend(extra);
+    env.run_stdin(&args, reviewers)["run"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 /// Starts a run with one full pass of `review` and returns the run id. The pass ends with its
 /// findings, locked when `lock` is set.
 pub fn start_review(env: &Env, review: &Review, lock: bool) -> String {
-    let run = env.run_stdin(
-        &["pass", "start", "--kind", "full", "--reviewers", "-"],
-        review.reviewers,
-    )["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let run = start_pass(env, review.reviewers, &[]);
     let mut end = vec![
         "pass",
         "end",

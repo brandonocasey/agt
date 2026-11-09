@@ -306,9 +306,7 @@ fn check_startable(run: &Run, run_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Everything that makes `pass start` refuse a run before it writes: the run, whether it can take
-/// a pass, the run-level fields and the reviewers. `pass start --dry-run` and the link that
-/// precedes the write both go through it.
+/// Fails when `pass start` would refuse to add a pass for `meta` to run `run_id`.
 fn check_pass_start(target: &Target, run_id: &str, meta: &PassMeta) -> Result<()> {
     let run = find_run(target, run_id)?;
     check_startable(run, run_id)?;
@@ -421,9 +419,8 @@ impl PassMeta {
         self.check_issue(run, run_id)
     }
 
-    /// Links the review to the run's issue, if any, before the write. A pass its run refuses
-    /// (no such run, an ended or open run, a contradicted run-level field, a bad reviewer) links
-    /// nothing.
+    /// Records the review in the links of `--issue`, if given, once `check_pass_start` accepts the
+    /// pass.
     fn link(&self, ctx: &Ctx, scope: &Scope, run_id: &str) -> Result<()> {
         let Some(issue) = &self.issue else {
             return Ok(());

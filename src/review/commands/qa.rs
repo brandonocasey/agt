@@ -380,7 +380,6 @@ fn run_start(ctx: &Ctx, start: RunStart) -> Result<Value> {
     ctx.check_first(&scope, |target| {
         qa_author(&tester, target, default.clone(), None).map(drop)
     })?;
-    let issue = linked_issue(ctx, issue.as_deref(), &scope.key)?;
     // QA run ids are unique in the repository, so `--run` alone finds the target.
     let taken: HashSet<String> = ctx
         .store
@@ -388,6 +387,7 @@ fn run_start(ctx: &Ctx, start: RunStart) -> Result<Value> {
         .into_iter()
         .flat_map(|target| target.qa_runs.into_iter().map(|run| run.id))
         .collect();
+    let issue = linked_issue(ctx, issue.as_deref(), &scope.key)?;
     let run = ctx.update(&scope, |target, now| {
         let id = fresh_id(
             &taken,
@@ -433,7 +433,7 @@ fn find_qa_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut QaRun
     }
 }
 
-/// Fails unless QA run `id` exists and has not ended: what a check needs of its run.
+/// Fails unless QA run `id` exists and has not ended.
 fn open_qa_run<'a>(target: &'a Target, id: &str) -> Result<&'a QaRun> {
     let run = target
         .qa_runs

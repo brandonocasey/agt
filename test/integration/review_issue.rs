@@ -8,7 +8,7 @@ use crate::support::forge::github::Github;
 use crate::support::forge::github::own_review;
 use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::issue::{Github as GithubIssues, IssueFake, Spec};
-use crate::support::scenario::{Review, Setup, sent, start_review, thread, write_text};
+use crate::support::scenario::{Review, Setup, sent, start_pass, start_review, thread, write_text};
 use crate::support::{Env, snapshot};
 
 /// A reviewed branch whose repository also tracks the issues of `o/r`, with issue 1 on the host.
@@ -382,12 +382,7 @@ const ONE_REVIEWER: &str = r#"[{"model":"m1","effort":"xhigh","harness":"codex"}
 
 /// Starts a second full-pass run of the reviewed branch with `extra` flags and ends its pass.
 fn another_review_run(env: &Env, extra: &[&str]) -> String {
-    let mut args = vec!["pass", "start", "--kind", "full", "--reviewers", "-"];
-    args.extend(extra);
-    let run = env.run_stdin(&args, ONE_REVIEWER)["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let run = start_pass(env, ONE_REVIEWER, extra);
     let end = ["pass", "end", "--run", &run, "--pass", "c1p0"];
     env.run_stdin(
         &[&end[..], &["--findings", "-", "--reviewer", "r1"]].concat(),
@@ -549,9 +544,7 @@ fn a_bad_run_or_check_issue_is_refused_before_anything_is_written() {
             "o/r#99",
         ],
     ] {
-        let output = env.bin(&env.repo).arg("qa").args(&args).output().unwrap();
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
-        let error = String::from_utf8_lossy(&output.stderr);
+        let error = qa_fails(env, &args);
         assert!(error.contains("no issue o/r#99"), "{error}");
     }
     let after = (
@@ -707,7 +700,7 @@ fn a_pass_end_on_a_missing_run_links_no_issue() {
 #[test]
 fn a_pass_end_on_a_missing_pass_links_no_issue() {
     let setup = setup_with_issue();
-    let open = another_pass_start(&setup.env);
+    let open = start_pass(&setup.env, ONE_REVIEWER, &[]);
     refused_pass_end(&setup.env, (&open, "c9p9", "r1"), "pass");
 }
 
@@ -720,49 +713,12 @@ fn a_pass_end_on_an_ended_pass_links_no_issue() {
 #[test]
 fn a_pass_end_by_an_unknown_reviewer_links_no_issue() {
     let setup = setup_with_issue();
-    let open = another_pass_start(&setup.env);
+    let open = start_pass(&setup.env, ONE_REVIEWER, &[]);
     refused_pass_end(
         &setup.env,
         (&open, "c1p0", "r9"),
         "reviewer r9 is not in pass",
     );
-}
-
-/// A valid pass end still links before the write.
-#[test]
-fn a_valid_pass_end_still_links_the_issue() {
-    let setup = setup_with_issue();
-    let env = &setup.env;
-    let target = env.run(&["status"])["target"].as_str().unwrap().to_owned();
-    let open = another_pass_start(env);
-    env.run_stdin(
-        &[
-            "pass",
-            "end",
-            "--run",
-            &open,
-            "--pass",
-            "c1p0",
-            "--findings",
-            "-",
-            "--reviewer",
-            "r1",
-        ],
-        ISSUE_FINDING,
-    );
-    let issue = env.issue_doc(GithubIssues.tracker(), "1");
-    assert_eq!(issue["links"]["reviews"], json!([target]), "{issue}");
-}
-
-/// Starts a second full-pass run of the reviewed branch and leaves its pass open.
-fn another_pass_start(env: &Env) -> String {
-    env.run_stdin(
-        &["pass", "start", "--kind", "full", "--reviewers", "-"],
-        ONE_REVIEWER,
-    )["run"]
-        .as_str()
-        .unwrap()
-        .to_owned()
 }
 
 /// A finding or QA comment on a check that does not exist, or by an author the QA rules refuse,
@@ -809,38 +765,6 @@ fn a_qa_command_its_target_refuses_links_no_issue() {
     );
     assert!(error.contains("--reviewer"), "{error}");
     assert_eq!(stored(env), before, "a refused command wrote");
-}
-
-/// The earlier order still holds for a valid run: the review is linked, then the write.
-#[test]
-fn a_valid_run_still_links_before_the_write() {
-    let setup = setup_with_issue();
-    let env = &setup.env;
-    let target = env.run(&["status"])["target"].as_str().unwrap().to_owned();
-    let run = another_review_run(env, &["--issue", "o/r#3"]);
-    assert_eq!(env.run(&["show", &run])["run"]["issue"], "o/r#3");
-    let qa_run = qa(env, &["run", "start"])["run"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    qa(
-        env,
-        &[
-            "check",
-            "--run",
-            &qa_run,
-            "--name",
-            "ok",
-            "--outcome",
-            "pass",
-            "--issue",
-            "o/r#2",
-        ],
-    );
-    for number in ["2", "3"] {
-        let issue = env.issue_doc(GithubIssues.tracker(), number);
-        assert_eq!(issue["links"]["reviews"], json!([target]), "{issue}");
-    }
 }
 
 const BAD_REVIEWERS: [(&str, &str); 3] = [

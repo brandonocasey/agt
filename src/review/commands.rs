@@ -504,11 +504,7 @@ fn find_run_mut<'a>(target: &'a mut Target, id: &str) -> Result<&'a mut Run> {
 }
 
 fn find_pass<'a>(target: &'a Target, run: &str, pass: &str) -> Result<&'a Pass> {
-    let run = target
-        .runs
-        .iter()
-        .find(|candidate| candidate.id == run)
-        .ok_or_else(|| run_missing(target, run))?;
+    let run = find_run(target, run)?;
     run.passes
         .iter()
         .find(|candidate| candidate.id == pass)
