@@ -579,9 +579,13 @@ fn qa_table(text: &mut String, qa: &QaSummary) {
             }
             let _ = write!(evidence, "{local} not uploaded");
         }
+        let related = check
+            .issue
+            .as_ref()
+            .map_or_else(String::new, |issue| format!(" · Related: {issue}"));
         let _ = writeln!(
             text,
-            "| {} | {emoji} {}{old} | {} | {evidence} |",
+            "| {} | {emoji} {}{old}{related} | {} | {evidence} |",
             cell(&clip(&check.name, CELL)),
             check.outcome.as_str(),
             cell(&clip(&environment(state.run, check).join(", "), CELL)),
@@ -620,6 +624,11 @@ fn footer(text: &mut String, covered: &[Covered], qa: &QaSummary) {
         format!("agt {}", env!("CARGO_PKG_VERSION")),
         what.to_owned(),
     ];
+    parts.extend(
+        run_issues(covered, qa)
+            .into_iter()
+            .map(|issue| format!("Related: {issue}")),
+    );
     if !reviewers.is_empty() {
         parts.push(format!(
             "{}, {}",
@@ -632,6 +641,21 @@ fn footer(text: &mut String, covered: &[Covered], qa: &QaSummary) {
     }
     parts.push("updated after each review".to_owned());
     let _ = write!(text, "\n\n> <sub>{}</sub>", parts.join(" · "));
+}
+
+/// The issues the covered review and QA runs name, each once.
+fn run_issues<'a>(covered: &[Covered<'a>], qa: &QaSummary<'a>) -> Vec<&'a str> {
+    let mut issues: Vec<&str> = Vec::new();
+    let named = covered
+        .iter()
+        .filter_map(|covered| covered.run.issue.as_deref())
+        .chain(qa.runs.iter().filter_map(|run| run.issue.as_deref()));
+    for issue in named {
+        if !issues.contains(&issue) {
+            issues.push(issue);
+        }
+    }
+    issues
 }
 
 /// The indent that keeps a line in the list item: as wide as `10. `.

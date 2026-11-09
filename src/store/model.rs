@@ -226,6 +226,10 @@ pub struct Run {
     /// Who implemented the work under review, such as `claude-sonnet-5-5`. Run-level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementer: Option<String>,
+    /// A related issue on the host (`owner/repo#12`), set by the pass that starts the run. Absent
+    /// unless given, so documents stay readable and writable by builds without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -359,6 +363,10 @@ pub struct QaRun {
     /// 1 is the first QA after the implementer handed back; 2 and up retest after fixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<u32>,
+    /// A related issue on the host (`owner/repo#12`) the posted summary names. Absent unless
+    /// given, so documents stay readable and writable by builds without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
 }
 
 /// One tested scenario and its outcome at the state it ran against.
@@ -384,6 +392,10 @@ pub struct Check {
     pub head: Option<String>,
     pub tree: String,
     pub recorded_at: String,
+    /// A related issue on the host (`owner/repo#12`) the posted summary names. Absent unless
+    /// given, so documents stay readable and writable by builds without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ValueEnum)]

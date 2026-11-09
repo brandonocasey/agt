@@ -393,6 +393,9 @@ pub(super) fn run_views(target: Option<&Target>) -> Vec<Value> {
                 if let Some(implementer) = &run.implementer {
                     fields.insert("implementer".to_owned(), json!(implementer));
                 }
+                if let Some(issue) = &run.issue {
+                    fields.insert("issue".to_owned(), json!(issue));
+                }
             }
             view
         })

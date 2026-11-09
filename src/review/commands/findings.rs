@@ -13,7 +13,7 @@ use crate::store::model::{
 use crate::store::{Namespace, Store};
 
 use super::input::{AnchorInput, build_anchor, limited, read_body};
-use super::qa::{check_run, qa_author};
+use super::qa::{finding_author, qa_author};
 use super::{Ctx, Scope, find_pass, find_pass_mut, find_thread_mut, killed, major_found};
 
 /// A comment written here, numbered after the thread's other local comments.
@@ -199,7 +199,7 @@ pub(super) fn finding_kill(ctx: &Ctx, id: &str, reason: &str) -> Result<Value> {
 }
 
 /// One reviewer finding as `pass end --findings` reads it; see README "Finding input".
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FindingInput {
     #[serde(rename = "type")]
@@ -409,31 +409,19 @@ pub(super) fn comment(
         start_line: args.start_line,
     };
     let anchor = comment_anchor(ctx, &scope, args, &anchor_input)?;
-    let issue = args
-        .issue
-        .as_deref()
-        .map(|text| issue_key(ctx, text))
-        .transpose()?;
-    if let Some(issue) = &issue {
-        link_review(ctx, issue, &scope.key)?;
-    }
     let default = ctx.default_author()?;
+    // A QA comment on a check is by the tester of the check's run unless the flags say otherwise.
+    let comment_by = |target: &Target, default: Option<Author>| match (qa, check) {
+        (false, _) => author(&args.author, target, default),
+        (true, Some(check)) => finding_author(&args.author, target, default, check),
+        (true, None) => qa_author(&args.author, target, default, None),
+    };
+    ctx.check_first(&scope, |target| {
+        comment_by(target, default.clone()).map(drop)
+    })?;
+    let issue = linked_issue(ctx, args.issue.as_deref(), &scope.key)?;
     let thread = ctx.update(&scope, |target, now| {
-        let author = if qa {
-            let run = check.map(|check| check_run(target, check)).transpose()?;
-            match run {
-                // The tester found it, unless the author flags say otherwise.
-                Some(run) if !args.author.is_set() => run.tester.clone(),
-                _ => qa_author(
-                    &args.author,
-                    target,
-                    default,
-                    run.map(|run| run.id.as_str()),
-                )?,
-            }
-        } else {
-            author(&args.author, target, default)?
-        };
+        let author = comment_by(target, default)?;
         let mut thread = local_thread(
             NewThread {
                 id: target.next_thread_id(),
@@ -516,6 +504,17 @@ pub(super) fn issue_key(ctx: &Ctx, text: &str) -> Result<String> {
             "{text} is in several trackers; pass owner/repo#<number>"
         )),
     }
+}
+
+/// The host key of the issue `text` names, if any, after recording review target `key` in its
+/// links. Callers MUST run it before they write: an issue that cannot be linked stores nothing.
+pub(super) fn linked_issue(ctx: &Ctx, text: Option<&str>, key: &str) -> Result<Option<String>> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let issue = issue_key(ctx, text)?;
+    link_review(ctx, &issue, key)?;
+    Ok(Some(issue))
 }
 
 /// Records review target `key` in the links of issue `issue`, so the issue points back.

@@ -157,6 +157,14 @@ byte for byte as before. Agt 0.33.0 and older read a target that carries the fie
 refuse to write to it ("has field ... that this agt does not know"), so give the flags only
 once every host that touches the repository runs an agt that knows them.
 
+`pass start --issue <issue>` (`owner/repo#12`, `#12` or `12`; the issue MUST be on the host, as for
+`comment --issue`) links the whole run to an issue. It belongs to the run like `--task-type`: the pass
+that starts the run sets it, and a later pass may repeat it but never change it or add one (`--dry-run`
+checks the same). The issue's `links.reviews` gains the target, the issue is checked and linked before
+anything is written, and `show <run>` and `status --full` print it. The posted summary names it in its
+footer as `Related: <owner/repo#n>`, once per distinct issue. A target written without it loads
+unchanged. Agt 0.37.0 and older refuse to write to a target that carries the field, as above.
+
 A first pass that fails to start leaves no run behind. A pass left open blocks `run end`
 and another `pass start --run` on that run; `pass abort --run <run> [--pass <id>]`
 deletes the open pass (an ended pass is refused, and so is one with findings or replies from its reviewers), and the
@@ -427,6 +435,14 @@ agt qa publish --dry-run            # as agt review publish
 2 and up are retests after fixes. Both are optional. `qa show <run>`, `qa list` (its
 `runs`) and the `qa` part of `status` print them when set. The same older-agt limit as
 for review runs applies: agt 0.33.0 and older cannot write to a target that has them.
+
+`qa run start --issue <issue>` links the whole QA run to an issue and `qa check --issue <issue>`
+links one check (same forms and checks as `pass start --issue`: the issue MUST be on the host, it is
+linked into the issue's `links.reviews` before the write, and a bad key stores nothing). `qa show`,
+`qa list` and the output of both commands print it when set. The summary names a run's issue in its
+footer, once with any equal review run issue, and a check's issue in its row of the QA check table,
+both as `Related: <owner/repo#n>`. A target written without them loads unchanged; agt 0.37.0 and older
+cannot write to a target that has them.
 
 - A check records its name, kind (`manual`, `automated`, `exploratory`), outcome (`pass`, `fail`,
   `blocked`, `skipped`), steps, command, environment, evidence and note, against the current
