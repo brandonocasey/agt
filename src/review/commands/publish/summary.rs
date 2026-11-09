@@ -120,7 +120,7 @@ pub(super) fn summary_texts(
         !head_local && !covered.is_empty() && !covered.iter().any(|run| run.head == qa.head);
     let (missing, shown) = match covered.last() {
         Some(newest) if unlisted => (vec![short(&qa.head).to_owned()], newest.head.as_str()),
-        _ => (unreviewed(covered, commits), qa.head.as_str()),
+        _ => (unreviewed(target, covered, commits), qa.head.as_str()),
     };
     let approvals = approvals(target, covered, qa);
     let mut items: Vec<String> = open
@@ -404,15 +404,16 @@ fn check_item(number: usize, state: &CheckState) -> String {
     text
 }
 
-/// The short ids of the PR/MR commits no covered run read, oldest first.
-fn unreviewed(covered: &[Covered], commits: Option<&[CommitInfo]>) -> Vec<String> {
+/// The short ids of the PR/MR commits no ended run read, oldest first. A run from before the
+/// PR/MR existed counts here though the summary leaves it out.
+fn unreviewed(target: &Target, covered: &[Covered], commits: Option<&[CommitInfo]>) -> Vec<String> {
     if covered.is_empty() {
         return Vec::new();
     }
     commits
         .unwrap_or_default()
         .iter()
-        .filter(|commit| !reviewed(covered, commit))
+        .filter(|commit| !reviewed(target, commit))
         .map(|commit| short(&commit.sha).to_owned())
         .collect()
 }
@@ -675,18 +676,17 @@ fn capitalized(text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a pass of a covered run read `commit`, by its id or the same patch.
-fn reviewed(covered: &[Covered], commit: &CommitInfo) -> bool {
+/// Whether a pass of an ended run read `commit`, by its id or the same patch.
+fn reviewed(target: &Target, commit: &CommitInfo) -> bool {
     let same = |patch: &CommitPatch| {
         patch.sha == commit.sha || (patch.patch_id.is_some() && patch.patch_id == commit.patch_id)
     };
-    covered.iter().any(|covered| {
-        covered
-            .run
-            .passes
-            .iter()
-            .any(|pass| pass.kind != PassKind::Reveal && pass.commits.iter().any(same))
-    })
+    target
+        .runs
+        .iter()
+        .filter(|run| run.ended_at.is_some())
+        .flat_map(|run| &run.passes)
+        .any(|pass| pass.kind != PassKind::Reveal && pass.commits.iter().any(same))
 }
 
 /// The record marker of every covered run, newest first, then the marker of this summary.

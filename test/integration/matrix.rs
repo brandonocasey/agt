@@ -80,6 +80,7 @@ matrix!(
     status_and_list_can_sync_first,
     a_qa_finding_resolved_before_it_is_posted_is_never_posted,
     qa_findings_of_runs_ended_before_the_pr_are_never_published,
+    the_summary_counts_commits_reviewed_before_the_pr,
     the_summary_of_one_open_finding_leads_with_what_to_fix,
     inline_finding_and_review_batch_carry_only_the_model_and_a_marker,
 );
@@ -1350,6 +1351,96 @@ fn qa_findings_of_runs_ended_before_the_pr_are_never_published(svc: Svc) {
             .unwrap()
             .contains("ended before the target was linked"),
         "{dry}"
+    );
+}
+
+/// A branch reviewed before its PR counts as reviewed in the summary, though the run stays
+/// private; a commit pushed after the PR is listed until a later review reads it.
+fn the_summary_counts_commits_reviewed_before_the_pr(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    env.run(&["run", "end", "--run", &setup.run]);
+    let later = (unix_now() + 3600).to_string();
+    let at = [("AGT_NOW", later.as_str())];
+    svc.sync(&setup, &Remote::new());
+    env.pull_with(&["sync", "--pr", svc.number()], &at);
+    // A review after the PR of the one commit pushed since, a pass that starts at the first head.
+    env.write("b.txt", "b\n");
+    let second = env.commit_all("second");
+    let first = setup.head.clone();
+    let pushed = Setup {
+        head: second.clone(),
+        ..setup
+    };
+    svc.sync(&pushed, &Remote::new());
+    let env = &pushed.env;
+    env.pull_with(&["sync", "--pr", svc.number()], &at);
+    let started = env.run_with(
+        &[
+            "pass",
+            "start",
+            "--kind",
+            "full",
+            "--base",
+            &first,
+            "--reviewers",
+            "-",
+        ],
+        Some(r#"[{"model":"m1","effort":"xhigh","harness":"codex"}]"#),
+        &at,
+    );
+    let run = started["run"].as_str().unwrap();
+    let end = [
+        "pass",
+        "end",
+        "--run",
+        run,
+        "--pass",
+        "c1p0",
+        "--findings",
+        "-",
+        "--reviewer",
+        "r1",
+    ];
+    env.run_with(&end, Some("[]"), &at);
+    env.run_with(&["run", "end", "--run", run], None, &at);
+    let dry = dry_run(env, svc, &[]);
+    let summary = write_text(&dry, "body", "review-record");
+    assert!(
+        summary.starts_with("**✅ Nothing to fix** at `"),
+        "{summary}"
+    );
+    assert!(
+        !summary.to_lowercase().contains("not reviewed"),
+        "{summary}"
+    );
+    // The earlier run, its findings and its commit stay out of everything posted.
+    let posted = dry["writes"].to_string();
+    for private in [
+        pushed.run.as_str(),
+        "In-diff text of f1",
+        "General text of f2",
+    ] {
+        assert!(!posted.contains(private), "{private} leaked: {dry}");
+    }
+    env.write("c.txt", "c\n");
+    let third = env.commit_all("third");
+    let newest = Setup {
+        head: third.clone(),
+        ..pushed
+    };
+    svc.sync(&newest, &Remote::new());
+    let env = &newest.env;
+    env.pull_with(&["sync", "--pr", svc.number()], &at);
+    let dry = dry_run(env, svc, &[]);
+    let summary = write_text(&dry, "body", "review-record");
+    assert!(
+        summary.contains(&format!(
+            "1 new commit not reviewed** at `{}`\n\nNot reviewed: `{}`\n",
+            &third[..7],
+            &third[..7]
+        )),
+        "{summary}"
     );
 }
 

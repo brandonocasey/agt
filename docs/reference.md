@@ -893,9 +893,11 @@ local reads continue.
   the PR author`, `QA: <check>`, the place (`path:line` or `whole PR`), `Related: <issue>`
   and `[thread](url)`; a finding that is not posted as a thread has its whole text quoted
   under the line.
-  `Not reviewed: ...` names the commits no run read. Findings moved to issues are listed under
-  **📋 Follow-up issues**. A collapsed Details section holds the QA checks table (a result
-  that tested an older head says `(out of date)`) and the closed findings with their outcome,
+  `Not reviewed: ...` names the commits no ended run read, also one that ended before the
+  target's `attached_at`: that run stays unposted and unnamed, but its commits count as
+  reviewed. Findings moved to issues are listed under **📋 Follow-up issues**. A collapsed
+  Details section holds the QA checks table (a result that tested an older head says
+  `(out of date)`) and the closed findings with their outcome,
   with a count of those closed before they were posted. After approval, the follow-ups and
   closed findings drop (a finding closed before the approval stays dropped after a later
   push, by the time it was closed, and a blocking finding opened since shows them again); only the QA table stays. A grey footer names the agt version, what
