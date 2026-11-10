@@ -1067,6 +1067,27 @@ impl Repo {
     }
 }
 
+/// Files in a git directory that mark an unfinished rebase, merge, cherry-pick, revert or
+/// bisect.
+const UNFINISHED: [&str; 8] = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "sequencer",
+    "BISECT_START",
+];
+
+/// The markers of unfinished operations that `git_dir` holds, in the order of [`UNFINISHED`].
+pub fn unfinished_markers(git_dir: &Path) -> Vec<&'static str> {
+    UNFINISHED
+        .into_iter()
+        .filter(|marker| git_dir.join(marker).exists())
+        .collect()
+}
+
 /// The non-empty fields of NUL-separated git output.
 pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
     listing

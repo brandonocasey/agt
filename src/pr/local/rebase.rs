@@ -8,20 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use super::Local;
 use crate::core::error::{Result, ctx, fail};
 use crate::git::fast_forward::{check, moves_submodule};
-use crate::git::{Repo, Worktree, nul_fields};
-
-/// What a rebase in progress leaves in the git directory of its work tree; so do a merge, a
-/// cherry-pick, a revert and a bisect, which a rebase would trample.
-const IN_PROGRESS: [&str; 8] = [
-    "rebase-merge",
-    "rebase-apply",
-    "MERGE_HEAD",
-    "CHERRY_PICK_HEAD",
-    "REVERT_HEAD",
-    "sequencer",
-    "BISECT_LOG",
-    "BISECT_START",
-];
+use crate::git::{Repo, Worktree, nul_fields, unfinished_markers};
 
 /// The directories that hold a rebase in progress.
 const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
@@ -280,9 +267,8 @@ impl Local<'_> {
 /// One line for each operation in progress in the work tree at `path`.
 fn operations_in_progress(path: &Path) -> Result<Vec<String>> {
     let git_dir = Repo::at(path).git_dir()?;
-    Ok(IN_PROGRESS
-        .iter()
-        .filter(|name| git_dir.join(name).exists())
+    Ok(unfinished_markers(&git_dir)
+        .into_iter()
         .map(|name| format!("{} has a {name} in progress", path.display()))
         .collect())
 }
