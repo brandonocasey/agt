@@ -71,7 +71,7 @@ impl Local<'_> {
         let intent = match intent::get(key)? {
             Some(intent) if intent.waiter == waiter => intent,
             Some(_) => return fail(format!("another call took over the auto-merge of {branch}")),
-            None => return fail(format!("the auto-merge of {branch} was turned off")),
+            None => return self.gone(branch),
         };
         let tip = self.tip(branch)?;
         if tip != intent.sha {
@@ -96,6 +96,16 @@ impl Local<'_> {
         intent::finish(key)?;
         landed?;
         Ok(Attempt::Merged)
+    }
+
+    /// What a waiter finds when its intent is gone: the merge, when a plain merge landed
+    /// `branch` meanwhile, else the error that `auto-merge off` ended it.
+    fn gone(&self, branch: &str) -> Result<Attempt> {
+        let target_tip = self.tip(&self.target()?)?;
+        if self.repo.is_ancestor(&self.tip(branch)?, &target_tip)? {
+            return Ok(Attempt::Merged);
+        }
+        fail(format!("the auto-merge of {branch} was turned off"))
     }
 
     /// The gates that fail for `branch` at `tip`: checks, review, approval, and that the branch

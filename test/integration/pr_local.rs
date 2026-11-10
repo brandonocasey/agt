@@ -1376,6 +1376,20 @@ fn auto_merge_off_stops_a_waiter_and_on_restores_the_method_it_recorded() {
 }
 
 #[test]
+fn a_waiter_reports_the_merge_when_a_plain_merge_landed_its_branch() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    let waiter = start_waiter(&env, &merge_args(&sha, "feat", &["--auto"]));
+    wait_until_on(&env, "feat");
+
+    ok(&env, &merge_args(&sha, "feat", &[]));
+    let output = waiter.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout_json(&output)["state"], "merged");
+    assert_eq!(tip(&env, "main"), sha);
+}
+
+#[test]
 fn auto_merge_on_with_nothing_recorded_fails() {
     let env = setup();
     add_branch(&env, "feat", "b.txt", "b\n");
