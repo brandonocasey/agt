@@ -1413,6 +1413,26 @@ fn checkout_scratch_goes_once_old_in_every_checkout_git_does_not_track_it_in() {
 }
 
 #[test]
+fn a_bad_roots_config_skips_only_checkout_scratch() {
+    let prune = Prune::new();
+    prune.env.write_config("[worktree]\nroots = [\n");
+    let task = prune.env.path("cache").join("agents/scratch/task");
+    old_file(&task.join("notes.md"), 31);
+    age(&task, 31);
+
+    let report = prune.run(&["--only", "files", "--yes"]);
+    assert!(!task.exists(), "{report}");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().starts_with("checkout scratch skipped:")),
+        "{report}"
+    );
+}
+
+#[test]
 fn the_sweep_plan_skips_a_worktree_changed_in_the_last_3_days() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");

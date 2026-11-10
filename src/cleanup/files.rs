@@ -211,11 +211,7 @@ pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
 /// Task directories in `agents/scratch` and in each of `checkouts`' `.cache/agents/scratch`, and
 /// harness session directories. A checkout holds files anyone can commit, so every directory
 /// from the checkout down to its scratch MUST be a real directory of this user.
-pub fn scratch(
-    checkouts: &[PathBuf],
-    now: i64,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<Stale>> {
+pub fn scratch(checkouts: &[PathBuf], now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
     let root = own_root(local::agents_cache()?.join(harness::SCRATCH_NAME));
     let mut found = stale_in(
         &root,

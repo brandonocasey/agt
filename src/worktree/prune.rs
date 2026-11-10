@@ -58,10 +58,7 @@ pub fn candidates() -> Result<Vec<Found>> {
 /// cannot read, a worktree whose directory is gone, and a checkout where git tracks a file
 /// under `scratch`, since that is the repository's content rather than an agent's.
 pub fn checkouts(scratch: &str) -> Result<Vec<PathBuf>> {
-    let mut repos: Vec<Repo> = roots::repositories()?
-        .into_iter()
-        .map(Repo::at)
-        .collect();
+    let mut repos: Vec<Repo> = roots::repositories()?.into_iter().map(Repo::at).collect();
     if let Ok(here) = Repo::discover() {
         repos.push(here);
     }

@@ -493,7 +493,13 @@ impl Plan {
     /// Scratch, checkout scratch and harness session directories untouched for 30 days.
     pub fn scratch(&mut self, now: i64) -> Result<()> {
         let harness = files::harness_roots()?;
-        let checkouts = crate::worktree::prune::checkouts(crate::core::harness::SCRATCH_DIR)?;
+        // A bad roots config skips only checkout scratch; the cache scratch is still swept.
+        let checkouts = crate::worktree::prune::checkouts(crate::core::harness::SCRATCH_DIR)
+            .unwrap_or_else(|error| {
+                self.warnings
+                    .push(format!("checkout scratch skipped: {error}"));
+                Vec::new()
+            });
         for stale in files::scratch(&checkouts, now, &mut self.warnings)? {
             let reason = files::reason(&stale, now, SCRATCH_DAYS);
             let in_harness = harness.iter().any(|root| stale.path.starts_with(root));
