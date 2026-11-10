@@ -16,6 +16,7 @@ mod issue_read;
 mod matrix;
 mod offline;
 mod pr;
+mod pr_local;
 mod ps;
 mod publish;
 mod publish_gitlab_outside;

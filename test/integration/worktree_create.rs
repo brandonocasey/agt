@@ -194,6 +194,30 @@ fn a_local_default_in_a_deleted_worktree_names_the_prune() {
 }
 
 #[test]
+fn a_local_default_checked_out_twice_stays_put_and_names_both() {
+    let (env, _, first, _) = behind_origin();
+    let second = env.path("second-checkout");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--force",
+            second.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "skipped", "{value}");
+    let reason = value["local_default"]["reason"].as_str().unwrap();
+    assert!(reason.contains("2 work trees"), "{reason}");
+    assert!(reason.contains("second-checkout"), "{reason}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "main"]), first);
+}
+
+#[test]
 fn a_local_default_checked_out_nowhere_moves_as_a_ref() {
     let (env, _, _, tip) = behind_origin();
     git(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);
