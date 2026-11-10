@@ -77,6 +77,11 @@ impl Worktree {
 pub struct Repo {
     root: PathBuf,
     main_checkout: OnceLock<PathBuf>,
+    // Facts of the repository's layout that nothing in one agt process changes, kept so each
+    // is asked of git once per `Repo`; a failed read is not kept.
+    toplevel: OnceLock<PathBuf>,
+    common_dir: OnceLock<String>,
+    is_bare: OnceLock<bool>,
     env: Vec<(OsString, OsString)>,
     _scratch: Option<tempfile::TempDir>,
 }
@@ -88,6 +93,9 @@ impl Repo {
         Self {
             root: root.into(),
             main_checkout: OnceLock::new(),
+            toplevel: OnceLock::new(),
+            common_dir: OnceLock::new(),
+            is_bare: OnceLock::new(),
             env: Vec::new(),
             _scratch: None,
         }
@@ -105,8 +113,10 @@ impl Repo {
 
     /// The root of the work tree that contains this directory.
     pub fn toplevel(&self) -> Result<PathBuf> {
-        self.git(&["rev-parse", "--show-toplevel"])
-            .map(PathBuf::from)
+        remembered(&self.toplevel, || {
+            self.git(&["rev-parse", "--show-toplevel"])
+                .map(PathBuf::from)
+        })
     }
 
     /// What `git status` lists, without renames. `untracked` also lists untracked files; `extra`
@@ -985,7 +995,15 @@ impl Repo {
 
     /// The absolute git common dir, which names a `local/` repository.
     pub fn common_dir(&self) -> Result<String> {
-        self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        remembered(&self.common_dir, || {
+            self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        })
+    }
+
+    fn is_bare(&self) -> Result<bool> {
+        remembered(&self.is_bare, || {
+            Ok(self.git(&["rev-parse", "--is-bare-repository"])? == "true")
+        })
     }
 
     /// Every worktree of the repository; the first is the main checkout.
@@ -1001,7 +1019,7 @@ impl Repo {
         if let Some(root) = self.main_checkout.get() {
             return Ok(root.clone());
         }
-        if self.git(&["rev-parse", "--is-bare-repository"])? == "true" {
+        if self.is_bare()? {
             return fail("repository-local state requires a non-bare main checkout");
         }
         let first = self
@@ -1011,7 +1029,7 @@ impl Repo {
             .ok_or_else(|| Error("git did not report its main checkout".into()))?;
         let root = fs::canonicalize(first.path).map_err(ctx("main checkout is unavailable"))?;
         let main = Self::at(&root);
-        if main.git(&["rev-parse", "--is-bare-repository"])? == "true"
+        if main.is_bare()?
             || fs::canonicalize(main.common_dir()?).map_err(ctx("resolve main git directory"))?
                 != fs::canonicalize(self.common_dir()?).map_err(ctx("resolve git directory"))?
         {
@@ -1060,6 +1078,16 @@ pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
     listing
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
+}
+
+/// The value of `cell`, computed by `read` on the first call. A failed read leaves the cell empty,
+/// so the next call tries again.
+fn remembered<T: Clone>(cell: &OnceLock<T>, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    if let Some(value) = cell.get() {
+        return Ok(value.clone());
+    }
+    let value = read()?;
+    Ok(cell.get_or_init(|| value).clone())
 }
 
 /// The revision range `from..to`, or all of `to` when `from` is `None`.
@@ -1167,6 +1195,8 @@ fn remote_key(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{Repo, branch_name, parse_worktrees, remote_key};
     use crate::core::testing::Sandbox;
 
@@ -1289,6 +1319,76 @@ mod tests {
             repo.default_branch_names().unwrap(),
             ["main", "master", "trunk"]
         );
+    }
+
+    #[test]
+    fn the_repository_layout_is_read_from_git_once_per_repo() {
+        let sandbox = Sandbox::with_repo();
+        let root = sandbox.repo();
+        let repo = sandboxed(&sandbox);
+        let read = |repo: &Repo| {
+            (
+                repo.common_dir().unwrap(),
+                repo.toplevel().unwrap(),
+                repo.is_bare().unwrap(),
+            )
+        };
+        let (common_dir, toplevel, is_bare) = read(&repo);
+        assert_eq!(
+            fs::canonicalize(&common_dir).unwrap(),
+            fs::canonicalize(root.join(".git")).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(&toplevel).unwrap(),
+            fs::canonicalize(&root).unwrap()
+        );
+        assert!(!is_bare);
+        // With the repository gone, only an answer kept from the first read can still come back.
+        fs::rename(root.join(".git"), root.join("moved")).unwrap();
+        assert_eq!(read(&repo), (common_dir, toplevel, is_bare));
+        assert!(sandboxed(&sandbox).common_dir().is_err());
+    }
+
+    #[test]
+    fn each_repo_keeps_the_layout_of_its_own_root() {
+        let sandbox = Sandbox::with_repo();
+        let other = sandbox.path().join("other");
+        fs::create_dir(&other).unwrap();
+        sandbox.git(&other, &["init", "-q", "--bare"]);
+        let first = sandboxed(&sandbox);
+        let second = Repo::at(&other);
+        for _ in 0..2 {
+            assert!(!first.is_bare().unwrap());
+            assert!(second.is_bare().unwrap());
+            assert_eq!(
+                fs::canonicalize(first.common_dir().unwrap()).unwrap(),
+                fs::canonicalize(sandbox.repo().join(".git")).unwrap()
+            );
+            assert_eq!(
+                fs::canonicalize(second.common_dir().unwrap()).unwrap(),
+                fs::canonicalize(&other).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_layout_read_is_not_kept() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        let repo = sandboxed(&sandbox);
+        assert!(repo.common_dir().is_err());
+        assert!(repo.toplevel().is_err());
+        assert!(repo.is_bare().is_err());
+        sandbox.git(&root, &["init", "-q"]);
+        assert_eq!(
+            fs::canonicalize(repo.common_dir().unwrap()).unwrap(),
+            fs::canonicalize(root.join(".git")).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(repo.toplevel().unwrap()).unwrap(),
+            fs::canonicalize(&root).unwrap()
+        );
+        assert!(!repo.is_bare().unwrap());
     }
 
     #[test]
