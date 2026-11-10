@@ -510,6 +510,34 @@ fn a_rebase_merge_into_a_target_rebased_or_bisected_elsewhere_changes_nothing() 
     }
 }
 
+/// With `worktree.useRelativePaths` git records a gone work tree's location relative to its entry
+/// in the git directory; the entry is still found.
+#[test]
+fn a_rebase_merge_sees_a_deleted_work_tree_that_git_recorded_by_a_relative_path() {
+    let env = setup();
+    git_ok(
+        &env,
+        &env.repo,
+        &["config", "worktree.useRelativePaths", "true"],
+    );
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    for count in 1..=4 {
+        advance_main(&env, &format!("c{count}.txt"), "c\n");
+    }
+    git_ok(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);
+    add_worktree(&env, "work", &["feat"]);
+    let stuck = add_worktree(&env, "stuck", &["main"]);
+    let stopped = git_in(&env, &stuck, &["rebase", "--exec", "false", "HEAD~1"]);
+    assert!(!stopped.status.success(), "the exec should stop the rebase");
+    fs::remove_dir_all(&stuck).unwrap();
+
+    let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(
+        message.contains(&format!("{} is rebasing main", stuck.display())),
+        "{message}"
+    );
+}
+
 /// A work tree whose directory is gone still holds the branch it was rebasing, so the message
 /// says that and not that no work tree has the branch.
 #[test]

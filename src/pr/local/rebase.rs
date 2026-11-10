@@ -3,7 +3,7 @@
 //! is aborted, so the branch is as it was.
 
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::Local;
 use crate::core::error::{Result, ctx, fail};
@@ -281,10 +281,21 @@ fn rebase_record(git_dir: &Path, dir: &str, name: &str) -> Option<String> {
         .map(|text| text.trim().to_owned())
 }
 
-/// The `.git` file path an entry under `worktrees` records as its work tree's.
+/// The `.git` file path an entry under `worktrees` records as its work tree's. With
+/// `worktree.useRelativePaths` (Git 2.48) it is relative to `admin`, so it is joined and folded.
 fn gitdir_of(admin: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(admin.join("gitdir")).ok()?;
-    Some(PathBuf::from(text.trim_end()))
+    let mut folded = PathBuf::new();
+    for part in admin.join(text.trim_end()).components() {
+        match part {
+            Component::ParentDir => {
+                folded.pop();
+            }
+            Component::CurDir => {}
+            other => folded.push(other),
+        }
+    }
+    Some(folded)
 }
 
 /// Whether the rebase in progress in `git_dir` is of `branch`.
