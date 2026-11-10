@@ -6,7 +6,7 @@ use crate::core::error::Result;
 use crate::git::{CommitInfo, LogEntry, Repo};
 use crate::store::model::{CommitPatch, ImportedRecord, Pass, PassKind, Target, TargetKind};
 
-use super::view::{Locator, run_views, thread_views};
+use super::view::{Locator, ThreadViews, run_views, thread_views};
 use super::{Ctx, Scope, pass_patch_ids};
 
 /// Where a commit's mark came from: a pass of a run, or (no pass) a run's repair.
@@ -620,6 +620,96 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     status_of(ctx, &scope, head_arg.is_some())
 }
 
+/// Whether the work tree belongs to the target: only when its branch is checked out, and the
+/// head is the checked-out one.
+fn work_tree_is_target(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<bool> {
+    Ok(!head_given
+        && scope.kind == TargetKind::Branch
+        && scope.branch.is_some()
+        && ctx.repo.current_branch()? == scope.branch)
+}
+
+/// The `worktree` block of `status` and the passes covering the work tree. `state` is the
+/// head's tree and whether a merge came after the last review; `coverage` the targets and the
+/// passes covering the head.
+fn worktree_view<'a>(
+    ctx: &Ctx,
+    scope: &Scope,
+    state: (&str, bool),
+    coverage: (&Targets<'a>, &[Covered<'a>]),
+) -> Result<(Value, Vec<Covered<'a>>)> {
+    let (head_tree, merge_after) = state;
+    let (targets, covered) = coverage;
+    let tree = ctx.repo.worktree_tree()?;
+    let dirty = tree != head_tree;
+    let worktree_covered = if dirty && !merge_after {
+        let range = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
+        targets.covered_at(&tree, range.as_deref(), None)
+    } else {
+        covered.to_vec()
+    };
+    let view = json!({
+        "dirty": dirty,
+        "tree": tree,
+        "reviewed": !worktree_covered.is_empty(),
+        "reviews": count(&worktree_covered),
+        "covered_by": coverage_json(&worktree_covered),
+    });
+    Ok((view, worktree_covered))
+}
+
+/// The threads of the target, plus those of every other target with a pass in `covering`: a
+/// covering pass of another target counts for the head, so its open threads show too.
+fn threads_view(
+    ctx: &Ctx,
+    scope: &Scope,
+    others: &[Target],
+    covering: Vec<&Covered>,
+) -> ThreadViews {
+    let target = scope.existing.as_ref();
+    let mut locator = Locator {
+        repo: &ctx.repo,
+        head: Some(scope.head.clone()),
+        diffs: HashMap::new(),
+    };
+    let mut threads = thread_views(target, &mut locator);
+    for view in &mut threads.open {
+        view["target"] = json!(target.map(|_| &scope.key));
+    }
+    let mut shown = HashSet::new();
+    for other in others.iter().filter(|other| {
+        covering.iter().any(|covered| covered.target == other.key) && shown.insert(&other.key)
+    }) {
+        let views = thread_views(Some(other), &mut locator);
+        threads.open.extend(views.open.into_iter().map(|mut view| {
+            view["target"] = json!(other.key);
+            view
+        }));
+        threads.held.extend(views.held);
+    }
+    threads
+}
+
+/// The imported records of `target` at `head`, leaving out those of its own runs and of runs
+/// covering the head, which already count through their passes.
+fn records_at_head<'a>(
+    target: Option<&'a Target>,
+    head: &str,
+    covered: &[Covered],
+) -> Vec<&'a ImportedRecord> {
+    target
+        .iter()
+        .flat_map(|target| &target.records)
+        .filter(|record| {
+            record.head == head || (record.head.len() >= 7 && head.starts_with(&record.head))
+        })
+        .filter(|record| {
+            !target.is_some_and(|target| target.runs.iter().any(|run| run.id == record.run))
+                && !covered.iter().any(|covered| covered.run == record.run)
+        })
+        .collect()
+}
+
 /// `status` of `scope`; `head_given` says its head is not the checked-out one, so the work tree
 /// is left out.
 pub(super) fn status_of(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<Value> {
@@ -674,70 +764,19 @@ pub(super) fn status_of(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<Va
         None => last_reviewed.clone(),
     };
 
-    // The work tree belongs to the target only when its branch is checked out.
-    let checked_out = !head_given
-        && scope.kind == TargetKind::Branch
-        && scope.branch.is_some()
-        && ctx.repo.current_branch()? == scope.branch;
-    let mut worktree_covered = Vec::new();
-    let worktree = if checked_out {
-        let tree = ctx.repo.worktree_tree()?;
-        let dirty = tree != head_tree;
-        worktree_covered = if dirty && !merge_after {
-            let range = ctx.repo.range_patch_id(scope.base.as_deref(), &tree)?;
-            targets.covered_at(&tree, range.as_deref(), None)
-        } else {
-            covered.clone()
-        };
-        json!({
-            "dirty": dirty,
-            "tree": tree,
-            "reviewed": !worktree_covered.is_empty(),
-            "reviews": count(&worktree_covered),
-            "covered_by": coverage_json(&worktree_covered),
-        })
+    let (worktree, worktree_covered) = if work_tree_is_target(ctx, scope, head_given)? {
+        worktree_view(ctx, scope, (&head_tree, merge_after), (&targets, &covered))?
     } else {
-        Value::Null
+        (Value::Null, Vec::new())
     };
 
-    let mut locator = Locator {
-        repo: &ctx.repo,
-        head: Some(head.clone()),
-        diffs: HashMap::new(),
-    };
-    let mut threads = thread_views(target, &mut locator);
-    for view in &mut threads.open {
-        view["target"] = json!(target.map(|_| &scope.key));
-    }
-    // A covering pass of another target counts here, so its open threads show here too.
-    let mut shown = HashSet::new();
-    for other in others.iter().filter(|other| {
-        covered
-            .iter()
-            .chain(&worktree_covered)
-            .any(|covered| covered.target == other.key)
-            && shown.insert(&other.key)
-    }) {
-        let views = thread_views(Some(other), &mut locator);
-        threads.open.extend(views.open.into_iter().map(|mut view| {
-            view["target"] = json!(other.key);
-            view
-        }));
-        threads.held.extend(views.held);
-    }
-    let records: Vec<&ImportedRecord> = target
-        .iter()
-        .flat_map(|target| &target.records)
-        .filter(|record| {
-            record.head == head || (record.head.len() >= 7 && head.starts_with(&record.head))
-        })
-        // Records of our own runs, or of runs covering the head, already count through their
-        // passes.
-        .filter(|record| {
-            !target.is_some_and(|target| target.runs.iter().any(|run| run.id == record.run))
-                && !covered.iter().any(|covered| covered.run == record.run)
-        })
-        .collect();
+    let threads = threads_view(
+        ctx,
+        scope,
+        &others,
+        covered.iter().chain(&worktree_covered).collect(),
+    );
+    let records = records_at_head(target, &head, &covered);
     let imported: u32 = records.iter().map(|record| record.reviews_at_head).sum();
     let local = count(&covered);
     let already_reviewed = commit_views.len() - unreviewed.len();
