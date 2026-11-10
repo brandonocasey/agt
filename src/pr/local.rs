@@ -4,6 +4,7 @@
 mod auto;
 mod rebase;
 
+use std::collections::HashSet;
 use std::fs;
 
 use super::gates::Gates;
@@ -18,6 +19,14 @@ use crate::store::model::ReviewState;
 
 /// The most PRs `list` returns.
 const LIST_LIMIT: usize = 100;
+
+/// A local branch with the fields a PR shows.
+struct Row {
+    branch: String,
+    tip: String,
+    author: String,
+    title: String,
+}
 
 pub struct Local<'a> {
     repo: &'a Repo,
@@ -50,10 +59,9 @@ impl<'a> Local<'a> {
             .ok_or_else(|| Error(format!("no local branch {branch}")))
     }
 
-    /// The PR of `branch` against `target`, which is at `target_tip`.
+    /// The PR of `branch` against `target` at `target_tip`, with its messages as body.
     fn pr(&self, branch: &str, target: &str, target_tip: &str) -> Result<Pr> {
         let tip = self.tip(branch)?;
-        let merged = self.repo.is_ancestor(&tip, target_tip)?;
         let range = format!("{target_tip}..{tip}");
         let messages = self
             .repo
@@ -63,31 +71,84 @@ impl<'a> Local<'a> {
             .map(str::trim)
             .filter(|message| !message.is_empty())
             .collect();
-        let (mergeable, merge_state) = match (merged, self.repo.is_ancestor(target_tip, &tip)?) {
+        let author = self.repo.authored(&[tip.as_str()])?;
+        let row = Row {
+            title: self.repo.subject(&tip)?,
+            author: author
+                .get(&tip)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_default(),
+            branch: branch.to_owned(),
+            tip,
+        };
+        let merged = self.repo.is_ancestor(&row.tip, target_tip)?;
+        let descends = self.repo.is_ancestor(target_tip, &row.tip)?;
+        self.row_pr(row, target, (merged, descends), messages.join("\n\n"))
+    }
+
+    /// The local branches `selector` picks, newest commit first, from one `git for-each-ref` call.
+    fn rows(&self, selector: &[&str]) -> Result<Vec<Row>> {
+        let mut args = vec![
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:lstrip=2)%00%(objectname)%00%(authorname)%00%(contents:subject)",
+        ];
+        args.extend(selector);
+        args.push("refs/heads/");
+        let listing = self.repo.git(&args)?;
+        Ok(listing
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(4, '\0');
+                Some(Row {
+                    branch: fields.next()?.to_owned(),
+                    tip: fields.next()?.to_owned(),
+                    author: fields.next()?.to_owned(),
+                    title: fields.next()?.to_owned(),
+                })
+            })
+            .collect())
+    }
+
+    /// The names of the branches `selector` picks.
+    fn names(&self, selector: &[&str]) -> Result<HashSet<String>> {
+        Ok(self
+            .rows(selector)?
+            .into_iter()
+            .map(|row| row.branch)
+            .collect())
+    }
+
+    /// The PR of `row` against `target`.
+    /// `merged` says the tip is in the target. `descends` says the target is in the tip.
+    fn row_pr(
+        &self,
+        row: Row,
+        target: &str,
+        (merged, descends): (bool, bool),
+        body: String,
+    ) -> Result<Pr> {
+        let (mergeable, merge_state) = match (merged, descends) {
             (true, _) => ("unknown", ""),
             (false, true) => ("mergeable", "mergeable"),
             (false, false) => ("blocked", "behind"),
         };
-        let author = self.repo.authored(&[tip.as_str()])?;
         self.with_intent(Pr {
             id: String::new(),
             number: None,
             url: None,
-            title: self.repo.subject(&tip)?,
-            body: messages.join("\n\n"),
+            title: row.title,
+            body,
             state: if merged {
                 ReviewState::Merged
             } else {
                 ReviewState::Open
             },
             draft: false,
-            head_branch: branch.to_owned(),
+            head_branch: row.branch,
             base_branch: target.to_owned(),
-            head_sha: tip.clone(),
-            author: author
-                .get(&tip)
-                .map(|(name, _)| name.clone())
-                .unwrap_or_default(),
+            head_sha: row.tip,
+            author: row.author,
             labels: Vec::new(),
             auto_merge: None,
             auto_merge_known: true,
@@ -231,29 +292,30 @@ impl Provider for Local<'_> {
         } else {
             None
         };
-        let refs = self.repo.git(&[
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format=%(refname)",
-            "refs/heads/",
-        ])?;
+        let rows = match filter.state {
+            State::Open => self.rows(&["--no-merged", &target_tip])?,
+            State::Merged => self.rows(&["--merged", &target_tip])?,
+            State::All => self.rows(&[])?,
+        };
+        let merged = match filter.state {
+            State::All => self.names(&["--merged", &target_tip])?,
+            State::Open | State::Merged => HashSet::new(),
+        };
+        let descending = match filter.state {
+            State::Merged => HashSet::new(),
+            State::Open | State::All => self.names(&["--contains", &target_tip])?,
+        };
         let mut found = Vec::new();
-        for branch in refs
-            .lines()
-            .filter_map(|name| name.strip_prefix("refs/heads/"))
-        {
-            if branch == target || filter.branch.is_some_and(|only| only != branch) {
+        for row in rows {
+            if row.branch == target
+                || filter.branch.is_some_and(|only| only != row.branch)
+                || me.as_ref().is_some_and(|me| *me != row.author)
+            {
                 continue;
             }
-            let pr = self.pr(branch, &target, &target_tip)?;
-            let wanted = match filter.state {
-                State::Open => pr.state == ReviewState::Open,
-                State::Merged => pr.state == ReviewState::Merged,
-                State::All => true,
-            };
-            if wanted && me.as_ref().is_none_or(|me| *me == pr.author) {
-                found.push(pr);
-            }
+            let is_merged = matches!(filter.state, State::Merged) || merged.contains(&row.branch);
+            let descends = descending.contains(&row.branch);
+            found.push(self.row_pr(row, &target, (is_merged, descends), String::new())?);
             if found.len() == LIST_LIMIT {
                 break;
             }

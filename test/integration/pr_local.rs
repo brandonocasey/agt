@@ -247,6 +247,141 @@ fn list_mine_without_a_git_user_name_fails_instead_of_listing_every_branch() {
     assert_eq!(ok(&env, &["list"]).as_array().unwrap().len(), 1);
 }
 
+/// `behind` is one commit with `main` moved on, `merged` is in `main`, `ahead` is one commit
+/// past `main`, and `theirs` is past `main` too but by another author, with a two-line subject.
+fn list_fixture() -> Env {
+    let env = setup();
+    add_branch(&env, "behind", "b.txt", "b\n");
+    add_branch(&env, "merged", "m.txt", "m\n");
+    git_ok(&env, &env.repo, &["merge", "-q", "--ff-only", "merged"]);
+    let ahead = add_branch(&env, "ahead", "a2.txt", "a2\n");
+    let tree = git_ok(
+        &env,
+        &env.repo,
+        &["rev-parse", &format!("{ahead}^{{tree}}")],
+    );
+    let theirs = git_ok(
+        &env,
+        &env.repo,
+        &[
+            "-c",
+            "user.name=Other",
+            "-c",
+            "user.email=other@example.com",
+            "commit-tree",
+            &tree,
+            "-p",
+            "main",
+            "-m",
+            "their work\nsecond line\n\nbody",
+        ],
+    );
+    point(&env, "theirs", &theirs);
+    env
+}
+
+fn names(list: &Value) -> Vec<String> {
+    let mut found: Vec<String> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pr| pr["head_branch"].as_str().unwrap().to_owned())
+        .collect();
+    found.sort();
+    found
+}
+
+#[test]
+fn list_shows_each_branch_with_its_state_mergeability_author_and_title() {
+    let env = list_fixture();
+    let filters: [(&[&str], &[&str]); 8] = [
+        (&["list"], &["ahead", "behind", "theirs"]),
+        (&["list", "--state", "open"], &["ahead", "behind", "theirs"]),
+        (&["list", "--state", "merged"], &["merged"]),
+        (
+            &["list", "--state", "all"],
+            &["ahead", "behind", "merged", "theirs"],
+        ),
+        (&["list", "--branch", "ahead"], &["ahead"]),
+        (&["list", "--branch", "merged"], &[]),
+        (&["list", "--mine"], &["ahead", "behind"]),
+        (
+            &["list", "--mine", "--state", "all"],
+            &["ahead", "behind", "merged"],
+        ),
+    ];
+    for (args, expected) in filters {
+        assert_eq!(names(&ok(&env, args)), expected, "{args:?}");
+    }
+
+    // (branch, state, mergeable, merge_state, author, title)
+    let rows = [
+        (
+            "ahead",
+            "open",
+            "mergeable",
+            "mergeable",
+            "Tester",
+            "add a2.txt",
+        ),
+        ("behind", "open", "blocked", "behind", "Tester", "add b.txt"),
+        ("merged", "merged", "unknown", "", "Tester", "add m.txt"),
+        (
+            "theirs",
+            "open",
+            "mergeable",
+            "mergeable",
+            "Other",
+            "their work second line",
+        ),
+    ];
+    let all = ok(&env, &["list", "--state", "all"]);
+    for (branch, state, mergeable, merge_state, author, title) in rows {
+        let pr = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pr| pr["head_branch"] == branch)
+            .unwrap();
+        assert_eq!(pr["state"], state, "{branch}");
+        assert_eq!(pr["mergeable"], mergeable, "{branch}");
+        assert_eq!(pr["merge_state"], merge_state, "{branch}");
+        assert_eq!(pr["author"], author, "{branch}");
+        assert_eq!(pr["title"], title, "{branch}");
+        assert_eq!(pr["head_sha"], tip(&env, branch).as_str(), "{branch}");
+        assert_eq!(*pr, ok(&env, &["view", "--", branch]), "{branch}");
+    }
+}
+
+/// `list` asks git for its rows in a few calls, not a handful for each branch.
+#[test]
+fn list_runs_a_few_git_calls_however_many_branches_there_are() {
+    let env = list_fixture();
+    for count in 0..6 {
+        add_branch(&env, &format!("extra{count}"), "x.txt", "x\n");
+    }
+    let calls = env.path("calls");
+    let path = env.git_wrapper(
+        "counting-git",
+        &format!("echo x >> '{}'\n", calls.display()),
+    );
+    for state in ["open", "merged", "all"] {
+        let _ = fs::remove_file(&calls);
+        let output = env
+            .bin(&env.repo)
+            .env("PATH", &path)
+            .args(["pr", "--local", "list", "--state", state])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        let spawned = fs::read_to_string(&calls).unwrap().lines().count();
+        assert!(
+            spawned <= 12,
+            "{state}: {spawned} git calls for 10 branches"
+        );
+    }
+}
+
 #[test]
 fn view_without_a_branch_reads_the_current_one_and_a_detached_head_needs_a_name() {
     let env = setup();
