@@ -1413,6 +1413,31 @@ fn checkout_scratch_goes_once_old_in_every_checkout_git_does_not_track_it_in() {
 }
 
 #[test]
+fn cache_scratch_inside_a_checkout_is_planned_once() {
+    let prune = Prune::new();
+    let home = prune.env.path("home/Projects/me/home");
+    fs::create_dir_all(home.join(".cache/agents/scratch")).unwrap();
+    let status = prune
+        .env
+        .command("git", &home)
+        .args(["init", "-q", "-b", "main"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let task = home.join(".cache/agents/scratch/task");
+    old_file(&task.join("notes.md"), 31);
+    age(&task, 31);
+    // The cache root resolving into the checkout, as `XDG_CACHE_HOME` unset with a repository
+    // at `$HOME` does.
+    let cache = prune.env.path("cache");
+    fs::create_dir_all(&cache).unwrap();
+    std::os::unix::fs::symlink(home.join(".cache/agents"), cache.join("agents")).unwrap();
+
+    let report = prune.run(&["--only", "files"]);
+    assert_eq!(keys(&report, "scratch"), ["task"], "{report}");
+}
+
+#[test]
 fn a_bad_roots_config_skips_only_checkout_scratch() {
     let prune = Prune::new();
     prune.env.write_config("[worktree]\nroots = [\n");

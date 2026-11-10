@@ -260,6 +260,10 @@ pub fn scratch(checkouts: &[PathBuf], now: i64, warnings: &mut Vec<String>) -> R
     }
     for checkout in checkouts {
         let dir = checkout.join(harness::SCRATCH_DIR);
+        // A checkout at `$HOME` holds the cache scratch, which the first pass already swept.
+        if fs::canonicalize(&dir).is_ok_and(|real| real == root) {
+            continue;
+        }
         found.extend(stale_in(
             checkout,
             std::slice::from_ref(&dir),
