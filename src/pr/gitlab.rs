@@ -2,8 +2,10 @@
 
 use serde_json::{Value, json};
 
-use super::upload::{Image, Uploaded};
-use super::{Changes, How, Pr, State};
+use super::provider::{At, Capabilities, Filter, NewPr, Provider};
+use super::remote::{self, Remote};
+use super::upload::{Image, Uploaded, Uploader};
+use super::{Changes, How, Native, Pr, State};
 use crate::core::error::{Error, Result, fail};
 use crate::forge::encode;
 use crate::forge::gitlab::{self, project_path};
@@ -33,8 +35,8 @@ fn mr(node: &Value) -> Pr {
     let shared = gitlab::pull_node(node);
     Pr {
         id: node["iid"].to_string(),
-        number: shared.number.unwrap_or_default(),
-        url: shared.url,
+        number: Some(shared.number.unwrap_or_default()),
+        url: Some(shared.url),
         title: shared.title,
         body: text("description"),
         state: shared.state.unwrap_or(ReviewState::Open),
@@ -62,8 +64,7 @@ fn mr(node: &Value) -> Pr {
         merge_state: detailed,
         conflicts,
         same_repo: shared.same_repo.unwrap_or(true),
-        squash,
-        merge_queue: false,
+        native: Native::Gitlab { squash },
     }
 }
 
@@ -76,7 +77,7 @@ fn queue(t: &dyn Transport, repo: &str, found: &mut Pr) -> Result<()> {
     let path = format!(
         "{}/merge_trains/merge_requests/{}",
         project_path(repo),
-        found.number
+        found.forge_number()
     );
     match t.send(&Request::get(path)) {
         Ok(reply) => {
@@ -214,7 +215,7 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
     }
     t.send(&Request::rest(
         Method::Put,
-        format!("{}/{}", base(repo), current.number),
+        format!("{}/{}", base(repo), current.forge_number()),
         Some(Value::Object(body)),
     ))
     .map(|_| ())
@@ -235,10 +236,10 @@ pub fn merge(
     match how {
         Some(How::Squash) => body["squash"] = json!(true),
         // GitLab squashes when the MR has squash on and only reads `squash: true` from the request.
-        Some(How::Merge) if current.squash => {
+        Some(How::Merge) if matches!(current.native, Native::Gitlab { squash: true }) => {
             return fail(format!(
                 "!{} has squash on, which GitLab applies on merge; use --method squash or turn squash off on the merge request",
-                current.number
+                current.forge_number()
             ));
         }
         Some(How::Rebase) => {
@@ -251,7 +252,7 @@ pub fn merge(
     }
     t.send(&Request::rest(
         Method::Put,
-        format!("{}/{}/merge", base(repo), current.number),
+        format!("{}/{}/merge", base(repo), current.forge_number()),
         Some(body),
     ))
     .map(|_| ())
@@ -269,4 +270,81 @@ pub fn disable_auto(t: &dyn Transport, repo: &str, number: u64) -> Result<()> {
     ))
     .map(|_| ())
     .map_err(Error::from)
+}
+
+pub struct Gitlab(pub Remote);
+
+impl Provider for Gitlab {
+    fn at(&self, text: &str) -> Result<At> {
+        self.0.at(text)
+    }
+
+    fn key(&self, at: &At) -> String {
+        self.0.key(at)
+    }
+
+    fn place(&self) -> String {
+        self.0.origin.repo.clone()
+    }
+
+    fn allow_write(&self, what: &str) -> Result<()> {
+        self.0.allow_write(what)
+    }
+
+    fn explain(&self, error: Error) -> Error {
+        remote::explain(error)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            resumes_auto_merge: false,
+            no_text: None,
+        }
+    }
+
+    fn view(&self, at: &At) -> Result<Pr> {
+        let (t, repo) = self.0.api();
+        view(t, repo, remote::number(at))
+    }
+
+    fn list(&self, filter: &Filter) -> Result<Vec<Pr>> {
+        let (t, repo) = self.0.api();
+        list(t, repo, filter.branch, filter.state, filter.mine)
+    }
+
+    fn create(&self, new: &NewPr) -> Result<At> {
+        let (t, repo) = self.0.api();
+        let number = create(t, repo, new.head, new.base, new.title, new.body, new.draft)?;
+        Ok(At::Number(number))
+    }
+
+    fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {
+        let (t, repo) = self.0.api();
+        update(t, repo, current, changes)
+    }
+
+    fn uploader(&self) -> Result<Uploader<'_>> {
+        let (t, repo) = self.0.api();
+        let host = self.0.origin.host.as_str();
+        Ok(Box::new(move |image| upload(t, host, repo, image)))
+    }
+
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+        let (t, repo) = self.0.api();
+        merge(t, repo, pr, sha, how, false)
+    }
+
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+        let (t, repo) = self.0.api();
+        merge(t, repo, pr, sha, how, true)
+    }
+
+    fn disable_auto(&self, pr: &Pr) -> Result<bool> {
+        let (t, repo) = self.0.api();
+        disable_auto(t, repo, pr.forge_number()).map(|()| true)
+    }
+
+    fn auto_method(&self, pr: &Pr, _recorded: Option<&str>) -> Option<String> {
+        pr.auto_merge.clone()
+    }
 }

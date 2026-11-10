@@ -8,6 +8,8 @@ mod forgejo;
 mod github;
 mod gitlab;
 mod memo;
+mod provider;
+mod remote;
 mod upload;
 
 use std::path::PathBuf;
@@ -15,14 +17,13 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
-use crate::core::config::{Config, Kind};
+use self::provider::{At, Filter, NewPr, Provider};
+use self::remote::Remote;
+use crate::core::config::Config;
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{self, Output};
-use crate::forge::auto::{Offline, pr_write_allowed};
-use crate::forge::landed::Source;
-use crate::forge::select::{Selected, require_tracker};
-use crate::forge::service::{ReviewService, SERVICES, kind};
-use crate::forge::{PrRef, parse_pr};
+use crate::forge::auto::Offline;
+use crate::forge::parse_pr;
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
@@ -192,12 +193,26 @@ impl Changes {
     }
 }
 
+/// What a provider keeps from reading a PR/MR to merge it later; the shared flow never looks
+/// inside.
+pub enum Native {
+    Github {
+        /// The base branch requires a merge queue.
+        merge_queue: bool,
+    },
+    Gitlab {
+        /// The MR squashes on merge.
+        squash: bool,
+    },
+    Forgejo,
+}
+
 /// A PR/MR as every subcommand reports it.
 pub struct Pr {
     /// The forge's node id: GitHub's GraphQL id, GitLab's iid.
     pub id: String,
-    pub number: u64,
-    pub url: String,
+    pub number: Option<u64>,
+    pub url: Option<String>,
     pub title: String,
     /// Not part of the JSON output; `merge` hands it on so issues it fixes can close.
     pub body: String,
@@ -220,13 +235,19 @@ pub struct Pr {
     pub conflicts: bool,
     /// The head branch lives in this repository (not a fork).
     pub same_repo: bool,
-    /// GitLab: the MR squashes on merge.
-    pub squash: bool,
-    /// GitHub: the base branch requires a merge queue.
-    pub merge_queue: bool,
+    pub native: Native,
 }
 
 impl Pr {
+    /// The number a forge request names; a forge PR/MR always has one.
+    fn forge_number(&self) -> u64 {
+        self.number.unwrap_or_default()
+    }
+
+    fn at(&self) -> At {
+        At::Number(self.forge_number())
+    }
+
     fn json(&self) -> Value {
         json!({
             "number": self.number,
@@ -253,218 +274,23 @@ impl Pr {
     }
 }
 
-/// The repository of the selected tracker, with the service that talks to its forge.
-struct Remote {
-    origin: Source,
-    service: Box<dyn ReviewService>,
-    selected: Selected,
-}
-
-fn number(text: &str, remote: &Remote) -> Result<u64> {
-    let PrRef {
-        number, location, ..
-    } = parse_pr(text)?;
-    if let Some((host, repo)) = location
-        && (host != remote.origin.host || repo != remote.origin.repo)
-    {
-        return fail(format!(
-            "{text} is not in this repository ({}/{})",
-            remote.origin.host, remote.origin.repo
-        ));
-    }
-    Ok(number)
-}
-
-impl Remote {
-    fn connect(
-        repo: &Repo,
-        config: &Config,
-        remote: Option<&str>,
-        pr: Option<&PrRef>,
-    ) -> Result<Self> {
-        let selected = require_tracker(repo, config, Kind::PullRequests, remote, pr)?;
-        let origin = Source::of(&selected)?;
-        let service = (kind(origin.forge).connect)(&origin.host);
-        Ok(Self {
-            origin,
-            service,
-            selected,
-        })
-    }
-
-    /// Refuses `what` when the tracker's `push` is `off`.
-    fn allow_write(&self, what: &str) -> Result<()> {
-        pr_write_allowed(what, &self.selected.name(), self.selected.push)
-    }
-
-    fn key(&self, number: u64) -> String {
-        format!("{}/{}#{number}", self.origin.host, self.origin.repo)
-    }
-
-    fn view(&self, number: u64) -> Result<Pr> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::view(t, repo, number),
-            Forge::Gitlab => gitlab::view(t, repo, number),
-            Forge::Forgejo => forgejo::view(t, repo, number),
-        }
-    }
-
-    fn list(&self, branch: Option<&str>, state: State, mine: bool) -> Result<Vec<Pr>> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::list(t, repo, branch, state, mine),
-            Forge::Gitlab => gitlab::list(t, repo, branch, state, mine),
-            Forge::Forgejo => {
-                let login = if mine {
-                    Some(self.service.login()?)
-                } else {
-                    None
-                };
-                forgejo::list(
-                    t,
-                    repo,
-                    &forgejo::Query {
-                        branch,
-                        state,
-                        author: login.as_deref(),
-                    },
-                )
-            }
-        }
-    }
-
-    fn create(
-        &self,
-        branch: &str,
-        base: &str,
-        title: &str,
-        body: &str,
-        draft: bool,
-    ) -> Result<u64> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::create(t, repo, branch, base, title, body, draft),
-            Forge::Gitlab => gitlab::create(t, repo, branch, base, title, body, draft),
-            Forge::Forgejo => {
-                let new = forgejo::NewPr {
-                    head: branch,
-                    base,
-                    title,
-                    body,
-                    draft,
-                };
-                forgejo::create(t, repo, &new)
-            }
-        }
-    }
-
-    /// Uploads one image per call; the one lookup the forge needs happens here, not per image.
-    fn uploader(&self) -> Result<upload::Uploader<'_>> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        Ok(match self.origin.forge {
-            Forge::Github => {
-                let id = github::repository_id(t, repo)?;
-                Box::new(move |image| github::upload(t, id, image))
-            }
-            Forge::Gitlab => {
-                let host = self.origin.host.as_str();
-                Box::new(move |image| gitlab::upload(t, host, repo, image))
-            }
-            Forge::Forgejo => {
-                return fail(
-                    "Forgejo can attach an image only to an existing issue or comment, \
-                     not to a PR body being written; upload it in the web interface",
-                );
-            }
-        })
-    }
-
-    fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::update(t, repo, current, changes),
-            Forge::Gitlab => gitlab::update(t, repo, current, changes),
-            Forge::Forgejo => forgejo::update(t, repo, current, changes),
-        }
-    }
-
-    /// Merges now, without auto-merge.
-    fn merge(&self, pr: &Pr, sha: &str, method: Option<How>) -> Result<()> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::merge(t, repo, pr.number, sha, method),
-            Forge::Gitlab => gitlab::merge(t, repo, pr, sha, method, false),
-            Forge::Forgejo => {
-                let request = forgejo::Merge {
-                    number: pr.number,
-                    sha,
-                    how: method,
-                };
-                forgejo::merge(t, repo, &request)
-            }
-        }
-    }
-
-    /// Turns auto-merge off; false when it was off already, which only Forgejo can tell.
-    fn disable_auto(&self, pr: &Pr) -> Result<bool> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => github::disable_auto(t, pr).map(|()| true),
-            Forge::Gitlab => gitlab::disable_auto(t, repo, pr.number).map(|()| true),
-            Forge::Forgejo => forgejo::disable_auto(t, repo, pr.number),
-        }
-    }
-
-    /// The open PR/MR of `branch`, else the newest of any state. Forgejo is not asked to filter
-    /// by head branch and lists the whole repository, so it is asked for the open ones first.
-    fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        let mut found = match self.origin.forge {
-            Forge::Forgejo => forgejo::of_branch(t, repo, branch)?,
-            _ => self.list(Some(branch), State::All, false)?,
-        };
-        found.retain(|pr| pr.same_repo);
-        let at = found
-            .iter()
-            .position(|pr| pr.state == ReviewState::Open)
-            .unwrap_or(0);
-        if found.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(found.swap_remove(at)))
-    }
-
-    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
-        let (t, repo) = (self.service.transport(), self.origin.repo.as_str());
-        match self.origin.forge {
-            Forge::Github => {
-                let how = how
-                    .or_else(|| pr.auto_merge.as_deref().and_then(How::named))
-                    .ok_or_else(|| Error("GitHub auto-merge needs --method".into()))?;
-                // GitHub offers auto-merge only while a PR cannot merge yet; like gh, merge a
-                // PR that can merge now, unless the base requires a merge queue: auto-merge
-                // is what queues it.
-                if !pr.merge_queue
-                    && matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable")
-                {
-                    return self.merge(pr, sha, Some(how));
-                }
-                github::enable_auto(t, pr, sha, how)
-            }
-            Forge::Gitlab => gitlab::merge(t, repo, pr, sha, how, true),
-            Forge::Forgejo => {
-                let request = forgejo::Merge {
-                    number: pr.number,
-                    sha,
-                    how,
-                };
-                forgejo::merge_when_checks_succeed(t, repo, &request)?;
-                // The host cannot be asked how auto-merge was set, so pausing it needs this.
-                memo::record(&self.key(pr.number), forgejo::method(how))
-            }
-        }
-    }
+/// The provider of the forge that the selected tracker names.
+fn provider(repo: &Repo, cli: &Cli) -> Result<Box<dyn Provider>> {
+    let config = Config::load_for_repo(repo)?;
+    let given = match &cli.command {
+        Command::Update { number, .. }
+        | Command::Merge { number, .. }
+        | Command::AutoMerge { number, .. } => Some(number.as_str()),
+        Command::View { number, .. } => number.as_deref(),
+        Command::List { .. } | Command::Create { .. } | Command::Upload { .. } => None,
+    };
+    let pr_ref = given.map(parse_pr).transpose()?;
+    let remote = Remote::connect(repo, &config, cli.remote.as_deref(), pr_ref.as_ref())?;
+    Ok(match remote.origin.forge {
+        Forge::Github => Box::new(github::Github(remote)),
+        Forge::Gitlab => Box::new(gitlab::Gitlab(remote)),
+        Forge::Forgejo => Box::new(forgejo::Forgejo(remote)),
+    })
 }
 
 fn branch_of(repo: &Repo, branch: Option<String>) -> Result<String> {
@@ -479,12 +305,13 @@ fn branch_of(repo: &Repo, branch: Option<String>) -> Result<String> {
 /// Fails unless `pr` is open and its head is `sha`.
 fn guard(pr: &Pr, sha: &str) -> Result<()> {
     if pr.state != ReviewState::Open {
-        return fail(format!("#{} is {}, not open", pr.number, pr.state.as_str()));
+        return fail(format!("{} is {}, not open", pr.at(), pr.state.as_str()));
     }
     if sha.len() < 7 || !pr.head_sha.starts_with(sha) {
         return fail(format!(
-            "#{} head is {}, not {sha}; inspect it again before merging",
-            pr.number, pr.head_sha
+            "{} head is {}, not {sha}; inspect it again before merging",
+            pr.at(),
+            pr.head_sha
         ));
     }
     Ok(())
@@ -493,89 +320,59 @@ fn guard(pr: &Pr, sha: &str) -> Result<()> {
 fn not_queued(pr: &Pr) -> Result<()> {
     match &pr.queue {
         Some(queue) => fail(format!(
-            "#{} is in a merge queue or train ({queue}); leave it untouched and do not push to its branch",
-            pr.number
+            "{} is in a merge queue or train ({queue}); leave it untouched and do not push to its branch",
+            pr.at()
         )),
         None => Ok(()),
     }
 }
 
-/// Names a missing or unauthenticated gh/glab/tea instead of repeating the raw tool error.
-fn explain(error: Error) -> Error {
-    let message = &error.0;
-    for tool in SERVICES.iter().map(|kind| kind.tool) {
-        if message.starts_with(&format!("run {tool}:")) {
-            return Error(format!(
-                "{tool} is not installed or not on PATH (needed for this repository's forge)"
-            ));
-        }
-        if message.starts_with(&format!("{tool} "))
-            && [
-                "auth login",
-                "login add",
-                "HTTP 401",
-                "not logged in",
-                "authentication",
-            ]
-            .iter()
-            .any(|hint| message.contains(hint))
-        {
-            let login = if tool == "tea" {
-                "login add"
-            } else {
-                "auth login"
-            };
-            return Error(format!(
-                "{tool} is not authenticated: run `{tool} {login}`\n{message}"
-            ));
-        }
-    }
-    error
-}
-
 /// Runs the command. Also returns the title and body of a PR/MR that this call merged.
 pub fn run(cli: Cli) -> Result<(Output, Option<String>)> {
+    Offline::current().forbid("agt pr")?;
+    let repo = Repo::discover()?;
+    let provider = provider(&repo, &cli)?;
     let mut merged_text = None;
-    let output = execute(cli, &mut merged_text).map_err(explain)?;
+    let output = execute(&*provider, &repo, cli.command, &mut merged_text)
+        .map_err(|error| provider.explain(error))?;
     Ok((output, merged_text))
 }
 
-fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
-    Offline::current().forbid("agt pr")?;
-    let repo = Repo::discover()?;
-    let config = Config::load_for_repo(&repo)?;
-    let given = match &cli.command {
-        Command::Update { number, .. }
-        | Command::Merge { number, .. }
-        | Command::AutoMerge { number, .. } => Some(number.as_str()),
-        Command::View { number, .. } => number.as_deref(),
-        Command::List { .. } | Command::Create { .. } | Command::Upload { .. } => None,
-    };
-    let pr_ref = given.map(parse_pr).transpose()?;
-    let remote = Remote::connect(&repo, &config, cli.remote.as_deref(), pr_ref.as_ref())?;
-    let slug = remote.origin.repo.as_str();
+fn execute(
+    provider: &dyn Provider,
+    repo: &Repo,
+    command: Command,
+    merged_text: &mut Option<String>,
+) -> Result<Output> {
     let shown = |pr: Pr| Ok(Output::Json(pr.json()));
-    match cli.command {
+    match command {
         Command::View {
             number: given,
             branch,
         } => {
             if let Some(given) = given {
-                return shown(remote.view(number(&given, &remote)?)?);
+                return shown(provider.view(&provider.at(&given)?)?);
             }
-            let branch = branch_of(&repo, branch)?;
-            let Some(found) = remote.of_branch(&branch)? else {
-                return fail(format!("no PR/MR for branch {branch} in {slug}"));
+            let branch = branch_of(repo, branch)?;
+            let Some(found) = provider.of_branch(&branch)? else {
+                return fail(format!(
+                    "no PR/MR for branch {branch} in {}",
+                    provider.place()
+                ));
             };
-            shown(remote.view(found.number)?)
+            shown(provider.view(&found.at())?)
         }
         Command::List {
             mine,
             branch,
             state,
         } => Ok(Output::Json(Value::Array(
-            remote
-                .list(branch.as_deref(), state, mine)?
+            provider
+                .list(&Filter {
+                    branch: branch.as_deref(),
+                    state,
+                    mine,
+                })?
                 .iter()
                 .map(Pr::json)
                 .collect(),
@@ -586,17 +383,23 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
             base,
             draft,
         } => {
-            remote.allow_write("agt pr create")?;
-            let branch = branch_of(&repo, None)?;
-            if let Some(open) = remote
-                .list(Some(&branch), State::Open, false)?
+            provider.allow_write("agt pr create")?;
+            no_text(provider, "create")?;
+            let branch = branch_of(repo, None)?;
+            if let Some(open) = provider
+                .list(&Filter {
+                    branch: Some(&branch),
+                    state: State::Open,
+                    mine: false,
+                })?
                 .into_iter()
                 .find(|pr| pr.same_repo)
             {
                 output::print(Output::Json(open.json()))?;
                 return fail(format!(
                     "branch {branch} already has {}: {}",
-                    open.number, open.url
+                    open.forge_number(),
+                    open.url.as_deref().unwrap_or_default()
                 ));
             }
             let base = match base {
@@ -608,10 +411,19 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
                     crate::git::branch_name(&full).to_owned()
                 }
             };
-            let made = remote.create(&branch, &base, &title, &body, draft)?;
-            shown(remote.view(made)?)
+            let made = provider.create(&NewPr {
+                head: &branch,
+                base: &base,
+                title: &title,
+                body: &body,
+                draft,
+            })?;
+            shown(provider.view(&made)?)
         }
-        Command::Upload { files } => upload::run(&remote, &files),
+        Command::Upload { files } => {
+            no_text(provider, "upload")?;
+            upload::run(provider, &files)
+        }
         Command::Update {
             number: given,
             title,
@@ -620,7 +432,8 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
             remove_label,
             draft,
         } => {
-            remote.allow_write("agt pr update")?;
+            provider.allow_write("agt pr update")?;
+            no_text(provider, "update")?;
             let changes = Changes {
                 title,
                 body,
@@ -638,10 +451,10 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
                     "nothing to update: pass --title, --body, --add-label, --remove-label or --draft",
                 );
             }
-            let at = number(&given, &remote)?;
-            let current = remote.view(at)?;
-            remote.update(&current, &changes)?;
-            shown(remote.view(at)?)
+            let at = provider.at(&given)?;
+            let current = provider.view(&at)?;
+            provider.update(&current, &changes)?;
+            shown(provider.view(&at)?)
         }
         Command::Merge {
             number: given,
@@ -649,23 +462,21 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
             method,
             auto,
         } => {
-            remote.allow_write("agt pr merge")?;
-            let at = number(&given, &remote)?;
-            let current = remote.view(at)?;
+            provider.allow_write("agt pr merge")?;
+            let at = provider.at(&given)?;
+            let current = provider.view(&at)?;
             guard(&current, &sha)?;
             if current.draft {
-                return fail(format!("#{at} is a draft; mark it ready first"));
+                return fail(format!("{at} is a draft; mark it ready first"));
             }
-            // A GitHub base that requires a merge queue takes a PR only through auto-merge,
-            // which queues it (what `gh pr merge` does).
-            if auto || current.merge_queue {
-                remote.enable_auto(&current, &current.head_sha, method)?;
+            if auto {
+                provider.enable_auto(&current, &current.head_sha, method)?;
             } else {
-                remote.merge(&current, &current.head_sha, method)?;
+                provider.merge(&current, &current.head_sha, method)?;
             }
-            let after = remote.view(at)?;
+            let after = provider.view(&at)?;
             if after.state == ReviewState::Merged {
-                *merged_text = Some(format!("{}\n{}", after.title, after.body));
+                *merged_text = Some(provider.merged_text(&current, &after));
             }
             shown(after)
         }
@@ -674,32 +485,31 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
             number: given,
             sha,
         } => {
-            remote.allow_write("agt pr auto-merge")?;
-            let at = number(&given, &remote)?;
-            let key = remote.key(at);
-            let current = remote.view(at)?;
+            provider.allow_write("agt pr auto-merge")?;
+            let at = provider.at(&given)?;
+            let current = provider.view(&at)?;
             not_queued(&current)?;
             let changed = match switch {
-                Switch::Off => pause(&remote, &current, &key)?,
-                Switch::On => restore(&remote, &current, &key, sha.as_deref())?,
+                Switch::Off => pause(provider, &current, &at)?,
+                Switch::On => restore(provider, &current, &at, sha.as_deref())?,
             };
-            let now = remote.view(at)?;
+            let now = provider.view(&at)?;
             let on = now.auto_merge.is_some();
             let readable = now.auto_merge_known;
             // Turning auto-merge on merges at once when the checks already passed.
             let merged =
                 matches!(switch, Switch::On) && changed && now.state == ReviewState::Merged;
             if merged {
-                *merged_text = Some(format!("{}\n{}", now.title, now.body));
+                *merged_text = Some(provider.merged_text(&current, &now));
             }
             if readable && changed && !merged && on == matches!(switch, Switch::Off) {
                 return fail(format!(
-                    "auto-merge is still {} on #{at} after the change",
+                    "auto-merge is still {} on {at} after the change",
                     if on { "on" } else { "off" }
                 ));
             }
-            if matches!(switch, Switch::On) {
-                forget_paused(&key, readable)?;
+            if matches!(switch, Switch::On) && readable {
+                provider.forget(&at)?;
             }
             Ok(Output::Json(
                 json!({"changed": changed, "merged": merged, "pr": now.json()}),
@@ -708,51 +518,43 @@ fn execute(cli: Cli, merged_text: &mut Option<String>) -> Result<Output> {
     }
 }
 
-/// Drops the record of a paused auto-merge once it is back on. Where the forge cannot report
-/// auto-merge (Forgejo), the record is the only place its method lives, so it stays.
-fn forget_paused(key: &str, readable: bool) -> Result<()> {
-    if readable {
-        memo::forget(key)?;
+/// Fails for a provider with nothing to store a title, body or label in.
+fn no_text(provider: &dyn Provider, what: &str) -> Result<()> {
+    match provider.capabilities().no_text {
+        Some(why) => fail(format!("agt pr {what} is not available: {why}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Turns auto-merge off after recording its method; false when it was off already.
-fn pause(remote: &Remote, pr: &Pr, key: &str) -> Result<bool> {
-    let before = memo::recorded(key)?;
-    let method = match &pr.auto_merge {
-        Some(method) => method.clone(),
-        None if pr.auto_merge_known => return Ok(false),
-        // Forgejo does not say whether auto-merge is on, so cancelling it is the probe; the
-        // method is the one `agt pr merge --auto` recorded, else a plain merge.
-        None => before
-            .clone()
-            .unwrap_or_else(|| forgejo::method(None).to_owned()),
+fn pause(provider: &dyn Provider, pr: &Pr, at: &At) -> Result<bool> {
+    let before = provider.recorded(at)?;
+    let Some(method) = provider.auto_method(pr, before.as_deref()) else {
+        return Ok(false);
     };
-    memo::record(key, &method)?;
-    if remote.disable_auto(pr)? {
+    provider.record(at, &method)?;
+    if provider.disable_auto(pr)? {
         return Ok(true);
     }
     // Nothing was scheduled: drop the record this call made, not one an earlier pause left.
     if before.is_none() {
-        memo::forget(key)?;
+        provider.forget(at)?;
     }
     Ok(false)
 }
 
 /// Turns auto-merge back on with the recorded method; false when it is on already.
-fn restore(remote: &Remote, pr: &Pr, key: &str, sha: Option<&str>) -> Result<bool> {
-    if pr.auto_merge.is_some() {
+fn restore(provider: &dyn Provider, pr: &Pr, at: &At, sha: Option<&str>) -> Result<bool> {
+    if pr.auto_merge.is_some() && !provider.capabilities().resumes_auto_merge {
         return Ok(false);
     }
-    let Some(method) = memo::recorded(key)? else {
+    let Some(method) = provider.recorded(at)? else {
         return fail(format!(
-            "no paused auto-merge is recorded for #{}; enable it with `agt pr merge --auto`",
-            pr.number
+            "no paused auto-merge is recorded for {at}; enable it with `agt pr merge --auto`"
         ));
     };
     let sha = sha.unwrap_or(&pr.head_sha);
     guard(pr, sha)?;
-    remote.enable_auto(pr, &pr.head_sha, How::named(&method))?;
+    provider.enable_auto(pr, &pr.head_sha, How::named(&method))?;
     Ok(true)
 }

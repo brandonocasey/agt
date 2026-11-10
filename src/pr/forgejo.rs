@@ -3,8 +3,11 @@
 
 use serde_json::{Value, json};
 
-use super::{Changes, How, Pr, State};
-use crate::core::error::{Error, Result};
+use super::provider::{At, Capabilities, Filter, NewPr, Provider, open_first};
+use super::remote::{self, Remote};
+use super::upload::Uploader;
+use super::{Changes, How, Native, Pr, State};
+use crate::core::error::{Error, Result, fail};
 use crate::forge::forgejo::{self, pull_node};
 use crate::forge::issue::names;
 use crate::forge::service::{Method, Request};
@@ -45,8 +48,8 @@ fn pr(node: &Value) -> Pr {
     };
     Pr {
         id: node["id"].to_string(),
-        number: shared.number.unwrap_or_default(),
-        url: shared.url,
+        number: Some(shared.number.unwrap_or_default()),
+        url: Some(shared.url),
         title: shared.title,
         body: node["body"].as_str().unwrap_or_default().to_owned(),
         state,
@@ -63,8 +66,7 @@ fn pr(node: &Value) -> Pr {
         merge_state: merge_state.to_owned(),
         conflicts: mergeable == "conflicting",
         same_repo: shared.same_repo.unwrap_or(true),
-        squash: false,
-        merge_queue: false,
+        native: Native::Forgejo,
     }
 }
 
@@ -114,15 +116,6 @@ pub fn of_branch(t: &dyn Transport, repo: &str, branch: &str) -> Result<Vec<Pr>>
     Ok(found.iter().map(pr).collect())
 }
 
-/// A pull request to open.
-pub struct NewPr<'a> {
-    pub head: &'a str,
-    pub base: &'a str,
-    pub title: &'a str,
-    pub body: &'a str,
-    pub draft: bool,
-}
-
 pub fn create(t: &dyn Transport, repo: &str, new: &NewPr) -> Result<u64> {
     let title = if new.draft {
         format!("{DRAFT_PREFIX}{}", new.title)
@@ -156,7 +149,7 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
     if !body.is_empty() {
         t.send(&Request::rest(
             Method::Patch,
-            format!("{}/{}", base(repo), current.number),
+            format!("{}/{}", base(repo), current.forge_number()),
             Some(Value::Object(body)),
         ))?;
     }
@@ -165,7 +158,7 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
     };
     t.send(&Request::rest(
         Method::Put,
-        format!("repos/{repo}/issues/{}/labels", current.number),
+        format!("repos/{repo}/issues/{}/labels", current.forge_number()),
         Some(json!({ "labels": labels })),
     ))?;
     Ok(())
@@ -227,6 +220,117 @@ pub fn disable_auto(t: &dyn Transport, repo: &str, number: u64) -> Result<bool> 
         Ok(_) => Ok(true),
         Err(error) if error.status == Some(404) => Ok(false),
         Err(error) => Err(error.into()),
+    }
+}
+
+pub struct Forgejo(pub Remote);
+
+impl Provider for Forgejo {
+    fn at(&self, text: &str) -> Result<At> {
+        self.0.at(text)
+    }
+
+    fn key(&self, at: &At) -> String {
+        self.0.key(at)
+    }
+
+    fn place(&self) -> String {
+        self.0.origin.repo.clone()
+    }
+
+    fn allow_write(&self, what: &str) -> Result<()> {
+        self.0.allow_write(what)
+    }
+
+    fn explain(&self, error: Error) -> Error {
+        remote::explain(error)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            resumes_auto_merge: false,
+            no_text: None,
+        }
+    }
+
+    fn view(&self, at: &At) -> Result<Pr> {
+        let (t, repo) = self.0.api();
+        view(t, repo, remote::number(at))
+    }
+
+    fn list(&self, filter: &Filter) -> Result<Vec<Pr>> {
+        let (t, repo) = self.0.api();
+        let login = if filter.mine {
+            Some(self.0.service.login()?)
+        } else {
+            None
+        };
+        list(
+            t,
+            repo,
+            &Query {
+                branch: filter.branch,
+                state: filter.state,
+                author: login.as_deref(),
+            },
+        )
+    }
+
+    /// Forgejo is not asked to filter by head branch and lists the whole repository, so it is
+    /// asked for the open ones first.
+    fn of_branch(&self, branch: &str) -> Result<Option<Pr>> {
+        let (t, repo) = self.0.api();
+        Ok(open_first(of_branch(t, repo, branch)?))
+    }
+
+    fn create(&self, new: &NewPr) -> Result<At> {
+        let (t, repo) = self.0.api();
+        Ok(At::Number(create(t, repo, new)?))
+    }
+
+    fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {
+        let (t, repo) = self.0.api();
+        update(t, repo, current, changes)
+    }
+
+    fn uploader(&self) -> Result<Uploader<'_>> {
+        fail(
+            "Forgejo can attach an image only to an existing issue or comment, \
+             not to a PR body being written; upload it in the web interface",
+        )
+    }
+
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+        let (t, repo) = self.0.api();
+        let request = Merge {
+            number: pr.forge_number(),
+            sha,
+            how,
+        };
+        merge(t, repo, &request)
+    }
+
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+        let (t, repo) = self.0.api();
+        let request = Merge {
+            number: pr.forge_number(),
+            sha,
+            how,
+        };
+        merge_when_checks_succeed(t, repo, &request)?;
+        // The host cannot be asked how auto-merge was set, so pausing it needs this.
+        self.record(&pr.at(), method(how))
+    }
+
+    fn disable_auto(&self, pr: &Pr) -> Result<bool> {
+        let (t, repo) = self.0.api();
+        disable_auto(t, repo, pr.forge_number())
+    }
+
+    /// The host does not say whether auto-merge is on, so cancelling it is the probe; the method
+    /// is the one `agt pr merge --auto` recorded, else a plain merge.
+    fn auto_method(&self, _pr: &Pr, recorded: Option<&str>) -> Option<String> {
+        Some(recorded.unwrap_or_else(|| method(None)).to_owned())
     }
 }
 
