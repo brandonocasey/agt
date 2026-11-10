@@ -76,17 +76,9 @@ fi
 key=$(printf '%s\n' "$@" | git hash-object --stdin)
 count=1
 if [ -n "$page" ] && [ "$page" != 1 ]; then
-  if [ -f "$dir/$key.count" ]; then
-    read -r count < "$dir/$key.count"
-  else
-    # A page after the first without a first page fails with cat's own message.
-    count=$(cat "$dir/$key.count")
-  fi
+  count=$(cat "$dir/$key.count")
 else
-  if [ -f "$dir/$key.count" ]; then
-    read -r count < "$dir/$key.count"
-    count=$((count + 1))
-  fi
+  [ -f "$dir/$key.count" ] && count=$(($(cat "$dir/$key.count") + 1))
   printf '%s\n' "$count" > "$dir/$key.count"
 fi
 # Prints the status line `tea api -i` writes to stderr before the body.
