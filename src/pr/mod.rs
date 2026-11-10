@@ -591,7 +591,8 @@ fn restore(
     }
     let Some(method) = provider.recorded(at)? else {
         return fail(format!(
-            "no paused auto-merge is recorded for {at}; enable it with `agt pr merge --auto`"
+            "no paused auto-merge is recorded for {at}; enable it with `{}`",
+            provider.enable_auto_command(at, pr)
         ));
     };
     let sha = sha.unwrap_or(&pr.head_sha);

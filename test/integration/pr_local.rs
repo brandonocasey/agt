@@ -417,6 +417,33 @@ fn a_target_being_rebased_elsewhere_is_refused() {
     assert!(git_ok(&env, &rebasing, &["status"]).contains("rebase in progress"));
 }
 
+/// A refusal from git comes with the command that repeats the move once the cause is gone.
+#[test]
+fn a_refused_merge_gives_the_command_to_retry() {
+    let env = setup();
+    env.write("a.txt", "main\n");
+    env.commit_all("main edits a");
+    git_ok(&env, &env.repo, &["switch", "-q", "-c", "other", "main~1"]);
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+
+    let rebasing = add_worktree(&env, "rebasing", &["main"]);
+    let rebase = git_in(&env, &rebasing, &["rebase", "--exec", "false", "HEAD~1"]);
+    assert!(!rebase.status.success(), "the exec should stop the rebase");
+    let message = refused(&env, &merge_args(&sha, "feat", &[]));
+    assert!(message.contains("git fetch refused"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "retry with: agt pr --local merge feat --sha {sha}"
+        )),
+        "{message}"
+    );
+    assert!(git_ok(&env, &rebasing, &["status"]).contains("rebase in progress"));
+
+    git_ok(&env, &rebasing, &["rebase", "--abort"]);
+    ok(&env, &merge_args(&sha, "feat", &[]));
+    assert_eq!(tip(&env, "main"), sha);
+}
+
 #[test]
 fn a_target_being_bisected_elsewhere_is_refused() {
     let env = setup();
@@ -1202,3 +1229,14 @@ fn a_head_that_is_not_the_sha_is_refused_before_any_intent_is_recorded() {
     assert!(message.contains("inspect it again"), "{message}");
     assert_eq!(intents(&env), serde_json::json!({}));
 }
+/// The hint names a command for a local branch, not the forge one.
+#[test]
+fn the_hint_for_a_missing_auto_merge_names_a_local_command() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    let message = err(&env, &["auto-merge", "on", "feat"]);
+    let command = format!("agt pr --local merge feat --sha {sha} --auto");
+    assert!(message.contains(&format!("`{command}`")), "{message}");
+    assert!(!message.contains("`agt pr merge"), "{message}");
+}
+

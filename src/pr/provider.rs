@@ -138,6 +138,11 @@ pub trait Provider {
         format!("{}\n{}", after.title, after.body)
     }
 
+    /// The command that turns auto-merge on for `pr` when no paused one is recorded for `at`.
+    fn enable_auto_command(&self, _at: &At, _pr: &Pr) -> String {
+        "agt pr merge --auto".to_owned()
+    }
+
     /// The method a paused auto-merge of `at` was left with.
     fn recorded(&self, at: &At) -> Result<Option<String>> {
         memo::recorded(&self.key(at))

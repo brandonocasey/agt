@@ -12,6 +12,7 @@ use super::intent;
 use super::provider::{At, Capabilities, Filter, Outcome, Provider};
 use super::{How, Native, Pr, State};
 use crate::core::error::{Error, Result, fail};
+use crate::core::shell::quote;
 use crate::git::Repo;
 use crate::git::fast_forward::{Update, fast_forward};
 use crate::store::model::ReviewState;
@@ -128,8 +129,17 @@ impl<'a> Local<'a> {
         match fast_forward(self.repo, &target, &target_tip, &head)? {
             Update::Moved { .. } => Ok(()),
             Update::Refused(refused) => fail(format!(
-                "{target} not updated: {}{}",
+                "{target} not updated: {}{}{}",
                 refused.reason,
+                // Git's own command is refused again once a work tree holds the target, so the
+                // retry is this merge, which picks the place anew.
+                refused
+                    .retry
+                    .map(|_| format!(
+                        "; retry with: agt pr --local merge {} --sha {head}",
+                        quote(branch)
+                    ))
+                    .unwrap_or_default(),
                 if rebased {
                     format!("; {branch} was rebased and was at {tip}")
                 } else {
@@ -187,6 +197,14 @@ impl Provider for Local<'_> {
                 "a local PR is the branch itself, and nothing stores a title, body, label or image for it",
             ),
         }
+    }
+
+    fn enable_auto_command(&self, at: &At, pr: &Pr) -> String {
+        format!(
+            "agt pr --local merge {} --sha {} --auto",
+            quote(&at.id()),
+            pr.head_sha
+        )
     }
 
     fn view(&self, at: &At) -> Result<Pr> {
