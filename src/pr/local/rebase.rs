@@ -40,7 +40,9 @@ impl Local<'_> {
         if let Some(refused) = check(self.repo, target, target_tip, tip)? {
             blockers.push(format!("{target} cannot be updated: {}", refused.reason));
         }
-        blockers.extend(self.target_in_use(target)?);
+        let in_use = self.target_in_use(target)?;
+        let target_busy = !in_use.is_empty();
+        blockers.extend(in_use);
         let holders = self.holders(branch)?;
         let [holder] = holders.as_slice() else {
             blockers.push(if holders.is_empty() {
@@ -73,11 +75,16 @@ impl Local<'_> {
             );
         }
         let ignored = ignored_paths(&work)?;
-        let written = self.written_paths(&base, tip, target_tip)?;
+        let changed = self.changed_paths(&base, tip)?;
+        let mut written = self.changed_paths(tip, target_tip)?;
+        written.extend(changed.iter().cloned());
         if let Some(path) = written.iter().find(|path| in_the_way(path, &ignored)) {
             blockers.push(format!(
                 "the ignored file {path} sits where the rebase would write"
             ));
+        }
+        if !target_busy {
+            blockers.extend(self.target_checkout(target, &changed)?);
         }
         if blockers.is_empty() {
             Ok(Ok(holder.clone()))
@@ -207,27 +214,53 @@ impl Local<'_> {
         }
         let conflicts = work.git(&["diff", "--name-only", "--diff-filter=U", "-z"]);
         work.git(&["rebase", "--abort"])?;
-        let paths: Vec<String> = nul_fields(conflicts?.as_bytes())
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect();
+        let paths = names(&conflicts?);
         fail(format!(
             "rebasing {branch} onto {target} stops on conflicts in {}; the rebase was aborted and {branch} is still at {tip}",
             paths.join(", ")
         ))
     }
 
-    /// The paths a rebase writes in the work tree: those it checks out from `target_tip` and
-    /// those the branch's commits change.
-    fn written_paths(&self, base: &str, tip: &str, target_tip: &str) -> Result<Vec<String>> {
-        let mut paths = Vec::new();
-        for (from, to) in [(tip, target_tip), (base, tip)] {
-            let listed = self.repo.git(&["diff", "--name-only", "-z", from, to])?;
-            paths.extend(
-                nul_fields(listed.as_bytes())
-                    .map(|path| String::from_utf8_lossy(path).into_owned()),
-            );
+    /// The paths that differ between the commits `from` and `to`.
+    fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+        let listed = self.repo.git(&["diff", "--name-only", "-z", from, to])?;
+        Ok(names(&listed))
+    }
+
+    /// One line for each reason the work tree that has `target` checked out would refuse the
+    /// fast-forward after the rebase: an operation in progress, or a local change, an untracked
+    /// or an ignored file at one of the `changed` paths. None when no work tree has it.
+    fn target_checkout(&self, target: &str, changed: &[String]) -> Result<Vec<String>> {
+        let holder = self
+            .repo
+            .worktrees()?
+            .into_iter()
+            .find(|entry| entry.branch.as_deref() == Some(target) && entry.path.exists());
+        let Some(holder) = holder else {
+            return Ok(Vec::new());
+        };
+        let work = Repo::at(&holder.path);
+        let mut found = operations_in_progress(&holder.path)?;
+        let kinds = [
+            (
+                "a local change",
+                names(&work.git(&["diff", "--name-only", "-z", "HEAD"])?),
+            ),
+            (
+                "an untracked file",
+                names(&work.git(&["ls-files", "--others", "--exclude-standard", "-z"])?),
+            ),
+            ("an ignored file", ignored_paths(&work)?),
+        ];
+        for (kind, paths) in kinds {
+            if let Some(path) = changed.iter().find(|path| in_the_way(path, &paths)) {
+                found.push(format!(
+                    "{} has {kind} at {path}, where the merge would write",
+                    holder.path.display()
+                ));
+            }
         }
-        Ok(paths)
+        Ok(found)
     }
 }
 
@@ -278,9 +311,14 @@ fn ignored_paths(work: &Repo) -> Result<Vec<String>> {
         "--directory",
         "-z",
     ])?;
-    Ok(nul_fields(listed.as_bytes())
+    Ok(names(&listed))
+}
+
+/// The paths in NUL-separated git output.
+fn names(listed: &str) -> Vec<String> {
+    nul_fields(listed.as_bytes())
         .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect())
+        .collect()
 }
 
 /// Whether writing `path` would overwrite or block on an ignored entry.

@@ -531,6 +531,76 @@ fn a_rebase_merge_of_a_branch_rebased_in_a_deleted_work_tree_changes_nothing() {
     assert_eq!(tip(&env, "feat"), sha);
 }
 
+/// `feat` is behind `main`, checked out in a linked work tree, and adds `b.txt`; `main` is
+/// checked out in the main work tree. The rebase would succeed, but the fast-forward in the main
+/// work tree would not, so the merge must stop before the rebase moves `feat`.
+fn rebase_into_a_blocked_target(blocker: impl Fn(&Env)) -> (Env, String) {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    advance_main(&env, "c.txt", "c\n");
+    add_branch(&env, "other", "d.txt", "d\n");
+    add_worktree(&env, "work", &["feat"]);
+    blocker(&env);
+    (env, sha)
+}
+
+#[test]
+fn a_rebase_merge_stops_for_a_target_work_tree_that_would_refuse_the_fast_forward() {
+    type Blocker = fn(&Env);
+    let cases: [(&str, &str, Blocker); 5] = [
+        ("a local change", "a local change at b.txt", |env| {
+            env.write("b.txt", "mine\n");
+            git_ok(env, &env.repo, &["add", "b.txt"]);
+        }),
+        ("an untracked file", "an untracked file at b.txt", |env| {
+            env.write("b.txt", "mine\n");
+        }),
+        ("an ignored file", "an ignored file at b.txt", |env| {
+            fs::write(env.repo.join(".git/info/exclude"), "b.txt\n").unwrap();
+            env.write("b.txt", "mine\n");
+        }),
+        ("a merge", "MERGE_HEAD in progress", |env| {
+            git_ok(
+                env,
+                &env.repo,
+                &["merge", "--no-commit", "--no-ff", "other"],
+            );
+        }),
+        ("a cherry-pick", "CHERRY_PICK_HEAD in progress", |env| {
+            let pick = git_in(env, &env.repo, &["cherry-pick", "HEAD"]);
+            assert!(!pick.status.success());
+        }),
+    ];
+    for (name, reason, blocker) in cases {
+        let (env, sha) = rebase_into_a_blocked_target(blocker);
+        let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+        assert!(message.contains(reason), "{name}: {message}");
+        assert!(
+            message.contains(&env.repo.display().to_string()),
+            "{name}: {message}"
+        );
+        assert!(
+            !message.contains("git merge refused"),
+            "the check comes before the rebase: {name}: {message}"
+        );
+        assert_eq!(tip(&env, "feat"), sha, "{name}");
+    }
+}
+
+#[test]
+fn a_rebase_merge_goes_through_when_the_target_work_tree_changed_other_paths() {
+    let (env, sha) = rebase_into_a_blocked_target(|env| {
+        env.write("mine.txt", "untracked\n");
+        env.write("a.txt", "edited\n");
+    });
+    ok(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert_eq!(tip(&env, "main"), tip(&env, "feat"));
+    assert_eq!(
+        fs::read_to_string(env.repo.join("a.txt")).unwrap(),
+        "edited\n"
+    );
+}
+
 #[test]
 fn a_moved_submodule_pointer_is_refused() {
     let env = setup();
@@ -1157,6 +1227,24 @@ fn the_branch_lands_gate_waits_on_a_branch_behind_the_target_unless_it_can_rebas
     assert!(output.status.success(), "{}", stderr(&output));
     assert_ne!(tip(&env, "main"), sha);
     assert_eq!(tip(&env, "main"), tip(&env, "feat"));
+}
+
+#[test]
+fn the_branch_lands_gate_waits_while_the_target_work_tree_would_refuse_a_rebase_merge() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    record_gates(&env, "feat", &[]);
+    advance_main(&env, "c.txt", "c\n");
+    add_worktree(&env, "work", &["feat"]);
+    env.write("b.txt", "mine\n");
+
+    let rebase = merge_args(&sha, "feat", &["--auto", "--method", "rebase"]);
+    let output = waiting(&env, &rebase);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let message = stderr(&output);
+    assert!(message.contains("lands:"), "{message}");
+    assert!(message.contains("an untracked file at b.txt"), "{message}");
+    assert_eq!(tip(&env, "feat"), sha);
 }
 
 #[test]
