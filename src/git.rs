@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 pub mod base;
+pub mod fast_forward;
 
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;
