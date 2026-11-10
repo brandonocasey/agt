@@ -237,6 +237,17 @@ fn view_list_and_merge_work_on_a_branch_of_a_temporary_repository() {
 }
 
 #[test]
+fn list_mine_without_a_git_user_name_fails_instead_of_listing_every_branch() {
+    let env = setup();
+    add_branch(&env, "feat", "b.txt", "b\n");
+    git_ok(&env, &env.repo, &["config", "user.name", ""]);
+
+    let message = err(&env, &["list", "--mine"]);
+    assert!(message.contains("git config user.name"), "{message}");
+    assert_eq!(ok(&env, &["list"]).as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn view_without_a_branch_reads_the_current_one_and_a_detached_head_needs_a_name() {
     let env = setup();
     add_branch(&env, "feat", "b.txt", "b\n");

@@ -222,7 +222,13 @@ impl Provider for Local<'_> {
         let target = self.target()?;
         let target_tip = self.tip(&target)?;
         let me = if filter.mine {
-            self.repo.user_name()?
+            let name = self.repo.user_name()?;
+            Some(name.ok_or_else(|| {
+                Error(
+                    "--mine needs an author name: set one with `git config user.name <name>`"
+                        .into(),
+                )
+            })?)
         } else {
             None
         };
