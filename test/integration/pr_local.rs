@@ -460,6 +460,77 @@ fn a_target_being_bisected_elsewhere_is_refused() {
     assert!(message.contains("git fetch refused"), "{message}");
 }
 
+/// Git refuses to move a branch that another work tree is rebasing or bisecting, also when that
+/// work tree's directory is gone and only its entry in the git directory is left, so a rebase of
+/// the feature branch must not start: it would move the branch and then fail to land it.
+#[test]
+fn a_rebase_merge_into_a_target_rebased_or_bisected_elsewhere_changes_nothing() {
+    for (operation, deleted) in [
+        ("rebase", false),
+        ("bisect", false),
+        ("rebase", true),
+        ("bisect", true),
+    ] {
+        let env = setup();
+        let sha = add_branch(&env, "feat", "b.txt", "b\n");
+        for count in 1..=4 {
+            advance_main(&env, &format!("c{count}.txt"), "c\n");
+        }
+        git_ok(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);
+        let work = add_worktree(&env, "work", &["feat"]);
+        let stuck = add_worktree(&env, "stuck", &["main"]);
+        if operation == "rebase" {
+            let stopped = git_in(&env, &stuck, &["rebase", "--exec", "false", "HEAD~1"]);
+            assert!(!stopped.status.success(), "the exec should stop the rebase");
+        } else {
+            git_ok(&env, &stuck, &["bisect", "start", "main", "main~4"]);
+        }
+        if deleted {
+            fs::remove_dir_all(&stuck).unwrap();
+        }
+
+        let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+        let case = format!("{operation}, work tree deleted: {deleted}");
+        assert!(
+            message.contains(&stuck.display().to_string()),
+            "{case}: {message}"
+        );
+        assert!(message.contains(operation), "{case}: {message}");
+        assert_eq!(
+            message.contains("git worktree prune"),
+            deleted,
+            "{case}: {message}"
+        );
+        assert!(
+            !message.contains("git fetch refused"),
+            "the check comes before the rebase: {case}: {message}"
+        );
+        assert_eq!(tip(&env, "feat"), sha);
+        assert_eq!(git_ok(&env, &work, &["rev-parse", "HEAD"]), sha);
+    }
+}
+
+/// A work tree whose directory is gone still holds the branch it was rebasing, so the message
+/// says that and not that no work tree has the branch.
+#[test]
+fn a_rebase_merge_of_a_branch_rebased_in_a_deleted_work_tree_changes_nothing() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    advance_main(&env, "c.txt", "c\n");
+    git_ok(&env, &env.repo, &["switch", "-q", "-c", "elsewhere"]);
+    let stuck = add_worktree(&env, "stuck", &["feat"]);
+    let stopped = git_in(&env, &stuck, &["rebase", "--exec", "false", "main"]);
+    assert!(!stopped.status.success(), "the exec should stop the rebase");
+    fs::remove_dir_all(&stuck).unwrap();
+
+    let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(
+        message.contains(&format!("{}, which no longer exists", stuck.display())),
+        "{message}"
+    );
+    assert_eq!(tip(&env, "feat"), sha);
+}
+
 #[test]
 fn a_moved_submodule_pointer_is_refused() {
     let env = setup();
@@ -1161,6 +1232,17 @@ fn auto_merge_on_with_nothing_recorded_fails() {
     assert!(message.contains("no paused auto-merge"), "{message}");
 }
 
+/// The hint names a command for a local branch, not the forge one.
+#[test]
+fn the_hint_for_a_missing_auto_merge_names_a_local_command() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    let message = err(&env, &["auto-merge", "on", "feat"]);
+    let command = format!("agt pr --local merge feat --sha {sha} --auto");
+    assert!(message.contains(&format!("`{command}`")), "{message}");
+    assert!(!message.contains("`agt pr merge"), "{message}");
+}
+
 #[test]
 fn a_second_waiter_replaces_the_first() {
     let env = setup();
@@ -1229,14 +1311,3 @@ fn a_head_that_is_not_the_sha_is_refused_before_any_intent_is_recorded() {
     assert!(message.contains("inspect it again"), "{message}");
     assert_eq!(intents(&env), serde_json::json!({}));
 }
-/// The hint names a command for a local branch, not the forge one.
-#[test]
-fn the_hint_for_a_missing_auto_merge_names_a_local_command() {
-    let env = setup();
-    let sha = add_branch(&env, "feat", "b.txt", "b\n");
-    let message = err(&env, &["auto-merge", "on", "feat"]);
-    let command = format!("agt pr --local merge feat --sha {sha} --auto");
-    assert!(message.contains(&format!("`{command}`")), "{message}");
-    assert!(!message.contains("`agt pr merge"), "{message}");
-}
-
