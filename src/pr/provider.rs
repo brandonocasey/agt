@@ -5,19 +5,31 @@ use std::fmt;
 
 use super::upload::Uploader;
 use super::{Changes, How, Pr, State, memo};
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, Result, fail};
 use crate::store::model::ReviewState;
 
-/// How a PR/MR is addressed: by number on a forge.
+/// How a PR/MR is addressed: by number on a forge, by branch name locally.
 #[derive(Clone)]
 pub enum At {
     Number(u64),
+    Branch(String),
+}
+
+impl At {
+    /// The number or the branch name alone, for keys.
+    pub fn id(&self) -> String {
+        match self {
+            Self::Number(number) => number.to_string(),
+            Self::Branch(branch) => branch.clone(),
+        }
+    }
 }
 
 impl fmt::Display for At {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Number(number) => write!(out, "#{number}"),
+            Self::Branch(branch) => write!(out, "branch {branch}"),
         }
     }
 }
@@ -82,9 +94,13 @@ pub trait Provider {
         Ok(open_first(found))
     }
 
-    fn create(&self, new: &NewPr) -> Result<At>;
+    fn create(&self, _new: &NewPr) -> Result<At> {
+        fail("this provider cannot create a PR")
+    }
 
-    fn update(&self, current: &Pr, changes: &Changes) -> Result<()>;
+    fn update(&self, _current: &Pr, _changes: &Changes) -> Result<()> {
+        fail("this provider cannot update a PR")
+    }
 
     /// Refuses before any file is read when the host cannot take uploads.
     fn upload_check(&self) -> Result<()> {
@@ -92,7 +108,9 @@ pub trait Provider {
     }
 
     /// Uploads one image per call; the one lookup the host needs happens here, not per image.
-    fn uploader(&self) -> Result<Uploader<'_>>;
+    fn uploader(&self) -> Result<Uploader<'_>> {
+        fail("this provider cannot upload images")
+    }
 
     /// Merges now, without auto-merge.
     fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()>;

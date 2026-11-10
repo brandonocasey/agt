@@ -61,15 +61,18 @@ impl Remote {
     }
 
     pub fn key(&self, at: &At) -> String {
-        let At::Number(number) = at;
-        format!("{}/{}#{number}", self.origin.host, self.origin.repo)
+        format!("{}/{}#{}", self.origin.host, self.origin.repo, at.id())
     }
 }
 
 /// The number a forge call names.
-pub fn number(at: &At) -> u64 {
-    let At::Number(number) = at;
-    *number
+pub fn number(at: &At) -> Result<u64> {
+    match at {
+        At::Number(number) => Ok(*number),
+        At::Branch(branch) => fail(format!(
+            "{branch} is a branch; a forge addresses a PR/MR by number"
+        )),
+    }
 }
 
 /// Names a missing or unauthenticated gh/glab/tea instead of repeating the raw tool error.

@@ -1,12 +1,14 @@
 //! `agt pr`: one GitHub/GitLab/Forgejo-neutral command for the PR/MR of the current repository:
 //! view, list, create, update, merge behind a head-sha guard, pause or restore auto-merge, and
-//! upload images for a body. The
-//! forge comes from the tracker of the origin remote, or the one `--remote` or a PR/MR URL
-//! names; writes are refused where `push` is `off`. Output is JSON.
+//! upload images for a body. The forge comes from the tracker of the origin remote, or the one
+//! `--remote` or a PR/MR URL names; writes are refused where `push` is `off`. With `--local`
+//! the PR is a local branch and its merge moves the local default branch (`local.rs`). Output
+//! is JSON.
 
 mod forgejo;
 mod github;
 mod gitlab;
+mod local;
 mod memo;
 mod provider;
 mod remote;
@@ -17,6 +19,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
+use self::local::Local;
 use self::provider::{At, Filter, NewPr, Provider};
 use self::remote::Remote;
 use crate::core::config::Config;
@@ -27,13 +30,20 @@ use crate::forge::parse_pr;
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
 
-/// View, list, create, update and merge the PRs/MRs of this repository, on GitHub, GitLab or Forgejo.
+/// View, list, create, update and merge the PRs/MRs of this repository, on GitHub, GitLab or
+/// Forgejo; with `--local`, merge local branches into the local default branch.
 #[derive(Args)]
 pub struct Cli {
     /// Tracker to use: a git remote name or `host/repo` [default: the repository of a PR/MR
     /// URL, else the tracker of `origin`].
     #[arg(long, global = true)]
     remote: Option<String>,
+    /// A local branch is the PR, addressed by its name and merged into the local default branch;
+    /// no tracker, network or push is involved. Never chosen automatically. `view` and `list`
+    /// read local refs, `merge` takes `--method rebase` or none (fast-forward only) and never
+    /// deletes a branch or work tree; `create`, `update` and `upload` have nothing to store.
+    #[arg(long, global = true, conflicts_with = "remote")]
+    local: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -204,7 +214,8 @@ pub enum Native {
         /// The MR squashes on merge.
         squash: bool,
     },
-    Forgejo,
+    /// The host keeps nothing: Forgejo, and the local provider.
+    None,
 }
 
 /// A PR/MR as every subcommand reports it.
@@ -245,7 +256,10 @@ impl Pr {
     }
 
     fn at(&self) -> At {
-        At::Number(self.forge_number())
+        match self.number {
+            Some(number) => At::Number(number),
+            None => At::Branch(self.head_branch.clone()),
+        }
     }
 
     fn json(&self) -> Value {
@@ -274,8 +288,12 @@ impl Pr {
     }
 }
 
-/// The provider of the forge that the selected tracker names.
-fn provider(repo: &Repo, cli: &Cli) -> Result<Box<dyn Provider>> {
+/// The local provider for `--local`, else the provider of the forge that the selected tracker
+/// names.
+fn provider<'a>(repo: &'a Repo, cli: &Cli) -> Result<Box<dyn Provider + 'a>> {
+    if cli.local {
+        return Ok(Box::new(Local::new(repo)?));
+    }
     let config = Config::load_for_repo(repo)?;
     let given = match &cli.command {
         Command::Update { number, .. }
@@ -329,7 +347,9 @@ fn not_queued(pr: &Pr) -> Result<()> {
 
 /// Runs the command. Also returns the title and body of a PR/MR that this call merged.
 pub fn run(cli: Cli) -> Result<(Output, Option<String>)> {
-    Offline::current().forbid("agt pr")?;
+    if !cli.local {
+        Offline::current().forbid("agt pr")?;
+    }
     let repo = Repo::discover()?;
     let provider = provider(&repo, &cli)?;
     let mut merged_text = None;

@@ -346,7 +346,7 @@ impl Provider for Github {
 
     fn view(&self, at: &At) -> Result<Pr> {
         let (t, repo) = self.0.api();
-        view(t, repo, remote::number(at))
+        view(t, repo, remote::number(at)?)
     }
 
     fn list(&self, filter: &Filter) -> Result<Vec<Pr>> {

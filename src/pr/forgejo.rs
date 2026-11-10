@@ -66,7 +66,7 @@ fn pr(node: &Value) -> Pr {
         merge_state: merge_state.to_owned(),
         conflicts: mergeable == "conflicting",
         same_repo: shared.same_repo.unwrap_or(true),
-        native: Native::Forgejo,
+        native: Native::None,
     }
 }
 
@@ -255,7 +255,7 @@ impl Provider for Forgejo {
 
     fn view(&self, at: &At) -> Result<Pr> {
         let (t, repo) = self.0.api();
-        view(t, repo, remote::number(at))
+        view(t, repo, remote::number(at)?)
     }
 
     fn list(&self, filter: &Filter) -> Result<Vec<Pr>> {

@@ -531,6 +531,17 @@ impl Repo {
         Ok(None)
     }
 
+    /// The first of [`Self::default_branch_names`] that exists as a local branch, from local refs
+    /// only.
+    pub fn local_default_branch(&self) -> Result<Option<String>> {
+        for name in self.default_branch_names()? {
+            if self.branch_tip(&name)?.is_some() {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
         self.git_opt(&["merge-base", "--end-of-options", a, b])
     }
