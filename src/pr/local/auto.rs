@@ -2,6 +2,8 @@
 //! merging when they pass at the head the intent names. The gates are judged at that head also
 //! for `rebase`, as a forge's rebase merge and the `land` skill's clean-rebase rule do.
 
+use std::time::{Duration, Instant};
+
 use super::{Local, method_of};
 use crate::core::clock;
 use crate::core::error::{Result, fail};
@@ -42,6 +44,7 @@ impl Local<'_> {
                 },
             )?;
         }
+        let started = Instant::now();
         let mut waited = 0;
         loop {
             let failing = {
@@ -51,7 +54,10 @@ impl Local<'_> {
                     Attempt::Waiting(failing) => failing,
                 }
             };
-            if waited >= WAIT_SECS {
+            // Polls count under `AGT_NOW`, where `sleep` returns at once. The clock stops a poll
+            // that would start late.
+            let left = Duration::from_secs(WAIT_SECS).saturating_sub(started.elapsed());
+            if waited >= WAIT_SECS || left < Duration::from_secs(POLL_SECS) {
                 return Ok(Outcome::Pending(failing));
             }
             clock::sleep(POLL_SECS);
