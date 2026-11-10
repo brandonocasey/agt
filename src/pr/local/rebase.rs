@@ -203,8 +203,14 @@ impl Local<'_> {
             }
         };
         let work = Repo::at(path);
-        let (code, error) =
-            work.probe(&["rebase", "--no-autostash", "--no-update-refs", target_tip])?;
+        // The `-c` form works on Git 2.31; `--no-update-refs` needs 2.38.
+        let (code, error) = work.probe(&[
+            "-c",
+            "rebase.updateRefs=false",
+            "rebase",
+            "--no-autostash",
+            target_tip,
+        ])?;
         if code == Some(0) {
             let from = work.git(&["rev-parse", "ORIG_HEAD"])?;
             let now = self.tip(branch)?;

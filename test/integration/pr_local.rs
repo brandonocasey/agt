@@ -688,6 +688,35 @@ fn a_branch_behind_the_target_rebases_and_fast_forwards() {
     assert_eq!(git_ok(&env, &work, &["status", "--porcelain"]), "");
 }
 
+/// Git 2.31 has no `rebase --no-update-refs` (Git 2.38 added it), so the merge turns update-refs
+/// off with a config key, which an older git ignores. A `git` that rejects the flag stands in.
+#[test]
+fn a_rebase_merge_does_not_use_the_flag_an_older_git_lacks() {
+    let env = setup();
+    let first = add_branch(&env, "feat", "b.txt", "b\n");
+    let second = commit_on(&env, &first, "b2.txt", "b2\n");
+    point(&env, "feat", &second);
+    point(&env, "mid", &first);
+    advance_main(&env, "c.txt", "c\n");
+    add_worktree(&env, "work", &["feat"]);
+    git_ok(&env, &env.repo, &["config", "rebase.updateRefs", "true"]);
+    let path = env.git_wrapper(
+        "old-git",
+        "for arg in \"$@\"; do\n  [ \"$arg\" = --no-update-refs ] && { echo \"error: unknown option 'no-update-refs'\" >&2; exit 129; }\ndone\n",
+    );
+
+    let output = env
+        .bin(&env.repo)
+        .env("PATH", path)
+        .args(["pr", "--local"])
+        .args(merge_args(&second, "feat", &["--method", "rebase"]))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(tip(&env, "main"), tip(&env, "feat"));
+    assert_eq!(tip(&env, "mid"), first, "update-refs stays off");
+}
+
 #[test]
 fn a_rebase_that_conflicts_leaves_the_branch_at_its_old_tip() {
     let env = setup();
