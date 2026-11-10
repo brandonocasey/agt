@@ -206,7 +206,14 @@ impl Local<'_> {
         let (code, error) =
             work.probe(&["rebase", "--no-autostash", "--no-update-refs", target_tip])?;
         if code == Some(0) {
-            return self.tip(branch);
+            let from = work.git(&["rev-parse", "ORIG_HEAD"])?;
+            let now = self.tip(branch)?;
+            if from != tip {
+                return fail(format!(
+                    "{branch} was at {from}, not {tip}, when the rebase started; it is at {now} and was not merged"
+                ));
+            }
+            return Ok(now);
         }
         if !started_here(&work.git_dir()?, branch, target_tip, tip) {
             let now = self.tip(branch)?;

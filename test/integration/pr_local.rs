@@ -869,6 +869,41 @@ fn a_hook_that_refuses_the_rebase_leaves_everything_as_it_was() {
     assert!(message.contains("no rebases today"), "{message}");
 }
 
+/// A commit that lands on the branch after the head was checked is not merged unseen: the rebase
+/// would start from a tip the caller never named. The commit is made by a `core.fsmonitor` hook,
+/// which the check of the work tree's status runs once, after the tip was read.
+#[test]
+fn a_commit_made_while_the_merge_runs_stops_the_merge_before_it_lands() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    advance_main(&env, "c.txt", "c\n");
+    let work = add_worktree(&env, "work", &["feat"]);
+    let hook = env.path("fsmonitor");
+    let once = env.path("committed");
+    crate::support::executable(
+        &hook,
+        format!(
+            "#!/bin/sh\n[ -e '{once}' ] && exit 1\ntouch '{once}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE\n\
+             git -C '{work}' commit -q --allow-empty -m sneaked\nexit 1\n",
+            once = once.display(),
+            work = work.display()
+        ),
+    );
+    git_ok(
+        &env,
+        &env.repo,
+        &["config", "core.fsmonitor", hook.to_str().unwrap()],
+    );
+    let main = tip(&env, "main");
+
+    let message = err(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    let now = tip(&env, "feat");
+    assert_ne!(now, sha, "the hook should have committed: {message}");
+    assert!(message.contains(&sha), "{message}");
+    assert!(message.contains(&now), "{message}");
+    assert_eq!(tip(&env, "main"), main, "{message}");
+}
+
 #[test]
 fn branch_names_with_unicode_a_slash_or_a_leading_dash_are_found_and_merged() {
     for name in ["fé/ü", "a/b/c", "-dash", "-dash/é"] {
