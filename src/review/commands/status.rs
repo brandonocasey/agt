@@ -617,8 +617,14 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
         scope.head = ctx.repo.commit(rev)?;
         scope.head_known = true;
     }
+    status_of(ctx, &scope, head_arg.is_some())
+}
+
+/// `status` of `scope`; `head_given` says its head is not the checked-out one, so the work tree
+/// is left out.
+pub(super) fn status_of(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<Value> {
     if !scope.head_known {
-        return Ok(status_without_head(ctx, &scope));
+        return Ok(status_without_head(ctx, scope));
     }
     let target = scope.existing.as_ref();
     let head = scope.head.clone();
@@ -669,11 +675,12 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     };
 
     // The work tree belongs to the target only when its branch is checked out.
-    let checked_out = scope.kind == TargetKind::Branch
+    let checked_out = !head_given
+        && scope.kind == TargetKind::Branch
         && scope.branch.is_some()
         && ctx.repo.current_branch()? == scope.branch;
     let mut worktree_covered = Vec::new();
-    let worktree = if head_arg.is_none() && checked_out {
+    let worktree = if checked_out {
         let tree = ctx.repo.worktree_tree()?;
         let dirty = tree != head_tree;
         worktree_covered = if dirty && !merge_after {

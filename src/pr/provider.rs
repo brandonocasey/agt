@@ -34,6 +34,15 @@ impl fmt::Display for At {
     }
 }
 
+/// What a merge or an auto-merge request came to.
+pub enum Outcome {
+    /// The request went through; a forge may only have queued it, so the PR/MR is read again to
+    /// tell.
+    Done,
+    /// The provider waited on gates and gave up: these still fail.
+    Pending(Vec<String>),
+}
+
 /// What a provider can do that the shared flow must know before it calls.
 pub struct Capabilities {
     /// `auto-merge on` over an auto-merge that is on does nothing; a provider that waits on
@@ -113,9 +122,9 @@ pub trait Provider {
     }
 
     /// Merges now, without auto-merge.
-    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()>;
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome>;
 
-    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()>;
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome>;
 
     /// Turns auto-merge off; false when it was off already, which only Forgejo can tell.
     fn disable_auto(&self, pr: &Pr) -> Result<bool>;

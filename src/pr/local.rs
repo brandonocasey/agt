@@ -2,11 +2,14 @@
 //! moves that branch. Everything is read from local refs; nothing here fetches, pushes or asks a
 //! forge.
 
+mod auto;
 mod rebase;
 
 use std::fs;
 
-use super::provider::{At, Capabilities, Filter, Provider};
+use super::gates::Gates;
+use super::intent;
+use super::provider::{At, Capabilities, Filter, Outcome, Provider};
 use super::{How, Native, Pr, State};
 use crate::core::error::{Error, Result, fail};
 use crate::git::Repo;
@@ -18,16 +21,18 @@ const LIST_LIMIT: usize = 100;
 
 pub struct Local<'a> {
     repo: &'a Repo,
+    gates: &'a dyn Gates,
     /// The git common directory, which tells repositories apart in the records.
     common: String,
 }
 
 impl<'a> Local<'a> {
-    pub fn new(repo: &'a Repo) -> Result<Self> {
+    pub fn new(repo: &'a Repo, gates: &'a dyn Gates) -> Result<Self> {
         let common = fs::canonicalize(repo.common_dir()?)
             .map_err(|error| Error(format!("resolve the git directory: {error}")))?;
         Ok(Self {
             repo,
+            gates,
             common: common.display().to_string(),
         })
     }
@@ -64,7 +69,7 @@ impl<'a> Local<'a> {
             (false, false) => ("blocked", "behind"),
         };
         let author = self.repo.authored(&[tip.as_str()])?;
-        Ok(Pr {
+        self.with_intent(Pr {
             id: String::new(),
             number: None,
             url: None,
@@ -98,11 +103,7 @@ impl<'a> Local<'a> {
     /// Moves `target` to `branch`, rebasing the branch first when it is behind and `how` says so.
     /// The branch MUST still be at `sha`.
     fn land(&self, branch: &str, sha: &str, how: Option<How>) -> Result<()> {
-        if matches!(how, Some(How::Merge | How::Squash)) {
-            return fail(
-                "a local merge creates no commit; use --method rebase, or none for a fast-forward",
-            );
-        }
+        method_of(how)?;
         let target = self.target()?;
         let tip = self.tip(branch)?;
         if tip != sha {
@@ -133,6 +134,17 @@ impl<'a> Local<'a> {
                     String::new()
                 }
             )),
+        }
+    }
+}
+
+/// What the records call the merge method `how`; the methods that would create a commit fail.
+fn method_of(how: Option<How>) -> Result<&'static str> {
+    match how {
+        None => Ok("fast-forward"),
+        Some(How::Rebase) => Ok("rebase"),
+        Some(How::Merge | How::Squash) => {
+            fail("a local merge creates no commit; use --method rebase, or none for a fast-forward")
         }
     }
 }
@@ -224,20 +236,47 @@ impl Provider for Local<'_> {
         Ok(found)
     }
 
-    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
-        self.land(&pr.head_branch, sha, how)
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
+        let key = self.key(&pr.at());
+        let _lock = intent::lock(&key)?;
+        self.land(&pr.head_branch, sha, how)?;
+        intent::finish(&key)?;
+        Ok(Outcome::Done)
     }
 
-    fn enable_auto(&self, _pr: &Pr, _sha: &str, _how: Option<How>) -> Result<()> {
-        fail("auto-merge is not available for a local PR yet")
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
+        self.auto_merge(pr, sha, how)
     }
 
-    fn disable_auto(&self, _pr: &Pr) -> Result<bool> {
-        Ok(false)
+    fn disable_auto(&self, pr: &Pr) -> Result<bool> {
+        let key = self.key(&pr.at());
+        let _lock = intent::lock(&key)?;
+        intent::clear(&key)
     }
 
     fn auto_method(&self, pr: &Pr, _recorded: Option<&str>) -> Option<String> {
         pr.auto_merge.clone()
+    }
+
+    /// The method of the intent that waits, else the one `auto-merge off` left.
+    fn recorded(&self, at: &At) -> Result<Option<String>> {
+        let key = self.key(at);
+        match intent::get(&key)? {
+            Some(intent) => Ok(Some(intent.method)),
+            None => intent::paused(&key),
+        }
+    }
+
+    fn record(&self, at: &At, method: &str) -> Result<()> {
+        let key = self.key(at);
+        let _lock = intent::lock(&key)?;
+        intent::pause(&key, method)
+    }
+
+    fn forget(&self, at: &At) -> Result<()> {
+        let key = self.key(at);
+        let _lock = intent::lock(&key)?;
+        intent::forget_paused(&key)
     }
 
     /// The merge leaves no commits between the target and the branch, so the messages are read

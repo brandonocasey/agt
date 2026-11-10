@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use super::provider::{At, Capabilities, Filter, NewPr, Provider, open_first};
+use super::provider::{At, Capabilities, Filter, NewPr, Outcome, Provider, open_first};
 use super::remote::{self, Remote};
 use super::upload::Uploader;
 use super::{Changes, How, Native, Pr, State};
@@ -300,17 +300,18 @@ impl Provider for Forgejo {
         )
     }
 
-    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         let (t, repo) = self.0.api();
         let request = Merge {
             number: pr.forge_number(),
             sha,
             how,
         };
-        merge(t, repo, &request)
+        merge(t, repo, &request)?;
+        Ok(Outcome::Done)
     }
 
-    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         let (t, repo) = self.0.api();
         let request = Merge {
             number: pr.forge_number(),
@@ -319,7 +320,8 @@ impl Provider for Forgejo {
         };
         merge_when_checks_succeed(t, repo, &request)?;
         // The host cannot be asked how auto-merge was set, so pausing it needs this.
-        self.record(&pr.at(), method(how))
+        self.record(&pr.at(), method(how))?;
+        Ok(Outcome::Done)
     }
 
     fn disable_auto(&self, pr: &Pr) -> Result<bool> {

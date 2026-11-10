@@ -6,8 +6,10 @@
 //! is JSON.
 
 mod forgejo;
+mod gates;
 mod github;
 mod gitlab;
+mod intent;
 mod local;
 mod memo;
 mod provider;
@@ -20,15 +22,17 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
 use self::local::Local;
-use self::provider::{At, Filter, NewPr, Provider};
+use self::provider::{At, Filter, NewPr, Outcome, Provider};
 use self::remote::Remote;
 use crate::core::config::Config;
 use crate::core::error::{Error, Result, fail};
-use crate::core::output::{self, Output};
+use crate::core::output::{self, Output, TIMED_OUT};
 use crate::forge::auto::Offline;
 use crate::forge::parse_pr;
 use crate::git::Repo;
 use crate::store::model::{Forge, ReviewState};
+
+pub use self::gates::{Gates, Review};
 
 /// View, list, create, update and merge the PRs/MRs of this repository, on GitHub, GitLab or
 /// Forgejo; with `--local`, merge local branches into the local default branch.
@@ -149,6 +153,12 @@ enum Command {
     /// Without --auto, a GitHub PR whose base requires a merge queue is added to the queue
     /// through auto-merge, so it needs --method too. GitLab cannot rebase on merge.
     ///
+    /// With --local, <NUMBER> is the branch name. Without --auto it merges at once; with --auto
+    /// it records an intent and polls every 5 seconds for up to 270 seconds until the gates pass
+    /// at the head: an `agt check run` pass for the tree, a review with no unreviewed commit and
+    /// no open blocking finding, an approval at exactly the head, and a branch that lands. A
+    /// gate that still fails exits 3, naming it, and keeps the intent.
+    ///
     /// When this call merges the PR/MR, each local issue that its title or body names after a
     /// closing keyword (`Fixes local-ab12cd`; one keyword per key) is closed and listed as
     /// `closed_issues`. Auto-merge that merges later closes nothing.
@@ -164,6 +174,10 @@ enum Command {
     },
     /// Pause or restore auto-merge. `off` records the method it disables; `on` re-enables it
     /// with the same method (state: `agents/pr/auto-merge.json`). A queued PR/MR is refused.
+    ///
+    /// With --local, `off` clears the intent of the branch and stops the call waiting on it
+    /// (state: `agents/pr/local-auto-merge.json`); `on` waits on the gates as `merge --auto`
+    /// does and exits 3 when one still fails.
     AutoMerge {
         #[arg(value_enum)]
         switch: Switch,
@@ -290,9 +304,9 @@ impl Pr {
 
 /// The local provider for `--local`, else the provider of the forge that the selected tracker
 /// names.
-fn provider<'a>(repo: &'a Repo, cli: &Cli) -> Result<Box<dyn Provider + 'a>> {
+fn provider<'a>(repo: &'a Repo, cli: &Cli, gates: &'a dyn Gates) -> Result<Box<dyn Provider + 'a>> {
     if cli.local {
-        return Ok(Box::new(Local::new(repo)?));
+        return Ok(Box::new(Local::new(repo, gates)?));
     }
     let config = Config::load_for_repo(repo)?;
     let given = match &cli.command {
@@ -345,13 +359,14 @@ fn not_queued(pr: &Pr) -> Result<()> {
     }
 }
 
-/// Runs the command. Also returns the title and body of a PR/MR that this call merged.
-pub fn run(cli: Cli) -> Result<(Output, Option<String>)> {
+/// Runs the command; `gates` answers what the local auto-merge asks of other domains. Also
+/// returns the title and body of a PR/MR that this call merged.
+pub fn run(cli: Cli, gates: &dyn Gates) -> Result<(Output, Option<String>)> {
     if !cli.local {
         Offline::current().forbid("agt pr")?;
     }
     let repo = Repo::discover()?;
-    let provider = provider(&repo, &cli)?;
+    let provider = provider(&repo, &cli, gates)?;
     let mut merged_text = None;
     let output = execute(&*provider, &repo, cli.command, &mut merged_text)
         .map_err(|error| provider.explain(error))?;
@@ -489,16 +504,16 @@ fn execute(
             if current.draft {
                 return fail(format!("{at} is a draft; mark it ready first"));
             }
-            if auto {
-                provider.enable_auto(&current, &current.head_sha, method)?;
+            let outcome = if auto {
+                provider.enable_auto(&current, &current.head_sha, method)?
             } else {
-                provider.merge(&current, &current.head_sha, method)?;
-            }
+                provider.merge(&current, &current.head_sha, method)?
+            };
             let after = provider.view(&at)?;
             if after.state == ReviewState::Merged {
                 *merged_text = Some(provider.merged_text(&current, &after));
             }
-            shown(after)
+            settle(outcome, after.json())
         }
         Command::AutoMerge {
             switch,
@@ -509,8 +524,8 @@ fn execute(
             let at = provider.at(&given)?;
             let current = provider.view(&at)?;
             not_queued(&current)?;
-            let changed = match switch {
-                Switch::Off => pause(provider, &current, &at)?,
+            let (changed, outcome) = match switch {
+                Switch::Off => (pause(provider, &current, &at)?, Outcome::Done),
                 Switch::On => restore(provider, &current, &at, sha.as_deref())?,
             };
             let now = provider.view(&at)?;
@@ -531,9 +546,10 @@ fn execute(
             if matches!(switch, Switch::On) && readable {
                 provider.forget(&at)?;
             }
-            Ok(Output::Json(
+            settle(
+                outcome,
                 json!({"changed": changed, "merged": merged, "pr": now.json()}),
-            ))
+            )
         }
     }
 }
@@ -564,9 +580,14 @@ fn pause(provider: &dyn Provider, pr: &Pr, at: &At) -> Result<bool> {
 }
 
 /// Turns auto-merge back on with the recorded method; false when it is on already.
-fn restore(provider: &dyn Provider, pr: &Pr, at: &At, sha: Option<&str>) -> Result<bool> {
+fn restore(
+    provider: &dyn Provider,
+    pr: &Pr,
+    at: &At,
+    sha: Option<&str>,
+) -> Result<(bool, Outcome)> {
     if pr.auto_merge.is_some() && !provider.capabilities().resumes_auto_merge {
-        return Ok(false);
+        return Ok((false, Outcome::Done));
     }
     let Some(method) = provider.recorded(at)? else {
         return fail(format!(
@@ -575,6 +596,22 @@ fn restore(provider: &dyn Provider, pr: &Pr, at: &At, sha: Option<&str>) -> Resu
     };
     let sha = sha.unwrap_or(&pr.head_sha);
     guard(pr, sha)?;
-    provider.enable_auto(pr, &pr.head_sha, How::named(&method))?;
-    Ok(true)
+    let outcome = provider.enable_auto(pr, &pr.head_sha, How::named(&method))?;
+    Ok((true, outcome))
+}
+
+/// Prints `shown`. When a provider gave up waiting on gates, it also fails with their names and
+/// the exit status of a timed-out wait; the auto-merge it left is kept.
+fn settle(outcome: Outcome, shown: Value) -> Result<Output> {
+    let Outcome::Pending(gates) = outcome else {
+        return Ok(Output::Json(shown));
+    };
+    output::print(Output::Json(shown))?;
+    let waiting = gates.join("; ");
+    Ok(Output::Failure(
+        Error(format!(
+            "not merged yet, waiting on: {waiting}\nthe auto-merge is kept: run the command or `auto-merge on` again to keep waiting"
+        )),
+        TIMED_OUT,
+    ))
 }

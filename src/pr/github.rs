@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::provider::{At, Capabilities, Filter, NewPr, Provider};
+use super::provider::{At, Capabilities, Filter, NewPr, Outcome, Provider};
 use super::remote::{self, Remote};
 use super::upload::{Image, Uploaded, Uploader};
 use super::{Changes, How, Native, Pr, State};
@@ -383,15 +383,16 @@ impl Provider for Github {
 
     /// A base that requires a merge queue takes a PR only through auto-merge, which queues it
     /// (what `gh pr merge` does).
-    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         if queue_required(pr) {
             return self.enable_auto(pr, sha, how);
         }
         let (t, repo) = self.0.api();
-        merge(t, repo, pr.forge_number(), sha, how)
+        merge(t, repo, pr.forge_number(), sha, how)?;
+        Ok(Outcome::Done)
     }
 
-    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         let how = how
             .or_else(|| pr.auto_merge.as_deref().and_then(How::named))
             .ok_or_else(|| Error("GitHub auto-merge needs --method".into()))?;
@@ -401,9 +402,11 @@ impl Provider for Github {
         if !queue_required(pr)
             && matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable")
         {
-            return merge(t, repo, pr.forge_number(), sha, Some(how));
+            merge(t, repo, pr.forge_number(), sha, Some(how))?;
+            return Ok(Outcome::Done);
         }
-        enable_auto(t, pr, sha, how)
+        enable_auto(t, pr, sha, how)?;
+        Ok(Outcome::Done)
     }
 
     fn disable_auto(&self, pr: &Pr) -> Result<bool> {

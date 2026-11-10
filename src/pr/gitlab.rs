@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::provider::{At, Capabilities, Filter, NewPr, Provider};
+use super::provider::{At, Capabilities, Filter, NewPr, Outcome, Provider};
 use super::remote::{self, Remote};
 use super::upload::{Image, Uploaded, Uploader};
 use super::{Changes, How, Native, Pr, State};
@@ -329,14 +329,16 @@ impl Provider for Gitlab {
         Ok(Box::new(move |image| upload(t, host, repo, image)))
     }
 
-    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         let (t, repo) = self.0.api();
-        merge(t, repo, pr, sha, how, false)
+        merge(t, repo, pr, sha, how, false)?;
+        Ok(Outcome::Done)
     }
 
-    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<()> {
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         let (t, repo) = self.0.api();
-        merge(t, repo, pr, sha, how, true)
+        merge(t, repo, pr, sha, how, true)?;
+        Ok(Outcome::Done)
     }
 
     fn disable_auto(&self, pr: &Pr) -> Result<bool> {

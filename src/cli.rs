@@ -66,6 +66,25 @@ enum Command {
     Wait(wait::Cli),
 }
 
+/// What the local auto-merge asks of the check and review domains, which `pr` may not import.
+struct DomainGates;
+
+impl pr::Gates for DomainGates {
+    fn checked(&self, head: &str) -> Result<bool> {
+        check::passed_at(head)
+    }
+
+    fn review(&self, branch: &str, head: &str, target: &str) -> Result<pr::Review> {
+        let found = review::commands::branch_review(branch, head, target)?;
+        Ok(pr::Review {
+            reviewed: found.reviewed,
+            unreviewed: found.unreviewed,
+            blocking: found.blocking,
+            approved: found.approved,
+        })
+    }
+}
+
 pub fn run(cli: Cli) -> Result<Output> {
     cli.offline.install();
     match cli.command {
@@ -78,7 +97,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
         Command::Pr(args) => {
-            let (output, merged) = pr::run(args)?;
+            let (output, merged) = pr::run(args, &DomainGates)?;
             Ok(match merged {
                 Some(text) => issue::close_fixed(output, &text),
                 None => output,

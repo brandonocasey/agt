@@ -217,6 +217,11 @@ impl Ctx {
             Error("HEAD is detached; pass --range <rev> or --target <key>".into())
         })?;
         let head = self.repo.head()?;
+        self.scope_of_branch(branch, head)
+    }
+
+    /// [`Self::scope_for_branch`] for `branch` at `head`, whatever is checked out.
+    pub(super) fn scope_of_branch(&self, branch: String, head: String) -> Result<Scope> {
         let birth = self.repo.branch_birth(&branch)?;
         let mut candidates: Vec<Target> = self
             .store
