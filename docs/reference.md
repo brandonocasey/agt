@@ -543,6 +543,12 @@ for the whole period, so a task that is still writing keeps all of its files:
   user's is skipped with a warning, and nothing is deleted unless every directory above it,
   up to its root, is a real directory of this user. `agents/output` and `agents/scratch`
   themselves may be links (say, to a bigger disk); they are in the user's own cache.
+- `scratch` category, checkout scratch: entries of `<checkout>/.cache/agents/scratch` (except
+  `.keep`) untouched for 30 days, in every main and linked checkout of the repositories under
+  the `[worktree] roots` and of the repository holding the current directory. A checkout is
+  left out when git tracks a file under that path. Anyone can commit a link, so here
+  `.cache`, `.cache/agents` and `scratch` must be real directories of this user too; a link
+  is skipped with a warning.
 - `scratch` category, browser temp directories: `puppeteer_dev_chrome_profile-*` and the
   `playwright_{chromium,firefox,webkit}dev_profile-*` profiles untouched for 1 day, and
   `playwright-artifacts-*` and `playwright-tracing-*` untouched for 7 days, in `/tmp` (and

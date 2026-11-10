@@ -490,10 +490,11 @@ impl Plan {
         Ok(())
     }
 
-    /// Scratch and harness session directories untouched for 30 days.
+    /// Scratch, checkout scratch and harness session directories untouched for 30 days.
     pub fn scratch(&mut self, now: i64) -> Result<()> {
         let harness = files::harness_roots()?;
-        for stale in files::scratch(now, &mut self.warnings)? {
+        let checkouts = crate::worktree::prune::checkouts(crate::core::harness::SCRATCH_DIR)?;
+        for stale in files::scratch(&checkouts, now, &mut self.warnings)? {
             let reason = files::reason(&stale, now, SCRATCH_DAYS);
             let in_harness = harness.iter().any(|root| stale.path.starts_with(root));
             self.add(

@@ -53,6 +53,35 @@ pub fn candidates() -> Result<Vec<Found>> {
     Ok(found)
 }
 
+/// Every checkout, main and linked, of the repositories under the configured roots and of the
+/// repository holding the current directory, without duplicates. Left out: a repository git
+/// cannot read, a worktree whose directory is gone, and a checkout where git tracks a file
+/// under `scratch`, since that is the repository's content rather than an agent's.
+pub fn checkouts(scratch: &str) -> Result<Vec<PathBuf>> {
+    let mut repos: Vec<Repo> = roots::repositories()?
+        .into_iter()
+        .map(Repo::at)
+        .collect();
+    if let Ok(here) = Repo::discover() {
+        repos.push(here);
+    }
+    let mut found: Vec<PathBuf> = repos
+        .iter()
+        .filter_map(|repo| repo.worktrees().ok())
+        .flatten()
+        .filter(|worktree| !worktree.bare && !worktree.prunable)
+        .filter_map(|worktree| std::fs::canonicalize(worktree.path).ok())
+        .collect();
+    found.sort();
+    found.dedup();
+    found.retain(|checkout| {
+        Repo::at(checkout)
+            .git(&["ls-files", "-z", "--", scratch])
+            .is_ok_and(|tracked| tracked.is_empty())
+    });
+    Ok(found)
+}
+
 fn of(repo: &Repo) -> Result<Vec<Found>> {
     let Some(scene) = Scene::read(repo)? else {
         return Ok(Vec::new());
