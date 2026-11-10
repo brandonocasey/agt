@@ -230,7 +230,7 @@ impl Env {
     }
 }
 
-/// What `git hash-object --stdin` prints for `text`: the SHA-1 of a git blob header and the text.
+/// Matches `git hash-object --stdin` for `text`: the SHA-1 of git's blob header and the text.
 /// `fake-forge.sh` keys its answers by this hash of the argument list, one argument per line.
 fn blob_hash(text: &str) -> String {
     let mut hash = sha1_smol::Sha1::new();

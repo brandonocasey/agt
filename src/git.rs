@@ -77,8 +77,8 @@ impl Worktree {
 pub struct Repo {
     root: PathBuf,
     main_checkout: OnceLock<PathBuf>,
-    // Facts of the repository's layout that nothing in one agt process changes, kept so each
-    // is asked of git once per `Repo`; a failed read is not kept.
+    // Layout facts that nothing in one agt process changes. Each is read from git once per
+    // `Repo`; a failed read is not kept.
     toplevel: OnceLock<PathBuf>,
     common_dir: OnceLock<String>,
     is_bare: OnceLock<bool>,
@@ -206,10 +206,8 @@ impl Repo {
         Ok(Self::at(top))
     }
 
-    /// Asks git for each fact about HEAD, branches, their reflogs, the default branch and merge
-    /// bases once: the same question later gets the first answer, so one command that works it
-    /// out twice spawns git once. A failed read is not kept. The caller MUST NOT move a ref,
-    /// HEAD or the config of the repository, through any handle, while this `Repo` lives.
+    /// Makes this `Repo` remember answers about refs, HEAD and config; failed reads are not kept.
+    /// Callers MUST NOT move a ref, HEAD or the repository's config while this `Repo` lives.
     #[must_use]
     pub fn remembering_refs(mut self) -> Self {
         self.refs = Some(Mutex::new(HashMap::new()));
@@ -365,9 +363,8 @@ impl Repo {
         Ok(self.ask(args)?.0)
     }
 
-    /// [`Self::git_opt`] with whether the answer is settled: git succeeded, or exited 1, which
-    /// `symbolic-ref`, `rev-parse --verify`, `config` and `merge-base` do for what is not there.
-    /// Another failure may pass.
+    /// Like [`Self::git_opt`], with whether the answer is settled. Git settles it with exit 0,
+    /// or exit 1 for a missing value.
     fn ask(&self, args: &[&str]) -> Result<(Option<String>, bool)> {
         let output = self.exec(args, None, &[])?;
         if !output.status.success() {
@@ -382,8 +379,8 @@ impl Repo {
         self.remembered_ref_fact(args, || self.ask(args))
     }
 
-    /// The answer `read` gives to `args`, from the first one when this `Repo` remembers refs
-    /// and `read` found it settled.
+    /// Returns the first kept answer, or else `read`'s. An answer is kept when this `Repo`
+    /// remembers refs and it is settled.
     fn remembered_ref_fact(
         &self,
         args: &[&str],
