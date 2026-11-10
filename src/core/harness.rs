@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Task scratch space, relative to `$HOME`; `agt doctor` wants it in the global git ignore.
+/// Task scratch space, relative to `$HOME` or a checkout; `agt doctor` wants it in the global git ignore.
 pub const SCRATCH_DIR: &str = ".cache/agents/scratch";
 
 /// The scratch directory as the anchored global git ignore pattern.

@@ -1,6 +1,6 @@
-//! Agent working files under the cache root that nothing touched for a while: long-output
-//! copies in `agents/output`, scratch in `agents/scratch`, and Claude Code's per-session
-//! scratchpads. Each top-level entry goes whole, and only when every file in it is old, so a
+//! Agent working files that nothing touched for a while: long-output copies in
+//! `agents/output`, scratch in `agents/scratch` and in each checkout's `.cache/agents/scratch`,
+//! and Claude Code's per-session scratchpads. Each top-level entry goes whole, and only when every file in it is old, so a
 //! task that is still writing keeps all of its files.
 
 use std::fs;
@@ -208,8 +208,10 @@ pub fn output(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
     ))
 }
 
-/// Task directories in `agents/scratch`, and harness session directories.
-pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
+/// Task directories in `agents/scratch` and in each of `checkouts`' `.cache/agents/scratch`, and
+/// harness session directories. A checkout holds files anyone can commit, so every directory
+/// from the checkout down to its scratch MUST be a real directory of this user.
+pub fn scratch(checkouts: &[PathBuf], now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
     let root = own_root(local::agents_cache()?.join(harness::SCRATCH_NAME));
     let mut found = stale_in(
         &root,
@@ -250,6 +252,21 @@ pub fn scratch(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Stale>> {
         found.extend(stale_in(
             &harness,
             &slugs,
+            SCRATCH_DAYS,
+            now,
+            |path| path.to_string_lossy().into_owned(),
+            warnings,
+        ));
+    }
+    for checkout in checkouts {
+        let dir = checkout.join(harness::SCRATCH_DIR);
+        // A checkout at `$HOME` holds the cache scratch, which the first pass already swept.
+        if fs::canonicalize(&dir).is_ok_and(|real| real == root) {
+            continue;
+        }
+        found.extend(stale_in(
+            checkout,
+            std::slice::from_ref(&dir),
             SCRATCH_DAYS,
             now,
             |path| path.to_string_lossy().into_owned(),

@@ -490,10 +490,18 @@ impl Plan {
         Ok(())
     }
 
-    /// Scratch and harness session directories untouched for 30 days.
+    /// Scratch, checkout scratch and harness session directories untouched for 30 days.
     pub fn scratch(&mut self, now: i64) -> Result<()> {
         let harness = files::harness_roots()?;
-        for stale in files::scratch(now, &mut self.warnings)? {
+        // A bad roots config skips only checkout scratch; the cache scratch is still swept.
+        let checkouts =
+            crate::worktree::prune::untracked_checkouts(crate::core::harness::SCRATCH_DIR)
+                .unwrap_or_else(|error| {
+                    self.warnings
+                        .push(format!("checkout scratch skipped: {error}"));
+                    Vec::new()
+                });
+        for stale in files::scratch(&checkouts, now, &mut self.warnings)? {
             let reason = files::reason(&stale, now, SCRATCH_DAYS);
             let in_harness = harness.iter().any(|root| stale.path.starts_with(root));
             self.add(
@@ -603,10 +611,7 @@ fn review_reason(target: &Target) -> String {
 
 fn stores(namespace: Namespace) -> Result<Vec<Store>> {
     let mut found = vec![Store::open(namespace)?];
-    let mut roots = crate::worktree::roots::repositories()?;
-    if let Ok(repo) = crate::git::Repo::discover() {
-        roots.push(repo.root().to_path_buf());
-    }
+    let roots = crate::worktree::prune::repositories_and_current()?;
     let mut seen = std::collections::BTreeSet::new();
     for root in roots {
         let repo = crate::git::Repo::at(root);

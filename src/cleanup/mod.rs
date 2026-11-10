@@ -47,8 +47,9 @@ enum Only {
     Checks,
     /// agt's own pre-migration backups and unfinished backup copies.
     Backups,
-    /// Long-output copies in `agents/output` untouched for 7 days, and `agents/scratch` and
-    /// Claude Code session scratchpads untouched for 30 days; browser temp profiles in `/tmp`
+    /// Long-output copies in `agents/output` untouched for 7 days, and `agents/scratch`, each
+    /// checkout's `.cache/agents/scratch` and Claude Code session scratchpads untouched for 30
+    /// days; browser temp profiles in `/tmp`
     /// untouched for a day (Playwright artifacts and traces: 7 days).
     Files,
     /// Processes a gone Claude Code session started, a day or more old; browser servers and

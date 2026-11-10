@@ -1347,6 +1347,117 @@ fn scratch_never_follows_a_link_out_of_the_harness_root() {
 }
 
 #[test]
+fn checkout_scratch_goes_once_old_in_every_checkout_git_does_not_track_it_in() {
+    let prune = Prune {
+        env: Env::with_branch(),
+    };
+    let git = |dir: &Path, args: &[&str]| {
+        let status = prune.env.command("git", dir).args(args).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    let old_task = |checkout: &Path, name: &str, days: i64| {
+        let task = checkout.join(".cache/agents/scratch").join(name);
+        old_file(&task.join("notes.md"), days);
+        age(&task, days);
+        task
+    };
+    let here = prune.env.repo.clone();
+    let linked = prune.env.path("linked");
+    git(&here, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    // A repository under the default roots, not the current one.
+    let other = prune.env.path("home/Projects/me/other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    let tracked = prune.env.path("home/Projects/me/tracked");
+    fs::create_dir_all(&tracked).unwrap();
+    git(&tracked, &["init", "-q", "-b", "main"]);
+    let committed = old_task(&tracked, "fixture", 40);
+    git(&tracked, &["add", "-f", "."]);
+    // A checkout whose `.cache` is a committed link to files of the user's.
+    let linking = prune.env.path("home/Projects/me/linking");
+    fs::create_dir_all(&linking).unwrap();
+    git(&linking, &["init", "-q", "-b", "main"]);
+    let victim = prune.env.path("victim");
+    let precious = old_task(&victim, "precious", 400);
+    std::os::unix::fs::symlink(victim.join(".cache"), linking.join(".cache")).unwrap();
+
+    let gone = [
+        old_task(&here, "main-task", 31),
+        old_task(&linked, "linked-task", 31),
+        old_task(&other, "other-task", 31),
+    ];
+    let young = old_task(&here, "young", 29);
+    old_file(&here.join(".cache/agents/scratch/.keep"), 400);
+
+    let report = prune.run(&["--only", "files"]);
+    let mut expected: Vec<String> = gone
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(keys(&report, "scratch"), expected, "{report}");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("not a directory of this user")),
+        "{report}"
+    );
+
+    let report = prune.run(&["--only", "files", "--yes"]);
+    assert_eq!(report["deleted"].as_array().unwrap().len(), 3, "{report}");
+    assert!(gone.iter().all(|path| !path.exists()));
+    assert!(young.exists() && here.join(".cache/agents/scratch/.keep").exists());
+    assert!(committed.exists() && precious.exists());
+}
+
+#[test]
+fn cache_scratch_inside_a_checkout_is_planned_once() {
+    let prune = Prune::new();
+    let home = prune.env.path("home/Projects/me/home");
+    fs::create_dir_all(home.join(".cache/agents/scratch")).unwrap();
+    let status = prune
+        .env
+        .command("git", &home)
+        .args(["init", "-q", "-b", "main"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let task = home.join(".cache/agents/scratch/task");
+    old_file(&task.join("notes.md"), 31);
+    age(&task, 31);
+    // The cache root resolving into the checkout, as `XDG_CACHE_HOME` unset with a repository
+    // at `$HOME` does.
+    let cache = prune.env.path("cache");
+    fs::create_dir_all(&cache).unwrap();
+    std::os::unix::fs::symlink(home.join(".cache/agents"), cache.join("agents")).unwrap();
+
+    let report = prune.run(&["--only", "files"]);
+    assert_eq!(keys(&report, "scratch"), ["task"], "{report}");
+}
+
+#[test]
+fn a_bad_roots_config_skips_only_checkout_scratch() {
+    let prune = Prune::new();
+    prune.env.write_config("[worktree]\nroots = [\n");
+    let task = prune.env.path("cache").join("agents/scratch/task");
+    old_file(&task.join("notes.md"), 31);
+    age(&task, 31);
+
+    let report = prune.run(&["--only", "files", "--yes"]);
+    assert!(!task.exists(), "{report}");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().starts_with("checkout scratch skipped:")),
+        "{report}"
+    );
+}
+
+#[test]
 fn the_sweep_plan_skips_a_worktree_changed_in_the_last_3_days() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");

@@ -1,5 +1,6 @@
 //! What `agt cleanup` lists for branches and worktree backups: branches already in the default
-//! branch by local ancestry alone, and the backups `agt worktree remove` made. Nothing here
+//! branch by local ancestry alone, and the backups `agt worktree remove` made; and the checkouts
+//! whose scratch it sweeps. Nothing here
 //! touches the network or runs `lsof`; removing the worktrees of landed work is
 //! `agt cleanup --only worktrees`.
 
@@ -50,6 +51,35 @@ pub fn candidates() -> Result<Vec<Found>> {
             found.append(&mut here);
         }
     }
+    Ok(found)
+}
+
+/// The repositories under the configured roots, then the one holding the current directory.
+pub fn repositories_and_current() -> Result<Vec<PathBuf>> {
+    let mut found = roots::repositories()?;
+    if let Ok(here) = Repo::discover() {
+        found.push(here.root().to_path_buf());
+    }
+    Ok(found)
+}
+
+/// Every checkout, main and linked, of [`repositories_and_current`] where git tracks nothing
+/// under `path`.
+pub fn untracked_checkouts(path: &str) -> Result<Vec<PathBuf>> {
+    let mut found: Vec<PathBuf> = repositories_and_current()?
+        .into_iter()
+        .filter_map(|root| Repo::at(root).worktrees().ok())
+        .flatten()
+        .filter(|worktree| !worktree.bare && !worktree.prunable)
+        .filter_map(|worktree| std::fs::canonicalize(worktree.path).ok())
+        .collect();
+    found.sort();
+    found.dedup();
+    found.retain(|checkout| {
+        Repo::at(checkout)
+            .git(&["ls-files", "-z", "--", path])
+            .is_ok_and(|tracked| tracked.is_empty())
+    });
     Ok(found)
 }
 
