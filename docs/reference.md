@@ -1340,8 +1340,9 @@ combined with `--remote`. A PR is addressed by its branch name (`view` and `list
   changes are kept and never overwritten, ignored files included), or by a ref update when no work tree has it. It is refused,
   with the reason and the command to retry, when the default branch is checked out in more than one work tree, when the work tree
   is missing (`git worktree prune`), when git is bisecting or rebasing it elsewhere, when the repository is bare, or when a
-  submodule pointer moves. `rebase` needs the branch to be checked out nowhere or in exactly one clean work tree, no rebase,
-  cherry-pick, merge or bisect under way there, no ignored file the rebase would overwrite and no submodule change; it runs
+  submodule pointer moves. The branch must not be checked out in more than one work tree, and no rebase, merge,
+  cherry-pick, revert or bisect may be under way in its work tree (a rebase the user started is never touched). `rebase` needs the
+  branch to be checked out in exactly one clean work tree, no ignored file the rebase would overwrite and no submodule change; it runs
   `git rebase` with hooks and user configuration as they are, and a conflict is final: the rebase is aborted and the branch stays
   as it was. Closing keywords (`Fixes local-ab12cd`) are read from every commit message of the branch.
 - `merge --auto` and `auto-merge on` record an intent (branch, head sha, method, waiter id) in

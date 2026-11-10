@@ -177,8 +177,14 @@ fn run(repo: &Repo, command: &[&str], path: Option<PathBuf>) -> Result<Update> {
         })
         .filter(|line| !line.is_empty())
         .collect();
+    // Git calls an ignored file in the way an untracked one, because `--no-overwrite-ignore`
+    // makes it count as one.
+    let message = message.join(" ").replace(
+        "untracked working tree files",
+        "untracked or ignored working tree files",
+    );
     Ok(Update::Refused(Refused {
-        reason: format!("git {} refused: {}", command[0], message.join(" ")),
+        reason: format!("git {} refused: {message}", command[0]),
         path,
         retry: Some(retry),
     }))

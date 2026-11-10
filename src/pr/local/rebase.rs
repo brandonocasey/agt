@@ -39,11 +39,7 @@ impl Local<'_> {
         if let Some(refused) = check(self.repo, target, target_tip, tip)? {
             blockers.push(format!("{target} cannot be updated: {}", refused.reason));
         }
-        let worktrees = self.repo.worktrees()?;
-        let holders: Vec<_> = worktrees
-            .iter()
-            .filter(|entry| entry.branch.as_deref() == Some(branch))
-            .collect();
+        let holders = self.holders(branch)?;
         let [holder] = holders.as_slice() else {
             blockers.push(if holders.is_empty() {
                 format!("{branch} is not checked out in any work tree, and a rebase needs one")
@@ -52,27 +48,18 @@ impl Local<'_> {
             });
             return Ok(Err(blockers));
         };
-        if !holder.path.exists() {
+        if !holder.exists() {
             blockers.push(format!(
                 "{branch} is checked out in {}, which no longer exists",
-                holder.path.display()
+                holder.display()
             ));
             return Ok(Err(blockers));
         }
-        let work = Repo::at(&holder.path);
+        let work = Repo::at(holder);
         if work.strict_uncommitted_count()? > 0 {
-            blockers.push(format!("{} has local changes", holder.path.display()));
+            blockers.push(format!("{} has local changes", holder.display()));
         }
-        let git_dir = work.git_dir()?;
-        for name in IN_PROGRESS
-            .iter()
-            .filter(|name| git_dir.join(name).exists())
-        {
-            blockers.push(format!(
-                "{} has a {name} in progress",
-                holder.path.display()
-            ));
-        }
+        blockers.extend(operations_in_progress(holder)?);
         let Some(base) = self.repo.merge_base(tip, target_tip)? else {
             blockers.push(format!("{branch} and {target} share no history"));
             return Ok(Err(blockers));
@@ -91,10 +78,49 @@ impl Local<'_> {
             ));
         }
         if blockers.is_empty() {
-            Ok(Ok(holder.path.clone()))
+            Ok(Ok(holder.clone()))
         } else {
             Ok(Err(blockers))
         }
+    }
+
+    /// The work trees that have `branch` checked out. A rebase detaches HEAD, so a work tree
+    /// whose rebase in progress is of `branch` counts as well.
+    fn holders(&self, branch: &str) -> Result<Vec<PathBuf>> {
+        let mut found = Vec::new();
+        for entry in self.repo.worktrees()? {
+            let rebasing = !entry.bare
+                && entry.path.exists()
+                && rebases(&Repo::at(&entry.path).git_dir()?, branch);
+            if rebasing || entry.branch.as_deref() == Some(branch) {
+                found.push(entry.path);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Fails when a fast-forward of the default branch to `branch` would leave work trees of
+    /// `branch` behind or trample an operation in one: `branch` is checked out in several, or
+    /// a work tree of it has a rebase, merge, cherry-pick, revert or bisect in progress.
+    pub(super) fn check_holders(&self, branch: &str) -> Result<()> {
+        let holders = self.holders(branch)?;
+        if holders.len() > 1 {
+            let paths: Vec<String> = holders
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            return fail(format!(
+                "{branch} is checked out in {} work trees ({}), and a merge would leave them in different states",
+                holders.len(),
+                paths.join(", ")
+            ));
+        }
+        for path in holders.iter().filter(|path| path.exists()) {
+            if let Some(blocker) = operations_in_progress(path)?.into_iter().next() {
+                return fail(blocker);
+            }
+        }
+        Ok(())
     }
 
     /// Rebases `branch` (at `tip`) onto `target` (at `target_tip`) and returns its new tip. When
@@ -151,6 +177,31 @@ impl Local<'_> {
     }
 }
 
+/// One line for each operation in progress in the work tree at `path`.
+fn operations_in_progress(path: &Path) -> Result<Vec<String>> {
+    let git_dir = Repo::at(path).git_dir()?;
+    Ok(IN_PROGRESS
+        .iter()
+        .filter(|name| git_dir.join(name).exists())
+        .map(|name| format!("{} has a {name} in progress", path.display()))
+        .collect())
+}
+
+/// What the rebase in `dir` of `git_dir` records under `name`.
+fn rebase_record(git_dir: &Path, dir: &str, name: &str) -> Option<String> {
+    std::fs::read_to_string(git_dir.join(dir).join(name))
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+/// Whether the rebase in progress in `git_dir` is of `branch`.
+fn rebases(git_dir: &Path, branch: &str) -> bool {
+    let head = format!("refs/heads/{branch}");
+    REBASE_DIRS
+        .iter()
+        .any(|dir| rebase_record(git_dir, dir, "head-name").is_some_and(|name| name == head))
+}
+
 /// The ignored paths no commit tracks in `work`; a whole ignored directory is one entry ending
 /// in a slash.
 fn ignored_paths(work: &Repo) -> Result<Vec<String>> {
@@ -180,8 +231,9 @@ fn in_the_way(path: &str, ignored: &[String]) -> bool {
 /// this call started, and not one a user began.
 fn started_here(git_dir: &Path, branch: &str, target_tip: &str, tip: &str) -> bool {
     REBASE_DIRS.iter().any(|dir| {
-        let read = |name: &str| std::fs::read_to_string(git_dir.join(dir).join(name));
-        let same = |name: &str, want: &str| read(name).is_ok_and(|text| text.trim() == want);
+        let same = |name: &str, want: &str| {
+            rebase_record(git_dir, dir, name).is_some_and(|text| text == want)
+        };
         same("head-name", &format!("refs/heads/{branch}"))
             && same("onto", target_tip)
             && same("orig-head", tip)

@@ -38,7 +38,12 @@ pub fn failing(gates: &dyn Gates, branch: &str, head: &str, target: &str) -> Res
             why.push("no review covers this head".to_owned());
         }
         if review.unreviewed > 0 {
-            why.push(format!("{} commits are unreviewed", review.unreviewed));
+            let (noun, verb) = if review.unreviewed == 1 {
+                ("commit", "is")
+            } else {
+                ("commits", "are")
+            };
+            why.push(format!("{} {noun} {verb} unreviewed", review.unreviewed));
         }
         if !review.blocking.is_empty() {
             why.push(format!("open findings {}", review.blocking.join(", ")));
@@ -49,4 +54,37 @@ pub fn failing(gates: &dyn Gates, branch: &str, head: &str, target: &str) -> Res
         failing.push("approval: none is recorded at this head".to_owned());
     }
     Ok(failing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixed(usize);
+
+    impl Gates for Fixed {
+        fn checked(&self, _head: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn review(&self, _branch: &str, _head: &str, _target: &str) -> Result<Review> {
+            Ok(Review {
+                reviewed: true,
+                unreviewed: self.0,
+                blocking: Vec::new(),
+                approved: true,
+            })
+        }
+    }
+
+    #[test]
+    fn the_review_gate_counts_one_commit_and_several() {
+        for (unreviewed, text) in [
+            (1, "review: 1 commit is unreviewed"),
+            (2, "review: 2 commits are unreviewed"),
+        ] {
+            let failing = failing(&Fixed(unreviewed), "feat", "head", "main").unwrap();
+            assert_eq!(failing, [text]);
+        }
+    }
 }

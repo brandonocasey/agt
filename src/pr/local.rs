@@ -114,7 +114,9 @@ impl<'a> Local<'a> {
         let target_tip = self.tip(&target)?;
         let mut head = tip.clone();
         let mut rebased = false;
-        if !self.repo.is_ancestor(&target_tip, &head)? {
+        if self.repo.is_ancestor(&target_tip, &head)? {
+            self.check_holders(branch)?;
+        } else {
             if !matches!(how, Some(How::Rebase)) {
                 return fail(format!(
                     "{branch} is behind {target}; rebase it first or merge with --method rebase"

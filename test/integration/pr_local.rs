@@ -363,7 +363,8 @@ fn an_ignored_file_at_a_path_the_branch_writes_stops_the_merge() {
     env.commit_all("ignore logs");
     let sha = add_branch(&env, "feat", "out.log", "tracked\n");
     env.write("out.log", "mine, ignored\n");
-    refused(&env, &merge_args(&sha, "feat", &[]));
+    let message = refused(&env, &merge_args(&sha, "feat", &[]));
+    assert!(message.contains("ignored"), "{message}");
     assert_eq!(
         fs::read_to_string(env.repo.join("out.log")).unwrap(),
         "mine, ignored\n"
@@ -507,8 +508,9 @@ fn a_rebase_never_aborts_one_the_user_started() {
     );
 
     let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(message.contains("rebase-merge in progress"), "{message}");
     assert!(
-        message.contains("not checked out in any work tree"),
+        !message.contains("not checked out in any work tree"),
         "{message}"
     );
     assert!(
@@ -564,6 +566,55 @@ fn a_rebase_stops_for_an_operation_in_progress_in_the_branchs_work_tree() {
     assert!(
         message.contains("CHERRY_PICK_HEAD in progress"),
         "{message}"
+    );
+}
+
+/// Leaves `feat` checked out in a linked work tree and `other` a branch of `main` that edits
+/// `a.txt` as `feat` does, so a rebase of `feat` onto `other` stops on a conflict.
+fn conflicting_pair(env: &Env) -> (String, PathBuf) {
+    let sha = add_branch(env, "feat", "a.txt", "feat\n");
+    add_branch(env, "other", "a.txt", "other\n");
+    (sha, add_worktree(env, "work", &["feat"]))
+}
+
+#[test]
+fn a_fast_forward_stops_for_a_branch_held_by_two_work_trees() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    add_worktree(&env, "first", &["feat"]);
+    add_worktree(&env, "second", &["--force", "feat"]);
+
+    let message = refused(&env, &merge_args(&sha, "feat", &[]));
+    assert!(message.contains("2 work trees"), "{message}");
+}
+
+#[test]
+fn a_fast_forward_stops_for_a_merge_in_progress_in_the_branchs_work_tree() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    add_branch(&env, "other", "c.txt", "c\n");
+    let work = add_worktree(&env, "work", &["feat"]);
+    git_ok(&env, &work, &["merge", "--no-commit", "--no-ff", "other"]);
+
+    let message = refused(&env, &merge_args(&sha, "feat", &[]));
+    assert!(message.contains("MERGE_HEAD in progress"), "{message}");
+}
+
+#[test]
+fn a_fast_forward_stops_for_a_rebase_the_user_started_and_leaves_it() {
+    let env = setup();
+    let (sha, work) = conflicting_pair(&env);
+    let own = git_in(&env, &work, &["rebase", "other"]);
+    assert!(
+        !own.status.success(),
+        "the rebase should stop on a conflict"
+    );
+
+    let message = refused(&env, &merge_args(&sha, "feat", &[]));
+    assert!(message.contains("rebase-merge in progress"), "{message}");
+    assert!(
+        git_ok(&env, &work, &["status"]).contains("rebase in progress"),
+        "the user's rebase is still there"
     );
 }
 
@@ -834,6 +885,52 @@ fn auto_merge_merges_at_once_when_all_four_gates_pass() {
     assert_eq!(stdout_json(&output)["state"], "merged");
     assert_eq!(tip(&env, "main"), sha);
     assert_eq!(intents(&env), serde_json::json!({}));
+}
+
+/// An auto-merge whose gates all pass lands through the same merge as `merge`: it fails when
+/// the branch is held by two work trees or a rebase of it is in progress, with nothing changed.
+#[test]
+fn an_auto_merge_stops_for_a_branch_held_by_two_work_trees() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    record_gates(&env, "feat", &[]);
+    add_worktree(&env, "first", &["feat"]);
+    add_worktree(&env, "second", &["--force", "feat"]);
+    let before = state(&env);
+
+    let output = waiting(&env, &merge_args(&sha, "feat", &["--auto"]));
+    assert!(!output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("2 work trees"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(state(&env), before);
+}
+
+#[test]
+fn an_auto_merge_stops_for_a_rebase_the_user_started_and_leaves_it() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "a.txt", "feat\n");
+    add_branch(&env, "other", "a.txt", "other\n");
+    record_gates(&env, "feat", &[]);
+    let work = add_worktree(&env, "work", &["feat"]);
+    let own = git_in(&env, &work, &["rebase", "other"]);
+    assert!(
+        !own.status.success(),
+        "the rebase should stop on a conflict"
+    );
+    let before = state(&env);
+
+    let output = waiting(&env, &merge_args(&sha, "feat", &["--auto"]));
+    assert!(!output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("rebase-merge in progress"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(state(&env), before);
+    assert!(git_ok(&env, &work, &["status"]).contains("rebase in progress"));
 }
 
 /// A branch whose `gate` is not recorded gives up with exit 3, names that gate alone and keeps
