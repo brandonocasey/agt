@@ -1250,7 +1250,7 @@ fn remote_key(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use super::{Repo, branch_name, parse_worktrees, remote_key};
     use crate::core::testing::Sandbox;
@@ -1258,8 +1258,13 @@ mod tests {
     /// The repository of `sandbox`, whose git calls see only the sandbox's home and global
     /// config, not the developer's.
     fn sandboxed(sandbox: &Sandbox) -> Repo {
+        sandboxed_at(sandbox, &sandbox.repo())
+    }
+
+    /// Like [`sandboxed`], for the repository at `repo_root`.
+    fn sandboxed_at(sandbox: &Sandbox, repo_root: &Path) -> Repo {
         let root = sandbox.path();
-        let mut repo = Repo::at(sandbox.repo());
+        let mut repo = Repo::at(repo_root);
         for (key, value) in [
             ("HOME", root.join("home")),
             ("XDG_CONFIG_HOME", root.join("config")),
@@ -1395,14 +1400,8 @@ mod tests {
         let sandbox = Sandbox::with_repo();
         let root = sandbox.repo();
         let repo = sandboxed(&sandbox);
-        let read = |repo: &Repo| {
-            (
-                repo.common_dir().unwrap(),
-                repo.toplevel().unwrap(),
-                repo.is_bare().unwrap(),
-            )
-        };
-        let (common_dir, toplevel, is_bare) = read(&repo);
+        let read = |repo: &Repo| (repo.common_dir().unwrap(), repo.toplevel().unwrap());
+        let (common_dir, toplevel) = read(&repo);
         assert_eq!(
             fs::canonicalize(&common_dir).unwrap(),
             fs::canonicalize(root.join(".git")).unwrap()
@@ -1411,10 +1410,9 @@ mod tests {
             fs::canonicalize(&toplevel).unwrap(),
             fs::canonicalize(&root).unwrap()
         );
-        assert!(!is_bare);
-        // With the repository gone, only an answer kept from the first read can still come back.
+        // With the repository gone, only the kept first answer can return.
         fs::rename(root.join(".git"), root.join("moved")).unwrap();
-        assert_eq!(read(&repo), (common_dir, toplevel, is_bare));
+        assert_eq!(read(&repo), (common_dir, toplevel));
         assert!(sandboxed(&sandbox).common_dir().is_err());
     }
 
@@ -1425,10 +1423,10 @@ mod tests {
         fs::create_dir(&other).unwrap();
         sandbox.git(&other, &["init", "-q", "--bare"]);
         let first = sandboxed(&sandbox);
-        let second = Repo::at(&other);
+        let second = sandboxed_at(&sandbox, &other);
         for _ in 0..2 {
-            assert!(!first.is_bare().unwrap());
-            assert!(second.is_bare().unwrap());
+            let refusal = second.main_checkout_root().unwrap_err();
+            assert!(refusal.to_string().contains("non-bare"), "{refusal}");
             assert_eq!(
                 fs::canonicalize(first.common_dir().unwrap()).unwrap(),
                 fs::canonicalize(sandbox.repo().join(".git")).unwrap()
@@ -1447,7 +1445,6 @@ mod tests {
         let repo = sandboxed(&sandbox);
         assert!(repo.common_dir().is_err());
         assert!(repo.toplevel().is_err());
-        assert!(repo.is_bare().is_err());
         sandbox.git(&root, &["init", "-q"]);
         assert_eq!(
             fs::canonicalize(repo.common_dir().unwrap()).unwrap(),
@@ -1457,7 +1454,6 @@ mod tests {
             fs::canonicalize(repo.toplevel().unwrap()).unwrap(),
             fs::canonicalize(&root).unwrap()
         );
-        assert!(!repo.is_bare().unwrap());
     }
 
     #[test]

@@ -590,8 +590,8 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
 mod tests {
     use super::*;
 
-    /// `Env::respond` and `fake-forge.sh` must name an argument list alike, or a canned answer
-    /// is never found.
+    /// `Env::respond` and `fake-forge.sh` MUST key an argument list alike, or no canned answer
+    /// is found.
     #[test]
     fn the_forge_key_is_what_git_hash_object_prints() {
         let env = Env::new();
@@ -602,10 +602,11 @@ mod tests {
             &[],
         ] {
             let text = format!("{}\n", args.join("\n"));
-            let expected = env.git_stdin(&["hash-object", "--stdin"], &text);
-            assert_eq!(blob_hash(&text), expected, "{args:?}");
-            let key = env.forge_file(args, "json");
-            assert_eq!(key, env.path("forge").join(format!("{expected}.json")));
+            let key = env.git_stdin(&["hash-object", "--stdin"], &text);
+            let body = format!("{args:?}");
+            env.respond(args, &body);
+            let stored = fs::read_to_string(env.path("forge").join(format!("{key}.json")));
+            assert_eq!(stored.ok(), Some(body), "{args:?}");
         }
     }
 }
