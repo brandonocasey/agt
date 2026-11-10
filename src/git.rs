@@ -207,7 +207,7 @@ impl Repo {
     }
 
     /// Makes this `Repo` remember answers about refs, HEAD and config; failed reads are not kept.
-    /// Callers MUST NOT move a ref, HEAD or the repository's config while this `Repo` lives.
+    /// While it lives, callers MUST NOT move a ref, HEAD or config through any handle.
     #[must_use]
     pub fn remembering_refs(mut self) -> Self {
         self.refs = Some(Mutex::new(HashMap::new()));
@@ -363,8 +363,8 @@ impl Repo {
         Ok(self.ask(args)?.0)
     }
 
-    /// Like [`Self::git_opt`], with whether the answer is settled. Git settles it with exit 0,
-    /// or exit 1 for a missing value.
+    /// Like [`Self::git_opt`], with whether the answer is settled. Only exit 0, or exit 1 for a
+    /// missing value, settles it.
     fn ask(&self, args: &[&str]) -> Result<(Option<String>, bool)> {
         let output = self.exec(args, None, &[])?;
         if !output.status.success() {
