@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 pub mod base;
 
@@ -82,6 +82,8 @@ pub struct Repo {
     toplevel: OnceLock<PathBuf>,
     common_dir: OnceLock<String>,
     is_bare: OnceLock<bool>,
+    // Answers about refs, HEAD and config, kept when [`Repo::remembering_refs`] asked for it.
+    refs: Option<Mutex<HashMap<String, Option<String>>>>,
     env: Vec<(OsString, OsString)>,
     _scratch: Option<tempfile::TempDir>,
 }
@@ -96,6 +98,7 @@ impl Repo {
             toplevel: OnceLock::new(),
             common_dir: OnceLock::new(),
             is_bare: OnceLock::new(),
+            refs: None,
             env: Vec::new(),
             _scratch: None,
         }
@@ -201,6 +204,16 @@ impl Repo {
             .git_opt(&["rev-parse", "--show-toplevel"])?
             .ok_or_else(|| Error("not inside a git work tree".into()))?;
         Ok(Self::at(top))
+    }
+
+    /// Asks git for each fact about HEAD, branches, their reflogs, the default branch and merge
+    /// bases once: the same question later gets the first answer, so one command that works it
+    /// out twice spawns git once. A failed read is not kept. The caller MUST NOT move a ref,
+    /// HEAD or the config of the repository, through any handle, while this `Repo` lives.
+    #[must_use]
+    pub fn remembering_refs(mut self) -> Self {
+        self.refs = Some(Mutex::new(HashMap::new()));
+        self
     }
 
     /// Sends object writes to a throwaway directory while existing objects stay readable, so a
@@ -349,11 +362,49 @@ impl Repo {
     }
 
     pub fn git_opt(&self, args: &[&str]) -> Result<Option<String>> {
+        Ok(self.ask(args)?.0)
+    }
+
+    /// [`Self::git_opt`] with whether the answer is settled: git succeeded, or exited 1, which
+    /// `symbolic-ref`, `rev-parse --verify`, `config` and `merge-base` do for what is not there.
+    /// Another failure may pass.
+    fn ask(&self, args: &[&str]) -> Result<(Option<String>, bool)> {
         let output = self.exec(args, None, &[])?;
         if !output.status.success() {
-            return Ok(None);
+            return Ok((None, output.status.code() == Some(1)));
         }
-        Ok(Some(text(output.stdout)?).filter(|value| !value.is_empty()))
+        let value = Some(text(output.stdout)?).filter(|value| !value.is_empty());
+        Ok((value, true))
+    }
+
+    /// [`Self::git_opt`] for a fact about refs, kept if this `Repo` remembers them.
+    fn ref_fact(&self, args: &[&str]) -> Result<Option<String>> {
+        self.remembered_ref_fact(args, || self.ask(args))
+    }
+
+    /// The answer `read` gives to `args`, from the first one when this `Repo` remembers refs
+    /// and `read` found it settled.
+    fn remembered_ref_fact(
+        &self,
+        args: &[&str],
+        read: impl FnOnce() -> Result<(Option<String>, bool)>,
+    ) -> Result<Option<String>> {
+        let Some(refs) = &self.refs else {
+            return Ok(read()?.0);
+        };
+        let key = args.join("\0");
+        let known = refs.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(value) = known.get(&key) {
+            return Ok(value.clone());
+        }
+        drop(known);
+        let (value, settled) = read()?;
+        if settled {
+            refs.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(key, value.clone());
+        }
+        Ok(value)
     }
 
     /// The exit code of `git <args>` (`None` when a signal ended it) and its stderr, for the
@@ -404,13 +455,13 @@ impl Repo {
     }
 
     pub fn head(&self) -> Result<String> {
-        self.git_opt(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?
+        self.ref_fact(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?
             .ok_or_else(|| Error("repository has no commits".into()))
     }
 
     /// The object `spec` names, `None` when it does not exist.
     fn verify(&self, spec: &str) -> Result<Option<String>> {
-        self.git_opt(&["rev-parse", "--verify", "--quiet", "--end-of-options", spec])
+        self.git_opt(&verify_args(spec))
     }
 
     pub fn commit(&self, rev: &str) -> Result<String> {
@@ -437,7 +488,7 @@ impl Repo {
     pub fn current_branch(&self) -> Result<Option<String>> {
         // Not `--short`: it prints `heads/<name>` when a tag or remote ref has the same name.
         Ok(self
-            .git_opt(&["symbolic-ref", "--quiet", "HEAD"])?
+            .ref_fact(&["symbolic-ref", "--quiet", "HEAD"])?
             .map(|full| local_branch_name(&full).to_owned()))
     }
 
@@ -446,7 +497,7 @@ impl Repo {
     /// branches live in the common dir, so linked worktrees agree. `None` without a reflog.
     pub fn branch_birth(&self, branch: &str) -> Result<Option<String>> {
         let reference = format!("refs/heads/{branch}");
-        let Some(log) = self.git_opt(&[
+        let Some(log) = self.ref_fact(&[
             "reflog",
             "show",
             "--date=unix",
@@ -469,7 +520,7 @@ impl Repo {
 
     /// The commit `reference` (a full ref name) leads to, or `None` when it does not exist.
     pub fn ref_commit(&self, reference: &str) -> Result<Option<String>> {
-        self.verify(&format!("{reference}^{{commit}}"))
+        self.ref_fact(&verify_args(&format!("{reference}^{{commit}}")))
     }
 
     /// The commit local branch `name` is at, or `None` when there is no such branch.
@@ -498,7 +549,7 @@ impl Repo {
             return Ok(Some(name.to_owned()));
         }
         if let Some(remote) =
-            self.git_opt(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?
+            self.ref_fact(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?
         {
             return Ok(Some(remote));
         }
@@ -509,7 +560,7 @@ impl Repo {
     /// `main`, `master`, then `init.defaultBranch`.
     pub fn default_branch_names(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
-        if let Some(remote) = self.git_opt(&[
+        if let Some(remote) = self.ref_fact(&[
             "symbolic-ref",
             "--quiet",
             "--short",
@@ -518,7 +569,7 @@ impl Repo {
             names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
         }
         names.extend(["main".to_owned(), "master".to_owned()]);
-        names.extend(self.git_opt(&["config", "init.defaultBranch"])?);
+        names.extend(self.ref_fact(&["config", "init.defaultBranch"])?);
         let mut seen = std::collections::HashSet::new();
         names.retain(|name| seen.insert(name.clone()));
         Ok(names)
@@ -541,11 +592,14 @@ impl Repo {
     }
 
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
-        self.git_opt(&["merge-base", "--end-of-options", a, b])
+        self.ref_fact(&["merge-base", "--end-of-options", a, b])
     }
 
     pub fn root_commit(&self, head: &str) -> Result<String> {
-        let roots = self.git(&["rev-list", "--max-parents=0", "--end-of-options", head])?;
+        let args = ["rev-list", "--max-parents=0", "--end-of-options", head];
+        let roots = self
+            .remembered_ref_fact(&args, || self.git(&args).map(|roots| (Some(roots), true)))?
+            .unwrap_or_default();
         let mut roots: Vec<&str> = roots.lines().collect();
         roots.sort_unstable();
         roots
@@ -1090,6 +1144,10 @@ fn remembered<T: Clone>(cell: &OnceLock<T>, read: impl FnOnce() -> Result<T>) ->
     Ok(cell.get_or_init(|| value).clone())
 }
 
+fn verify_args(spec: &str) -> [&str; 5] {
+    ["rev-parse", "--verify", "--quiet", "--end-of-options", spec]
+}
+
 /// The revision range `from..to`, or all of `to` when `from` is `None`.
 fn range(from: Option<&str>, to: &str) -> String {
     match from {
@@ -1295,6 +1353,20 @@ mod tests {
         assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
         sandbox.git(&root, &["checkout", "-q", "--detach"]);
         assert_eq!(repo.current_branch().unwrap(), None);
+    }
+
+    #[test]
+    fn a_remembering_repo_does_not_keep_a_read_that_failed() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        let repo = sandboxed(&sandbox).remembering_refs();
+        // Outside a repository git exits 128, which says nothing about the branch.
+        assert_eq!(repo.current_branch().unwrap(), None);
+        assert!(repo.head().is_err());
+        sandbox.git(&root, &["init", "-q", "-b", "topic"]);
+        sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        assert_eq!(repo.current_branch().unwrap().as_deref(), Some("topic"));
+        assert!(repo.head().is_ok());
     }
 
     #[test]

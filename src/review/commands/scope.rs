@@ -62,7 +62,9 @@ impl Ctx {
         scratch_git: bool,
         preview: bool,
     ) -> Result<Self> {
-        let mut repo = Repo::discover()?;
+        // No review command moves a ref, HEAD or git config of the repository: it writes the
+        // store and git objects only.
+        let mut repo = Repo::discover()?.remembering_refs();
         if scratch_git {
             repo = repo.read_only()?;
         }
