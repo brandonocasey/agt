@@ -1,16 +1,14 @@
-//! The gates of a local auto-merge that other domains judge. `pr` may not import them, so the
+//! The gates of a local auto-merge that other domains judge. `pr` MUST NOT import them, so the
 //! command line hands in the way to ask.
 
 use crate::core::error::Result;
 
 /// What the review and check domains tell the gates.
 pub trait Gates {
-    /// Whether an `agt check run` pass is recorded for the tree of `head`, with its log still
-    /// present.
+    /// Whether `head`'s tree has a recorded `agt check run` pass with its log.
     fn checked(&self, head: &str) -> Result<bool>;
 
-    /// The review of local branch `branch` at `head` against the local `target`, wherever the
-    /// command runs.
+    /// The review of local `branch` at `head` against `target`, wherever the command runs.
     fn review(&self, branch: &str, head: &str, target: &str) -> Result<Review>;
 }
 

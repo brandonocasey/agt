@@ -620,8 +620,8 @@ pub(super) fn status(ctx: &Ctx, head_arg: Option<&str>) -> Result<Value> {
     status_of(ctx, &scope, head_arg.is_some())
 }
 
-/// Whether the work tree belongs to the target: only when its branch is checked out, and the
-/// head is the checked-out one.
+/// Whether the work tree belongs to the target. That needs its branch checked out and no head
+/// given.
 fn work_tree_is_target(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<bool> {
     Ok(!head_given
         && scope.kind == TargetKind::Branch
@@ -630,8 +630,8 @@ fn work_tree_is_target(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<boo
 }
 
 /// The `worktree` block of `status` and the passes covering the work tree. `state` is the
-/// head's tree and whether a merge came after the last review; `coverage` the targets and the
-/// passes covering the head.
+/// head's tree and whether a merge came after the last review. `coverage` is the targets and
+/// the passes covering the head.
 fn worktree_view<'a>(
     ctx: &Ctx,
     scope: &Scope,
@@ -658,8 +658,8 @@ fn worktree_view<'a>(
     Ok((view, worktree_covered))
 }
 
-/// The threads of the target, plus those of every other target with a pass in `covering`: a
-/// covering pass of another target counts for the head, so its open threads show too.
+/// The target's threads, plus those of other targets with a pass in `covering`. A covering
+/// pass counts for the head, so that target's open threads show too.
 fn threads_view(
     ctx: &Ctx,
     scope: &Scope,
@@ -690,8 +690,8 @@ fn threads_view(
     threads
 }
 
-/// The imported records of `target` at `head`, leaving out those of its own runs and of runs
-/// covering the head, which already count through their passes.
+/// The imported records of `target` at `head`. It leaves out records of its own runs and of
+/// runs covering the head. Those already count through their passes.
 fn records_at_head<'a>(
     target: Option<&'a Target>,
     head: &str,
@@ -710,8 +710,7 @@ fn records_at_head<'a>(
         .collect()
 }
 
-/// `status` of `scope`; `head_given` says its head is not the checked-out one, so the work tree
-/// is left out.
+/// `status` of `scope`. `head_given` means a head was passed, so the work tree is left out.
 pub(super) fn status_of(ctx: &Ctx, scope: &Scope, head_given: bool) -> Result<Value> {
     if !scope.head_known {
         return Ok(status_without_head(ctx, scope));

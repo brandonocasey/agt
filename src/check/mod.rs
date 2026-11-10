@@ -76,8 +76,8 @@ impl Entry {
     }
 }
 
-/// Whether a pass of any check is recorded for the tree of `head`, with its log still present,
-/// wherever it ran in this repository.
+/// Whether any check pass is recorded for the tree of `head`, with its log. It counts a pass
+/// run anywhere in this repository.
 pub fn passed_at(head: &str) -> Result<bool> {
     let repo = Repo::discover()?;
     let tree = repo.tree_of(head)?;

@@ -1,9 +1,9 @@
 //! `agt pr`: one GitHub/GitLab/Forgejo-neutral command for the PR/MR of the current repository:
 //! view, list, create, update, merge behind a head-sha guard, pause or restore auto-merge, and
 //! upload images for a body. The forge comes from the tracker of the origin remote, or the one
-//! `--remote` or a PR/MR URL names; writes are refused where `push` is `off`. With `--local`
-//! the PR is a local branch and its merge moves the local default branch (`local.rs`). Output
-//! is JSON.
+//! `--remote` or a PR/MR URL names; writes are refused where `push` is `off`. With `--local`,
+//! the PR is a local branch. Its merge moves the local default branch (`local.rs`). Output is
+//! JSON.
 
 mod forgejo;
 mod gates;
@@ -35,17 +35,18 @@ use crate::store::model::{Forge, ReviewState};
 pub use self::gates::{Gates, Review};
 
 /// View, list, create, update and merge the PRs/MRs of this repository, on GitHub, GitLab or
-/// Forgejo; with `--local`, merge local branches into the local default branch.
+/// Forgejo. With `--local`, merge local branches into the local default branch.
 #[derive(Args)]
 pub struct Cli {
     /// Tracker to use: a git remote name or `host/repo` [default: the repository of a PR/MR
     /// URL, else the tracker of `origin`].
     #[arg(long, global = true)]
     remote: Option<String>,
-    /// A local branch is the PR, addressed by its name and merged into the local default branch;
-    /// no tracker, network or push is involved. Never chosen automatically. `view` and `list`
-    /// read local refs, `merge` takes `--method rebase` or none (fast-forward only) and never
-    /// deletes a branch or work tree; `create`, `update` and `upload` have nothing to store.
+    /// A local branch is the PR, addressed by its name. It merges into the local default
+    /// branch. No tracker, network or push is involved. Never chosen automatically. `view` and
+    /// `list` read local refs. `merge` takes `--method rebase` or none (fast-forward only). It
+    /// never deletes a branch or work tree. `create`, `update` and `upload` have nothing to
+    /// store.
     #[arg(long, global = true, conflicts_with = "remote")]
     local: bool,
     #[command(subcommand)]
@@ -153,11 +154,11 @@ enum Command {
     /// Without --auto, a GitHub PR whose base requires a merge queue is added to the queue
     /// through auto-merge, so it needs --method too. GitLab cannot rebase on merge.
     ///
-    /// With --local, <NUMBER> is the branch name. Without --auto it merges at once; with --auto
-    /// it records an intent and polls every 5 seconds for up to 270 seconds until the gates pass
-    /// at the head: an `agt check run` pass for the tree, a review with no unreviewed commit and
-    /// no open blocking finding, an approval at exactly the head, and a branch that lands. A
-    /// gate that still fails exits 3, naming it, and keeps the intent.
+    /// With --local, <NUMBER> is the branch name. Without --auto it merges at once. With --auto
+    /// it records an intent and polls every 5 seconds, up to 270 seconds, until the gates pass
+    /// at the head. The gates: an `agt check run` pass for the tree; a review with no
+    /// unreviewed commit and no open blocking finding; an approval at exactly the head; a
+    /// branch that lands. A gate that still fails exits 3, naming it. The intent is kept.
     ///
     /// When this call merges the PR/MR, each local issue that its title or body names after a
     /// closing keyword (`Fixes local-ab12cd`; one keyword per key) is closed and listed as
@@ -175,9 +176,9 @@ enum Command {
     /// Pause or restore auto-merge. `off` records the method it disables; `on` re-enables it
     /// with the same method (state: `agents/pr/auto-merge.json`). A queued PR/MR is refused.
     ///
-    /// With --local, `off` clears the intent of the branch and stops the call waiting on it
-    /// (state: `agents/pr/local-auto-merge.json`); `on` waits on the gates as `merge --auto`
-    /// does and exits 3 when one still fails.
+    /// With --local, `off` clears the branch's intent and stops its waiting call (state:
+    /// `agents/pr/local-auto-merge.json`). `on` waits on the gates as `merge --auto` does. It
+    /// exits 3 when one still fails.
     AutoMerge {
         #[arg(value_enum)]
         switch: Switch,
@@ -217,7 +218,7 @@ impl Changes {
     }
 }
 
-/// What a provider keeps from reading a PR/MR to merge it later; the shared flow never looks
+/// What a provider keeps from reading a PR/MR for a later merge. The shared flow never looks
 /// inside.
 pub enum Native {
     Github {
@@ -302,8 +303,7 @@ impl Pr {
     }
 }
 
-/// The local provider for `--local`, else the provider of the forge that the selected tracker
-/// names.
+/// The local provider for `--local`, else the provider for the selected tracker's forge.
 fn provider<'a>(repo: &'a Repo, cli: &Cli, gates: &'a dyn Gates) -> Result<Box<dyn Provider + 'a>> {
     if cli.local {
         return Ok(Box::new(Local::new(repo, gates)?));
@@ -601,8 +601,8 @@ fn restore(
     Ok((true, outcome))
 }
 
-/// Prints `shown`. When a provider gave up waiting on gates, it also fails with their names and
-/// the exit status of a timed-out wait; the auto-merge it left is kept.
+/// Prints `shown`. On a timed-out wait for gates, this fails with the gate names and the
+/// timeout status. The auto-merge the provider left is kept.
 fn settle(outcome: Outcome, shown: Value) -> Result<Output> {
     let Outcome::Pending(gates) = outcome else {
         return Ok(Output::Json(shown));

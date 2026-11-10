@@ -1,6 +1,6 @@
-//! The auto-merge of local branches: the intents that are waiting, and the methods `auto-merge
-//! off` paused, in `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`. Each is keyed by the git
-//! common directory and the branch. `auto-merge.json` stays the forges' alone.
+//! Local auto-merge state in `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`. It holds the
+//! waiting intents and the methods `auto-merge off` paused. Each is keyed by the git common
+//! directory and the branch. `auto-merge.json` stays the forges' alone.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -41,9 +41,8 @@ fn document() -> Result<PathBuf> {
     Ok(folder()?.join("local-auto-merge.json"))
 }
 
-/// Holds the lock of `key` until dropped. Whoever re-reads the intent, merges or removes the
-/// intent MUST hold it, so two of them never act on the same branch at once; it comes before
-/// the document's own lock.
+/// Holds the lock of `key` until dropped. Code that reads, merges or removes the intent MUST
+/// hold it. Take it before the document's own lock.
 pub fn lock(key: &str) -> Result<File> {
     let name = format!("local-{}.flock", &sha256_hex(key.as_bytes())[..32]);
     lock_file(&folder()?.join(name))

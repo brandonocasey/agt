@@ -14,9 +14,8 @@ pub struct BranchReview {
     pub approved: bool,
 }
 
-/// The review of local `branch` at `head` against local `target`, as `status` would report it
-/// there. It reads the stored review only: no checkout of the current directory counts and
-/// nothing is synced.
+/// The review of local `branch` at `head` against `target`, as `status` reports it. It reads
+/// the stored review only. Nothing is synced, and the current checkout does not count.
 pub fn branch_review(branch: &str, head: &str, target: &str) -> Result<BranchReview> {
     let ctx = Ctx::new(
         Selection {
