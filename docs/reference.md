@@ -1283,8 +1283,8 @@ and the Forgejo API description. No test ran a real `tea` or Forgejo host; the t
 `agt pr` is one GitHub/GitLab/Forgejo-neutral command for the PR/MR of the current repository; the forge
 comes from the tracker of the `origin` remote (or the tracker `--remote <name|host/repo>`, or a PR/MR URL, names; see
 [Issues](#issues)), and `gh`, `glab` or `tea` (`AGT_GH_BIN`, `AGT_GLAB_BIN`, `AGT_TEA_BIN`) must be installed and logged in. `create`, `update`,
-`merge`, `auto-merge` and `upload` are refused when `push` was set to `off` for the tracker. `--local` (global, never
-automatic, conflicts with `--remote`) works on local branches instead, with no forge; see [Local PRs](#local-prs). Output is JSON.
+`merge`, `auto-merge` and `upload` are refused when `push` was set to `off` for the tracker. `--local` works on local branches with no forge. It is global, never
+automatic, and cannot combine with `--remote`; see [Local PRs](#local-prs). Output is JSON.
 
 ```sh
 agt pr [--remote R | --local] view [<n>|<url>] [--branch B]
@@ -1326,39 +1326,50 @@ before any call.
 
 ### Local PRs
 
-`agt pr --local` treats a local branch as a PR against the local default branch (the first of the branch `origin/HEAD` names, `main`,
-`master` and `init.defaultBranch` that exists as a local branch), from local refs only: nothing is fetched, pushed or sent to a forge, so it
-skips tracker selection, the `--offline` refusal and the `push` write gate. `--local` is never chosen for you, and it cannot be
-combined with `--remote`. A PR is addressed by its branch name (`view` and `list` also take the current branch and `--branch`); the
-`number` and `url` fields are `null`, `state` is `open` until the branch is an ancestor of the default branch, then `merged`.
+`agt pr --local` treats a local branch as a PR against the local default branch. That is the first local branch among these, in order: the branch `origin/HEAD` names, `main`, `master`, `init.defaultBranch`. It reads local refs. No remote is contacted, and nothing is pushed or sent to a forge. It skips tracker selection, the `--offline` refusal and the `push` write gate.
 
-- `view`, `list`, `merge` and `auto-merge` work. `create`, `update` and `upload` fail with a message, because nothing stores a
-  title, body, label or image for a branch.
-- `merge <branch> --sha HEAD` moves the default branch to the branch tip and creates no commit. Without `--method` it is a
-  fast-forward only; `--method rebase` rebases the branch onto the default branch first and then fast-forwards; `--method merge` and
-  `--method squash` fail. The default branch moves in the work tree that has it checked out through `git merge --ff-only` (local
-  changes are kept and never overwritten, ignored files included), or by a ref update when no work tree has it. It is refused,
-  with the reason and the command to retry, when the default branch is checked out in more than one work tree, when the work tree
-  is missing (`git worktree prune`), when git is bisecting or rebasing it elsewhere, when the repository is bare, or when a
-  submodule pointer moves. The branch must not be checked out in more than one work tree, and no rebase, merge,
-  cherry-pick, revert or bisect may be under way in its work tree (a rebase the user started is never touched). `rebase` needs the
-  branch to be checked out in exactly one clean work tree, no ignored file the rebase would overwrite and no submodule change; it runs
-  `git rebase` with hooks and user configuration as they are, and a conflict is final: the rebase is aborted and the branch stays
-  as it was. Closing keywords (`Fixes local-ab12cd`) are read from every commit message of the branch.
-- `merge --auto` and `auto-merge on` record an intent (branch, head sha, method, waiter id) in
-  `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`, keyed by the git common directory and the branch, and poll every 5 seconds, for up
-  to 270 seconds, until all gates pass at that head; then the branch lands. A gate that still fails after the wait exits 3 with the
-  JSON of the PR on stdout and each failing gate on stderr, and the intent stays so that a rerun, or `auto-merge on`, waits again.
-  The gates are:
+`--local` is never chosen for you, and it cannot be combined with `--remote`. A PR is addressed by its branch name. `view` takes the current branch when none is given. `list` shows every local branch unless `--branch` limits it to one. `list --mine` keeps the branches whose tip author is `git config user.name`. It fails when that name is unset.
+
+The `number` and `url` fields are `null`. `state` is `open` until the branch is an ancestor of the default branch. Then it is `merged`.
+
+- `view`, `list`, `merge` and `auto-merge` work. `create`, `update` and `upload` fail with a message. A branch stores no title, body, label or image.
+- `merge <branch> --sha HEAD` moves the default branch to the branch tip. It creates no commit. Without `--method` it is a fast-forward only.
+
+  `--method rebase` rebases the branch onto the default branch first and then fast-forwards. `--method merge` and `--method squash` fail.
+
+  If a work tree has the default branch checked out, `git merge --ff-only` moves it there. Local changes are kept and never overwritten, ignored files included. When no work tree has it, a ref update moves it. The move is refused, with the reason and the command to retry, when:
+
+  - the default branch is checked out in more than one work tree;
+  - its work tree is missing (`git worktree prune`);
+  - git is bisecting or rebasing it elsewhere;
+  - the repository is bare;
+  - a submodule pointer moves.
+
+  The branch must not be checked out in more than one work tree. No rebase, merge, cherry-pick, revert or bisect may be under way in its work tree. A rebase the user started is never touched.
+
+  `rebase` needs all of these: the branch checked out in exactly one clean work tree; no ignored file the rebase would overwrite; no submodule change. It runs `git rebase` with hooks as they are. Autostash and `rebase.updateRefs` are off whatever the configuration says. A conflict is final: the rebase is aborted and the branch stays as it was.
+
+  With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes. Otherwise the merge is refused before the rebase starts.
+
+  With `rebase`, a commit made on the branch during the merge stops it before landing.
+
+  Closing keywords (`Fixes local-ab12cd`) are read from every commit message of the branch.
+- `merge --auto` and `auto-merge on` record an intent in `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`. The intent holds the branch, head sha, method and waiter id. It is keyed by the git common directory and the branch.
+
+  Both poll every 5 seconds, up to 270 seconds, until all gates pass at the head. Then the branch lands. The gates are:
   1. checks: an `agt check run` pass is recorded for the head's tree and its log is still there;
   2. review: the branch has a review at the head, no commit since the base is unreviewed, and no blocking finding is open;
   3. approval: an approval is recorded at exactly the head (`agt review publish --approve`; with no tracker for pull requests, the
      approval is recorded and the publish then fails saying so, which is enough for this gate);
   4. lands: the branch is ahead of the default branch (or, with `--method rebase`, the rebase preconditions hold).
-  A newer call for the same branch replaces the older one, which stops with an error; `auto-merge off` clears the intent and stops
-  the waiter; a branch that moves away from the recorded sha clears it. A failure after the gates passed (a rebase conflict, a
-  refused update) is final and exits 1. A lock per key (the `.flock` file next to the document) keeps two calls from merging at once.
-  Plain `merge` clears the intent of the branch. The wait goes through the same clock as `agt wait`, so `AGT_NOW` makes it instant.
+
+  A gate that still fails after the wait exits 3. The JSON of the PR goes to stdout and each failing gate to stderr. The intent stays, so a rerun, or `auto-merge on`, waits again. After the gates passed, a failure is final and exits 1. Examples are a rebase conflict and a refused update.
+
+  A newer call for the same branch replaces the older one. The older one stops with an error. `auto-merge off` clears the intent and stops the waiter. A waiter whose branch a plain `merge` landed reports the merge and exits 0.
+
+  Moving the branch off the recorded sha clears the intent. So does plain `merge`.
+
+  A lock per key keeps two calls from merging at once. It is the `.flock` file next to the document. The wait goes through the same clock as `agt wait`, so `AGT_NOW` makes it instant.
 
 Failures print `agt: error: ...` and exit 1.
 
