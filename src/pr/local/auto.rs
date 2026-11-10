@@ -1,6 +1,7 @@
-//! The auto-merge of a local branch: `merge --auto` records an intent and waits on the gates,
-//! merging when they pass at the head the intent names. The gates are judged at that head also
-//! for `rebase`, as a forge's rebase merge and the `land` skill's clean-rebase rule do.
+//! The auto-merge of a local branch. `merge --auto` records an intent and waits on the gates.
+//! It merges when they pass at the head the intent names. The gates are judged at that head for
+//! `rebase` too.
+//! A forge's rebase merge does the same.
 
 use std::time::{Duration, Instant};
 
@@ -25,8 +26,9 @@ enum Attempt {
 }
 
 impl Local<'_> {
-    /// Records the intent to merge `pr` at `sha` and waits until the gates pass, then merges. A
-    /// newer call replaces this one, and `auto-merge off` stops it; both leave it with an error.
+    /// Records the intent to merge `pr` at `sha`, waits until the gates pass, then merges.
+    /// A newer call replaces this one, and `auto-merge off` stops it.
+    /// Both fail it, unless a plain merge landed the branch first.
     pub(super) fn auto_merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         let method = method_of(how)?;
         let key = self.key(&pr.at());
@@ -65,7 +67,7 @@ impl Local<'_> {
         }
     }
 
-    /// Looks at the intent of `branch` once and merges when it holds and the gates pass.
+    /// Looks at the intent of `branch` once. It merges when the intent holds and the gates pass.
     /// The caller MUST hold the lock of `key`.
     fn attempt(&self, key: &str, branch: &str, waiter: &str) -> Result<Attempt> {
         let intent = match intent::get(key)? {
@@ -91,15 +93,15 @@ impl Local<'_> {
         if !failing.is_empty() {
             return Ok(Attempt::Waiting(failing));
         }
-        // A merge that fails after the gates passed is final, as is a rebase that conflicts.
+        // A merge that fails after the gates passed is final. So is a rebase that conflicts.
         let landed = self.land(branch, &tip, how);
         intent::finish(key)?;
         landed?;
         Ok(Attempt::Merged)
     }
 
-    /// What a waiter finds when its intent is gone: the merge, when a plain merge landed
-    /// `branch` meanwhile, else the error that `auto-merge off` ended it.
+    /// A waiter whose intent is gone reports the merge when a plain merge landed `branch`.
+    /// Otherwise `auto-merge off` ended it, and that is an error.
     fn gone(&self, branch: &str) -> Result<Attempt> {
         let target_tip = self.tip(&self.target()?)?;
         if self.repo.is_ancestor(&self.tip(branch)?, &target_tip)? {
@@ -108,8 +110,8 @@ impl Local<'_> {
         fail(format!("the auto-merge of {branch} was turned off"))
     }
 
-    /// The gates that fail for `branch` at `tip`: checks, review, approval, and that the branch
-    /// lands.
+    /// The gates that fail for `branch` at `tip`.
+    /// The gates are checks, review, approval and that the branch lands.
     fn failing_gates(
         &self,
         branch: &str,
@@ -134,8 +136,8 @@ impl Local<'_> {
         Ok(failing)
     }
 
-    /// `pr` with the auto-merge its intent asks for. An intent that no longer fits (the branch
-    /// moved, or is no longer open) is dropped.
+    /// `pr` with the auto-merge its intent asks for. An intent that does not fit is dropped.
+    /// It does not fit when the branch moved or is not open.
     pub(super) fn with_intent(&self, mut pr: Pr) -> Result<Pr> {
         let key = self.key(&pr.at());
         let Some(intent) = intent::get(&key)? else {

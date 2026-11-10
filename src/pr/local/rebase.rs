@@ -1,6 +1,6 @@
-//! Rebasing a local branch onto the local default branch before it is fast-forwarded. It runs
-//! only where nothing a rebase could damage is in the way, and a rebase that stops on conflicts
-//! is aborted, so the branch is as it was.
+//! Rebases a local branch onto the local default branch before it is fast-forwarded.
+//! It runs only where nothing a rebase could damage is in the way.
+//! A rebase that stops on conflicts is aborted, so the branch is as it was.
 
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -14,8 +14,9 @@ use crate::git::{Repo, Worktree, nul_fields, unfinished_markers};
 const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
 
 impl Local<'_> {
-    /// The work tree where `branch` can be rebased onto `target` (at `target_tip`; `tip` is the
-    /// branch), or what stops it. The fast-forward that follows is checked first.
+    /// The work tree where `branch` can be rebased onto `target`, or what stops it.
+    /// `tip` and `target_tip` are the commits of `branch` and `target`.
+    /// It also checks the target's work tree and the fast-forward that follows.
     pub(super) fn rebase_place(
         &self,
         branch: &str,
@@ -80,9 +81,9 @@ impl Local<'_> {
         }
     }
 
-    /// One line for each work tree that is rebasing or bisecting `target`, also one whose
-    /// directory is gone. Git will not move a branch such a work tree has in use, so the rebase
-    /// of the branch that lands on `target` MUST NOT start while one exists.
+    /// One line for each work tree rebasing or bisecting `target`, also a deleted one.
+    /// Git will not move a branch that such a work tree uses. The rebase MUST NOT start while one
+    /// exists.
     fn target_in_use(&self, target: &str) -> Result<Vec<String>> {
         let mut found = Vec::new();
         for entry in self.repo.worktrees()? {
@@ -109,9 +110,9 @@ impl Local<'_> {
         Ok(found)
     }
 
-    /// The git directory of the work tree `entry`: its own, or, when its directory is gone, the
-    /// entry git still keeps for it under `worktrees` in the common git directory. `None` for a
-    /// bare repository, or when that entry is not there either.
+    /// The git directory of the work tree `entry`.
+    /// A deleted work tree has an entry under `worktrees` in the common git directory.
+    /// `None` for a bare repository or a missing entry.
     fn git_dir_of(&self, entry: &Worktree) -> Result<Option<PathBuf>> {
         if entry.bare {
             return Ok(None);
@@ -132,8 +133,8 @@ impl Local<'_> {
             .find(|dir| gitdir_of(dir).is_some_and(|recorded| recorded == wanted)))
     }
 
-    /// The work trees that have `branch` checked out. A rebase detaches HEAD, so a work tree
-    /// whose rebase in progress is of `branch` counts as well.
+    /// The work trees that have `branch` checked out.
+    /// A rebase detaches HEAD, so one rebasing `branch` counts too.
     fn holders(&self, branch: &str) -> Result<Vec<PathBuf>> {
         let mut found = Vec::new();
         for entry in self.repo.worktrees()? {
@@ -147,9 +148,9 @@ impl Local<'_> {
         Ok(found)
     }
 
-    /// Fails when a fast-forward of the default branch to `branch` would leave work trees of
-    /// `branch` behind or trample an operation in one: `branch` is checked out in several, or
-    /// a work tree of it has a rebase, merge, cherry-pick, revert or bisect in progress.
+    /// Fails when `branch` is checked out in several work trees. A fast-forward would leave the
+    /// others behind.
+    /// It also fails when one has a rebase, merge, cherry-pick, revert or bisect in progress.
     pub(super) fn check_holders(&self, branch: &str) -> Result<()> {
         let holders = self.holders(branch)?;
         if holders.len() > 1 {
@@ -227,9 +228,10 @@ impl Local<'_> {
         Ok(names(&listed))
     }
 
-    /// One line for each reason the work tree that has `target` checked out would refuse the
-    /// fast-forward after the rebase: an operation in progress, or a local change, an untracked
-    /// or an ignored file at one of the `changed` paths. None when no work tree has it.
+    /// One line for each reason the target's work tree would refuse the fast-forward.
+    /// It looks for an operation in progress. A local change, untracked file or ignored file at a
+    /// `changed` path counts too.
+    /// Empty when no work tree has `target`.
     fn target_checkout(&self, target: &str, changed: &[String]) -> Result<Vec<String>> {
         let holder = self
             .repo
@@ -310,8 +312,8 @@ fn bisects(git_dir: &Path, branch: &str) -> bool {
     std::fs::read_to_string(git_dir.join("BISECT_START")).is_ok_and(|start| start.trim() == branch)
 }
 
-/// The ignored paths no commit tracks in `work`; a whole ignored directory is one entry ending
-/// in a slash.
+/// The ignored paths no commit tracks in `work`. A whole ignored directory is one entry ending in a
+/// slash.
 fn ignored_paths(work: &Repo) -> Result<Vec<String>> {
     let listed = work.git(&[
         "ls-files",
@@ -340,8 +342,8 @@ fn in_the_way(path: &str, ignored: &[String]) -> bool {
     })
 }
 
-/// Whether the rebase in `git_dir` is the one of `branch` onto `target_tip` from `tip`, which
-/// this call started, and not one a user began.
+/// Whether the rebase in `git_dir` is of `branch` onto `target_tip` from `tip`.
+/// That is the one this call started, not one a user began.
 fn started_here(git_dir: &Path, branch: &str, target_tip: &str, tip: &str) -> bool {
     REBASE_DIRS.iter().any(|dir| {
         let same = |name: &str, want: &str| {

@@ -1,6 +1,6 @@
-//! `agt pr --local`: a local branch is the PR, and merging it moves the local default branch. Every
-//! test runs in its own temporary repository with a temporary HOME and state; no forge tool is
-//! called and nothing reaches a network.
+//! `agt pr --local`: a local branch is the PR. Merging it moves the local default branch.
+//! Every test runs in its own temporary repository, HOME and state.
+//! No forge tool is called and nothing reaches a network.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -67,9 +67,9 @@ fn git_ok(env: &Env, dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// Creates local branch `name` from `main`'s tip with one commit that writes `file`, and leaves
-/// the checkout where it was. The name goes in through `update-ref`, so it may be one that
-/// `git branch` would refuse.
+/// Creates local branch `name` from `main`'s tip with one commit that writes `file`.
+/// The checkout stays where it was. The name goes in through `update-ref`, so `git branch` may
+/// refuse it.
 fn add_branch(env: &Env, name: &str, file: &str, content: &str) -> String {
     let sha = commit_on(env, "main", file, content);
     point(env, name, &sha);
@@ -84,8 +84,8 @@ fn point(env: &Env, branch: &str, sha: &str) {
     );
 }
 
-/// A commit on top of `parent` whose tree is `parent`'s with `entry` (`mode,object,path`) added,
-/// made without moving any branch or checkout.
+/// A commit on top of `parent` with `entry` (`mode,object,path`) added to its tree.
+/// It moves no branch or checkout.
 fn commit_entry(env: &Env, parent: &str, entry: &str, message: &str) -> String {
     let index = env.path("index");
     let _ = fs::remove_file(&index);
@@ -176,7 +176,7 @@ fn state(env: &Env) -> String {
     text
 }
 
-/// Runs a merge that must fail and checks that no ref, head or work tree changed.
+/// Runs a merge that must fail. Checks that no ref, head or work tree changed.
 fn refused(env: &Env, args: &[&str]) -> String {
     let before = state(env);
     let message = err(env, args);
@@ -414,7 +414,7 @@ fn a_target_being_rebased_elsewhere_is_refused() {
     git_ok(&env, &env.repo, &["switch", "-q", "-c", "conf", "main~1"]);
     env.write("a.txt", "conf\n");
     env.commit_all("conf edits a");
-    // `main` is free now; the feature branch descends from it.
+    // The feature branch descends from `main`, which no work tree holds.
     let sha = add_branch(&env, "feat", "b.txt", "b\n");
 
     let rebasing = add_worktree(&env, "rebasing", &["main"]);
@@ -428,7 +428,7 @@ fn a_target_being_rebased_elsewhere_is_refused() {
     assert!(git_ok(&env, &rebasing, &["status"]).contains("rebase in progress"));
 }
 
-/// A refusal from git comes with the command that repeats the move once the cause is gone.
+/// A refusal gives the command that repeats the move after the cause clears.
 #[test]
 fn a_refused_merge_gives_the_command_to_retry() {
     let env = setup();
@@ -471,9 +471,9 @@ fn a_target_being_bisected_elsewhere_is_refused() {
     assert!(message.contains("git fetch refused"), "{message}");
 }
 
-/// Git refuses to move a branch that another work tree is rebasing or bisecting, also when that
-/// work tree's directory is gone and only its entry in the git directory is left, so a rebase of
-/// the feature branch must not start: it would move the branch and then fail to land it.
+/// Git refuses to move a branch that another work tree is rebasing or bisecting.
+/// That holds when the work tree's directory is gone and only its entry is left.
+/// Such a rebase would move the feature branch and then fail to land it.
 #[test]
 fn a_rebase_merge_into_a_target_rebased_or_bisected_elsewhere_changes_nothing() {
     for (operation, deleted) in [
@@ -521,8 +521,9 @@ fn a_rebase_merge_into_a_target_rebased_or_bisected_elsewhere_changes_nothing() 
     }
 }
 
-/// With `worktree.useRelativePaths` git records a gone work tree's location relative to its entry
-/// in the git directory; the entry is still found.
+/// With `worktree.useRelativePaths`, git records a deleted work tree's location relative to its
+/// entry.
+/// The entry is still found.
 #[test]
 fn a_rebase_merge_sees_a_deleted_work_tree_that_git_recorded_by_a_relative_path() {
     let env = setup();
@@ -549,8 +550,8 @@ fn a_rebase_merge_sees_a_deleted_work_tree_that_git_recorded_by_a_relative_path(
     );
 }
 
-/// A work tree whose directory is gone still holds the branch it was rebasing, so the message
-/// says that and not that no work tree has the branch.
+/// A deleted work tree still holds the branch it was rebasing.
+/// The message says that, not that no work tree has the branch.
 #[test]
 fn a_rebase_merge_of_a_branch_rebased_in_a_deleted_work_tree_changes_nothing() {
     let env = setup();
@@ -570,9 +571,10 @@ fn a_rebase_merge_of_a_branch_rebased_in_a_deleted_work_tree_changes_nothing() {
     assert_eq!(tip(&env, "feat"), sha);
 }
 
-/// `feat` is behind `main`, checked out in a linked work tree, and adds `b.txt`; `main` is
-/// checked out in the main work tree. The rebase would succeed, but the fast-forward in the main
-/// work tree would not, so the merge must stop before the rebase moves `feat`.
+/// `feat` is behind `main` and adds `b.txt`, and sits in a linked work tree.
+/// `main` is checked out in the main work tree.
+/// The rebase would work but the fast-forward there would not.
+/// The merge must stop before the rebase moves `feat`.
 fn rebase_into_a_blocked_target(blocker: impl Fn(&Env)) -> (Env, String) {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");
@@ -668,7 +670,7 @@ fn a_branch_behind_the_target_rebases_and_fast_forwards() {
     point(&env, "mid", &first);
     let old_main = advance_main(&env, "c.txt", "c\n");
     let work = add_worktree(&env, "work", &["feat"]);
-    // Both are configured to move other branches and to stash, which a rebase here must not do.
+    // The config asks to move other branches and to stash. A rebase here must do neither.
     git_ok(&env, &env.repo, &["config", "rebase.updateRefs", "true"]);
     git_ok(&env, &env.repo, &["config", "rebase.autoStash", "true"]);
 
@@ -688,8 +690,9 @@ fn a_branch_behind_the_target_rebases_and_fast_forwards() {
     assert_eq!(git_ok(&env, &work, &["status", "--porcelain"]), "");
 }
 
-/// Git 2.31 has no `rebase --no-update-refs` (Git 2.38 added it), so the merge turns update-refs
-/// off with a config key, which an older git ignores. A `git` that rejects the flag stands in.
+/// Git 2.31 has no `rebase --no-update-refs`, which Git 2.38 added.
+/// The merge turns update-refs off by a config key, which an older git ignores.
+/// A `git` that rejects the flag stands in.
 #[test]
 fn a_rebase_merge_does_not_use_the_flag_an_older_git_lacks() {
     let env = setup();
@@ -794,7 +797,7 @@ fn a_rebase_stops_for_an_operation_in_progress_in_the_branchs_work_tree() {
     let sha = add_branch(&env, "feat", "b.txt", "b\n");
     advance_main(&env, "c.txt", "c\n");
     let work = add_worktree(&env, "work", &["feat"]);
-    // Picking a commit the branch already has stops with a clean tree and a pick in progress.
+    // Picking a commit the branch has stops at once. The tree is clean and the pick in progress.
     let pick = git_in(&env, &work, &["cherry-pick", "HEAD"]);
     assert!(!pick.status.success());
 
@@ -805,8 +808,9 @@ fn a_rebase_stops_for_an_operation_in_progress_in_the_branchs_work_tree() {
     );
 }
 
-/// Leaves `feat` checked out in a linked work tree and `other` a branch of `main` that edits
-/// `a.txt` as `feat` does, so a rebase of `feat` onto `other` stops on a conflict.
+/// Leaves `feat` checked out in a linked work tree.
+/// `other` is a branch of `main` that edits `a.txt` as `feat` does.
+/// A rebase of `feat` onto `other` stops on a conflict.
 fn conflicting_pair(env: &Env) -> (String, PathBuf) {
     let sha = add_branch(env, "feat", "a.txt", "feat\n");
     add_branch(env, "other", "a.txt", "other\n");
@@ -909,9 +913,10 @@ fn a_hook_that_refuses_the_rebase_leaves_everything_as_it_was() {
     assert!(message.contains("no rebases today"), "{message}");
 }
 
-/// A commit that lands on the branch after the head was checked is not merged unseen: the rebase
-/// would start from a tip the caller never named. The commit is made by a `core.fsmonitor` hook,
-/// which the check of the work tree's status runs once, after the tip was read.
+/// A commit made after the head was checked is not merged unseen.
+/// A rebase would start from a tip the caller never named.
+/// A `core.fsmonitor` hook makes the commit. The status check of the work tree runs it, after the
+/// tip was read.
 #[test]
 fn a_commit_made_while_the_merge_runs_stops_the_merge_before_it_lands() {
     let env = setup();
@@ -966,8 +971,8 @@ fn a_rebase_works_for_a_leading_dash_branch_in_a_work_tree_with_a_space_and_unic
     let sha = add_branch(&env, "-dash/é", "b.txt", "b\n");
     advance_main(&env, "c.txt", "c\n");
     let work = add_worktree(&env, "work tree é", &["--detach", "main"]);
-    // `git worktree add` takes no branch whose name starts with a dash; the work tree is
-    // pointed at it afterwards.
+    // `git worktree add` takes no branch whose name starts with a dash.
+    // The work tree is pointed at it afterwards.
     git_ok(&env, &work, &["symbolic-ref", "HEAD", "refs/heads/-dash/é"]);
     git_ok(&env, &work, &["reset", "-q", "--hard"]);
 
@@ -1065,7 +1070,7 @@ fn a_local_pr_has_no_title_body_label_or_image_to_store() {
     }
 }
 
-/// A wait that skips its sleeps, so a call that gives up does it at once.
+/// A wait that skips its sleeps. A call that gives up does it at once.
 fn waiting(env: &Env, args: &[&str]) -> Output {
     waiting_in(env, &env.repo, args)
 }
@@ -1101,9 +1106,10 @@ fn wait_until_on(env: &Env, branch: &str) {
     panic!("{branch} never reported auto-merge on");
 }
 
-/// Records the gates for `branch`, except those named in `skip`: a check pass, a review, and an
-/// approval at the head. The approval goes through `publish --approve --dry-run`, which records
-/// it before it looks for a tracker and fails here, where there is none.
+/// Records the gates for `branch`, except those named in `skip`.
+/// The gates are a check pass, a review and an approval at the head.
+/// The approval uses `publish --approve --dry-run`, which records it before it looks for a tracker.
+/// It then fails here, as there is none.
 fn record_gates(env: &Env, branch: &str, skip: &[&str]) {
     git_ok(env, &env.repo, &["switch", "-q", branch]);
     if !skip.contains(&"checks") {
@@ -1158,8 +1164,9 @@ fn auto_merge_merges_at_once_when_all_four_gates_pass() {
     assert_eq!(intents(&env), serde_json::json!({}));
 }
 
-/// An auto-merge whose gates all pass lands through the same merge as `merge`: it fails when
-/// the branch is held by two work trees or a rebase of it is in progress, with nothing changed.
+/// An auto-merge whose gates all pass lands through the same merge as `merge`.
+/// It fails, changing nothing, when two work trees hold the branch.
+/// It fails likewise for a rebase of the branch in progress.
 #[test]
 fn an_auto_merge_stops_for_a_branch_held_by_two_work_trees() {
     let env = setup();
@@ -1204,8 +1211,8 @@ fn an_auto_merge_stops_for_a_rebase_the_user_started_and_leaves_it() {
     assert!(git_ok(&env, &work, &["status"]).contains("rebase in progress"));
 }
 
-/// A branch whose `gate` is not recorded gives up with exit 3, names that gate alone and keeps
-/// the intent.
+/// A branch whose `gate` is not recorded gives up with exit 3.
+/// The message names that gate alone, and the intent stays.
 fn assert_gate_times_out(gate: &str) {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");

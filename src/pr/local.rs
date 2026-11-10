@@ -1,6 +1,5 @@
-//! The local provider: a PR is a local branch against the local default branch, and merging it
-//! moves that branch. Everything is read from local refs; nothing here fetches, pushes or asks a
-//! forge.
+//! A local PR is a local branch against the local default branch. Merging moves that branch.
+//! Everything is read from local refs. Nothing here contacts a remote, pushes or asks a forge.
 
 mod auto;
 mod rebase;
@@ -101,7 +100,7 @@ impl<'a> Local<'a> {
         })
     }
 
-    /// Moves `target` to `branch`, rebasing the branch first when it is behind and `how` says so.
+    /// Moves `target` to `branch`, rebasing first when it is behind and `how` says so.
     /// The branch MUST still be at `sha`.
     fn land(&self, branch: &str, sha: &str, how: Option<How>) -> Result<()> {
         method_of(how)?;
@@ -131,8 +130,8 @@ impl<'a> Local<'a> {
             Update::Refused(refused) => fail(format!(
                 "{target} not updated: {}{}{}",
                 refused.reason,
-                // Git's own command is refused again once a work tree holds the target, so the
-                // retry is this merge, which picks the place anew.
+                // Git's own command fails again once a work tree holds the target.
+                // The retry is this merge, which picks the place anew.
                 refused
                     .retry
                     .map(|_| format!(
@@ -150,7 +149,7 @@ impl<'a> Local<'a> {
     }
 }
 
-/// What the records call the merge method `how`; the methods that would create a commit fail.
+/// What the records call the merge method `how`. The methods that would create a commit fail.
 fn method_of(how: Option<How>) -> Result<&'static str> {
     match how {
         None => Ok("fast-forward"),
@@ -305,8 +304,7 @@ impl Provider for Local<'_> {
         intent::forget_paused(&key)
     }
 
-    /// The merge leaves no commits between the target and the branch, so the messages are read
-    /// from the PR as it was before.
+    /// The merge adds no commits. The messages are read from the PR before it merges.
     fn merged_text(&self, before: &Pr, _after: &Pr) -> String {
         format!("{}\n{}", before.title, before.body)
     }

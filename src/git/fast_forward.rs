@@ -1,8 +1,7 @@
-//! Moves a local branch forward to a commit that descends from it, without touching anything
-//! else: `git merge --ff-only` in the work tree that has the branch checked out, which keeps
-//! local changes and refuses to overwrite them, ignored files included, else a ref update that git
-//! refuses for a branch being rebased or bisected. Never stashes, adds a work tree or switches a
-//! checkout's branch.
+//! Moves a local branch forward to a descendant commit with `git merge --ff-only` in the work tree
+//! that has it, else by a ref update, leaving local changes and ignored files untouched, and never
+//! stashing, adding a work tree or switching a branch; git refuses a branch being rebased or
+//! bisected.
 
 use std::path::PathBuf;
 
@@ -12,8 +11,8 @@ use crate::core::shell::quote;
 
 /// What `fast_forward` did.
 pub enum Update {
-    /// The branch is at the new commit; `path` is the work tree that merged it, none when git
-    /// moved the ref alone.
+    /// The branch is at the new commit. `path` is the work tree that merged it, none when git moved
+    /// the ref alone.
     Moved {
         path: Option<PathBuf>,
     },
@@ -46,9 +45,9 @@ enum Place {
     Worktree(PathBuf),
 }
 
-/// What stops moving local branch `name` to `to`, which MUST descend from `from`; `None` when
-/// nothing does that can be seen beforehand. Git may still refuse, as it does for a branch
-/// being rebased or bisected.
+/// What stops moving local branch `name` to `to`, which MUST descend from `from`.
+/// `None` when nothing stops it that can be seen beforehand.
+/// Git may still refuse for a branch being rebased or bisected.
 pub fn check(repo: &Repo, name: &str, from: &str, to: &str) -> Result<Option<Refused>> {
     Ok(place(repo, name, from, to)?.err())
 }
@@ -142,8 +141,8 @@ fn place(
     Ok(Ok(Place::Worktree(holder.path.clone())))
 }
 
-/// Whether a submodule pointer differs between `from` and `to`. A merge leaves a moved
-/// submodule checked out at its old commit, so the checkout turns dirty.
+/// Whether a submodule pointer differs between `from` and `to`.
+/// A merge leaves a moved submodule at its old commit, which dirties the checkout.
 pub fn moves_submodule(repo: &Repo, from: &str, to: &str) -> Result<bool> {
     let raw = repo.git(&["diff", "--raw", "--ignore-submodules=none", from, to])?;
     Ok(raw.lines().any(|line| {
@@ -153,8 +152,8 @@ pub fn moves_submodule(repo: &Repo, from: &str, to: &str) -> Result<bool> {
     }))
 }
 
-/// Runs the update; when git refuses, as it does over local changes a merge would overwrite, the
-/// reason is git's message and `retry` the command to run once that is resolved.
+/// Runs the update. Git may refuse over local changes a merge would overwrite.
+/// The reason is git's message, and `retry` the command to run once that is resolved.
 fn run(repo: &Repo, command: &[&str], path: Option<PathBuf>) -> Result<Update> {
     let (code, error) = repo.probe(command)?;
     if code == Some(0) {
@@ -177,8 +176,8 @@ fn run(repo: &Repo, command: &[&str], path: Option<PathBuf>) -> Result<Update> {
         })
         .filter(|line| !line.is_empty())
         .collect();
-    // Git calls an ignored file in the way an untracked one, because `--no-overwrite-ignore`
-    // makes it count as one.
+    // `--no-overwrite-ignore` makes git count an ignored file as untracked. The message is reworded
+    // to name both.
     let message = message.join(" ").replace(
         "untracked working tree files",
         "untracked or ignored working tree files",
