@@ -1251,7 +1251,8 @@ on GitHub and GitLab, with these differences:
   that quotes the thread, and a local resolve stays local: `publish` lists it under `skipped` with
   `Forgejo cannot resolve threads; cleared locally`. A resolve made on the host syncs. The next
   `sync` reopens a thread resolved only locally.
-- `agt pr` marks a draft by the `WIP: ` title prefix. The PR does not say whether auto-merge is
+- `agt pr` marks a draft with the `WIP: ` title prefix. A title that starts with `WIP:` or
+  `[WIP]`, in any case, counts as a draft, also in `agt status`. The PR does not say whether auto-merge is
   on, so `auto_merge` is `"unknown"`. `merge --auto` schedules the merge with
   `merge_when_checks_succeed`; `auto-merge off` cancels the schedule (a 404 means none was set)
   and `auto-merge on` schedules it again with the method `merge --auto` recorded, `merge` by default.
@@ -1776,7 +1777,7 @@ publish, and the writes of `agt pr`.
 Trackers come first from the git remotes. `[sync] remotes` chooses which: `all` (the
 default) every remote (`origin`, `upstream`, then the rest by name), `origin` only `origin`,
 `none` only the configured entries. A remote becomes a tracker only when its URL names a
-repository on a host agt knows to be GitHub, GitLab or Forgejo. A `[[tracker]]` at the same host and
+repository on a known host. Known hosts are GitHub, GitLab and Forgejo hosts. A `[[tracker]]` at the same host and
 repository (ASCII case ignored) overrides the fields of that tracker; any other entry adds one.
 `enabled = false` drops a tracker, and `issues = false` or `pull_requests = false` drops it for that
 kind. `issues` and `pull_requests` can also be a table that overrides `pull` and `push` for that

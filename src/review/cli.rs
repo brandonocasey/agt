@@ -410,9 +410,8 @@ pub struct ApprovalArgs {
     #[arg(long)]
     pub approve: bool,
     /// With `--approve`, also submit the host's approval (GitHub and Forgejo APPROVE review, GitLab
-    /// approve). On your own GitHub or Forgejo PR, which the host will not let you approve, post a
-    /// COMMENT review with the approval text instead; when GitLab will not let you approve, post
-    /// the text as a comment.
+    /// approve). GitHub and Forgejo block approval of your own PR. There it posts a COMMENT review
+    /// with the approval text instead. When GitLab blocks approval, it posts the text as a comment.
     #[arg(long, requires = "approve")]
     pub formal: bool,
     /// With `--approve`, the approval text kept in the store and posted only in that COMMENT
