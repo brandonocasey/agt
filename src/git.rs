@@ -77,11 +77,9 @@ impl Worktree {
 pub struct Repo {
     root: PathBuf,
     main_checkout: OnceLock<PathBuf>,
-    // Layout facts that nothing in one agt process changes. Each is read from git once per
-    // `Repo`; a failed read is not kept.
-    toplevel: OnceLock<PathBuf>,
+    // Nothing in one agt process moves the common dir, so it is read from git once per `Repo`;
+    // a failed read is not kept.
     common_dir: OnceLock<String>,
-    is_bare: OnceLock<bool>,
     // Answers about refs, HEAD and config, kept when [`Repo::remembering_refs`] asked for it.
     refs: Option<Mutex<HashMap<String, Option<String>>>>,
     env: Vec<(OsString, OsString)>,
@@ -95,9 +93,7 @@ impl Repo {
         Self {
             root: root.into(),
             main_checkout: OnceLock::new(),
-            toplevel: OnceLock::new(),
             common_dir: OnceLock::new(),
-            is_bare: OnceLock::new(),
             refs: None,
             env: Vec::new(),
             _scratch: None,
@@ -116,10 +112,8 @@ impl Repo {
 
     /// The root of the work tree that contains this directory.
     pub fn toplevel(&self) -> Result<PathBuf> {
-        remembered(&self.toplevel, || {
-            self.git(&["rev-parse", "--show-toplevel"])
-                .map(PathBuf::from)
-        })
+        self.git(&["rev-parse", "--show-toplevel"])
+            .map(PathBuf::from)
     }
 
     /// What `git status` lists, without renames. `untracked` also lists untracked files; `extra`
@@ -1046,15 +1040,15 @@ impl Repo {
 
     /// The absolute git common dir, which names a `local/` repository.
     pub fn common_dir(&self) -> Result<String> {
-        remembered(&self.common_dir, || {
-            self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        })
+        if let Some(dir) = self.common_dir.get() {
+            return Ok(dir.clone());
+        }
+        let dir = self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        Ok(self.common_dir.get_or_init(|| dir).clone())
     }
 
     fn is_bare(&self) -> Result<bool> {
-        remembered(&self.is_bare, || {
-            Ok(self.git(&["rev-parse", "--is-bare-repository"])? == "true")
-        })
+        Ok(self.git(&["rev-parse", "--is-bare-repository"])? == "true")
     }
 
     /// Every worktree of the repository; the first is the main checkout.
@@ -1129,16 +1123,6 @@ pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
     listing
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
-}
-
-/// The value of `cell`, computed by `read` on the first call. A failed read leaves the cell empty,
-/// so the next call tries again.
-fn remembered<T: Clone>(cell: &OnceLock<T>, read: impl FnOnce() -> Result<T>) -> Result<T> {
-    if let Some(value) = cell.get() {
-        return Ok(value.clone());
-    }
-    let value = read()?;
-    Ok(cell.get_or_init(|| value).clone())
 }
 
 fn verify_args(spec: &str) -> [&str; 5] {
@@ -1400,19 +1384,14 @@ mod tests {
         let sandbox = Sandbox::with_repo();
         let root = sandbox.repo();
         let repo = sandboxed(&sandbox);
-        let read = |repo: &Repo| (repo.common_dir().unwrap(), repo.toplevel().unwrap());
-        let (common_dir, toplevel) = read(&repo);
+        let common_dir = repo.common_dir().unwrap();
         assert_eq!(
             fs::canonicalize(&common_dir).unwrap(),
             fs::canonicalize(root.join(".git")).unwrap()
         );
-        assert_eq!(
-            fs::canonicalize(&toplevel).unwrap(),
-            fs::canonicalize(&root).unwrap()
-        );
         // With the repository gone, only the kept first answer can return.
         fs::rename(root.join(".git"), root.join("moved")).unwrap();
-        assert_eq!(read(&repo), (common_dir, toplevel));
+        assert_eq!(repo.common_dir().unwrap(), common_dir);
         assert!(sandboxed(&sandbox).common_dir().is_err());
     }
 
@@ -1444,15 +1423,10 @@ mod tests {
         let root = sandbox.repo();
         let repo = sandboxed(&sandbox);
         assert!(repo.common_dir().is_err());
-        assert!(repo.toplevel().is_err());
         sandbox.git(&root, &["init", "-q"]);
         assert_eq!(
             fs::canonicalize(repo.common_dir().unwrap()).unwrap(),
             fs::canonicalize(root.join(".git")).unwrap()
-        );
-        assert_eq!(
-            fs::canonicalize(repo.toplevel().unwrap()).unwrap(),
-            fs::canonicalize(&root).unwrap()
         );
     }
 
