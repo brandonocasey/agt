@@ -71,13 +71,14 @@ impl<'a> Local<'a> {
             .map(str::trim)
             .filter(|message| !message.is_empty())
             .collect();
-        let author = self.repo.authored(&[tip.as_str()])?;
+        let (author, title) = self
+            .repo
+            .authored(&[tip.as_str()])?
+            .remove(&tip)
+            .unwrap_or_default();
         let row = Row {
-            title: self.repo.subject(&tip)?,
-            author: author
-                .get(&tip)
-                .map(|(name, _)| name.clone())
-                .unwrap_or_default(),
+            title,
+            author,
             branch: branch.to_owned(),
             tip,
         };
@@ -188,25 +189,38 @@ impl<'a> Local<'a> {
         }
         match fast_forward(self.repo, &target, &target_tip, &head)? {
             Update::Moved { .. } => Ok(()),
-            Update::Refused(refused) => fail(format!(
-                "{target} not updated: {}{}{}",
-                refused.reason,
+            Update::Refused(refused) => {
                 // Git's own command fails again once a work tree holds the target.
                 // The retry is this merge, which picks the place anew.
-                refused
-                    .retry
-                    .map(|_| format!(
-                        "; retry with: agt pr --local merge {} --sha {head}",
-                        quote(branch)
-                    ))
-                    .unwrap_or_default(),
-                if rebased {
+                let retry = match refused.retry {
+                    Some(_) => format!(
+                        "; retry with: {}",
+                        self.merge_command(branch, &target, &head)?
+                    ),
+                    None => String::new(),
+                };
+                let rebased = if rebased {
                     format!("; {branch} was rebased and was at {tip}")
                 } else {
                     String::new()
-                }
-            )),
+                };
+                fail(format!(
+                    "{target} not updated: {}{retry}{rebased}",
+                    refused.reason
+                ))
+            }
         }
+    }
+
+    /// The command that merges `branch` at `sha` into `target`.
+    /// It needs `--method rebase` once `target` has moved past the branch.
+    fn merge_command(&self, branch: &str, target: &str, sha: &str) -> Result<String> {
+        let behind = !self.repo.is_ancestor(&self.tip(target)?, sha)?;
+        let method = if behind { " --method rebase" } else { "" };
+        Ok(format!(
+            "agt pr --local merge --sha {sha}{method} -- {}",
+            quote(branch)
+        ))
     }
 }
 
@@ -261,9 +275,9 @@ impl Provider for Local<'_> {
 
     fn enable_auto_command(&self, at: &At, pr: &Pr) -> String {
         format!(
-            "agt pr --local merge {} --sha {} --auto",
-            quote(&at.id()),
-            pr.head_sha
+            "agt pr --local merge --sha {} --auto -- {}",
+            pr.head_sha,
+            quote(&at.id())
         )
     }
 

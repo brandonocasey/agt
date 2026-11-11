@@ -51,7 +51,7 @@ impl Local<'_> {
         loop {
             let failing = {
                 let _lock = intent::lock(&key)?;
-                match self.attempt(&key, branch, &waiter)? {
+                match self.attempt(&key, branch, sha, &waiter)? {
                     Attempt::Merged => return Ok(Outcome::Done),
                     Attempt::Waiting(failing) => failing,
                 }
@@ -69,19 +69,16 @@ impl Local<'_> {
 
     /// Looks at the intent of `branch` once. It merges when the intent holds and the gates pass.
     /// The caller MUST hold the lock of `key`.
-    fn attempt(&self, key: &str, branch: &str, waiter: &str) -> Result<Attempt> {
+    fn attempt(&self, key: &str, branch: &str, sha: &str, waiter: &str) -> Result<Attempt> {
         let intent = match intent::get(key)? {
             Some(intent) if intent.waiter == waiter => intent,
             Some(_) => return fail(format!("another call took over the auto-merge of {branch}")),
-            None => return self.gone(branch),
+            None => return self.gone(branch, sha),
         };
         let tip = self.tip(branch)?;
         if tip != intent.sha {
             intent::clear(key)?;
-            return fail(format!(
-                "{branch} is at {tip}, not {}; the auto-merge was cleared",
-                intent.sha
-            ));
+            return moved(branch, &tip, &intent.sha);
         }
         let target = self.target()?;
         if self.repo.is_ancestor(&tip, &self.tip(&target)?)? {
@@ -102,10 +99,14 @@ impl Local<'_> {
 
     /// A waiter whose intent is gone reports the merge when a plain merge landed `branch`.
     /// Otherwise `auto-merge off` or a moved branch cleared it, and that is an error.
-    fn gone(&self, branch: &str) -> Result<Attempt> {
+    fn gone(&self, branch: &str, sha: &str) -> Result<Attempt> {
         let target_tip = self.tip(&self.target()?)?;
-        if self.repo.is_ancestor(&self.tip(branch)?, &target_tip)? {
+        let tip = self.tip(branch)?;
+        if self.repo.is_ancestor(&tip, &target_tip)? {
             return Ok(Attempt::Merged);
+        }
+        if tip != sha {
+            return moved(branch, &tip, sha);
         }
         fail(format!("the auto-merge of {branch} was turned off"))
     }
@@ -157,6 +158,13 @@ impl Local<'_> {
         }
         Ok(pr)
     }
+}
+
+/// The failure of a waiter whose branch left the head it was told to merge.
+fn moved(branch: &str, tip: &str, sha: &str) -> Result<Attempt> {
+    fail(format!(
+        "{branch} moved to {tip}, not {sha}; the auto-merge was cleared"
+    ))
 }
 
 fn fits(intent: &Intent, pr: &Pr) -> bool {

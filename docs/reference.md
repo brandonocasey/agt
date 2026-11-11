@@ -1337,7 +1337,7 @@ It reads local refs. No remote is contacted, and nothing is pushed or sent to a 
 The `number` and `url` fields are `null`. `state` is `open` until the branch is an ancestor of the default branch. Then it is `merged`.
 
 - `view`, `list`, `merge` and `auto-merge` work. `create`, `update` and `upload` fail with a message. A branch stores no title, body, label or image.
-- `merge <branch> --sha HEAD` moves the default branch to the branch tip. It creates no commit. Without `--method` it is a fast-forward only.
+- `merge <branch> --sha <head-sha>` moves the default branch to the branch tip. It creates no commit. Without `--method` it is a fast-forward only.
 
   `--method rebase` rebases the branch onto the default branch first and then fast-forwards. `--method merge` and `--method squash` fail.
 
@@ -1349,11 +1349,13 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
   - the repository is bare;
   - a submodule pointer moves.
 
+  The retry names `--method rebase` once the default branch has moved past the branch.
+
   The branch must not be checked out in more than one work tree. No rebase, merge, cherry-pick, revert or bisect may be under way in its work tree. A rebase the user started is never touched.
 
-  `rebase` needs the branch checked out in exactly one clean work tree. No ignored file may sit where the rebase would write. No submodule pointer may move.
+  `rebase` needs the branch checked out in exactly one clean work tree. No ignored file may sit where the rebase would write. That covers a path any commit of the branch writes, and a file written where an ignored directory is. No submodule pointer may move.
 
-  It runs `git rebase` with hooks and user configuration as they are. Only autostash and `rebase.updateRefs` are forced off. A conflict is final: the rebase is aborted and the branch stays as it was.
+  It runs `git rebase` with hooks and user configuration as they are. Only autostash and `rebase.updateRefs` are forced off. A conflict is final: the rebase is aborted and the branch stays as it was. A rebase that stops with no conflict reports git's error and is aborted the same way.
 
   With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes. Otherwise the merge is refused before the rebase starts.
 
@@ -1363,11 +1365,12 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
 - `merge --auto` and `auto-merge on` record an intent in `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`. The intent holds the branch, head sha, method and waiter id. It is keyed by the git common directory and the branch.
 
   Both poll every 5 seconds, up to 270 seconds. They wait until all gates pass at the head. Then the branch lands. The gates are:
-  1. checks: an `agt check run` pass is recorded for the head's tree and its log is still there;
-  2. review: the branch has a review at the head, no commit since the base is unreviewed, and no blocking finding is open;
-  3. approval: an approval is recorded at exactly the head (`agt review publish --approve`; with no tracker for pull requests, the
-     approval is recorded and the publish then fails saying so, which is enough for this gate);
-  4. lands: the branch is ahead of the default branch (or, with `--method rebase`, the rebase preconditions hold).
+  1. checks: an `agt check run` pass is recorded for the head's tree. Its log is still there;
+  2. review: the branch has a review at the head. No commit since the base is unreviewed. No blocking finding is open;
+  3. approval: an approval is recorded at exactly the head (`agt review publish --approve`).
+     Without a pull request tracker, the approval is recorded; the publish then fails saying so.
+     That is enough for this gate;
+  4. lands: the branch is ahead of the default branch. With `--method rebase`, the rebase preconditions hold instead.
 
   A gate that still fails after the wait exits 3. The JSON of the PR goes to stdout and each failing gate to stderr. The intent stays, so a rerun, or `auto-merge on`, waits again.
 
@@ -1801,8 +1804,9 @@ and `review publish` (a review of someone else's PR/MR is never published). With
 local store, on whichever tracker each belongs to (`--remote` limits it to one), and never
 imports a new PR/MR; `--pr <n|url>` starts a local review of one, as `review run` on a branch can.
 
-`agt pr create`, `update`, `merge`, `auto-merge` and `upload` are refused only when `push` was set to
-`off` explicitly; unset, they stay allowed; `agt pr --local` is never refused by it, as it writes nothing remote. Reads of any command are never refused by `push`.
+Only an explicit `push = "off"` refuses `agt pr create`, `update`, `merge`, `auto-merge` and `upload`.
+Unset, they stay allowed. `agt pr --local` is never refused by it, as it writes nothing remote.
+Reads of any command are never refused by `push`.
 `review publish`, `qa publish` and `issue push` need `manual` or `auto`: with `off`, or unset,
 they keep everything local, exit 0 and print why on stderr, naming the key. Their `--dry-run`
 previews still work.

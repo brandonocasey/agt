@@ -19,7 +19,8 @@ pub struct Intent {
     pub sha: String,
     /// `fast-forward` or `rebase`.
     pub method: String,
-    /// The call that is waiting on it; a newer call replaces it, and the older one stops.
+    /// The call that is waiting on it.
+    /// A newer call replaces it, and the older one stops.
     pub waiter: String,
 }
 

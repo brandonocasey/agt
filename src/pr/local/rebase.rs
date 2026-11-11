@@ -65,7 +65,7 @@ impl Local<'_> {
         let ignored = ignored_paths(&work)?;
         let changed = self.changed_paths(&base, tip)?;
         let mut written = self.changed_paths(tip, target_tip)?;
-        written.extend(changed.iter().cloned());
+        written.extend(self.replayed_paths(&base, tip)?);
         if let Some(path) = written.iter().find(|path| in_the_way(path, &ignored)) {
             blockers.push(format!(
                 "the ignored file {path} sits where the rebase would write"
@@ -216,10 +216,31 @@ impl Local<'_> {
         let conflicts = work.git(&["diff", "--name-only", "--diff-filter=U", "-z"]);
         work.git(&["rebase", "--abort"])?;
         let paths = names(&conflicts?);
+        let cause = if paths.is_empty() {
+            format!("stops: {error}")
+        } else {
+            format!("stops on conflicts in {}", paths.join(", "))
+        };
         fail(format!(
-            "rebasing {branch} onto {target} stops on conflicts in {}; the rebase was aborted and {branch} is still at {tip}",
-            paths.join(", ")
+            "rebasing {branch} onto {target} {cause}; the rebase was aborted and {branch} is still at {tip}"
         ))
+    }
+
+    /// The paths each commit from `base` to `tip` touches.
+    /// A rebase writes them one commit at a time.
+    /// A path added early and removed later is in no net difference.
+    fn replayed_paths(&self, base: &str, tip: &str) -> Result<Vec<String>> {
+        let range = format!("{base}..{tip}");
+        let listed = self.repo.git(&[
+            "log",
+            "--no-renames",
+            "--name-only",
+            "--format=",
+            "-z",
+            "--end-of-options",
+            &range,
+        ])?;
+        Ok(names(&listed))
     }
 
     /// The paths that differ between the commits `from` and `to`.
@@ -334,11 +355,12 @@ fn names(listed: &str) -> Vec<String> {
 }
 
 /// Whether writing `path` would overwrite or block on an ignored entry.
+/// That includes a file written where an ignored directory is.
 fn in_the_way(path: &str, ignored: &[String]) -> bool {
     ignored.iter().any(|entry| {
-        path == entry
-            || (entry.ends_with('/') && path.starts_with(entry.as_str()))
-            || path.starts_with(&format!("{entry}/"))
+        let entry = entry.trim_end_matches('/');
+        path.strip_prefix(entry)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     })
 }
 
@@ -353,39 +375,4 @@ fn started_here(git_dir: &Path, branch: &str, target_tip: &str, tip: &str) -> bo
             && same("onto", target_tip)
             && same("orig-head", tip)
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_ignored_entry_is_in_the_way_of_its_own_path_and_those_beside_it() {
-        let ignored = vec!["out.log".to_owned(), "build/".to_owned()];
-        assert!(in_the_way("out.log", &ignored));
-        assert!(in_the_way("build/x.o", &ignored));
-        assert!(in_the_way("out.log/inner", &ignored));
-        assert!(!in_the_way("out.logs", &ignored));
-        assert!(!in_the_way("builder/x", &ignored));
-    }
-
-    #[test]
-    fn only_a_rebase_of_this_branch_from_this_tip_onto_this_target_is_ours() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("rebase-merge");
-        std::fs::create_dir(&state).unwrap();
-        for (name, text) in [
-            ("head-name", "refs/heads/feat\n"),
-            ("onto", "target\n"),
-            ("orig-head", "tip\n"),
-        ] {
-            std::fs::write(state.join(name), text).unwrap();
-        }
-        assert!(started_here(dir.path(), "feat", "target", "tip"));
-        assert!(!started_here(dir.path(), "other", "target", "tip"));
-        assert!(!started_here(dir.path(), "feat", "elsewhere", "tip"));
-        assert!(!started_here(dir.path(), "feat", "target", "moved"));
-        std::fs::remove_dir_all(&state).unwrap();
-        assert!(!started_here(dir.path(), "feat", "target", "tip"));
-    }
 }

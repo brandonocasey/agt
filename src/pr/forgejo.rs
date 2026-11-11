@@ -329,8 +329,8 @@ impl Provider for Forgejo {
         disable_auto(t, repo, pr.forge_number())
     }
 
-    /// The host does not say whether auto-merge is on, so cancelling it is the probe; the method
-    /// is the one `agt pr merge --auto` recorded, else a plain merge.
+    /// The host does not say whether auto-merge is on, so cancelling it is the probe.
+    /// The method is the one `agt pr merge --auto` recorded, else a plain merge.
     fn auto_method(&self, _pr: &Pr, recorded: Option<&str>) -> Option<String> {
         Some(recorded.unwrap_or_else(|| method(None)).to_owned())
     }

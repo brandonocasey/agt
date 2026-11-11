@@ -566,28 +566,69 @@ fn a_target_being_rebased_elsewhere_is_refused() {
 /// A refusal gives the command that repeats the move after the cause clears.
 #[test]
 fn a_refused_merge_gives_the_command_to_retry() {
-    let env = setup();
-    env.write("a.txt", "main\n");
-    env.commit_all("main edits a");
-    git_ok(&env, &env.repo, &["switch", "-q", "-c", "other", "main~1"]);
-    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    for branch in ["feat", "-dash"] {
+        let env = setup();
+        env.write("a.txt", "main\n");
+        env.commit_all("main edits a");
+        git_ok(&env, &env.repo, &["switch", "-q", "-c", "other", "main~1"]);
+        let sha = add_branch(&env, branch, "b.txt", "b\n");
 
-    let rebasing = add_worktree(&env, "rebasing", &["main"]);
-    let rebase = git_in(&env, &rebasing, &["rebase", "--exec", "false", "HEAD~1"]);
-    assert!(!rebase.status.success(), "the exec should stop the rebase");
-    let message = refused(&env, &merge_args(&sha, "feat", &[]));
-    assert!(message.contains("git fetch refused"), "{message}");
-    assert!(
-        message.contains(&format!(
-            "retry with: agt pr --local merge feat --sha {sha}"
-        )),
-        "{message}"
-    );
-    assert!(git_ok(&env, &rebasing, &["status"]).contains("rebase in progress"));
+        let rebasing = add_worktree(&env, "rebasing", &["main"]);
+        let rebase = git_in(&env, &rebasing, &["rebase", "--exec", "false", "HEAD~1"]);
+        assert!(!rebase.status.success(), "the exec should stop the rebase");
+        let message = refused(&env, &merge_args(&sha, branch, &[]));
+        assert!(message.contains("git fetch refused"), "{message}");
+        let retry = format!("retry with: agt pr --local merge --sha {sha} -- {branch}");
+        assert!(message.contains(&retry), "{message}");
+        assert!(git_ok(&env, &rebasing, &["status"]).contains("rebase in progress"));
 
-    git_ok(&env, &rebasing, &["rebase", "--abort"]);
-    ok(&env, &merge_args(&sha, "feat", &[]));
-    assert_eq!(tip(&env, "main"), sha);
+        git_ok(&env, &rebasing, &["rebase", "--abort"]);
+        ok(&env, &merge_args(&sha, branch, &[]));
+        assert_eq!(tip(&env, "main"), sha);
+    }
+}
+
+/// `main` moves while the rebase runs, so the rebased branch is behind again at the fast-forward.
+/// A `post-commit` hook advances `main` once. The hint then names the rebase method.
+#[test]
+fn a_merge_refused_because_the_target_moved_suggests_the_rebase_method() {
+    for branch in ["feat", "-dash"] {
+        let env = setup();
+        let sha = add_branch(&env, branch, "b.txt", "b\n");
+        advance_main(&env, "c.txt", "c\n");
+        git_ok(&env, &env.repo, &["switch", "-q", "-c", "other"]);
+        let work = add_worktree(&env, "work", &["--detach", "main"]);
+        // `git worktree add` takes no branch whose name starts with a dash.
+        let head = format!("refs/heads/{branch}");
+        git_ok(&env, &work, &["symbolic-ref", "HEAD", &head]);
+        git_ok(&env, &work, &["reset", "-q", "--hard"]);
+        let once = env.path("moved");
+        let hook = env.repo.join(".git/hooks/post-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        crate::support::executable(
+            &hook,
+            format!(
+                "#!/bin/sh\n[ -e '{once}' ] && exit 0\ntouch '{once}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE\n\
+                 new=$(git -C '{repo}' commit-tree 'main^{{tree}}' -p main -m 'main moved')\n\
+                 git -C '{repo}' update-ref refs/heads/main \"$new\"\n",
+                once = once.display(),
+                repo = env.repo.display()
+            ),
+        );
+
+        let message = err(&env, &merge_args(&sha, branch, &["--method", "rebase"]));
+        let rebased = tip(&env, &head);
+        assert_ne!(
+            rebased, sha,
+            "the rebase should have moved {branch}: {message}"
+        );
+        let retry =
+            format!("retry with: agt pr --local merge --sha {rebased} --method rebase -- {branch}");
+        assert!(message.contains(&retry), "{message}");
+
+        ok(&env, &merge_args(&rebased, branch, &["--method", "rebase"]));
+        assert_eq!(tip(&env, "main"), tip(&env, &head));
+    }
 }
 
 #[test]
@@ -1011,6 +1052,87 @@ fn a_rebase_stops_for_an_ignored_file_it_would_write() {
         fs::read_to_string(work.join("out.log")).unwrap(),
         "ignored, mine\n"
     );
+}
+
+/// A work tree on `feat` with `ignored` written in it, which the repository ignores.
+fn work_with_ignored(env: &Env, ignored: &str) -> PathBuf {
+    let work = add_worktree(env, "work", &["feat"]);
+    let path = work.join(ignored);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "mine\n").unwrap();
+    work
+}
+
+#[test]
+fn a_rebase_stops_for_an_ignored_directory_it_would_replace_with_a_file() {
+    let env = setup();
+    env.write(".gitignore", "build/\n");
+    env.commit_all("ignore build");
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    advance_main(&env, "build", "a file now\n");
+    let work = work_with_ignored(&env, "build/out.o");
+
+    let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(message.contains("the ignored file build"), "{message}");
+    assert_eq!(
+        fs::read_to_string(work.join("build/out.o")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn a_rebase_stops_for_an_ignored_file_only_an_earlier_commit_writes() {
+    let env = setup();
+    env.write(".gitignore", "*.log\n");
+    env.commit_all("ignore logs");
+    git_ok(&env, &env.repo, &["switch", "-q", "-c", "feat"]);
+    env.write("out.log", "added\n");
+    git_ok(&env, &env.repo, &["add", "-f", "out.log"]);
+    git_ok(&env, &env.repo, &["commit", "-q", "-m", "add a log"]);
+    git_ok(&env, &env.repo, &["rm", "-q", "out.log"]);
+    git_ok(&env, &env.repo, &["commit", "-q", "-m", "drop the log"]);
+    let sha = tip(&env, "feat");
+    git_ok(&env, &env.repo, &["switch", "-q", "main"]);
+    advance_main(&env, "c.txt", "c\n");
+    let work = work_with_ignored(&env, "out.log");
+
+    let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(message.contains("the ignored file out.log"), "{message}");
+    assert_eq!(fs::read_to_string(work.join("out.log")).unwrap(), "mine\n");
+}
+
+#[test]
+fn a_rebase_goes_through_for_paths_that_only_start_like_an_ignored_one() {
+    let env = setup();
+    env.write(".gitignore", "build/\n*.log\n");
+    env.commit_all("ignore build and logs");
+    let sha = add_branch(&env, "feat", "builder/x", "x\n");
+    advance_main(&env, "out.logs", "not ignored\n");
+    let work = work_with_ignored(&env, "build/out.o");
+
+    ok(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert_eq!(
+        fs::read_to_string(work.join("build/out.o")).unwrap(),
+        "mine\n"
+    );
+}
+
+/// A rebase that stops with no conflicting path reports what git said.
+/// A `prepare-commit-msg` hook that fails makes git stop on a commit that applies cleanly.
+#[test]
+fn a_rebase_that_stops_without_conflicts_reports_the_git_error() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    advance_main(&env, "c.txt", "c\n");
+    add_worktree(&env, "work", &["feat"]);
+    let hook = env.repo.join(".git/hooks/prepare-commit-msg");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    crate::support::executable(&hook, "#!/bin/sh\necho hook says no >&2\nexit 1\n");
+
+    let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(message.contains("hook says no"), "{message}");
+    assert!(!message.contains("conflicts in"), "{message}");
+    assert!(message.contains("the rebase was aborted"), "{message}");
 }
 
 #[test]
@@ -1582,12 +1704,14 @@ fn auto_merge_on_with_nothing_recorded_fails() {
 /// The hint names a command for a local branch, not the forge one.
 #[test]
 fn the_hint_for_a_missing_auto_merge_names_a_local_command() {
-    let env = setup();
-    let sha = add_branch(&env, "feat", "b.txt", "b\n");
-    let message = err(&env, &["auto-merge", "on", "feat"]);
-    let command = format!("agt pr --local merge feat --sha {sha} --auto");
-    assert!(message.contains(&format!("`{command}`")), "{message}");
-    assert!(!message.contains("`agt pr merge"), "{message}");
+    for branch in ["feat", "-dash"] {
+        let env = setup();
+        let sha = add_branch(&env, branch, "b.txt", "b\n");
+        let message = err(&env, &["auto-merge", "on", "--", branch]);
+        let command = format!("agt pr --local merge --sha {sha} --auto -- {branch}");
+        assert!(message.contains(&format!("`{command}`")), "{message}");
+        assert!(!message.contains("`agt pr merge"), "{message}");
+    }
 }
 
 #[test]
@@ -1624,6 +1748,28 @@ fn a_waiter_whose_branch_moved_fails_and_clears_the_intent() {
     );
     assert_eq!(intents(&env), serde_json::json!({}));
     assert_eq!(ok(&env, &["view", "feat"])["auto_merge"], "off");
+}
+
+/// A look at the branch (`view`) clears the intent of a moved branch before the waiter polls.
+/// The waiter says the branch moved, not that the auto-merge was turned off.
+#[test]
+fn a_waiter_whose_intent_was_cleared_by_a_moved_branch_says_it_moved() {
+    let env = setup();
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    let waiter = start_waiter(&env, &merge_args(&sha, "feat", &["--auto"]));
+    wait_until_on(&env, "feat");
+
+    let moved = commit_on(&env, &sha, "c.txt", "c\n");
+    point(&env, "feat", &moved);
+    assert_eq!(ok(&env, &["view", "feat"])["auto_merge"], "off");
+    let output = waiter.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains(&format!("feat moved to {moved}")),
+        "{message}"
+    );
+    assert!(!message.contains("turned off"), "{message}");
 }
 
 #[test]

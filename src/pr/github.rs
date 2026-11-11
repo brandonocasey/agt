@@ -381,8 +381,8 @@ impl Provider for Github {
         Ok(Box::new(move |image| upload(t, id, image)))
     }
 
-    /// A base that requires a merge queue takes a PR only through auto-merge, which queues it
-    /// (what `gh pr merge` does).
+    /// A base that requires a merge queue takes a PR only through auto-merge.
+    /// That queues it, as `gh pr merge` does.
     fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
         if queue_required(pr) {
             return self.enable_auto(pr, sha, how);

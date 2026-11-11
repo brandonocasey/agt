@@ -1,5 +1,6 @@
 //! What `agt pr` asks of a provider: the PR/MR host, with one implementation per forge. The
-//! shared flow in `mod.rs` names no forge and reads no field that only one host sets.
+//! shared flow in `mod.rs` names no forge.
+//! It reads no field that only one host sets.
 
 use std::fmt;
 
@@ -36,8 +37,8 @@ impl fmt::Display for At {
 
 /// What a merge or an auto-merge request came to.
 pub enum Outcome {
-    /// The request went through; a forge may only have queued it, so the PR/MR is read again to
-    /// tell.
+    /// The request went through.
+    /// A forge may only have queued it, so the PR/MR is read again to tell.
     Done,
     /// The provider waited on gates and gave up: these still fail.
     Pending(Vec<String>),
@@ -45,11 +46,11 @@ pub enum Outcome {
 
 /// What a provider can do that the shared flow must know before it calls.
 pub struct Capabilities {
-    /// `auto-merge on` over an auto-merge that is on does nothing; a provider that waits on
-    /// gates itself waits again instead.
+    /// `auto-merge on` over an auto-merge that is on does nothing.
+    /// A provider that waits on gates itself waits again instead.
     pub resumes_auto_merge: bool,
-    /// Why `create`, `update` and `upload` are refused, for a provider with nothing to store a
-    /// title, body or label in.
+    /// Why `create`, `update` and `upload` are refused.
+    /// It is for a provider with nothing to store a title, body or label in.
     pub no_text: Option<&'static str>,
 }
 
@@ -71,8 +72,8 @@ pub struct NewPr<'a> {
 }
 
 pub trait Provider {
-    /// The address `text` (what the user typed) names; a forge refuses a PR/MR of another
-    /// repository.
+    /// The address `text` (what the user typed) names.
+    /// A forge refuses a PR/MR of another repository.
     fn at(&self, text: &str) -> Result<At>;
 
     /// Names the PR/MR in the paused auto-merge records.
@@ -116,7 +117,8 @@ pub trait Provider {
         Ok(())
     }
 
-    /// Uploads one image per call; the one lookup the host needs happens here, not per image.
+    /// Uploads one image per call.
+    /// The one lookup the host needs happens here, not per image.
     fn uploader(&self) -> Result<Uploader<'_>> {
         fail("this provider cannot upload images")
     }
@@ -126,10 +128,12 @@ pub trait Provider {
 
     fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome>;
 
-    /// Turns auto-merge off; false when it was off already, which only Forgejo can tell.
+    /// Turns auto-merge off.
+    /// False when it was off already, which only Forgejo can tell.
     fn disable_auto(&self, pr: &Pr) -> Result<bool>;
 
-    /// The method of the auto-merge `pr` has, which `off` records; `None` when it is off.
+    /// The method of the auto-merge `pr` has, which `off` records.
+    /// `None` when it is off.
     /// `recorded` is what an earlier call left for a host that cannot say.
     fn auto_method(&self, pr: &Pr, recorded: Option<&str>) -> Option<String>;
 
@@ -157,7 +161,8 @@ pub trait Provider {
     }
 }
 
-/// The open PR/MR of the repository itself (not a fork), else the newest of any state.
+/// The open PR/MR of the repository itself (not a fork).
+/// Else the newest of any state.
 pub fn open_first(mut found: Vec<Pr>) -> Option<Pr> {
     found.retain(|pr| pr.same_repo);
     let at = found

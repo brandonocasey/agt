@@ -1,5 +1,5 @@
-//! The repository of the selected tracker, with the service that talks to its forge: what the
-//! GitHub, GitLab and Forgejo providers share.
+//! The repository of the selected tracker, with the service that talks to its forge.
+//! The GitHub, GitLab and Forgejo providers share it.
 
 use super::provider::At;
 use crate::core::config::{Config, Kind};
