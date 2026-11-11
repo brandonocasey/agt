@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use super::{GITLINK, Repo};
+use super::{GITLINK, Repo, error_lines};
 use crate::core::error::Result;
 use crate::core::shell::quote;
 
@@ -165,17 +165,7 @@ fn run(repo: &Repo, command: &[&str], path: Option<PathBuf>) -> Result<Update> {
         quote(&repo.root().display().to_string()),
         words.join(" ")
     );
-    let message: Vec<&str> = error
-        .lines()
-        .map(|line| {
-            let line = line.trim();
-            ["error: ", "fatal: "]
-                .iter()
-                .find_map(|prefix| line.strip_prefix(prefix))
-                .unwrap_or(line)
-        })
-        .filter(|line| !line.is_empty())
-        .collect();
+    let message: Vec<&str> = error_lines(&error).collect();
     // `--no-overwrite-ignore` makes git count an ignored file as untracked. The message is reworded
     // to name both.
     let message = message.join(" ").replace(

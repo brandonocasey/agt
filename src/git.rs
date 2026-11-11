@@ -1095,6 +1095,24 @@ pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
         .filter(|field| !field.is_empty())
 }
 
+/// The lines of git's stderr that say what failed, trimmed and without `error:` or `fatal:`.
+/// Progress text that a carriage return overwrites on a terminal is left out.
+pub fn error_lines(stderr: &str) -> impl Iterator<Item = &str> {
+    stderr
+        .lines()
+        .map(|line| {
+            let line = line
+                .rsplit_once('\r')
+                .map_or(line, |(_, shown)| shown)
+                .trim();
+            ["error: ", "fatal: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .unwrap_or(line)
+        })
+        .filter(|line| !line.is_empty())
+}
+
 /// The revision range `from..to`, or all of `to` when `from` is `None`.
 fn range(from: Option<&str>, to: &str) -> String {
     match from {

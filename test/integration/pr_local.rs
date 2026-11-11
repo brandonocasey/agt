@@ -1133,6 +1133,8 @@ fn a_rebase_that_stops_without_conflicts_reports_the_git_error() {
     assert!(message.contains("hook says no"), "{message}");
     assert!(!message.contains("conflicts in"), "{message}");
     assert!(message.contains("the rebase was aborted"), "{message}");
+    assert!(!message.trim_end().contains(['\r', '\n']), "{message:?}");
+    assert!(!message.contains("hint:"), "{message}");
 }
 
 #[test]
@@ -1168,6 +1170,7 @@ fn a_hook_that_refuses_the_rebase_leaves_everything_as_it_was() {
 
     let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
     assert!(message.contains("no rebases today"), "{message}");
+    assert!(!message.trim_end().contains('\n'), "{message:?}");
 }
 
 /// A commit made after the head was checked is not merged unseen.
