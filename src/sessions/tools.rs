@@ -28,7 +28,7 @@ static PREAMBLE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // Commands whose first plain argument names what they did, as in `git status`.
-const SUBCOMMANDS: [&str; 30] = [
+const SUBCOMMANDS: [&str; 31] = [
     "agt",
     "aws",
     "brew",
@@ -56,6 +56,7 @@ const SUBCOMMANDS: [&str; 30] = [
     "pnpm",
     "poetry",
     "rustup",
+    "tea",
     "terraform",
     "uv",
     "yarn",
