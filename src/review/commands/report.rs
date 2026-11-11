@@ -832,13 +832,13 @@ fn summary_text(summary: &Value, section: Section) -> String {
                     |number| {
                         // GitHub and Forgejo say `#12`, GitLab `!12`.
                         // From the URL's path, so self-hosted GitHub and Forgejo count too.
-                        let hash = entry["url"].as_str().is_some_and(|url| {
+                        let uses_hash = entry["url"].as_str().is_some_and(|url| {
                             matches!(
                                 crate::forge::parse_pr(url).ok().and_then(|pr| pr.forge),
                                 Some(Forge::Github | Forge::Forgejo)
                             )
                         });
-                        format!("{}{number}", if hash { '#' } else { '!' })
+                        format!("{}{number}", if uses_hash { '#' } else { '!' })
                     },
                 ),
                 entry["branch"].as_str().unwrap_or("-").to_owned(),
