@@ -487,7 +487,8 @@ fn automatic_push_attaches_only_the_changed_child_and_its_ancestors() {
     assert_eq!(env.issue(&["show", key(&parent)])["key"], "o/r#1");
 }
 
-fn refresh_outside_listing(fake: &dyn IssueFake) {
+/// `refreshed` is how many hierarchies the second sync reports: none on a host without parents.
+fn refresh_outside_listing(fake: &dyn IssueFake, refreshed: u64) {
     let env = Env::new();
     env.write_config(&fake.config(false));
     fake.serve(
@@ -501,16 +502,20 @@ fn refresh_outside_listing(fake: &dyn IssueFake) {
     fake.serve_issue(&env, &child);
     let report = env.issue(&["sync"]);
     assert_eq!(report["trackers"][0]["listed"], 0);
-    assert_eq!(report["trackers"][0]["hierarchy_refreshed"], 2);
+    assert_eq!(report["trackers"][0]["hierarchy_refreshed"], refreshed);
     assert_eq!(env.issue(&["show", "2"])["parent"], Value::Null);
 }
 #[test]
 fn github_refreshes_hierarchy_outside_the_changed_listing() {
-    refresh_outside_listing(&Github);
+    refresh_outside_listing(&Github, 2);
 }
 #[test]
 fn gitlab_refreshes_hierarchy_outside_the_changed_listing() {
-    refresh_outside_listing(&Gitlab);
+    refresh_outside_listing(&Gitlab, 2);
+}
+#[test]
+fn forgejo_counts_no_hierarchy_outside_the_changed_listing() {
+    refresh_outside_listing(&Forgejo, 0);
 }
 
 #[test]
@@ -1163,8 +1168,9 @@ fn forgejo_pulls_no_hierarchy() {
             Spec::new(2, "Child").parent(1),
         ],
     );
-    env.issue(&["sync"]);
-    // The issue is read once: no second read stands in for a hierarchy request.
+    let report = env.issue(&["sync"]);
+    assert_eq!(report["trackers"][0]["hierarchy_refreshed"], 0);
+    // Sync reads the issue once and sends no hierarchy request.
     let calls = env.forge_calls();
     let reads = calls
         .iter()

@@ -90,10 +90,7 @@ pub(super) fn sync_tracker(
         index: &index,
         login: &login,
         now: &now,
-        has_hierarchy: tracker
-            .doc
-            .forge
-            .is_some_and(|forge| service::kind(forge).issue_caps.hierarchy),
+        has_hierarchy: tracker.sends_parent(),
     };
     let mut counts = Counts::default();
     let mut refreshed_numbers = HashSet::new();
@@ -156,8 +153,8 @@ struct Counts {
     hierarchy_refreshed: usize,
 }
 
-/// Brings one listed issue up to date; true when its hierarchy needs no refresh by
-/// [`refresh_cached`] this sync.
+/// Brings one listed issue up to date. Returns true when [`refresh_cached`] can skip its
+/// hierarchy.
 fn sync_listed(
     pass: &Pass,
     data: &IssueData,
@@ -176,13 +173,16 @@ fn sync_listed(
     if current {
         counts.unchanged += 1;
         // A host without parents has no hierarchy to refresh on an issue it just listed.
-        if !pass.has_hierarchy || hierarchy_budget.is_some() {
-            return Ok(!pass.has_hierarchy);
+        if !pass.has_hierarchy {
+            return Ok(true);
+        }
+        if hierarchy_budget.is_some() {
+            return Ok(false);
         }
     }
     let mut hierarchy = listed_hierarchy(pass, data.number)?;
     hierarchy.parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
-    counts.hierarchy_refreshed += 1;
+    counts.hierarchy_refreshed += usize::from(pass.has_hierarchy);
     if current {
         counts.conflicts +=
             store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
@@ -218,7 +218,7 @@ fn sync_listed(
     Ok(true)
 }
 
-/// The parent and children of an issue the host just listed; none on a host without parents.
+/// The parent and children of an issue the host just listed. A host without parents gives none.
 fn listed_hierarchy(pass: &Pass, number: u64) -> Result<IssueHierarchy> {
     if !pass.has_hierarchy {
         return Ok(IssueHierarchy::default());
@@ -233,8 +233,8 @@ fn listed_hierarchy(pass: &Pass, number: u64) -> Result<IssueHierarchy> {
         })
 }
 
-/// Refreshes the hierarchy of the cached issues that `refreshed_numbers` lacks, at most
-/// `hierarchy_budget` of them from the tracker's cursor; returns the keys the host no longer
+/// Refreshes the hierarchy of cached issues that `refreshed_numbers` lacks. It takes at most
+/// `hierarchy_budget` of them, after the tracker's cursor. Returns the keys the host no longer
 /// has, sorted, and how many issues were left to refresh.
 fn refresh_cached(
     pass: &Pass,
@@ -280,7 +280,7 @@ fn refresh_cached(
                     Ok(count)
                 },
             )?;
-            counts.hierarchy_refreshed += 1;
+            counts.hierarchy_refreshed += usize::from(pass.has_hierarchy);
         } else {
             unavailable.push(existing.key.clone());
         }
