@@ -1,6 +1,8 @@
 //! `sync`: list what changed on each configured tracker, fetch those issues and merge them into
 //! the local copies.
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use super::hierarchy::Index;
@@ -9,7 +11,7 @@ use super::trackers::{self, Tracker};
 use crate::core::clock;
 use crate::core::config;
 use crate::core::error::{Error, Result};
-use crate::forge::issue::{IssueData, ListQuery};
+use crate::forge::issue::{IssueData, IssueHierarchy, ListQuery};
 use crate::forge::markers::is_landed_as;
 use crate::forge::service::{self, IssueService, IssueSubject};
 use crate::store::Store;
@@ -80,131 +82,25 @@ pub(super) fn sync_tracker(
         login: &login,
     })?;
     let claimed = claim_created(store, &tracker, &listed, &login)?;
-    let (mut new, mut updated, mut unchanged, mut conflicts) = (0, 0, 0, 0);
     let index = Index::load(store, &tracker)?;
-    let mut refreshed_numbers = std::collections::HashSet::new();
-    let mut hierarchy_refreshed = 0;
+    let pass = Pass {
+        store,
+        tracker: &tracker,
+        service: service.as_ref(),
+        index: &index,
+        login: &login,
+        now: &now,
+        has_hierarchy: tracker.sends_parent(),
+    };
+    let mut counts = Counts::default();
+    let mut refreshed_numbers = HashSet::new();
     for data in &listed {
-        let name = data.number.to_string();
-        let existing = store.load_doc::<Issue>(&tracker.dir, &name)?;
-        let current = existing.as_ref().is_some_and(|issue| {
-            issue
-                .remote
-                .as_ref()
-                .is_some_and(|remote| remote.updated_at == data.updated_at)
-        });
-        if current {
-            unchanged += 1;
-            if hierarchy_budget.is_some() {
-                continue;
-            }
-        }
-        let mut hierarchy = service
-            .hierarchy(IssueSubject {
-                repo: &tracker.doc.repo,
-                number: data.number,
-            })?
-            .ok_or_else(|| {
-                Error(format!(
-                    "listed issue {}#{} is no longer available; retry sync",
-                    tracker.doc.repo, data.number
-                ))
-            })?;
-        hierarchy.parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
-        if current {
-            let count = store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
-                index.normalize(issue);
-                let count = merge::apply_parent(issue, &hierarchy.parent, hierarchy.task, &now);
-                issue.sub_issues.clone_from(&hierarchy.children);
-                Ok(count)
-            })?;
-            conflicts += count;
+        if sync_listed(&pass, data, hierarchy_budget, &mut counts)? {
             refreshed_numbers.insert(data.number);
-            hierarchy_refreshed += 1;
-            continue;
-        }
-        let mut fetched = service.fetch_issue(IssueSubject {
-            repo: &tracker.doc.repo,
-            number: data.number,
-        })?;
-        fetched.issue.parent = hierarchy.parent;
-        fetched.issue.task = hierarchy.task;
-        let merged = store.update_doc(
-            &tracker.dir,
-            &name,
-            || merge::from_remote(&tracker.doc.key, &tracker.doc.repo, data, &now),
-            |issue| {
-                index.normalize(issue);
-                issue.sub_issues.clone_from(&hierarchy.children);
-                Ok(merge::apply(issue, &fetched, &login, &now))
-            },
-        )?;
-        refreshed_numbers.insert(data.number);
-        hierarchy_refreshed += 1;
-        conflicts += merged.conflicts;
-        if existing.is_some() {
-            updated += 1;
-        } else {
-            new += 1;
         }
     }
-    let mut unavailable = Vec::new();
-    let mut cached: Vec<_> = index
-        .issues()
-        .filter(|issue| {
-            issue
-                .number
-                .is_some_and(|number| !refreshed_numbers.contains(&number))
-        })
-        .collect();
-    cached.sort_unstable_by_key(|issue| issue.number.unwrap());
-    if hierarchy_budget.is_some() {
-        cached.retain(|issue| {
-            tracker
-                .doc
-                .hierarchy_cursor
-                .is_none_or(|cursor| issue.number.unwrap() > cursor)
-        });
-    }
-    let remaining = cached.len();
-    let limit = hierarchy_budget.unwrap_or(remaining);
-    for (position, existing) in cached.into_iter().take(limit).enumerate() {
-        let hierarchy = service.hierarchy(IssueSubject {
-            repo: &tracker.doc.repo,
-            number: existing.number.unwrap(),
-        })?;
-        if let Some(hierarchy) = hierarchy {
-            let parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
-            conflicts += store.update_existing_doc(
-                &tracker.dir,
-                &existing.doc_name(),
-                |issue: &mut Issue| {
-                    index.normalize(issue);
-                    let count = merge::apply_parent(issue, &parent, hierarchy.task, &now);
-                    issue.sub_issues.clone_from(&hierarchy.children);
-                    Ok(count)
-                },
-            )?;
-            hierarchy_refreshed += 1;
-        } else {
-            unavailable.push(existing.key.clone());
-        }
-        if hierarchy_budget.is_some() {
-            store.update_existing_doc(
-                &tracker.dir,
-                TRACKER_FILE,
-                |doc: &mut crate::store::issues::TrackerDoc| {
-                    doc.hierarchy_cursor = if position + 1 == remaining {
-                        None
-                    } else {
-                        existing.number
-                    };
-                    Ok(())
-                },
-            )?;
-        }
-    }
-    unavailable.sort();
+    let (unavailable, remaining) =
+        refresh_cached(&pass, &refreshed_numbers, hierarchy_budget, &mut counts)?;
     let newest = listed.iter().map(|data| data.updated_at.clone()).max();
     store.update_doc(
         &tracker.dir,
@@ -226,14 +122,184 @@ pub(super) fn sync_tracker(
     Ok(json!({
         "tracker": tracker.doc.key,
         "listed": listed.len(),
-        "hierarchy_refreshed": hierarchy_refreshed,
+        "hierarchy_refreshed": counts.hierarchy_refreshed,
         "unavailable": unavailable,
-        "new": new,
-        "updated": updated,
-        "unchanged": unchanged,
+        "new": counts.new,
+        "updated": counts.updated,
+        "unchanged": counts.unchanged,
         "claimed": claimed,
-        "conflicts": conflicts,
+        "conflicts": counts.conflicts,
     }))
+}
+
+/// What one sync of a tracker reads and writes through.
+struct Pass<'a> {
+    store: &'a Store,
+    tracker: &'a Tracker,
+    service: &'a dyn IssueService,
+    index: &'a Index,
+    login: &'a str,
+    now: &'a str,
+    /// The host links issues as parent and child (`IssueCaps::hierarchy`).
+    has_hierarchy: bool,
+}
+
+#[derive(Default)]
+struct Counts {
+    new: usize,
+    updated: usize,
+    unchanged: usize,
+    conflicts: usize,
+    hierarchy_refreshed: usize,
+}
+
+/// Brings one listed issue up to date. Returns true when [`refresh_cached`] can skip its
+/// hierarchy.
+fn sync_listed(
+    pass: &Pass,
+    data: &IssueData,
+    hierarchy_budget: Option<usize>,
+    counts: &mut Counts,
+) -> Result<bool> {
+    let (store, tracker, index, now) = (pass.store, pass.tracker, pass.index, pass.now);
+    let name = data.number.to_string();
+    let existing = store.load_doc::<Issue>(&tracker.dir, &name)?;
+    let current = existing.as_ref().is_some_and(|issue| {
+        issue
+            .remote
+            .as_ref()
+            .is_some_and(|remote| remote.updated_at == data.updated_at)
+    });
+    if current {
+        counts.unchanged += 1;
+        // A host without parents has no hierarchy to refresh on an issue it just listed.
+        if !pass.has_hierarchy {
+            return Ok(true);
+        }
+        if hierarchy_budget.is_some() {
+            return Ok(false);
+        }
+    }
+    let mut hierarchy = listed_hierarchy(pass, data.number)?;
+    hierarchy.parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
+    counts.hierarchy_refreshed += usize::from(pass.has_hierarchy);
+    if current {
+        counts.conflicts +=
+            store.update_existing_doc(&tracker.dir, &name, |issue: &mut Issue| {
+                index.normalize(issue);
+                let count = merge::apply_parent(issue, &hierarchy.parent, hierarchy.task, now);
+                issue.sub_issues.clone_from(&hierarchy.children);
+                Ok(count)
+            })?;
+        return Ok(true);
+    }
+    let mut fetched = pass.service.fetch_issue(IssueSubject {
+        repo: &tracker.doc.repo,
+        number: data.number,
+    })?;
+    fetched.issue.parent = hierarchy.parent;
+    fetched.issue.task = hierarchy.task;
+    let merged = store.update_doc(
+        &tracker.dir,
+        &name,
+        || merge::from_remote(&tracker.doc.key, &tracker.doc.repo, data, now),
+        |issue| {
+            index.normalize(issue);
+            issue.sub_issues.clone_from(&hierarchy.children);
+            Ok(merge::apply(issue, &fetched, pass.login, now))
+        },
+    )?;
+    counts.conflicts += merged.conflicts;
+    if existing.is_some() {
+        counts.updated += 1;
+    } else {
+        counts.new += 1;
+    }
+    Ok(true)
+}
+
+/// The parent and children of an issue the host just listed. A host without parents gives none.
+fn listed_hierarchy(pass: &Pass, number: u64) -> Result<IssueHierarchy> {
+    if !pass.has_hierarchy {
+        return Ok(IssueHierarchy::default());
+    }
+    let repo = &pass.tracker.doc.repo;
+    pass.service
+        .hierarchy(IssueSubject { repo, number })?
+        .ok_or_else(|| {
+            Error(format!(
+                "listed issue {repo}#{number} is no longer available; retry sync"
+            ))
+        })
+}
+
+/// Refreshes up to `hierarchy_budget` cached issues that `refreshed_numbers` lacks, after the
+/// tracker's cursor. Returns the sorted keys the host no longer has, and how many remain.
+fn refresh_cached(
+    pass: &Pass,
+    refreshed_numbers: &HashSet<u64>,
+    hierarchy_budget: Option<usize>,
+    counts: &mut Counts,
+) -> Result<(Vec<String>, usize)> {
+    let (store, tracker, index) = (pass.store, pass.tracker, pass.index);
+    let mut unavailable = Vec::new();
+    let mut cached: Vec<_> = index
+        .issues()
+        .filter(|issue| {
+            issue
+                .number
+                .is_some_and(|number| !refreshed_numbers.contains(&number))
+        })
+        .collect();
+    cached.sort_unstable_by_key(|issue| issue.number.unwrap());
+    if hierarchy_budget.is_some() {
+        cached.retain(|issue| {
+            tracker
+                .doc
+                .hierarchy_cursor
+                .is_none_or(|cursor| issue.number.unwrap() > cursor)
+        });
+    }
+    let remaining = cached.len();
+    let limit = hierarchy_budget.unwrap_or(remaining);
+    for (position, existing) in cached.into_iter().take(limit).enumerate() {
+        let hierarchy = pass.service.hierarchy(IssueSubject {
+            repo: &tracker.doc.repo,
+            number: existing.number.unwrap(),
+        })?;
+        if let Some(hierarchy) = hierarchy {
+            let parent = hierarchy.parent.map(|key| index.canonical(&key).to_owned());
+            counts.conflicts += store.update_existing_doc(
+                &tracker.dir,
+                &existing.doc_name(),
+                |issue: &mut Issue| {
+                    index.normalize(issue);
+                    let count = merge::apply_parent(issue, &parent, hierarchy.task, pass.now);
+                    issue.sub_issues.clone_from(&hierarchy.children);
+                    Ok(count)
+                },
+            )?;
+            counts.hierarchy_refreshed += usize::from(pass.has_hierarchy);
+        } else {
+            unavailable.push(existing.key.clone());
+        }
+        if hierarchy_budget.is_some() {
+            store.update_existing_doc(
+                &tracker.dir,
+                TRACKER_FILE,
+                |doc: &mut crate::store::issues::TrackerDoc| {
+                    doc.hierarchy_cursor = if position + 1 == remaining {
+                        None
+                    } else {
+                        existing.number
+                    };
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    unavailable.sort();
+    Ok((unavailable, remaining))
 }
 
 /// Local issues whose create was sent but whose response was lost: the host's copy carries the

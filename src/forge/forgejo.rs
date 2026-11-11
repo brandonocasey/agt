@@ -51,10 +51,10 @@ pub fn connect(host: &str) -> Forgejo {
 /// The shared fields of a REST pull request node.
 pub fn pull_node(node: &Value) -> PullNode {
     let text = |pointer: &str| forge::text(node, pointer).unwrap_or_default();
+    let title = text("/title");
     PullNode {
         number: node["number"].as_u64(),
         url: text("/html_url"),
-        title: text("/title"),
         state: state_of(node),
         merged: node["merged"].as_bool() == Some(true),
         closed_at: forge::text(node, "/closed_at").or_else(|| forge::text(node, "/merged_at")),
@@ -70,8 +70,20 @@ pub fn pull_node(node: &Value) -> PullNode {
         },
         created_at: forge::text(node, "/created_at"),
         author: forge::text(node, "/user/login"),
-        draft: node["draft"].as_bool() == Some(true),
+        draft: node["draft"].as_bool() == Some(true) || plain(&title) != title,
+        title,
     }
+}
+
+/// The title without a draft marker such as `WIP: `.
+pub fn plain(title: &str) -> &str {
+    let lower = title.to_lowercase();
+    for marker in ["wip: ", "wip:", "[wip] ", "[wip]"] {
+        if lower.starts_with(marker) {
+            return title[marker.len()..].trim_start();
+        }
+    }
+    title
 }
 
 /// The state of a pull request node: a merged one is `closed` on the host, with `merged` set.
@@ -507,6 +519,84 @@ fn fetch(forgejo: &dyn Transport, repo: &str, number: u64) -> Result<Fetched> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::contract::{self, Replay};
+    use crate::forge::transport::tea_args;
+
+    const VARS: [(&str, &str); 6] = [
+        ("HEAD", "1111111111111111111111111111111111111111"),
+        ("BASE", "2222222222222222222222222222222222222222"),
+        ("HOST", "codeberg.org"),
+        ("REPO", "me/proj"),
+        ("NUMBER", "5"),
+        ("AUTHOR", "me"),
+    ];
+    const PULL: &str = "repos/me/proj/pulls/5";
+
+    fn subject() -> ReviewSubject<'static> {
+        ReviewSubject {
+            repo: "me/proj",
+            number: 5,
+        }
+    }
+
+    fn tea(request: &Request) -> Vec<String> {
+        tea_args(request, "codeberg")
+    }
+
+    fn forgejo() -> Forgejo {
+        let get = ["api", "--login", "codeberg", "-i", "-X", "GET"];
+        let replay = [
+            (PULL.to_owned(), "pr"),
+            (format!("{PULL}/reviews?limit=50&page=1"), "reviews"),
+            (format!("{PULL}/reviews/5004/comments"), "review-comments"),
+            ("repos/me/proj/issues/5/comments".to_owned(), "comments"),
+        ]
+        .into_iter()
+        .fold(Replay::new(tea), |replay, (path, name)| {
+            let fixture = contract::fixture(&format!("forgejo/{name}.json"), &VARS);
+            replay.answer(&[&get[..], &[path.as_str()]].concat(), fixture)
+        });
+        Forgejo::new(Box::new(replay))
+    }
+
+    #[test]
+    fn capabilities_match_the_contract() {
+        contract::golden(
+            "forgejo/capabilities.json",
+            &contract::capabilities(&forgejo()),
+        );
+    }
+
+    #[test]
+    fn fetch_reads_the_contract_fixtures() {
+        let fetched = forgejo().fetch(subject()).unwrap();
+        contract::golden("forgejo/fetched.golden.json", &contract::dump(&fetched));
+    }
+
+    #[test]
+    fn requests_render_to_the_canonical_argv() {
+        let forgejo = forgejo();
+        let thread = RemoteThread::new(RemoteKind::General, "8000".to_owned(), false);
+        let position = Position {
+            commit: "c".to_owned(),
+            data: json!({ "path": "a.txt", "new_position": 3 }),
+        };
+        let all = [
+            (
+                "review_batch",
+                forgejo.review_batch(subject(), "c", "summary", &[(position, "text".to_owned())]),
+            ),
+            ("thread", forgejo.thread(subject(), "text")),
+            ("note", forgejo.note(subject(), "text")),
+            ("edit_note", forgejo.edit_note(subject(), "8000", "text")),
+            ("reply", forgejo.reply(subject(), &thread, "text")),
+            ("approve", forgejo.approve(subject(), "c", Some("ok"))),
+        ];
+        contract::golden(
+            "forgejo/requests.golden.json",
+            &contract::requests(tea, &all),
+        );
+    }
 
     #[test]
     fn a_merged_pull_request_is_merged_though_the_host_calls_it_closed() {
@@ -523,6 +613,13 @@ mod tests {
         assert_eq!(pull.closed_at.as_deref(), Some("2026-10-02T00:00:00Z"));
         assert_eq!(pull.same_repo, Some(true));
         assert_eq!(pull.head_branch, "topic");
+        assert!(!pull.draft);
+        for title in ["WIP: t", "[wip] t"] {
+            assert!(
+                pull_node(&json!({"title": title, "draft": false})).draft,
+                "{title}"
+            );
+        }
         let closed = json!({"state": "closed", "merged": false, "head": {"repo": null}});
         assert_eq!(pull_node(&closed).state, Some(ReviewState::Closed));
         assert_eq!(pull_node(&closed).same_repo, None);

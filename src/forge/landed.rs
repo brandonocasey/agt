@@ -67,9 +67,9 @@ impl Source {
         })
     }
 
-    /// The pull request tracker a command picks with no `--remote` or PR/MR URL, as `agt pr`
-    /// does (`origin` by default); `None` when no tracker serves pull requests or its host is no
-    /// GitHub or GitLab host that agt can identify.
+    /// The pull request tracker a command picks without `--remote` or a PR/MR URL: `origin` by
+    /// default, as `agt pr` does. `None` when no tracker serves pull requests, or agt cannot
+    /// identify the host's service.
     pub fn chosen(repo: &Repo) -> Result<Option<Self>> {
         let config = Config::load_for_repo(repo)?;
         let Some(selected) = select::select_tracker(repo, &config, Kind::PullRequests, None, None)?

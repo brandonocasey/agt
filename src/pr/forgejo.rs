@@ -8,7 +8,7 @@ use super::remote::{self, Remote};
 use super::upload::Uploader;
 use super::{Changes, How, Native, Pr, State};
 use crate::core::error::{Error, Result, fail};
-use crate::forge::forgejo::{self, pull_node};
+use crate::forge::forgejo::{self, plain, pull_node};
 use crate::forge::issue::names;
 use crate::forge::service::{Method, Request};
 use crate::forge::transport::Transport;
@@ -24,20 +24,9 @@ fn base(repo: &str) -> String {
     format!("repos/{repo}/pulls")
 }
 
-/// The title without a draft marker.
-fn plain(title: &str) -> &str {
-    let lower = title.to_lowercase();
-    for marker in ["wip: ", "wip:", "[wip] ", "[wip]"] {
-        if lower.starts_with(marker) {
-            return title[marker.len()..].trim_start();
-        }
-    }
-    title
-}
-
 fn pr(node: &Value) -> Pr {
     let shared = pull_node(node);
-    let draft = shared.draft || plain(&shared.title) != shared.title;
+    let draft = shared.draft;
     let state = shared.state.unwrap_or(ReviewState::Open);
     let (mergeable, merge_state) = match (state, node["mergeable"].as_bool()) {
         (ReviewState::Open, Some(false)) => ("conflicting", "conflict"),

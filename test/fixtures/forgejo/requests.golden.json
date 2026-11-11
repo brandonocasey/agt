@@ -1,0 +1,121 @@
+{
+  "review_batch": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "POST",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/pulls/5/reviews"
+    ],
+    "body": {
+      "commit_id": "c",
+      "event": "COMMENT",
+      "body": "summary",
+      "comments": [
+        {
+          "path": "a.txt",
+          "new_position": 3,
+          "body": "text"
+        }
+      ]
+    }
+  },
+  "thread": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "POST",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/issues/5/comments"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "note": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "POST",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/issues/5/comments"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "edit_note": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "PATCH",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/issues/comments/8000"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "reply": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "POST",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/issues/5/comments"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "approve": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "POST",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/pulls/5/reviews"
+    ],
+    "body": {
+      "commit_id": "c",
+      "event": "APPROVED",
+      "body": "ok"
+    }
+  }
+}

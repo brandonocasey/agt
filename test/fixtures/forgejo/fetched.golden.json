@@ -1,0 +1,185 @@
+{
+  "pr": {
+    "repo": "me/proj",
+    "url": "https://codeberg.org/me/proj/pulls/5",
+    "state": "open",
+    "closed_at": null,
+    "head_branch": "feat",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "base_sha": "2222222222222222222222222222222222222222",
+    "start_sha": null,
+    "author": "me"
+  },
+  "threads": [
+    {
+      "remote": {
+        "kind": "review-thread",
+        "id": "6001",
+        "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-6001",
+        "resolvable": true,
+        "outdated": null,
+        "path": "a.txt",
+        "old_path": null,
+        "line": 3,
+        "old_line": null,
+        "original_line": 3,
+        "start_line": null,
+        "original_start_line": null,
+        "side": "new",
+        "commit": "1111111111111111111111111111111111111111",
+        "review_state": null
+      },
+      "resolved": true,
+      "position_head": null,
+      "comments": [
+        {
+          "id": "6001",
+          "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-6001",
+          "body": "Bot finding on line 3.",
+          "created_at": "2026-10-13T11:00:01Z",
+          "login": "dj-bot",
+          "editor": null,
+          "review_id": "5004"
+        },
+        {
+          "id": "6002",
+          "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-6002",
+          "body": "Same line, a second remark.",
+          "created_at": "2026-10-13T09:05:00Z",
+          "login": "me",
+          "editor": null,
+          "review_id": "5004"
+        }
+      ]
+    },
+    {
+      "remote": {
+        "kind": "review-thread",
+        "id": "6003",
+        "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-6003",
+        "resolvable": true,
+        "outdated": null,
+        "path": "a.txt",
+        "old_path": null,
+        "line": null,
+        "old_line": 2,
+        "original_line": null,
+        "start_line": null,
+        "original_start_line": null,
+        "side": "old",
+        "commit": "1111111111111111111111111111111111111111",
+        "review_state": null
+      },
+      "resolved": false,
+      "position_head": null,
+      "comments": [
+        {
+          "id": "6003",
+          "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-6003",
+          "body": "A removed line.",
+          "created_at": "2026-10-13T11:10:00Z",
+          "login": "dj-bot",
+          "editor": null,
+          "review_id": "5004"
+        }
+      ]
+    },
+    {
+      "remote": {
+        "kind": "review",
+        "id": "5003",
+        "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-5003",
+        "resolvable": false,
+        "outdated": null,
+        "path": null,
+        "old_path": null,
+        "line": null,
+        "old_line": null,
+        "original_line": null,
+        "start_line": null,
+        "original_start_line": null,
+        "side": null,
+        "commit": null,
+        "review_state": "APPROVED"
+      },
+      "resolved": false,
+      "position_head": null,
+      "comments": [
+        {
+          "id": "5003",
+          "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-5003",
+          "body": "Looks good to me.",
+          "created_at": "2026-10-13T10:00:00Z",
+          "login": "alice",
+          "editor": null,
+          "review_id": null
+        }
+      ]
+    },
+    {
+      "remote": {
+        "kind": "general",
+        "id": "7001",
+        "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-7001",
+        "resolvable": false,
+        "outdated": null,
+        "path": null,
+        "old_path": null,
+        "line": null,
+        "old_line": null,
+        "original_line": null,
+        "start_line": null,
+        "original_start_line": null,
+        "side": null,
+        "commit": null,
+        "review_state": null
+      },
+      "resolved": false,
+      "position_head": null,
+      "comments": [
+        {
+          "id": "7001",
+          "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-7001",
+          "body": "Please add a test.",
+          "created_at": "2026-10-14T07:00:00Z",
+          "login": "alice",
+          "editor": null,
+          "review_id": null
+        }
+      ]
+    },
+    {
+      "remote": {
+        "kind": "general",
+        "id": "7002",
+        "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-7002",
+        "resolvable": false,
+        "outdated": null,
+        "path": null,
+        "old_path": null,
+        "line": null,
+        "old_line": null,
+        "original_line": null,
+        "start_line": null,
+        "original_start_line": null,
+        "side": null,
+        "commit": null,
+        "review_state": null
+      },
+      "resolved": false,
+      "position_head": null,
+      "comments": [
+        {
+          "id": "7002",
+          "url": "https://codeberg.org/me/proj/pulls/5#issuecomment-7002",
+          "body": "Done.",
+          "created_at": "2026-10-14T08:00:00Z",
+          "login": "me",
+          "editor": null,
+          "review_id": null
+        }
+      ]
+    }
+  ],
+  "drafts": []
+}

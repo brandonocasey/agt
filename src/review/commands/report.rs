@@ -830,13 +830,15 @@ fn summary_text(summary: &Value, section: Section) -> String {
                 entry["mr"].as_u64().map_or_else(
                     || "-".to_owned(),
                     |number| {
-                        // GitHub says `#12`, GitLab `!12`.
-                        // From the URL's path, so GitHub Enterprise hosts count as GitHub.
-                        let github = entry["url"].as_str().is_some_and(|url| {
-                            crate::forge::parse_pr(url).ok().and_then(|pr| pr.forge)
-                                == Some(Forge::Github)
+                        // GitHub and Forgejo say `#12`, GitLab `!12`.
+                        // From the URL's path, so self-hosted GitHub and Forgejo count too.
+                        let uses_hash = entry["url"].as_str().is_some_and(|url| {
+                            matches!(
+                                crate::forge::parse_pr(url).ok().and_then(|pr| pr.forge),
+                                Some(Forge::Github | Forge::Forgejo)
+                            )
                         });
-                        format!("{}{number}", if github { '#' } else { '!' })
+                        format!("{}{number}", if uses_hash { '#' } else { '!' })
                     },
                 ),
                 entry["branch"].as_str().unwrap_or("-").to_owned(),
@@ -1081,6 +1083,12 @@ mod tests {
             summary_text(&enterprise, Section::All)
                 .lines()
                 .any(|line| line.starts_with("#6"))
+        );
+        let forgejo = json!({"targets": [{"mr": 7, "url": "https://codeberg.org/o/r/pulls/7", "branch": "f"}]});
+        assert!(
+            summary_text(&forgejo, Section::All)
+                .lines()
+                .any(|line| line.starts_with("#7"))
         );
         let other = json!({"targets": [
             {"mr": 5, "url": "https://git.example/o/pull/-/merge_requests/5", "branch": "x"}
