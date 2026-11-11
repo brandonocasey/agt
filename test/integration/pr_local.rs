@@ -1125,13 +1125,7 @@ fn a_rebase_stops_for_an_ignored_file_where_it_would_write_a_directory() {
 
 /// Makes git sign every commit of the repository and show signatures in `git log`.
 fn sign_commits(env: &Env) {
-    let key = env.path("signing-key");
-    let made = std::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-        .arg(&key)
-        .status()
-        .unwrap();
-    assert!(made.success());
+    let key = env.signing_key();
     let settings = [
         ("gpg.format", "ssh"),
         ("user.signingkey", key.to_str().unwrap()),
