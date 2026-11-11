@@ -10,7 +10,7 @@ const FINDING: &str = "<!-- review-finding v1 id=";
 const RECORD: &str = "<!-- review-record v2 ";
 const QA_RECORD: &str = "<!-- qa-record v1 ";
 const CLOSE: &str = "-->";
-/// Local id prefix of the body of a GitHub review that `publish` posts; sync skips those.
+/// Local id prefix of the body of a review that `publish` posts; sync skips those.
 const REVIEW_ID: &str = "review/";
 const RECORD_SUFFIX: &str = "/record";
 /// Local id of the one summary comment of a PR/MR, which holds the record of every run.

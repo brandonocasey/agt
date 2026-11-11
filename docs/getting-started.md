@@ -2,7 +2,7 @@
 
 This walkthrough installs `agt` and records an issue and a review question locally.
 You need a Git checkout with at least one commit.
-A GitHub or GitLab account is unnecessary for the local commands.
+A GitHub, GitLab or Forgejo account is unnecessary for the local commands.
 
 For the broader purpose, read the [overview](../README.md).
 For command details, use the [reference](reference.md).

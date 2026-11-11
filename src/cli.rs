@@ -42,7 +42,7 @@ enum Command {
     Check(check::Cli),
     /// Wait for PR/MR checks and pipelines; GitLab failing specs versus the default branch.
     Ci(ci::Cli),
-    /// Local issues with optional GitHub and GitLab sync.
+    /// Local issues with optional GitHub, GitLab and Forgejo sync.
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
     Cleanup(cleanup::Cli),

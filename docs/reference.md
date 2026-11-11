@@ -1759,7 +1759,7 @@ push = "auto"               # this tracker, both kinds
 issues = { scope = "assigned" }   # issues only: scope (involved | assigned | all), since_days
 
 [[tracker]]                 # issues only
-forge = "gitlab"            # only for a host agt cannot identify
+forge = "gitlab"            # github, gitlab or forgejo; only for a host agt cannot identify
 host = "gitlab.example.com"
 repo = "team/tickets"
 pull_requests = false
@@ -1776,7 +1776,7 @@ publish, and the writes of `agt pr`.
 Trackers come first from the git remotes. `[sync] remotes` chooses which: `all` (the
 default) every remote (`origin`, `upstream`, then the rest by name), `origin` only `origin`,
 `none` only the configured entries. A remote becomes a tracker only when its URL names a
-repository on a host agt knows to be GitHub or GitLab. A `[[tracker]]` at the same host and
+repository on a host agt knows to be GitHub, GitLab or Forgejo. A `[[tracker]]` at the same host and
 repository (ASCII case ignored) overrides the fields of that tracker; any other entry adds one.
 `enabled = false` drops a tracker, and `issues = false` or `pull_requests = false` drops it for that
 kind. `issues` and `pull_requests` can also be a table that overrides `pull` and `push` for that
@@ -1843,7 +1843,7 @@ line on stderr per key and file:
 
 An old key and its new key in one file are an error that names both.
 
-`involved` includes issues you created, are assigned or (GitHub only) are mentioned in.
+`involved` includes issues you created, are assigned or (GitHub and Forgejo) are mentioned in.
 GitLab has no mentions filter. Credentials come from `gh`, `glab` and `tea`.
 Issues live under `<main-checkout>/.agt/issues/<tracker>/<number-or-local-id>.json`.
 Remote tracker keys are `gh-<host>-<owner>-<repo>`, `gl-<host>-<group>-<project>` or `fg-<host>-<owner>-<repo>`.

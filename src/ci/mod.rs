@@ -23,7 +23,7 @@ use crate::store::model::Forge;
 use api::Project;
 use table::Out;
 
-/// GitHub and GitLab CI: wait for checks, and triage GitLab failures.
+/// GitHub, GitLab and Forgejo CI: wait for checks, and triage GitLab failures.
 #[derive(Args)]
 pub struct Cli {
     #[command(subcommand)]

@@ -1,6 +1,6 @@
-//! `agt issue`: GitHub and GitLab issues kept locally. Reads are local, after an auto-sync of
-//! the trackers whose last sync is older than `sync.max_age_secs` (see [`auto`]); `sync` fetches;
-//! every write is queued in the local copy and sent by `push`.
+//! `agt issue`: GitHub, GitLab and Forgejo issues kept locally. Reads are local, after an
+//! auto-sync of the trackers whose last sync is older than `sync.max_age_secs` (see [`auto`]);
+//! `sync` fetches; every write is queued in the local copy and sent by `push`.
 
 mod auto;
 mod cli;
