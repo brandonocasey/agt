@@ -85,6 +85,18 @@ impl Env {
         self.root.join(name)
     }
 
+    /// A new SSH key that git can sign commits with, as the path of its private half.
+    pub fn signing_key(&self) -> PathBuf {
+        let key = self.path("signing-key");
+        let made = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        key
+    }
+
     /// `agt review` in `dir`, in the isolated environment.
     pub fn agt(&self, dir: &Path) -> Command {
         let mut command = self.bin(dir);

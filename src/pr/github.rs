@@ -2,13 +2,18 @@
 
 use serde_json::{Value, json};
 
-use super::upload::{Image, Uploaded};
-use super::{Changes, How, Pr, State};
+use super::provider::{At, Capabilities, Filter, NewPr, Outcome, Provider};
+use super::remote::{self, Remote};
+use super::upload::{Image, Uploaded, Uploader};
+use super::{Changes, How, Native, Pr, State};
 use crate::core::error::{Error, Result, fail};
 use crate::forge::service::{Method, Request, Var};
 use crate::forge::transport::{Transport, TransportError};
 use crate::forge::{self, github};
 use crate::store::model::ReviewState;
+
+/// The only host whose upload endpoint is known; GitHub Enterprise Server's is not.
+const UPLOAD_HOST: &str = "github.com";
 
 const FIELDS: &str = "id number url title state isDraft headRefName headRefOid baseRefName author{login} labels(first:100){nodes{name}} autoMergeRequest{mergeMethod} mergeable mergeStateStatus mergeQueueEntry{state} isMergeQueueEnabled isCrossRepository";
 
@@ -29,8 +34,8 @@ fn pr(node: &Value) -> Pr {
     let shared = github::pull_node(node);
     Pr {
         id: text("/id"),
-        number: shared.number.unwrap_or_default(),
-        url: shared.url,
+        number: Some(shared.number.unwrap_or_default()),
+        url: Some(shared.url),
         title: shared.title,
         body: text("/body"),
         state: shared.state.unwrap_or(ReviewState::Open),
@@ -57,10 +62,11 @@ fn pr(node: &Value) -> Pr {
             .map(str::to_lowercase),
         conflicts: mergeable == "conflicting",
         same_repo: shared.same_repo.unwrap_or(true),
-        squash: false,
         mergeable: mergeable.to_owned(),
         merge_state,
-        merge_queue: node["isMergeQueueEnabled"].as_bool().unwrap_or(false),
+        native: Native::Github {
+            merge_queue: node["isMergeQueueEnabled"].as_bool().unwrap_or(false),
+        },
     }
 }
 
@@ -240,7 +246,7 @@ pub fn update(t: &dyn Transport, repo: &str, current: &Pr, changes: &Changes) ->
     if !body.is_empty() {
         t.send(&Request::rest(
             Method::Patch,
-            format!("repos/{repo}/issues/{}", current.number),
+            format!("repos/{repo}/issues/{}", current.forge_number()),
             Some(Value::Object(body)),
         ))?;
     }
@@ -301,4 +307,114 @@ pub fn enable_auto(t: &dyn Transport, current: &Pr, sha: &str, how: How) -> Resu
 pub fn disable_auto(t: &dyn Transport, current: &Pr) -> Result<()> {
     let query = "mutation PrAutoOff($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){pullRequest{number}}}";
     graphql(t, query, vec![Var::text("id", current.id.clone())]).map(|_| ())
+}
+
+/// Whether the base branch requires a merge queue, which takes a PR only through auto-merge.
+fn queue_required(pr: &Pr) -> bool {
+    matches!(pr.native, Native::Github { merge_queue: true })
+}
+
+pub struct Github(pub Remote);
+
+impl Provider for Github {
+    fn at(&self, text: &str) -> Result<At> {
+        self.0.at(text)
+    }
+
+    fn key(&self, at: &At) -> String {
+        self.0.key(at)
+    }
+
+    fn place(&self) -> String {
+        self.0.origin.repo.clone()
+    }
+
+    fn allow_write(&self, what: &str) -> Result<()> {
+        self.0.allow_write(what)
+    }
+
+    fn explain(&self, error: Error) -> Error {
+        remote::explain(error)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            resumes_auto_merge: false,
+            no_text: None,
+        }
+    }
+
+    fn view(&self, at: &At) -> Result<Pr> {
+        let (t, repo) = self.0.api();
+        view(t, repo, remote::number(at)?)
+    }
+
+    fn list(&self, filter: &Filter) -> Result<Vec<Pr>> {
+        let (t, repo) = self.0.api();
+        list(t, repo, filter.branch, filter.state, filter.mine)
+    }
+
+    fn create(&self, new: &NewPr) -> Result<At> {
+        let (t, repo) = self.0.api();
+        let number = create(t, repo, new.head, new.base, new.title, new.body, new.draft)?;
+        Ok(At::Number(number))
+    }
+
+    fn update(&self, current: &Pr, changes: &Changes) -> Result<()> {
+        let (t, repo) = self.0.api();
+        update(t, repo, current, changes)
+    }
+
+    fn upload_check(&self) -> Result<()> {
+        if self.0.origin.host != UPLOAD_HOST {
+            return fail(format!(
+                "agt pr upload supports GitHub only on {UPLOAD_HOST}, not {}",
+                self.0.origin.host
+            ));
+        }
+        Ok(())
+    }
+
+    fn uploader(&self) -> Result<Uploader<'_>> {
+        let (t, repo) = self.0.api();
+        let id = repository_id(t, repo)?;
+        Ok(Box::new(move |image| upload(t, id, image)))
+    }
+
+    /// A base that requires a merge queue takes a PR only through auto-merge.
+    /// That queues it, as `gh pr merge` does.
+    fn merge(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
+        if queue_required(pr) {
+            return self.enable_auto(pr, sha, how);
+        }
+        let (t, repo) = self.0.api();
+        merge(t, repo, pr.forge_number(), sha, how)?;
+        Ok(Outcome::Done)
+    }
+
+    fn enable_auto(&self, pr: &Pr, sha: &str, how: Option<How>) -> Result<Outcome> {
+        let how = how
+            .or_else(|| pr.auto_merge.as_deref().and_then(How::named))
+            .ok_or_else(|| Error("GitHub auto-merge needs --method".into()))?;
+        let (t, repo) = self.0.api();
+        // GitHub offers auto-merge only while a PR cannot merge yet; like gh, merge a PR that
+        // can merge now, unless the base requires a merge queue: auto-merge is what queues it.
+        if !queue_required(pr)
+            && matches!(pr.merge_state.as_str(), "clean" | "has_hooks" | "unstable")
+        {
+            merge(t, repo, pr.forge_number(), sha, Some(how))?;
+            return Ok(Outcome::Done);
+        }
+        enable_auto(t, pr, sha, how)?;
+        Ok(Outcome::Done)
+    }
+
+    fn disable_auto(&self, pr: &Pr) -> Result<bool> {
+        let (t, _) = self.0.api();
+        disable_auto(t, pr).map(|()| true)
+    }
+
+    fn auto_method(&self, pr: &Pr, _recorded: Option<&str>) -> Option<String> {
+        pr.auto_merge.clone()
+    }
 }

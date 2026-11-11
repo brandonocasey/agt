@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 pub mod base;
+pub mod fast_forward;
 
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;
@@ -582,6 +583,17 @@ impl Repo {
         Ok(None)
     }
 
+    /// The first of [`Self::default_branch_names`] that exists as a local branch, from local refs
+    /// only.
+    pub fn local_default_branch(&self) -> Result<Option<String>> {
+        for name in self.default_branch_names()? {
+            if self.branch_tip(&name)?.is_some() {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
         self.ref_fact(&["merge-base", "--end-of-options", a, b])
     }
@@ -1118,11 +1130,53 @@ impl Repo {
     }
 }
 
+/// Files in a git directory that mark an unfinished rebase, merge, cherry-pick, revert or
+/// bisect.
+const UNFINISHED: [&str; 8] = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "sequencer",
+    "BISECT_START",
+];
+
+/// The markers of unfinished operations that `git_dir` holds, in the order of [`UNFINISHED`].
+pub fn unfinished_markers(git_dir: &Path) -> Vec<&'static str> {
+    UNFINISHED
+        .into_iter()
+        .filter(|marker| git_dir.join(marker).exists())
+        .collect()
+}
+
 /// The non-empty fields of NUL-separated git output.
 pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
     listing
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
+}
+
+/// Git's stderr as one line, without `error:` and `fatal:` marks and without hints.
+/// Progress text that a carriage return overwrites on a terminal is left out too.
+pub fn error_line(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(|line| {
+            let line = line
+                .rsplit_once('\r')
+                .map_or(line, |(_, shown)| shown)
+                .trim();
+            ["error: ", "fatal: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .unwrap_or(line)
+        })
+        // Git's hints name git commands, such as `git merge --no-ff`, that a caller here forbids.
+        .filter(|line| !line.is_empty() && !line.starts_with("hint:"))
+        .collect();
+    lines.join(" ")
 }
 
 fn verify_args(spec: &str) -> [&str; 5] {

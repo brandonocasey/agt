@@ -6,10 +6,9 @@ use std::path::{self, Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::Remote;
+use super::provider::Provider;
 use crate::core::error::{Error, Result, fail};
 use crate::core::output::{self, Output};
-use crate::store::model::Forge;
 
 /// The image types both forges render, by lowercase file extension.
 const IMAGE_TYPES: [(&str, &str); 6] = [
@@ -20,9 +19,6 @@ const IMAGE_TYPES: [(&str, &str); 6] = [
     ("webp", "image/webp"),
     ("svg", "image/svg+xml"),
 ];
-
-/// The only host whose upload endpoint is known; GitHub Enterprise Server's is not.
-const GITHUB_HOST: &str = "github.com";
 
 /// A checked image file: an absolute UTF-8 path to a non-empty regular file of a known type.
 pub struct Image {
@@ -92,19 +88,14 @@ impl Image {
 }
 
 /// Uploads each file in turn. When one fails after others landed, prints those before failing.
-pub fn run(remote: &Remote, files: &[PathBuf]) -> Result<Output> {
-    remote.allow_write("agt pr upload")?;
-    if remote.origin.forge == Forge::Github && remote.origin.host != GITHUB_HOST {
-        return fail(format!(
-            "agt pr upload supports GitHub only on {GITHUB_HOST}, not {}",
-            remote.origin.host
-        ));
-    }
+pub fn run(provider: &dyn Provider, files: &[PathBuf]) -> Result<Output> {
+    provider.allow_write("agt pr upload")?;
+    provider.upload_check()?;
     let images = files
         .iter()
         .map(|file| Image::open(file))
         .collect::<Result<Vec<_>>>()?;
-    let upload = remote.uploader()?;
+    let upload = provider.uploader()?;
     let mut done = Vec::new();
     for image in &images {
         match upload(image) {

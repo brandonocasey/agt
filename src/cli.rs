@@ -46,7 +46,8 @@ enum Command {
     Issue(issue::Cli),
     /// Delete stale reviews, issues, tasks, locks and backups across every repository.
     Cleanup(cleanup::Cli),
-    /// GitHub/GitLab PRs/MRs: view, list, create, update, merge behind a head-sha guard, pause auto-merge, upload images.
+    /// GitHub, GitLab or Forgejo PRs/MRs, or local branches with `--local`. Commands: view,
+    /// list, create, update, merge (behind a head-sha guard), pause auto-merge, upload images.
     Pr(pr::Cli),
     /// Cost, context, tool, cache, error and friction reports from agent transcripts, and search of what you typed.
     Sessions(sessions::Cli),
@@ -66,6 +67,25 @@ enum Command {
     Wait(wait::Cli),
 }
 
+/// What the local auto-merge asks of the check and review domains. `pr` MUST NOT import them.
+struct DomainGates;
+
+impl pr::Gates for DomainGates {
+    fn checked(&self, head: &str) -> Result<bool> {
+        check::passed_at(head)
+    }
+
+    fn review(&self, branch: &str, head: &str, target: &str) -> Result<pr::Review> {
+        let found = review::commands::branch_review(branch, head, target)?;
+        Ok(pr::Review {
+            reviewed: found.reviewed,
+            unreviewed: found.unreviewed,
+            blocking: found.blocking,
+            approved: found.approved,
+        })
+    }
+}
+
 pub fn run(cli: Cli) -> Result<Output> {
     cli.offline.install();
     match cli.command {
@@ -78,7 +98,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Ci(args) => ci::run(args),
         Command::Issue(args) => issue::run(args),
         Command::Pr(args) => {
-            let (output, merged) = pr::run(args)?;
+            let (output, merged) = pr::run(args, &DomainGates)?;
             Ok(match merged {
                 Some(text) => issue::close_fixed(output, &text),
                 None => output,

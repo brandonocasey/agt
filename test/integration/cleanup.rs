@@ -1279,13 +1279,7 @@ fn a_merged_branch_with_a_signed_tip_is_listed_when_git_shows_signatures() {
     let home = prune.env.path("home");
     let repo = home.join("projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
-    let key = prune.env.path("signing-key");
-    let status = std::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-        .arg(&key)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let key = prune.env.signing_key();
     let git = |args: &[&str]| {
         let status = prune
             .env

@@ -1283,10 +1283,11 @@ and the Forgejo API description. No test ran a real `tea` or Forgejo host; the t
 `agt pr` is one GitHub/GitLab/Forgejo-neutral command for the PR/MR of the current repository; the forge
 comes from the tracker of the `origin` remote (or the tracker `--remote <name|host/repo>`, or a PR/MR URL, names; see
 [Issues](#issues)), and `gh`, `glab` or `tea` (`AGT_GH_BIN`, `AGT_GLAB_BIN`, `AGT_TEA_BIN`) must be installed and logged in. `create`, `update`,
-`merge`, `auto-merge` and `upload` are refused when `push` was set to `off` for the tracker. Output is JSON.
+`merge`, `auto-merge` and `upload` are refused when `push` was set to `off` for the tracker. `--local` works on local branches with no forge. It is global, never
+automatic, and cannot combine with `--remote`; see [Local PRs](#local-prs). Output is JSON.
 
 ```sh
-agt pr [--remote R] view [<n>|<url>] [--branch B]
+agt pr [--remote R | --local] view [<n>|<url>] [--branch B]
 agt pr list [--mine] [--branch B] [--state open|merged|all]
 agt pr create --title T [--body B] [--base BRANCH] [--draft]
 agt pr update <n> [--title T] [--body B] [--add-label L] [--remove-label L] [--draft[=false]]
@@ -1322,6 +1323,66 @@ its own relative Markdown, with `url` made absolute from `full_path`.
 
 Forgejo has no repository-level upload (it attaches files only to an existing issue or comment), so `upload` is refused there
 before any call.
+
+### Local PRs
+
+`agt pr --local` treats a local branch as a PR against the local default branch. That is the first of these local branches: the one `origin/HEAD` names, `main`, `master`, `init.defaultBranch`.
+
+It reads local refs. No remote is contacted, and nothing is pushed or sent to a forge. It skips tracker selection, the `--offline` refusal and the `push` write gate.
+
+`--local` is never chosen for you, and it cannot be combined with `--remote`. A PR is addressed by its branch name. `view` takes the current branch unless a name or `--branch` gives one.
+
+`list` shows open branches. `--state merged` or `--state all` changes that, and `--branch` limits it to one. `list --mine` keeps the branches whose tip author is `git config user.name`. It fails when that name is unset.
+
+The `number` and `url` fields are `null`. `state` is `open` until the branch is an ancestor of the default branch. Then it is `merged`.
+
+- `view`, `list`, `merge` and `auto-merge` work. `create`, `update` and `upload` fail with a message. A branch stores no title, body, label or image.
+- `merge <branch> --sha <head-sha>` moves the default branch to the branch tip. It creates no commit. Without `--method` it is a fast-forward only.
+
+  `--method rebase` rebases the branch onto the default branch first and then fast-forwards. `--method merge` and `--method squash` fail.
+
+  `git merge --ff-only` moves the default branch in the work tree that has it. Local changes are kept and never overwritten, ignored files included. When no work tree has it, a ref update moves it. The move is refused, with the reason and the command to retry, when:
+
+  - the default branch is checked out in more than one work tree;
+  - its work tree is missing (`git worktree prune`);
+  - git is bisecting or rebasing it elsewhere;
+  - the repository is bare;
+  - a submodule pointer moves.
+
+  The retry names `--method rebase` once the default branch has moved past the branch.
+
+  The branch must not be checked out in more than one work tree. No rebase, merge, cherry-pick, revert or bisect may be under way in its work tree. A rebase the user started is never touched.
+
+  `rebase` needs the branch checked out in exactly one clean work tree. No submodule pointer may move.
+
+  No ignored file may sit where the rebase would write. That covers any path a branch commit writes. It also covers a file written where a directory holds ignored files. The same goes for a directory written where an ignored file is.
+
+  It runs `git rebase` with hooks and user configuration as they are. Only autostash and `rebase.updateRefs` are forced off. A conflict is final: the rebase is aborted and the branch stays as it was. A rebase that stops without conflicts reports git's error and is aborted the same way.
+
+  With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes. Otherwise the merge is refused before the rebase starts.
+
+  With `rebase`, a commit made on the branch during the merge stops it before landing.
+
+  Closing keywords (`Fixes local-ab12cd`) are read from every commit message of the branch.
+- `merge --auto` and `auto-merge on` record an intent in `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`. The intent holds the branch, head sha, method and waiter id. It is keyed by the git common directory and the branch.
+
+  Both poll every 5 seconds, up to 270 seconds. They wait until all gates pass at the head. Then the branch lands. The gates are:
+  1. checks: an `agt check run` pass is recorded for the head's tree. Its log is still there;
+  2. review: the branch has a review at the head. No commit since the base is unreviewed. No blocking finding is open;
+  3. approval: an approval is recorded at exactly the head (`agt review publish --approve`).
+     Without a pull request tracker, the approval is recorded; the publish then fails saying so.
+     That is enough for this gate;
+  4. lands: the branch is ahead of the default branch. With `--method rebase`, the rebase preconditions hold instead.
+
+  A gate that still fails after the wait exits 3. The JSON of the PR goes to stdout and each failing gate to stderr. The intent stays, so a rerun, or `auto-merge on`, waits again.
+
+  After the gates passed, a failure is final and exits 1. Examples are a rebase conflict and a refused update.
+
+  A newer call for the same branch replaces the older one. The older one stops with an error. `auto-merge off` clears the intent and stops the waiter. A waiter whose branch a plain `merge` landed reports the merge and exits 0.
+
+  Moving the branch off the recorded sha clears the intent. So does plain `merge`.
+
+  A lock per key keeps two calls from merging at once. It is the `.flock` file next to the document. The wait goes through the same clock as `agt wait`, so `AGT_NOW` makes it instant.
 
 Failures print `agt: error: ...` and exit 1.
 
@@ -1745,8 +1806,9 @@ and `review publish` (a review of someone else's PR/MR is never published). With
 local store, on whichever tracker each belongs to (`--remote` limits it to one), and never
 imports a new PR/MR; `--pr <n|url>` starts a local review of one, as `review run` on a branch can.
 
-`agt pr create`, `update`, `merge`, `auto-merge` and `upload` are refused only when `push` was set to
-`off` explicitly; unset, they stay allowed. Reads of any command are never refused by `push`.
+Only an explicit `push = "off"` refuses `agt pr create`, `update`, `merge`, `auto-merge` and `upload`.
+Unset, they stay allowed. `agt pr --local` is never refused by it, as it writes nothing remote.
+Reads of any command are never refused by `push`.
 `review publish`, `qa publish` and `issue push` need `manual` or `auto`: with `off`, or unset,
 they keep everything local, exit 0 and print why on stderr, naming the key. Their `--dry-run`
 previews still work.

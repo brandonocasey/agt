@@ -15,6 +15,7 @@ use crate::store::model::{
 mod approve;
 mod auto;
 mod findings;
+mod gate;
 mod input;
 pub mod prune;
 mod publish;
@@ -32,6 +33,7 @@ mod usage;
 mod view;
 use self::approve::approve;
 use self::findings::{comment, finding_kill, reply, resolve};
+pub use self::gate::branch_review;
 pub use self::qa::run_qa;
 use self::report::Section;
 use self::run::{PassMeta, pass_abort, pass_dry_run, pass_end, pass_start, run_end, run_start};

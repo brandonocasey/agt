@@ -76,6 +76,18 @@ impl Entry {
     }
 }
 
+/// Whether any check pass is recorded for the tree of `head`, with its log. It counts a pass
+/// run anywhere in this repository.
+pub fn passed_at(head: &str) -> Result<bool> {
+    let repo = Repo::discover()?;
+    let tree = repo.tree_of(head)?;
+    let store = Store::inspect_repo(Namespace::Checks, &repo)?;
+    let (entries, _) = store.docs_intact::<Entry>(store.root(), &[])?;
+    Ok(entries
+        .iter()
+        .any(|entry| entry.tree == tree && entry.log.exists()))
+}
+
 pub fn run(cli: Cli) -> Result<Output> {
     let Command::Run {
         name,

@@ -5,9 +5,9 @@
 //! not an error, because the new worktree already exists.
 
 use crate::core::error::Result;
-use crate::core::shell::quote;
 use crate::git::base::Candidate;
-use crate::git::{GITLINK, Repo, local_branch_name};
+use crate::git::fast_forward::{Update, fast_forward};
+use crate::git::{Repo, local_branch_name};
 use serde_json::{Value, json};
 
 /// The report on the local default branch and, when it may still be behind, the warning; `None`
@@ -79,59 +79,24 @@ fn update(
             "it has diverged from {remote}/{tracked} ({ahead} ahead, {behind} behind)"
         )));
     }
-    let worktrees = repo.worktrees()?;
-    if worktrees.first().is_some_and(|main| main.bare) {
-        return Ok(Some(
-            "git reports the main repository as bare; automatic default-branch updates are disabled because an existing checkout cannot be ruled out; check core.bare if this repository has a working checkout".to_owned(),
-        ));
+    match fast_forward(repo, name, from, to)? {
+        Update::Moved { path } => {
+            if let Some(path) = path {
+                report["path"] = json!(path);
+            }
+            report["status"] = json!("updated");
+            Ok(None)
+        }
+        Update::Refused(refused) => {
+            if let Some(path) = refused.path {
+                report["path"] = json!(path);
+            }
+            if let Some(retry) = refused.retry {
+                report["retry"] = json!(retry);
+            }
+            Ok(Some(refused.reason))
+        }
     }
-    let holder = worktrees
-        .iter()
-        .find(|entry| entry.branch.as_deref() == Some(name));
-    let Some(holder) = holder else {
-        let spec = format!("{to}:refs/heads/{name}");
-        let fetch = [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            ".",
-            &spec,
-        ];
-        return run(repo, &fetch, report);
-    };
-    report["path"] = json!(holder.path);
-    if !holder.path.exists() {
-        return Ok(Some(format!(
-            "it is checked out in {}, which no longer exists; `git worktree prune` drops that entry",
-            holder.path.display()
-        )));
-    }
-    // A merge leaves a moved submodule checked out at its old commit, so the checkout turns dirty.
-    let raw = repo.git(&["diff", "--raw", "--ignore-submodules=none", from, to])?;
-    let gitlink = raw.lines().any(|line| {
-        line.split_whitespace()
-            .take(2)
-            .any(|mode| mode.trim_start_matches(':') == GITLINK)
-    });
-    if gitlink {
-        return Ok(Some(format!(
-            "a submodule moves, and a merge in {} would leave it at its old commit",
-            holder.path.display()
-        )));
-    }
-    run(
-        &Repo::at(&holder.path),
-        &[
-            "merge",
-            "--ff-only",
-            "--no-overwrite-ignore",
-            "--no-autostash",
-            "--quiet",
-            to,
-        ],
-        report,
-    )
 }
 
 /// Moves the upstream's remote-tracking branch up to the fetched commit, as a fetch would, so
@@ -147,36 +112,4 @@ fn advance_tracking(repo: &Repo, remote: &str, tracked: &str, to: &str) {
         let message = "agt worktree create: fetched default";
         let _ = repo.succeeds(&["update-ref", "-m", message, &tracking, to, &old]);
     }
-}
-
-/// Runs the update; when git refuses, as it does over local changes a merge would overwrite, the
-/// reason is git's message and `retry` the command to run once that is resolved.
-fn run(repo: &Repo, command: &[&str], report: &mut Value) -> Result<Option<String>> {
-    let (code, error) = repo.probe(command)?;
-    if code == Some(0) {
-        report["status"] = json!("updated");
-        return Ok(None);
-    }
-    let words: Vec<String> = command.iter().map(|word| quote(word)).collect();
-    report["retry"] = json!(format!(
-        "git -C {} {}",
-        quote(&repo.root().display().to_string()),
-        words.join(" ")
-    ));
-    let message: Vec<&str> = error
-        .lines()
-        .map(|line| {
-            let line = line.trim();
-            ["error: ", "fatal: "]
-                .iter()
-                .find_map(|prefix| line.strip_prefix(prefix))
-                .unwrap_or(line)
-        })
-        .filter(|line| !line.is_empty())
-        .collect();
-    Ok(Some(format!(
-        "git {} refused: {}",
-        command[0],
-        message.join(" ")
-    )))
 }

@@ -14,20 +14,7 @@ use super::nested;
 use crate::core::env;
 use crate::core::error::{Result, fail};
 use crate::forge::auto::Offline;
-use crate::git::Repo;
-
-/// Files in a git directory that mark an unfinished rebase, merge, cherry-pick, revert or
-/// bisect.
-const UNFINISHED: [&str; 8] = [
-    "rebase-merge",
-    "rebase-apply",
-    "MERGE_HEAD",
-    "CHERRY_PICK_HEAD",
-    "REVERT_HEAD",
-    "BISECT_LOG",
-    "sequencer",
-    "BISECT_START",
-];
+use crate::git::{Repo, unfinished_markers};
 
 /// Refuses, naming the repository and the reason, when removing the worktree at `worktree`
 /// would delete work that exists nowhere else. Under `--offline` it is [`check_offline`].
@@ -129,9 +116,8 @@ fn worktree_state(worktree: &Path) -> Result<()> {
 
 /// The unfinished operation (rebase, merge, ...) the git directory records, if any.
 fn unfinished(git_dir: &Path) -> Option<String> {
-    UNFINISHED
-        .iter()
-        .find(|marker| git_dir.join(marker).exists())
+    unfinished_markers(git_dir)
+        .first()
         .map(|marker| marker.trim_end_matches("_HEAD").to_lowercase())
 }
 
