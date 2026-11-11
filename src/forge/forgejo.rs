@@ -51,10 +51,10 @@ pub fn connect(host: &str) -> Forgejo {
 /// The shared fields of a REST pull request node.
 pub fn pull_node(node: &Value) -> PullNode {
     let text = |pointer: &str| forge::text(node, pointer).unwrap_or_default();
+    let title = text("/title");
     PullNode {
         number: node["number"].as_u64(),
         url: text("/html_url"),
-        title: text("/title"),
         state: state_of(node),
         merged: node["merged"].as_bool() == Some(true),
         closed_at: forge::text(node, "/closed_at").or_else(|| forge::text(node, "/merged_at")),
@@ -70,8 +70,20 @@ pub fn pull_node(node: &Value) -> PullNode {
         },
         created_at: forge::text(node, "/created_at"),
         author: forge::text(node, "/user/login"),
-        draft: node["draft"].as_bool() == Some(true),
+        draft: node["draft"].as_bool() == Some(true) || plain(&title) != title,
+        title,
     }
+}
+
+/// The title without a draft marker such as `WIP: `.
+pub fn plain(title: &str) -> &str {
+    let lower = title.to_lowercase();
+    for marker in ["wip: ", "wip:", "[wip] ", "[wip]"] {
+        if lower.starts_with(marker) {
+            return title[marker.len()..].trim_start();
+        }
+    }
+    title
 }
 
 /// The state of a pull request node: a merged one is `closed` on the host, with `merged` set.
@@ -601,6 +613,13 @@ mod tests {
             &self,
             _request: &Request,
         ) -> std::result::Result<
+        assert!(!pull.draft);
+        for title in ["WIP: t", "[wip] t"] {
+            assert!(
+                pull_node(&json!({"title": title, "draft": false})).draft,
+                "{title}"
+            );
+        }
             crate::forge::transport::Response,
             crate::forge::transport::TransportError,
         > {
