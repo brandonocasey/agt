@@ -1095,10 +1095,10 @@ pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
         .filter(|field| !field.is_empty())
 }
 
-/// The lines of git's stderr that say what failed, trimmed and without `error:` or `fatal:`.
-/// Progress text that a carriage return overwrites on a terminal is left out.
-pub fn error_lines(stderr: &str) -> impl Iterator<Item = &str> {
-    stderr
+/// Git's stderr as one line, without `error:` and `fatal:` marks and without hints.
+/// Progress text that a carriage return overwrites on a terminal is left out too.
+pub fn error_line(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
         .lines()
         .map(|line| {
             let line = line
@@ -1110,7 +1110,10 @@ pub fn error_lines(stderr: &str) -> impl Iterator<Item = &str> {
                 .find_map(|prefix| line.strip_prefix(prefix))
                 .unwrap_or(line)
         })
-        .filter(|line| !line.is_empty())
+        // Git's hints name git commands, such as `git merge --no-ff`, that a caller here forbids.
+        .filter(|line| !line.is_empty() && !line.starts_with("hint:"))
+        .collect();
+    lines.join(" ")
 }
 
 /// The revision range `from..to`, or all of `to` when `from` is `None`.

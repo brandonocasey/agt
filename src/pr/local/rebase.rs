@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use super::Local;
 use crate::core::error::{Result, ctx, fail};
 use crate::git::fast_forward::{check, moves_submodule};
-use crate::git::{Repo, Worktree, error_lines, nul_fields, unfinished_markers};
+use crate::git::{Repo, Worktree, error_line, nul_fields, unfinished_markers};
 
 /// The directories that hold a rebase in progress.
 const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
@@ -209,7 +209,7 @@ impl Local<'_> {
             }
             return Ok(now);
         }
-        let error = one_line_error(&error);
+        let error = error_line(&error);
         if !started_here(&work.git_dir()?, branch, target_tip, tip) {
             let now = self.tip(branch)?;
             return fail(format!("git rebase refused: {error}; {branch} is at {now}"));
@@ -289,15 +289,6 @@ impl Local<'_> {
         }
         Ok(found)
     }
-}
-
-/// Git's error on one line, without its hints.
-/// The hints name git steps for a rebase in progress, and none is left in progress.
-fn one_line_error(stderr: &str) -> String {
-    let lines: Vec<&str> = error_lines(stderr)
-        .filter(|line| !line.starts_with("hint:"))
-        .collect();
-    lines.join(" ")
 }
 
 /// One line for each operation in progress in the work tree at `path`.

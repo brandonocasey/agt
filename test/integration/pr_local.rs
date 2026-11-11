@@ -592,11 +592,14 @@ fn a_refused_merge_gives_the_command_to_retry() {
 /// A `post-commit` hook advances `main` once. The hint then names the rebase method.
 #[test]
 fn a_merge_refused_because_the_target_moved_suggests_the_rebase_method() {
-    for branch in ["feat", "-dash"] {
+    // Git adds hints to its refusal only when a work tree has `main` checked out.
+    for (branch, main_checked_out) in [("feat", false), ("-dash", false), ("feat", true)] {
         let env = setup();
         let sha = add_branch(&env, branch, "b.txt", "b\n");
         advance_main(&env, "c.txt", "c\n");
-        git_ok(&env, &env.repo, &["switch", "-q", "-c", "other"]);
+        if !main_checked_out {
+            git_ok(&env, &env.repo, &["switch", "-q", "-c", "other"]);
+        }
         let work = add_worktree(&env, "work", &["--detach", "main"]);
         // `git worktree add` takes no branch whose name starts with a dash.
         let head = format!("refs/heads/{branch}");
@@ -625,6 +628,7 @@ fn a_merge_refused_because_the_target_moved_suggests_the_rebase_method() {
         let retry =
             format!("retry with: agt pr --local merge --sha {rebased} --method rebase -- {branch}");
         assert!(message.contains(&retry), "{message}");
+        assert!(!message.contains("hint:"), "{message}");
 
         ok(&env, &merge_args(&rebased, branch, &["--method", "rebase"]));
         assert_eq!(tip(&env, "main"), tip(&env, &head));
