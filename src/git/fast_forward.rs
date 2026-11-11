@@ -1,7 +1,7 @@
-//! Moves a local branch forward to a descendant commit with `git merge --ff-only` in the work tree
-//! that has it, else by a ref update, leaving local changes and ignored files untouched, and never
-//! stashing, adding a work tree or switching a branch; git refuses a branch being rebased or
-//! bisected.
+//! Moves a local branch forward to a descendant commit. The work tree that has the branch runs
+//! `git merge --ff-only`. With none, a ref update moves it. Local changes and ignored files stay
+//! untouched. Nothing is stashed, no work tree is added and no branch is switched. Git refuses a
+//! branch being rebased or bisected.
 
 use std::path::PathBuf;
 

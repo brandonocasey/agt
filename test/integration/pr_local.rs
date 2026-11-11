@@ -247,8 +247,8 @@ fn list_mine_without_a_git_user_name_fails_instead_of_listing_every_branch() {
     assert_eq!(ok(&env, &["list"]).as_array().unwrap().len(), 1);
 }
 
-/// `behind` is one commit with `main` moved on, `merged` is in `main`, `ahead` is one commit
-/// past `main`, and `theirs` is past `main` too but by another author, with a two-line subject.
+/// `behind` is one commit that `main` has moved on from. `merged` is in `main`. `ahead` is one
+/// commit past `main`. `theirs` is past `main` too, by another author, with a two-line subject.
 fn list_fixture() -> Env {
     let env = setup();
     add_branch(&env, "behind", "b.txt", "b\n");
@@ -353,7 +353,7 @@ fn list_shows_each_branch_with_its_state_mergeability_author_and_title() {
     }
 }
 
-/// `list` asks git for its rows in a few calls, not a handful for each branch.
+/// `list` asks git for its rows in a few calls, not several per branch.
 #[test]
 fn list_runs_a_few_git_calls_however_many_branches_there_are() {
     let env = list_fixture();

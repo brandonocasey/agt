@@ -16,7 +16,7 @@ const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
 impl Local<'_> {
     /// The work tree where `branch` can be rebased onto `target`, or what stops it.
     /// `tip` and `target_tip` are the commits of `branch` and `target`.
-    /// It also checks the target's work tree and the fast-forward that follows.
+    /// The fast-forward that follows is checked first, and the target's work tree last.
     pub(super) fn rebase_place(
         &self,
         branch: &str,

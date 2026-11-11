@@ -138,7 +138,7 @@ pub trait Provider {
         format!("{}\n{}", after.title, after.body)
     }
 
-    /// The command that turns auto-merge on for `pr` when no paused one is recorded for `at`.
+    /// The command that turns auto-merge on for `pr` when `at` has no paused one.
     fn enable_auto_command(&self, _at: &At, _pr: &Pr) -> String {
         "agt pr merge --auto".to_owned()
     }

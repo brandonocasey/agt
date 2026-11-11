@@ -1326,9 +1326,13 @@ before any call.
 
 ### Local PRs
 
-`agt pr --local` treats a local branch as a PR against the local default branch. That is the first local branch among these, in order: the branch `origin/HEAD` names, `main`, `master`, `init.defaultBranch`. It reads local refs. No remote is contacted, and nothing is pushed or sent to a forge. It skips tracker selection, the `--offline` refusal and the `push` write gate.
+`agt pr --local` treats a local branch as a PR against the local default branch. That is the first of these local branches: the one `origin/HEAD` names, `main`, `master`, `init.defaultBranch`.
 
-`--local` is never chosen for you, and it cannot be combined with `--remote`. A PR is addressed by its branch name. `view` takes the current branch when none is given. `list` shows every local branch unless `--branch` limits it to one. `list --mine` keeps the branches whose tip author is `git config user.name`. It fails when that name is unset.
+It reads local refs. No remote is contacted, and nothing is pushed or sent to a forge. It skips tracker selection, the `--offline` refusal and the `push` write gate.
+
+`--local` is never chosen for you, and it cannot be combined with `--remote`. A PR is addressed by its branch name. `view` takes the current branch unless a name or `--branch` gives one.
+
+`list` shows open branches. `--state merged` or `--state all` changes that, and `--branch` limits it to one. `list --mine` keeps the branches whose tip author is `git config user.name`. It fails when that name is unset.
 
 The `number` and `url` fields are `null`. `state` is `open` until the branch is an ancestor of the default branch. Then it is `merged`.
 
@@ -1337,7 +1341,7 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
 
   `--method rebase` rebases the branch onto the default branch first and then fast-forwards. `--method merge` and `--method squash` fail.
 
-  If a work tree has the default branch checked out, `git merge --ff-only` moves it there. Local changes are kept and never overwritten, ignored files included. When no work tree has it, a ref update moves it. The move is refused, with the reason and the command to retry, when:
+  `git merge --ff-only` moves the default branch in the work tree that has it. Local changes are kept and never overwritten, ignored files included. When no work tree has it, a ref update moves it. The move is refused, with the reason and the command to retry, when:
 
   - the default branch is checked out in more than one work tree;
   - its work tree is missing (`git worktree prune`);
@@ -1347,7 +1351,9 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
 
   The branch must not be checked out in more than one work tree. No rebase, merge, cherry-pick, revert or bisect may be under way in its work tree. A rebase the user started is never touched.
 
-  `rebase` needs all of these: the branch checked out in exactly one clean work tree; no ignored file the rebase would overwrite; no submodule change. It runs `git rebase` with hooks as they are. Autostash and `rebase.updateRefs` are off whatever the configuration says. A conflict is final: the rebase is aborted and the branch stays as it was.
+  `rebase` needs the branch checked out in exactly one clean work tree. No ignored file may sit where the rebase would write. No submodule pointer may move.
+
+  It runs `git rebase` with hooks and user configuration as they are. Only autostash and `rebase.updateRefs` are forced off. A conflict is final: the rebase is aborted and the branch stays as it was.
 
   With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes. Otherwise the merge is refused before the rebase starts.
 
@@ -1356,14 +1362,16 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
   Closing keywords (`Fixes local-ab12cd`) are read from every commit message of the branch.
 - `merge --auto` and `auto-merge on` record an intent in `$XDG_STATE_HOME/agents/pr/local-auto-merge.json`. The intent holds the branch, head sha, method and waiter id. It is keyed by the git common directory and the branch.
 
-  Both poll every 5 seconds, up to 270 seconds, until all gates pass at the head. Then the branch lands. The gates are:
+  Both poll every 5 seconds, up to 270 seconds. They wait until all gates pass at the head. Then the branch lands. The gates are:
   1. checks: an `agt check run` pass is recorded for the head's tree and its log is still there;
   2. review: the branch has a review at the head, no commit since the base is unreviewed, and no blocking finding is open;
   3. approval: an approval is recorded at exactly the head (`agt review publish --approve`; with no tracker for pull requests, the
      approval is recorded and the publish then fails saying so, which is enough for this gate);
   4. lands: the branch is ahead of the default branch (or, with `--method rebase`, the rebase preconditions hold).
 
-  A gate that still fails after the wait exits 3. The JSON of the PR goes to stdout and each failing gate to stderr. The intent stays, so a rerun, or `auto-merge on`, waits again. After the gates passed, a failure is final and exits 1. Examples are a rebase conflict and a refused update.
+  A gate that still fails after the wait exits 3. The JSON of the PR goes to stdout and each failing gate to stderr. The intent stays, so a rerun, or `auto-merge on`, waits again.
+
+  After the gates passed, a failure is final and exits 1. Examples are a rebase conflict and a refused update.
 
   A newer call for the same branch replaces the older one. The older one stops with an error. `auto-merge off` clears the intent and stops the waiter. A waiter whose branch a plain `merge` landed reports the merge and exits 0.
 

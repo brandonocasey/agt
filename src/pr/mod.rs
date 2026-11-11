@@ -155,10 +155,10 @@ enum Command {
     /// through auto-merge, so it needs --method too. GitLab cannot rebase on merge.
     ///
     /// With --local, <NUMBER> is the branch name. Without --auto it merges at once. With --auto
-    /// it records an intent and polls every 5 seconds, up to 270 seconds, until the gates pass
-    /// at the head. The gates: an `agt check run` pass for the tree; a review with no
-    /// unreviewed commit and no open blocking finding; an approval at exactly the head; a
-    /// branch that lands. A gate that still fails exits 3, naming it. The intent is kept.
+    /// it records an intent and polls every 5 seconds, up to 270 seconds. It merges when four
+    /// gates pass at the head. Checks: an `agt check run` pass for the tree. Review: no
+    /// unreviewed commit and no open blocking finding. Approval: one at exactly the head. Lands:
+    /// the branch can land. A gate that still fails exits 3, naming it. The intent is kept.
     ///
     /// When this call merges the PR/MR, each local issue that its title or body names after a
     /// closing keyword (`Fixes local-ab12cd`; one keyword per key) is closed and listed as
@@ -601,8 +601,8 @@ fn restore(
     Ok((true, outcome))
 }
 
-/// Prints `shown`. On a timed-out wait for gates, this fails with the gate names and the
-/// timeout status. The auto-merge the provider left is kept.
+/// Prints `shown`. A timed-out wait for gates fails with the gate names and the timeout
+/// status. The auto-merge the provider left is kept.
 fn settle(outcome: Outcome, shown: Value) -> Result<Output> {
     let Outcome::Pending(gates) = outcome else {
         return Ok(Output::Json(shown));

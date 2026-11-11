@@ -101,7 +101,7 @@ impl Local<'_> {
     }
 
     /// A waiter whose intent is gone reports the merge when a plain merge landed `branch`.
-    /// Otherwise `auto-merge off` ended it, and that is an error.
+    /// Otherwise `auto-merge off` or a moved branch cleared it, and that is an error.
     fn gone(&self, branch: &str) -> Result<Attempt> {
         let target_tip = self.tip(&self.target()?)?;
         if self.repo.is_ancestor(&self.tip(branch)?, &target_tip)? {
