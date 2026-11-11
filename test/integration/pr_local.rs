@@ -1080,25 +1080,93 @@ fn a_rebase_stops_for_an_ignored_directory_it_would_replace_with_a_file() {
     );
 }
 
+/// Git removes a directory's ignored files when a checkout replaces the directory with a file.
 #[test]
-fn a_rebase_stops_for_an_ignored_file_only_an_earlier_commit_writes() {
+fn a_rebase_stops_for_an_ignored_file_in_a_directory_it_would_replace_with_a_file() {
+    let env = setup();
+    env.write(".gitignore", "*.local\n");
+    env.write("conf/app.toml", "a = 1\n");
+    env.commit_all("add conf and ignore local files");
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    git_ok(&env, &env.repo, &["rm", "-q", "-r", "conf"]);
+    advance_main(&env, "conf", "a file now\n");
+    let work = work_with_ignored(&env, "conf/secrets.local");
+
+    let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+    assert!(message.contains("the ignored file conf"), "{message}");
+    assert_eq!(
+        fs::read_to_string(work.join("conf/secrets.local")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn a_rebase_stops_for_an_ignored_file_where_it_would_write_a_directory() {
     let env = setup();
     env.write(".gitignore", "*.log\n");
     env.commit_all("ignore logs");
-    git_ok(&env, &env.repo, &["switch", "-q", "-c", "feat"]);
-    env.write("out.log", "added\n");
-    git_ok(&env, &env.repo, &["add", "-f", "out.log"]);
-    git_ok(&env, &env.repo, &["commit", "-q", "-m", "add a log"]);
-    git_ok(&env, &env.repo, &["rm", "-q", "out.log"]);
-    git_ok(&env, &env.repo, &["commit", "-q", "-m", "drop the log"]);
-    let sha = tip(&env, "feat");
-    git_ok(&env, &env.repo, &["switch", "-q", "main"]);
-    advance_main(&env, "c.txt", "c\n");
+    let sha = add_branch(&env, "feat", "b.txt", "b\n");
+    env.write("out.log/inner", "tracked on main\n");
+    git_ok(&env, &env.repo, &["add", "-f", "out.log/inner"]);
+    git_ok(&env, &env.repo, &["commit", "-q", "-m", "track a file"]);
     let work = work_with_ignored(&env, "out.log");
 
     let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
-    assert!(message.contains("the ignored file out.log"), "{message}");
+    assert!(
+        message.contains("the ignored file out.log/inner"),
+        "{message}"
+    );
     assert_eq!(fs::read_to_string(work.join("out.log")).unwrap(), "mine\n");
+}
+
+/// Makes git sign every commit of the repository and show signatures in `git log`.
+fn sign_commits(env: &Env) {
+    let key = env.path("signing-key");
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let settings = [
+        ("gpg.format", "ssh"),
+        ("user.signingkey", key.to_str().unwrap()),
+        ("commit.gpgsign", "true"),
+        ("log.showSignature", "true"),
+    ];
+    for (name, value) in settings {
+        git_ok(env, &env.repo, &["config", name, value]);
+    }
+}
+
+/// Signature text in `git log` output MUST NOT hide a path a signed commit writes.
+#[test]
+fn a_rebase_stops_for_an_ignored_file_only_an_earlier_commit_writes() {
+    for signed in [false, true] {
+        let env = setup();
+        if signed {
+            sign_commits(&env);
+        }
+        env.write(".gitignore", "*.log\n");
+        env.commit_all("ignore logs");
+        git_ok(&env, &env.repo, &["switch", "-q", "-c", "feat"]);
+        env.write("out.log", "added\n");
+        git_ok(&env, &env.repo, &["add", "-f", "out.log"]);
+        git_ok(&env, &env.repo, &["commit", "-q", "-m", "add a log"]);
+        git_ok(&env, &env.repo, &["rm", "-q", "out.log"]);
+        git_ok(&env, &env.repo, &["commit", "-q", "-m", "drop the log"]);
+        let sha = tip(&env, "feat");
+        git_ok(&env, &env.repo, &["switch", "-q", "main"]);
+        advance_main(&env, "c.txt", "c\n");
+        let work = work_with_ignored(&env, "out.log");
+
+        let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
+        assert!(
+            message.contains("the ignored file out.log"),
+            "signed {signed}: {message}"
+        );
+        assert_eq!(fs::read_to_string(work.join("out.log")).unwrap(), "mine\n");
+    }
 }
 
 #[test]

@@ -232,7 +232,10 @@ impl Local<'_> {
     /// A path added early and removed later is in no net difference.
     fn replayed_paths(&self, base: &str, tip: &str) -> Result<Vec<String>> {
         let range = format!("{base}..{tip}");
+        // A user's `log.showSignature` would put signature text among the paths.
         let listed = self.repo.git(&[
+            "-c",
+            "log.showSignature=false",
             "log",
             "--no-renames",
             "--name-only",
@@ -364,14 +367,19 @@ fn names(listed: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether writing `path` would overwrite or block on an ignored entry.
-/// That includes a file written where an ignored directory is.
+/// Whether writing `path` would overwrite, block on or remove an ignored entry.
+/// A file written where a directory is removes every entry below it.
 fn in_the_way(path: &str, ignored: &[String]) -> bool {
     ignored.iter().any(|entry| {
         let entry = entry.trim_end_matches('/');
-        path.strip_prefix(entry)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        within(path, entry) || within(entry, path)
     })
+}
+
+/// Whether `path` is `directory` or lies below it.
+fn within(path: &str, directory: &str) -> bool {
+    path.strip_prefix(directory)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// Whether the rebase in `git_dir` is of `branch` onto `target_tip` from `tip`.

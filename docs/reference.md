@@ -1353,9 +1353,11 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
 
   The branch must not be checked out in more than one work tree. No rebase, merge, cherry-pick, revert or bisect may be under way in its work tree. A rebase the user started is never touched.
 
-  `rebase` needs the branch checked out in exactly one clean work tree. No ignored file may sit where the rebase would write. That covers a path any commit of the branch writes, and a file written where an ignored directory is. No submodule pointer may move.
+  `rebase` needs the branch checked out in exactly one clean work tree. No submodule pointer may move.
 
-  It runs `git rebase` with hooks and user configuration as they are. Only autostash and `rebase.updateRefs` are forced off. A conflict is final: the rebase is aborted and the branch stays as it was. A rebase that stops with no conflict reports git's error and is aborted the same way.
+  No ignored file may sit where the rebase would write. That covers any path a branch commit writes. It also covers a file written where a directory holds ignored files. The same goes for a directory written where an ignored file is.
+
+  It runs `git rebase` with hooks and user configuration as they are. Only autostash and `rebase.updateRefs` are forced off. A conflict is final: the rebase is aborted and the branch stays as it was. A rebase that stops without conflicts reports git's error and is aborted the same way.
 
   With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes. Otherwise the merge is refused before the rebase starts.
 
