@@ -228,8 +228,7 @@ impl Local<'_> {
     }
 
     /// The paths each commit from `base` to `tip` touches.
-    /// A rebase writes them one commit at a time.
-    /// A path added early and removed later is in no net difference.
+    /// A rebase writes each commit in turn, so a path added then removed still counts.
     fn replayed_paths(&self, base: &str, tip: &str) -> Result<Vec<String>> {
         let range = format!("{base}..{tip}");
         // A user's `log.showSignature` would put signature text among the paths.

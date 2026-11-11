@@ -132,8 +132,7 @@ pub trait Provider {
     /// False when it was off already, which only Forgejo can tell.
     fn disable_auto(&self, pr: &Pr) -> Result<bool>;
 
-    /// The method of the auto-merge `pr` has, which `off` records.
-    /// `None` when it is off.
+    /// The auto-merge method of `pr`, which `off` records, or `None` when it is off.
     /// `recorded` is what an earlier call left for a host that cannot say.
     fn auto_method(&self, pr: &Pr, recorded: Option<&str>) -> Option<String>;
 

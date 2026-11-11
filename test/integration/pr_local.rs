@@ -588,8 +588,8 @@ fn a_refused_merge_gives_the_command_to_retry() {
     }
 }
 
-/// `main` moves while the rebase runs, so the rebased branch is behind again at the fast-forward.
-/// A `post-commit` hook advances `main` once. The hint then names the rebase method.
+/// `main` moves during the rebase, so the rebased branch is behind again at the fast-forward.
+/// A `post-commit` hook advances `main` once.
 #[test]
 fn a_merge_refused_because_the_target_moved_suggests_the_rebase_method() {
     // Git adds hints to its refusal only when a work tree has `main` checked out.
@@ -1825,7 +1825,7 @@ fn a_waiter_whose_branch_moved_fails_and_clears_the_intent() {
     assert_eq!(ok(&env, &["view", "feat"])["auto_merge"], "off");
 }
 
-/// A look at the branch (`view`) clears the intent of a moved branch before the waiter polls.
+/// A `view` of a moved branch clears its intent before the waiter polls.
 /// The waiter says the branch moved, not that the auto-merge was turned off.
 #[test]
 fn a_waiter_whose_intent_was_cleared_by_a_moved_branch_says_it_moved() {
