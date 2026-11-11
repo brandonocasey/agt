@@ -173,9 +173,7 @@ fn incremental_sync_lists_from_the_watermark_and_refetches_only_changes(fake: Fa
             })
             .count()
     };
-    // Forgejo reads an issue's hierarchy with the same GET as the issue, once a sync for each.
-    let probe = usize::from(fake.name() == "forgejo");
-    assert_eq!((fetched(1), fetched(2)), (probe, 1 + probe));
+    assert_eq!((fetched(1), fetched(2)), (0, 1));
     assert_eq!(
         env.issue_doc(fake.tracker(), "2")["fields"]["title"],
         "Old thing renamed"

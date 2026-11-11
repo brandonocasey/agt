@@ -1164,6 +1164,12 @@ fn forgejo_pulls_no_hierarchy() {
         ],
     );
     env.issue(&["sync"]);
+    // The issue is read once: no second read stands in for a hierarchy request.
+    let calls = env.forge_calls();
+    let reads = calls
+        .iter()
+        .filter(|call| call.ends_with("GET repos/o/r/issues/1"));
+    assert_eq!(reads.count(), 1, "{calls:?}");
     assert_eq!(env.issue(&["show", "1"])["sub_issues"], json!([]));
     assert_eq!(env.issue(&["show", "2"])["parent"], Value::Null);
     assert_eq!(env.issue(&["list", "--parent", "1"])["count"], 0);
