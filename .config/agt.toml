@@ -1,5 +1,4 @@
-[[issues.tracker]]
+[[tracker]]
 forge = "github"
 host = "github.com"
 repo = "brandonocasey/agt"
-push = true
