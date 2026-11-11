@@ -62,7 +62,7 @@ for arg do
 done
 [ -n "${FAKE_FORGE_TEA:-}" ] || logged=$*
 printf '%s\t%s\n' "${GITLAB_HOST:-}" "$logged" >> "$dir/calls.log"
-call=$(wc -l < "$dir/calls.log" | tr -d ' ')
+call=$(($(wc -l < "$dir/calls.log")))
 # A request loop that never ends in the tool under test stops here instead of hanging the suite.
 if [ "$call" -gt 2000 ]; then
   echo "fake-forge: more than 2000 calls" >&2
@@ -125,7 +125,16 @@ last() {
   }' "$latest"
 }
 reply() {
-  if ! grep -q '{{LAST_' "$1"; then
+  placeholder=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      *'{{LAST_'*)
+        placeholder=1
+        break
+        ;;
+    esac
+  done < "$1"
+  if [ -z "$placeholder" ]; then
     cat "$1"
     return
   fi

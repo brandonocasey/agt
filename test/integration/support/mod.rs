@@ -198,10 +198,7 @@ impl Env {
     }
 
     fn forge_file(&self, args: &[&str], suffix: &str) -> PathBuf {
-        let key = self.git_stdin(
-            &["hash-object", "--stdin"],
-            &format!("{}\n", args.join("\n")),
-        );
+        let key = blob_hash(&format!("{}\n", args.join("\n")));
         self.root.join("forge").join(format!("{key}.{suffix}"))
     }
 
@@ -231,6 +228,15 @@ impl Env {
             .map(str::to_owned)
             .collect()
     }
+}
+
+/// Matches `git hash-object --stdin` for `text`: the SHA-1 of git's blob header and the text.
+/// `fake-forge.sh` keys its answers by this hash of the argument list, one argument per line.
+fn blob_hash(text: &str) -> String {
+    let mut hash = sha1_smol::Sha1::new();
+    hash.update(format!("blob {}\0", text.len()).as_bytes());
+    hash.update(text.as_bytes());
+    hash.digest().to_string()
 }
 
 /// Writes `body` to `path` as an executable script.
@@ -578,4 +584,29 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Env::respond` and `fake-forge.sh` MUST key an argument list alike, or no canned answer
+    /// is found.
+    #[test]
+    fn the_forge_key_is_what_git_hash_object_prints() {
+        let env = Env::new();
+        for args in [
+            &["api", "repos/o/r/issues?per_page=100"][..],
+            &["api", "title with space", "h\u{e9}llo", "", "last"],
+            &[""],
+            &[],
+        ] {
+            let text = format!("{}\n", args.join("\n"));
+            let key = env.git_stdin(&["hash-object", "--stdin"], &text);
+            let body = format!("{args:?}");
+            env.respond(args, &body);
+            let stored = fs::read_to_string(env.path("forge").join(format!("{key}.json")));
+            assert_eq!(stored.ok(), Some(body), "{args:?}");
+        }
+    }
 }
