@@ -233,9 +233,8 @@ fn listed_hierarchy(pass: &Pass, number: u64) -> Result<IssueHierarchy> {
         })
 }
 
-/// Refreshes the hierarchy of cached issues that `refreshed_numbers` lacks. It takes at most
-/// `hierarchy_budget` of them, after the tracker's cursor. Returns the keys the host no longer
-/// has, sorted, and how many issues were left to refresh.
+/// Refreshes up to `hierarchy_budget` cached issues that `refreshed_numbers` lacks, after the
+/// tracker's cursor. Returns the sorted keys the host no longer has, and how many remain.
 fn refresh_cached(
     pass: &Pass,
     refreshed_numbers: &HashSet<u64>,

@@ -1251,8 +1251,8 @@ on GitHub and GitLab, with these differences:
   that quotes the thread, and a local resolve stays local: `publish` lists it under `skipped` with
   `Forgejo cannot resolve threads; cleared locally`. A resolve made on the host syncs. The next
   `sync` reopens a thread resolved only locally.
-- `agt pr` marks a draft with the `WIP: ` title prefix. A title that starts with `WIP:` or
-  `[WIP]`, in any case, counts as a draft, also in `agt status`. The PR does not say whether auto-merge is
+- `agt pr` marks a draft with the `WIP: ` title prefix. Titles starting with `WIP:` or `[WIP]`,
+  in any case, are drafts, also in `agt status`. The PR does not say whether auto-merge is
   on, so `auto_merge` is `"unknown"`. `merge --auto` schedules the merge with
   `merge_when_checks_succeed`; `auto-merge off` cancels the schedule (a 404 means none was set)
   and `auto-merge on` schedules it again with the method `merge --auto` recorded, `merge` by default.
@@ -1776,8 +1776,8 @@ publish, and the writes of `agt pr`.
 
 Trackers come first from the git remotes. `[sync] remotes` chooses which: `all` (the
 default) every remote (`origin`, `upstream`, then the rest by name), `origin` only `origin`,
-`none` only the configured entries. A remote becomes a tracker only when its URL names a
-repository on a known host. Known hosts are GitHub, GitLab and Forgejo hosts. A `[[tracker]]` at the same host and
+`none` only the configured entries. Only a remote whose URL names a repository on a
+known host becomes a tracker. Known hosts are GitHub, GitLab and Forgejo hosts. A `[[tracker]]` at the same host and
 repository (ASCII case ignored) overrides the fields of that tracker; any other entry adds one.
 `enabled = false` drops a tracker, and `issues = false` or `pull_requests = false` drops it for that
 kind. `issues` and `pull_requests` can also be a table that overrides `pull` and `push` for that
@@ -1878,7 +1878,7 @@ opt into remote access independently of automatic settings. `--offline` and
 
 | Command | What it does |
 | --- | --- |
-| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Refreshes hierarchy for every stored remote issue, even outside the changed listing; unchanged issue fields are skipped. Forgejo has no hierarchy: there sync only checks that each stored issue still exists, and `hierarchy_refreshed` stays 0. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts`, `hierarchy_refreshed`, `unavailable` per tracker. |
+| `sync` | Lists what changed since the last watermark (five minutes of overlap), fetches those issues with their comments and the PRs/MRs the host links, merges them in. Refreshes hierarchy for every stored remote issue, even outside the changed listing; unchanged issue fields are skipped. Forgejo has no hierarchy: sync only checks each stored issue still exists. `hierarchy_refreshed` stays 0. Reports `listed`, `new`, `updated`, `unchanged`, `claimed`, `conflicts`, `hierarchy_refreshed`, `unavailable` per tracker. |
 | `list [--state open\|closed\|all] [--label L] [--assignee A] [--author A] [--pending] [--parent KEY] [--text T] [--pr <n\|url>] [--branch B] [--title T]` | Summaries; `pending` is whether anything is queued for the issue. `--state` defaults to `open`, or to `all` when `--text`, `--pr`, `--branch`, `--title` or `--parent` is given. `--parent` selects direct children. `--text` is a case-insensitive match over title, body, comments and notes; `matched` says where. `--pr`, `--branch` and `--title` look issues up: issues linked to a PR/MR; issues named by a number in the branch (`12-fix`, `feat/12-x`, `issue-12`, `gh-12`) or a PR/MR branch the host reported or `link --branch` recorded; issues a `#12`, `owner/repo#12` or issue URL in the title names. `via` says which; an issue that matches any of the three lookups is kept. All filters combine with AND. |
 | `show <key>` | The issue, its `parent`, direct `sub_issues` keys, comments, links, notes, what is queued (`queued`), conflicts and errors. |
 | `status` | Per tracker: counts, issues with queued changes, conflicts, errors, `push` and the last sync. |
