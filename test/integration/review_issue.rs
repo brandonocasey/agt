@@ -174,7 +174,7 @@ fn comment_and_qa_finding_issue_name_a_related_issue() {
     assert!(posted.contains("\n\nRelated: o/r#1"), "{posted}");
     let summary = write_text(&dry, "body", "qa-record");
     assert!(
-        summary.contains("3. 🧪 **Login hangs.** · High · QA: login · whole PR · Related: o/r#2\n"),
+        summary.contains("1. 🧪 **Login hangs.** · High · QA: login · whole PR · Related: o/r#2\n"),
         "{summary}"
     );
     // Each thread points its issue back at the review.
@@ -463,9 +463,9 @@ fn a_review_run_names_an_issue_from_pass_start() {
     assert_eq!(occurrences(summary, "Related: o/r#1"), 1, "{summary}");
 }
 
-/// A QA run and a QA check that name an issue store it and link the review back. The summary
-/// names each run's issue once, even when a review run and another QA run name the same one, and
-/// the check's issue in its table row only.
+/// A QA run or check with an issue stores it and links the review back. Each summary names the
+/// issues of its runs once. A check's issue shows only in its table row. A QA run with no check
+/// adds no issue to the QA summary.
 #[test]
 fn a_qa_run_and_a_qa_check_name_an_issue() {
     let setup = setup_with_issue();
@@ -507,11 +507,13 @@ fn a_qa_run_and_a_qa_check_name_an_issue() {
     qa(env, &["run", "end", "--run", &run]);
     qa(env, &["run", "end", "--run", &same]);
     let dry = env.run(&["publish", "--pr", "42", "--dry-run"]);
+    let review = write_text(&dry, "body", "review-record");
+    assert_eq!(occurrences(review, "Related: o/r#1"), 1, "{review}");
     let summary = write_text(&dry, "body", "qa-record");
-    for issue in ["o/r#1", "o/r#2", "o/r#3"] {
+    for (issue, times) in [("o/r#1", 0), ("o/r#2", 1), ("o/r#3", 1)] {
         assert_eq!(
             occurrences(summary, &format!("Related: {issue}")),
-            1,
+            times,
             "{summary}"
         );
     }

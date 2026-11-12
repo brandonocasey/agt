@@ -10,6 +10,16 @@ use crate::support::forge::{Call, Comment, FakeService, Remote};
 use crate::support::scenario::{Review, Setup, write_text};
 use crate::support::{Env, numbered};
 
+/// The edit of the QA summary comment, which `accept_nth` answers with id 802.
+const PATCH_QA_SUMMARY: [&str; 6] = [
+    "api",
+    "--method",
+    "PATCH",
+    "repos/me/repo/issues/comments/802",
+    "--input",
+    "-",
+];
+
 fn exec(env: &Env, args: &[&str]) -> Output {
     env.bin(&env.repo).arg("qa").args(args).output().unwrap()
 }
@@ -367,7 +377,7 @@ fn a_failed_check_no_thread_explains_is_left_to_fix() {
         "{summary}"
     );
     assert!(
-        summary.contains("> <sub>agt ") && summary.contains(" · 🔍 review and 🧪 QA · "),
+        summary.contains("> <sub>agt ") && summary.contains(" · 🧪 QA · "),
         "{summary}"
     );
 }
@@ -400,6 +410,9 @@ fn a_qa_approval_of_the_head_shows_in_the_headline() {
         )),
         "{summary}"
     );
+    // A QA approval shows in the QA summary only.
+    let review = write_text(&dry, "body", "review-record");
+    assert!(!review.contains("QA approved"), "{review}");
 }
 
 /// A QA finding with no diff line goes in the review body on someone else's PR, and its
@@ -465,6 +478,157 @@ fn a_qa_finding_in_a_review_body_names_its_check_in_the_footer() {
     );
 }
 
+/// Review and QA summaries are separate comments, each posted once and edited in place.
+/// Neither holds the other's text or records.
+#[test]
+fn review_and_qa_runs_get_separate_summary_comments() {
+    let svc = Github::new();
+    let (setup, run) = published_setup(&svc, false, |_| {});
+    let env = &setup.env;
+    let dry = qa(env, &["publish", "--pr", "42", "--dry-run"]);
+    let review = write_text(&dry, "body", "review-record");
+    let tested = write_text(&dry, "body", "qa-record");
+    assert!(review.contains("agent-review id=summary "), "{review}");
+    assert!(
+        !review.contains("qa-record") && !review.contains("QA check"),
+        "{review}"
+    );
+    assert!(tested.contains("agent-review id=qa-summary "), "{tested}");
+    assert!(
+        !tested.contains("review-record") && !tested.contains("closed finding"),
+        "{tested}"
+    );
+
+    svc.accept_nth(env, Call::PostNote, 1, 801);
+    svc.accept_nth(env, Call::PostNote, 2, 802);
+    env.respond(
+        &PATCH_QA_SUMMARY,
+        r#"{"id":802,"html_url":"https://github.com/me/repo/pull/42#issuecomment-802"}"#,
+    );
+    let published = exec(env, &["publish", "--pr", "42"]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    assert_eq!(svc.count(env, Call::PostNote), 2);
+    let review_id = env.run(&["show", &setup.run])["run"]["record"]["remote_id"].clone();
+    let qa_id = qa(env, &["show", &run])["run"]["record"]["remote_id"].clone();
+    assert!(
+        review_id.is_string() && qa_id.is_string(),
+        "{review_id} {qa_id}"
+    );
+    assert_ne!(review_id, qa_id);
+
+    // A later QA run changes the QA summary, which is edited where it is.
+    let again = start(env, &[]);
+    check(env, &again, "pay with a card", "pass", &[]);
+    qa(env, &["run", "end", "--run", &again]);
+    assert!(exec(env, &["publish", "--pr", "42"]).status.success());
+    assert_eq!(svc.count(env, Call::PostNote), 2);
+    assert_eq!(
+        qa(env, &["show", &again])["run"]["record"]["remote_id"],
+        qa_id
+    );
+    assert_eq!(
+        env.run(&["show", &setup.run])["run"]["record"]["remote_id"],
+        review_id
+    );
+}
+
+/// Moves QA run `run`'s record into comment `remote`, with `parts` as its parts. Review and QA
+/// runs shared that comment in an older agt.
+fn share_summary_comment(env: &Env, run: &str, remote: &str, parts: Value) {
+    let path = std::fs::read_dir(env.state())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && !path.file_name().unwrap().to_string_lossy().starts_with('.')
+        })
+        .unwrap();
+    let mut target: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let qa_run = target["qa_runs"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|candidate| candidate["id"] == run)
+        .unwrap();
+    let record = &mut qa_run["record"];
+    record["remote_id"] = remote.into();
+    if !parts.is_null() {
+        record["parts"] = parts;
+    }
+    let sent = record["sent"]
+        .as_str()
+        .unwrap()
+        .replace("id=qa-summary", "id=summary");
+    record["sent"] = sent.into();
+    std::fs::write(&path, serde_json::to_vec(&target).unwrap()).unwrap();
+}
+
+/// A QA record that shares the review summary's comment moves to its own QA summary. The review
+/// summary keeps the comment and its parts.
+#[test]
+fn a_qa_record_in_the_shared_summary_moves_to_its_own_comment() {
+    let svc = Github::new();
+    let (setup, run) = published_setup(&svc, false, |_| {});
+    let env = &setup.env;
+    svc.accept_nth(env, Call::PostNote, 1, 801);
+    svc.accept_nth(env, Call::PostNote, 2, 802);
+    svc.accept_nth(env, Call::PostNote, 3, 803);
+    assert!(exec(env, &["publish", "--pr", "42"]).status.success());
+    share_summary_comment(
+        env,
+        &run,
+        "801",
+        serde_json::json!([{"post": "posted", "sent": "x", "remote_id": "900", "url": null}]),
+    );
+    assert!(exec(env, &["publish", "--pr", "42"]).status.success());
+    assert_eq!(svc.count(env, Call::PostNote), 3);
+    let record = &qa(env, &["show", &run])["run"]["record"];
+    assert_eq!(record["remote_id"], "803", "{record}");
+    // The parts stay with the review summary.
+    assert!(record["parts"].is_null(), "{record}");
+    assert_eq!(
+        env.run(&["show", &setup.run])["run"]["record"]["remote_id"],
+        "801"
+    );
+}
+
+/// A QA record alone in the shared comment keeps that comment. The comment becomes the QA
+/// summary, edited in place.
+#[test]
+fn a_qa_record_alone_in_the_shared_summary_keeps_its_comment() {
+    let svc = Github::new();
+    let (setup, run) = published_setup(&svc, false, |_| {});
+    let env = &setup.env;
+    svc.accept_nth(env, Call::PostNote, 1, 801);
+    svc.accept_nth(env, Call::PostNote, 2, 802);
+    env.respond(
+        &[
+            "api",
+            "--method",
+            "PATCH",
+            "repos/me/repo/issues/comments/777",
+            "--input",
+            "-",
+        ],
+        r#"{"id":777,"html_url":"https://github.com/me/repo/pull/42#issuecomment-777"}"#,
+    );
+    assert!(exec(env, &["publish", "--pr", "42"]).status.success());
+    share_summary_comment(env, &run, "777", Value::Null);
+    let again = start(env, &[]);
+    check(env, &again, "pay with a card", "pass", &[]);
+    qa(env, &["run", "end", "--run", &again]);
+    assert!(exec(env, &["publish", "--pr", "42"]).status.success());
+    assert_eq!(svc.count(env, Call::PostNote), 2);
+    let record = &qa(env, &["show", &again])["run"]["record"];
+    assert_eq!(record["remote_id"], "777", "{record}");
+    let sent = record["sent"].as_str().unwrap();
+    assert!(sent.contains("agent-review id=qa-summary "), "{sent}");
+}
+
 #[test]
 fn publish_adds_a_qa_section_to_the_summary() {
     let svc = Github::new();
@@ -527,21 +691,28 @@ fn publish_adds_a_qa_section_to_the_summary() {
 #[test]
 fn sync_claims_the_qa_record_of_its_own_summary() {
     let svc = Github::new();
-    let (setup, run) = published_setup(&svc, false, |_| {});
+    let (setup, _) = published_setup(&svc, false, |_| {});
     let env = &setup.env;
-    svc.lose(env, Call::PostNote);
+    svc.accept_nth(env, Call::PostNote, 1, 801);
+    svc.accept_nth(env, Call::PostNote, 2, 802);
+    assert!(exec(env, &["publish", "--pr", "42"]).status.success());
+    // A later QA run edits the QA summary, and the edit's response is lost.
+    let run = start(env, &[]);
+    check(env, &run, "pay with a card", "pass", &[]);
+    qa(env, &["run", "end", "--run", &run]);
+    env.fail_call(&PATCH_QA_SUMMARY);
     exec(env, &["publish", "--pr", "42"]);
     let record = &qa(env, &["show", &run])["run"]["record"];
     assert_eq!(record["post"], "posting", "{record}");
     let sent = record["sent"].as_str().unwrap().to_owned();
 
     let mut remote = Remote::new();
-    remote.general("9001", Comment::new(9001, "me", &sent));
+    remote.general("802", Comment::new(802, "me", &sent));
     svc.sync(&setup, &remote);
     env.pull(&["sync", "--pr", "42"]);
     let record = &qa(env, &["show", &run])["run"]["record"];
     assert_eq!(record["post"], "posted", "{record}");
-    assert_eq!(record["remote_id"], "9001");
+    assert_eq!(record["remote_id"], "802");
     let list = env.run(&["list"]);
     assert!(
         !list["threads"]
@@ -604,7 +775,7 @@ fn a_headless_target_still_reports_qa() {
 
 /// Line count of all text the fixture below posts, hidden markers included, as measured on a
 /// GitHub dry run.
-const FIXTURE_POSTED_LINES: usize = 55;
+const FIXTURE_POSTED_LINES: usize = 59;
 
 #[test]
 fn published_text_is_short_and_actionable_findings_are_threads() {
@@ -660,7 +831,7 @@ fn published_text_is_short_and_actionable_findings_are_threads() {
         .iter()
         .map(|write| write["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, ["review", "summary"], "{dry}");
+    assert_eq!(kinds, ["review", "summary", "summary"], "{dry}");
     assert_eq!(writes[0]["input"]["comments"].as_array().unwrap().len(), 4);
 
     let mut texts = vec![writes[0]["input"]["body"].as_str().unwrap().to_owned()];
@@ -668,6 +839,7 @@ fn published_text_is_short_and_actionable_findings_are_threads() {
         texts.push(comment["body"].as_str().unwrap().to_owned());
     }
     texts.push(writes[1]["input"]["body"].as_str().unwrap().to_owned());
+    texts.push(writes[2]["input"]["body"].as_str().unwrap().to_owned());
     let lines: usize = texts.iter().map(|text| text.lines().count()).sum();
     assert!(
         lines <= FIXTURE_POSTED_LINES,
@@ -675,7 +847,7 @@ fn published_text_is_short_and_actionable_findings_are_threads() {
         texts.join("\n=====\n")
     );
 
-    let summary = write_text(&dry, "body", "qa-record");
+    let summary = write_text(&dry, "body", "review-record");
     assert!(
         summary.contains(
             "\n1. 🐛 **Bug one.** · High · `a.txt:3`\n2. 🐛 **Bug two.** · Low · `a.txt:4`\n"

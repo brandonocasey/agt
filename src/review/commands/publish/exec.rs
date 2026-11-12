@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use super::plan::{Item, Write};
 use crate::core::clock;
 use crate::core::error::{Error, Result};
-use crate::forge::markers::{self, agent_id};
+use crate::forge::markers::{SummaryKind, agent_id};
 use crate::forge::service::Inline;
 use crate::forge::transport::TransportError;
 use crate::review::commands::Ctx;
@@ -189,17 +189,21 @@ fn already_gone(error: &TransportError, item: &Item) -> bool {
 fn reposted(item: &Item) -> Option<Item> {
     match item {
         Item::Summary {
+            kind,
             runs,
             remote: Some(_),
         } => Some(Item::Summary {
+            kind: *kind,
             runs: runs.clone(),
             remote: None,
         }),
         Item::SummaryPart {
+            kind,
             runs,
             number,
             remote: Some(_),
         } => Some(Item::SummaryPart {
+            kind: *kind,
             runs: runs.clone(),
             number: *number,
             remote: None,
@@ -269,6 +273,33 @@ fn clear_edit(target: &mut Target, id: &str, sent: &str) {
     }
 }
 
+/// Whether a QA record moves off the review summary's comment. Its parts then belong to the
+/// review summary.
+fn left_shared_summary(kind: SummaryKind, previous: &RecordPost, remote: &Option<String>) -> bool {
+    let sent = previous.delivery.sent.as_deref().and_then(agent_id);
+    kind == SummaryKind::Qa
+        && previous.remote_id != *remote
+        && sent.as_deref() == Some(SummaryKind::Review.id())
+}
+
+/// A record keeps its own parts, unless it leaves the review summary or has none. Then it takes
+/// the parts that the runs in `remote` share.
+fn kept_parts(
+    kind: SummaryKind,
+    previous: Option<&RecordPost>,
+    remote: &Option<String>,
+    shared: &[SummaryPart],
+) -> Vec<SummaryPart> {
+    match previous {
+        Some(previous)
+            if !previous.parts.is_empty() && !left_shared_summary(kind, previous, remote) =>
+        {
+            previous.parts.clone()
+        }
+        _ => shared.to_vec(),
+    }
+}
+
 pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
@@ -283,7 +314,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
         | Item::ApprovalReview { comment }
         | Item::Draft { comment }
         | Item::Reply { comment } => vec![comment.clone()],
-        Item::Summary { runs, remote } => {
+        Item::Summary { kind, runs, remote } => {
             let text = texts.next().flatten();
             // The parts of the comment the runs share, for a run that joins it now.
             let mut shared: Vec<SummaryPart> = Vec::new();
@@ -299,10 +330,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
             for (run, head) in runs {
                 if let Some(record) = target.record_mut(run) {
                     let previous = record.take();
-                    let parts = match previous.as_ref().map(|record| record.parts.clone()) {
-                        Some(parts) if !parts.is_empty() => parts,
-                        _ => shared.clone(),
-                    };
+                    let parts = kept_parts(*kind, previous.as_ref(), remote, &shared);
                     let url = previous
                         .as_ref()
                         .filter(|record| record.remote_id == *remote)
@@ -336,6 +364,7 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
             runs,
             number,
             remote,
+            ..
         } => {
             let text = texts.next().flatten();
             let index = number - 2;
@@ -513,7 +542,9 @@ pub(super) fn save(
             })?;
             Ok(Some(id))
         }
-        Item::SummaryPart { runs, number, .. } => {
+        Item::SummaryPart {
+            kind, runs, number, ..
+        } => {
             let (id, url) = service
                 .comment_created(review_url, response)
                 .ok_or_else(|| {
@@ -527,7 +558,7 @@ pub(super) fn save(
                         part.delivery.post = PostState::Posted;
                         part.remote_id = Some(id.clone());
                         part.url.clone_from(&url);
-                        let part_id = markers::summary_part_id(*number);
+                        let part_id = kind.part_id(*number);
                         record
                             .earlier
                             .retain(|body| agent_id(body).as_deref() != Some(part_id.as_str()));

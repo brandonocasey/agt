@@ -71,13 +71,17 @@ pub(super) fn approve(ctx: &Ctx, args: &ApprovalArgs) -> Result<Value> {
     Ok(json!({ "target": scope.key, "thread": thread }))
 }
 
-/// Ids of the open threads that stop an approval of `target`.
-pub(super) fn blocking_threads(target: &Target) -> impl Iterator<Item = &str> {
+/// The open threads that stop an approval of `target`.
+pub(super) fn blocking(target: &Target) -> impl Iterator<Item = &Thread> {
     target
         .threads
         .iter()
         .filter(|thread| is_open(thread) && thread.kind.blocks_approval())
-        .map(|thread| thread.id.as_str())
+}
+
+/// Ids of the open threads that stop an approval of `target`.
+pub(super) fn blocking_threads(target: &Target) -> impl Iterator<Item = &str> {
+    blocking(target).map(|thread| thread.id.as_str())
 }
 
 /// Open review items: unresolved findings and threads still on the host. A general comment or

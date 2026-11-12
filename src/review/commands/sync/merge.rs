@@ -6,7 +6,7 @@ use super::records::{
     reply_thread,
 };
 use super::trust::Trust;
-use crate::forge::markers::{self, agent_attempt, agent_id};
+use crate::forge::markers::{self, SummaryKind, agent_attempt, agent_id};
 use crate::forge::service::{Capabilities, ReviewService};
 use crate::forge::{CommentData, Draft, Fetched, ThreadData};
 use crate::store::model::{
@@ -194,6 +194,39 @@ pub(super) fn claim_git_names(target: &mut Target, login: &str) {
     }
 }
 
+/// Marks a summary part as posted in the runs whose records hold it.
+fn land_summary_part(
+    runs: &mut [Run],
+    qa_runs: &mut [QaRun],
+    (kind, number): (SummaryKind, usize),
+    comment: &CommentData,
+) {
+    let posts: Vec<&mut RecordPost> = match kind {
+        SummaryKind::Review => runs
+            .iter_mut()
+            .filter_map(|run| run.record.as_mut())
+            .collect(),
+        SummaryKind::Qa => qa_runs
+            .iter_mut()
+            .filter_map(|run| run.record.as_mut())
+            .collect(),
+    };
+    for part in posts
+        .into_iter()
+        .filter_map(|record| record.parts.get_mut(number - 2))
+    {
+        if (part.remote_id.as_deref() == Some(comment.id.as_str())
+            || (part.remote_id.is_none() && part.delivery.is_posting()))
+            && (!part.delivery.is_posting()
+                || part.delivery.is_attempt(agent_attempt(&comment.body)))
+        {
+            part.delivery.post = PostState::Posted;
+            part.remote_id = Some(comment.id.clone());
+            part.url.clone_from(&comment.url);
+        }
+    }
+}
+
 /// Stores the records of a verified record or summary comment and marks our runs' records
 /// posted when it is their write; false when the comment holds no record.
 fn take_record(
@@ -205,22 +238,8 @@ fn take_record(
 ) -> bool {
     let own = trust.own_id(comment);
     // A continuation of the summary holds no record, but is ours and is not a finding.
-    if let Some(number) = own.as_deref().and_then(markers::summary_part) {
-        let posts = runs
-            .iter_mut()
-            .filter_map(|run| run.record.as_mut())
-            .chain(qa_runs.iter_mut().filter_map(|run| run.record.as_mut()));
-        for part in posts.filter_map(|record| record.parts.get_mut(number - 2)) {
-            if (part.remote_id.as_deref() == Some(comment.id.as_str())
-                || (part.remote_id.is_none() && part.delivery.is_posting()))
-                && (!part.delivery.is_posting()
-                    || part.delivery.is_attempt(agent_attempt(&comment.body)))
-            {
-                part.delivery.post = PostState::Posted;
-                part.remote_id = Some(comment.id.clone());
-                part.url.clone_from(&comment.url);
-            }
-        }
+    if let Some(part) = own.as_deref().and_then(markers::summary_part) {
+        land_summary_part(runs, qa_runs, part, comment);
         return true;
     }
     let found = parse_records(comment);
@@ -230,7 +249,7 @@ fn take_record(
     }
     // A run's own record names the run in its id; the summary holds every run it lists.
     let claimed: Vec<&str> = match own.as_deref() {
-        Some(markers::SUMMARY_ID) => found
+        Some(id) if markers::is_summary_id(id) => found
             .iter()
             .map(|record| record.run.as_str())
             .chain(qa_found.iter().map(String::as_str))
@@ -285,7 +304,7 @@ pub(crate) fn landed(record: &mut RecordPost, id: String, url: Option<String>) {
     record.url = url;
     record
         .earlier
-        .retain(|body| agent_id(body).as_deref() != Some(markers::SUMMARY_ID));
+        .retain(|body| !agent_id(body).is_some_and(|id| markers::is_summary_id(&id)));
 }
 
 /// What the host returned, by kind and id: a review, an inline comment and a general comment
