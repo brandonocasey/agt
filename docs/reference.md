@@ -257,7 +257,7 @@ agt review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
   --reviewer rv-7k2m.c1p0.fix --model claude-opus-5-5 --harness claude-code \
   --session dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f
 agt review edit h1/c2 --body "Matches the API limit, see #12."   # rewrite a comment
-agt review delete h1/c2                                        # remove a comment
+agt review delete h1/c2 --force                                # remove a comment
 agt review resolve h1 --answered
 agt review resolve rv-7k2m.c1p0.r1.f3 --issue '#57'          # left for a follow-up issue
 agt review comment --body "Same race as #12." --issue '#12'  # names a related issue
@@ -284,7 +284,8 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
 - `reply --local` keeps the reply in the store only, such as the user's answer
   to a held question: `list --format prompt` shows it and `publish` never posts
   it.
-- `edit <comment-id> --body <text|->` and `delete <comment-id>` change one comment.
+- `edit <comment-id> --body <text|->` and `delete <comment-id> --force` change one comment.
+  - `delete` removes nothing without `--force`.
   - The id is the thread id and `/c<n>`, such as `h1/c2` or `rv-7k2m.c1p0.r1.f1/c1`.
   - A comment not posted yet is rewritten by `edit` and removed by `delete`.
     Deleting the comment that opens the thread removes the thread and its replies.

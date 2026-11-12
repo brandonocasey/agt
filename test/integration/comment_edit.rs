@@ -51,9 +51,17 @@ fn edit_rewrites_an_unposted_comment_from_text_or_stdin() {
 }
 
 #[test]
+fn delete_without_force_removes_nothing() {
+    let env = thread_with_a_reply();
+    let error = env.fail(&["delete", "h1/c2"], None);
+    assert!(error.contains("needs --force"), "{error}");
+    assert_eq!(bodies(&env), ["Opening.", "Answer."]);
+}
+
+#[test]
 fn delete_removes_an_unposted_reply_and_keeps_the_thread() {
     let env = thread_with_a_reply();
-    let deleted = env.run(&["delete", "h1/c2"]);
+    let deleted = env.run(&["delete", "--force", "h1/c2"]);
     assert_eq!(deleted["deleted"], "h1/c2");
     assert_eq!(deleted["pending"], false);
     assert_eq!(deleted["thread_removed"], false);
@@ -64,7 +72,7 @@ fn delete_removes_an_unposted_reply_and_keeps_the_thread() {
 fn deleting_the_opener_of_an_unposted_thread_removes_the_thread() {
     let env = thread_with_a_reply();
     env.run(&["comment", "--body", "Another thread.", "--author", "me"]);
-    let deleted = env.run(&["delete", "h1/c1"]);
+    let deleted = env.run(&["delete", "--force", "h1/c1"]);
     assert_eq!(deleted["thread_removed"], true);
     assert_eq!(ids(&env.run(&["list"])), ["h2"]);
 }
@@ -78,7 +86,7 @@ fn an_unknown_comment_is_refused_and_a_thread_id_is_not_a_comment_id() {
             error.contains(&format!("comment {id} not found")),
             "{error}"
         );
-        let error = env.fail(&["delete", id], None);
+        let error = env.fail(&["delete", "--force", id], None);
         assert!(
             error.contains(&format!("comment {id} not found")),
             "{error}"
@@ -108,7 +116,7 @@ fn a_comment_being_posted_is_refused() {
     env.fail(&["publish", "--pr", svc.number()], None);
     for args in [
         vec!["edit", &comment, "--body", "x"],
-        vec!["delete", &comment],
+        vec!["delete", "--force", &comment],
     ] {
         let error = env.fail(&args, None);
         assert!(
@@ -313,7 +321,7 @@ fn a_reply_on_a_review_thread_is_edited_and_deleted_as_a_general_comment() {
     let text = write_text(&dry, "body", "Thanks a lot.");
     assert!(text.starts_with("> Looks risky."), "{text}");
 
-    env.run(&["delete", &reply]);
+    env.run(&["delete", "--force", &reply]);
     let dry = dry_run(env, "gh-r801", &[]);
     assert_eq!(kinds(&dry, "writes"), ["delete"], "{dry}");
     assert_eq!(
@@ -355,7 +363,7 @@ fn a_fresh_general_comment_is_planned_before_any_sync(
     assert_eq!(dry["writes"][0]["call"], json!(patch), "{dry}");
     write_text(&dry, "body", "Edited.");
 
-    env.run(&["delete", comment]);
+    env.run(&["delete", "--force", comment]);
     let dry = plan();
     assert_eq!(kinds(&dry, "writes"), ["delete"], "{dry}");
     assert_eq!(dry["writes"][0]["call"], json!(delete));
@@ -386,7 +394,7 @@ fn a_fresh_forgejo_comment_is_edited_and_deleted_before_any_sync() {
 fn deleting_a_posted_opener_does_not_import_its_reply_twice() {
     let Posted { svc, setup, remote } = posted_pair(None);
     let env = &setup.env;
-    env.run(&["delete", "h1/c1"]);
+    env.run(&["delete", "--force", "h1/c1"]);
     let delete = bodyless("DELETE", &issue_comment(602));
     env.respond(&strs(&delete), "");
 
@@ -528,7 +536,7 @@ fn a_gitlab_draft_is_to_be_published_before_it_changes() {
     env.pull(&["sync", "--pr", svc.number()]);
     for args in [
         vec!["edit", &comment, "--body", "x"],
-        vec!["delete", &comment],
+        vec!["delete", "--force", &comment],
     ] {
         let error = env.fail(&args, None);
         assert!(
@@ -565,7 +573,7 @@ fn a_forgejo_diff_comment_with_no_known_review_is_not_deleted() {
     remote.items.clear();
     env.pull(&["sync", "--pr", svc.number()]);
 
-    env.run(&["delete", &format!("{f1}/c1")]);
+    env.run(&["delete", "--force", &format!("{f1}/c1")]);
     let dry = env.run(&["publish", "--pr", svc.number(), "--dry-run", "--only", &f1]);
     assert_eq!(dry["writes"], json!([]), "{dry}");
     let reason = skipped_reason(&dry, &format!("{f1}/c1"));

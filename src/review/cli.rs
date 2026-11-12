@@ -364,6 +364,9 @@ pub struct EditArgs {
 pub struct DeleteArgs {
     /// Comment to remove, such as `h1/c2`. One imported from the host is read-only.
     pub id: String,
+    /// Confirm the delete; without it nothing is removed.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]

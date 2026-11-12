@@ -104,7 +104,7 @@ fn a_0_4_0_store_reads_and_updates_unchanged() {
 
     let edited = env.run(&["--target", KEY, "edit", "h2/c2", "--body", "agreed, thanks"]);
     assert_eq!(edited["thread"]["comments"][1]["body"], "agreed, thanks");
-    env.run(&["--target", KEY, "delete", "h2/c2"]);
+    env.run(&["--target", KEY, "delete", "--force", "h2/c2"]);
     let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert!(!document.to_string().contains("agreed"));
 }

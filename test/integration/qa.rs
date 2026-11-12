@@ -173,9 +173,9 @@ fn qa_comments_are_edited_and_deleted_and_stay_qa() {
         .clone();
     assert_eq!(edited["comments"][1]["body"], "Yes, at 60.");
     assert_eq!(edited["comments"][1]["qa"], true);
-    let deleted = qa(&env, &["delete", &format!("{id}/c2")]);
+    let deleted = qa(&env, &["delete", "--force", &format!("{id}/c2")]);
     assert_eq!(deleted["thread_removed"], false);
-    let deleted = qa(&env, &["delete", &format!("{id}/c1")]);
+    let deleted = qa(&env, &["delete", "--force", &format!("{id}/c1")]);
     assert_eq!(deleted["thread_removed"], true);
     assert_eq!(qa(&env, &["list"])["threads"], serde_json::json!([]));
 }

@@ -1562,7 +1562,7 @@ fn deleting_a_posted_comment_waits_for_publish(svc: Svc) {
     let calls = env.forge_calls().len();
 
     env.run(&["edit", &comment, "--body", "Edited, then deleted."]);
-    let deleted = env.run(&["delete", &comment]);
+    let deleted = env.run(&["delete", "--force", &comment]);
     assert_eq!(deleted["pending"], true);
     assert_eq!(deleted["thread_removed"], false);
     assert_eq!(env.forge_calls().len(), calls, "a delete calls no host");
@@ -1611,7 +1611,7 @@ fn imported_comments_are_read_only(svc: Svc) {
     assert_eq!(imported["comments"][0]["id"], alice.as_str());
     for args in [
         vec!["edit", &alice, "--body", "Mine now."],
-        vec!["delete", &alice],
+        vec!["delete", "--force", &alice],
     ] {
         let error = env.fail(&args, None);
         assert!(
@@ -1671,7 +1671,7 @@ fn a_comment_the_host_already_lost_is_deleted_here_without_a_call(svc: Svc) {
     let env = &setup.env;
     let (f1, host_id) = (setup.finding(1), svc.landed_inline());
     svc.land_inline(&setup);
-    env.run(&["delete", &format!("{f1}/c1")]);
+    env.run(&["delete", "--force", &format!("{f1}/c1")]);
 
     svc.sync(&setup, &Remote::new());
     let published = publish(env, svc, &["--only", &f1]);
@@ -1689,7 +1689,7 @@ fn a_delete_the_host_answers_with_not_found_is_done(svc: Svc) {
     let env = &setup.env;
     let (f1, host_id) = (setup.finding(1), svc.landed_inline());
     svc.land_inline(&setup);
-    env.run(&["delete", &format!("{f1}/c1")]);
+    env.run(&["delete", "--force", &format!("{f1}/c1")]);
 
     env.fail_call_with(
         &strs(&svc.call(Call::DeleteComment(host_id))),

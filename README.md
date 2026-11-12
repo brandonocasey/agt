@@ -36,6 +36,7 @@ Local issues and reviews need a Git repository, but no hosted project or login.
 Threads support file locations, replies, questions, and resolutions.
 You can edit or delete your own comments.
 Use `agt review edit|delete` or `agt qa edit|delete`.
+`delete` needs `--force`.
 `publish` sends the change for a posted one.
 Imported comments and ones being posted are refused.
 Review records capture who reviewed which changes and what happened to each finding.

@@ -65,6 +65,12 @@ pub(super) fn edit(ctx: &Ctx, args: &EditArgs) -> Result<Value> {
 }
 
 pub(super) fn delete(ctx: &Ctx, args: &DeleteArgs) -> Result<Value> {
+    if !args.force {
+        return fail(format!(
+            "delete of comment {} needs --force; nothing was removed",
+            args.id
+        ));
+    }
     let scope = ctx.scope()?;
     if scope.existing.is_none() {
         return fail(format!("comment {} not found", args.id));
