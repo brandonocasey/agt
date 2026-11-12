@@ -46,8 +46,8 @@ Later, you can import its discussions and publish local findings and summaries.
 Coverage checks help identify changes that still need review after fixes or rebases.
 
 `agt qa` records testing the same way: which checks ran, where, with what outcome and
-evidence, and the bugs they found. Checks go stale when the content changes, and the PR/MR
-summary shows them beside the review.
+evidence, and the bugs they found. Checks go stale when the content changes.
+The QA summary comment on a PR/MR shows them beside the review summary.
 
 [Review commands](docs/reference.md#commands) · [QA](docs/reference.md#qa) · [Coverage rules](docs/reference.md#reviewed-counting-and-pruning-rules)
 

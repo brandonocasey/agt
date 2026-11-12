@@ -217,7 +217,7 @@ head again reuses the same thread, and `--formal` upgrades a comment approval.
 `publish` posts no comment for it, except the `COMMENT` review or GitLab comment below (the text, default `Approved at <sha>.` or
 `--body`, stays in the store, also after `sync` reads back the review or comment that carries a formal
 approval).
-The summary headline shows ` · 🔍 approved` while the PR/MR head is the approved head and
+The review summary headline shows ` · 🔍 approved` while the PR/MR head is the approved head and
 no open finding blocks approval. The author flags (`--author`,
 `--reviewer`, `--model`, ...) sign the approval as for `comment`. With `--dry-run`
 the approval is still recorded locally, and nothing is posted.
@@ -489,9 +489,10 @@ cannot write to a target that has them.
 - `agt review status` carries the same QA state under `qa` (`null` before the first QA run).
   QA runs never count as reviews.
 - `show` takes a QA run (`qa-4f2a`) or check (`qa-4f2a.k1`) id, as does `agt review show`.
-- `publish` adds QA to the PR/MR summary: open QA findings and current failed or blocked checks
-  no open thread explains join the list of what is left to fix (a check that ran against an
-  older head does not; the table says `(out of date)`), and the checks table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
+- `publish` posts QA in its own PR/MR comment, apart from the review summary. The QA summary
+  lists open QA findings. It also lists current failed or blocked checks that no open thread explains. A check
+  that ran against an older head does not count; the table says `(out of date)`. The checks
+  table sits under Details. Evidence URLs are linked; local paths are only counted. Each covered QA run leaves
   a `<!-- qa-record v1 id=<run> head=<sha> -->` marker, distinct from review records, which
   `sync` reads to mark the run's record posted. A QA finding is headed
   `**🐛 bug (high)**` on its own line, with the check in the footer
@@ -944,17 +945,20 @@ local reads continue.
 - In-diff means the line is in a hunk of `git diff -U3 -M` between the PR/MR
   base and the reviewed commit (GitHub) or MR head (GitLab, after mapping the
   line to it); when the commits are not local it is out of diff.
-- The summary is one general comment per PR/MR: posted with the first ended
-  run, then edited in place (`PATCH .../issues/comments/<id>` on GitHub,
-  `PUT .../notes/<id>` on GitLab), and posted anew when the host no longer has
+- Review and QA summaries are separate general comments per PR/MR. Each covers only the runs
+  of its kind. The review summary holds review findings, `Not reviewed` commits and
+  `🔍 approved`. The QA summary holds QA findings, failed checks, the checks table and
+  `🧪 QA approved`. Each is posted with the first ended run of its kind. It is edited in place (`PATCH .../issues/comments/<id>` on GitHub,
+  `PUT .../notes/<id>` on GitLab). It is posted anew when the host no longer has
   it. The whole PR/MR, whatever `--run` selects to post. Its headline is the only status:
   `**⚠️ <N> to fix** at `<head>`` (plus ` · <n> commits not reviewed`),
   `**⏳ <n> new commits not reviewed** at `<head>`` when nothing is open but a PR/MR
-  commit no run read, or `**✅ Nothing to fix** at `<head>``, then ` · 🔍 approved` (only while no open finding blocks
-  approval) and ` · 🧪 QA approved` for approvals of that head. When the PR/MR head is not
+  commit no run read, or `**✅ Nothing to fix** at `<head>``, then ` · 🔍 approved` in the review summary (only while no open finding blocks
+  approval) or ` · 🧪 QA approved` in the QA summary, for approvals of that head. When the PR/MR head is not
   in the local repository, `<head>` is the newest head a run read and the head is listed under
   `Not reviewed` as not in the local repository. "To fix" counts open findings and current
-  failed or blocked QA checks no open thread explains; out-of-date checks never count. Each
+  failed or blocked QA checks no open thread explains, each in the summary of its kind;
+  out-of-date checks never count. Each
   item is one line: the emoji and the first sentence in bold, then severity, `Waiting on
   the PR author`, `QA: <check>`, the place (`path:line` or `whole PR`), `Related: <issue>`
   and `[thread](url)`; a finding that is not posted as a thread has its whole text quoted
@@ -966,14 +970,17 @@ local reads continue.
   `(out of date)`) and the closed findings with their outcome,
   with a count of those closed before they were posted. After approval, the follow-ups and
   closed findings drop (a finding closed before the approval stays dropped after a later
-  push, by the time it was closed, and a blocking finding opened since shows them again); only the QA table stays. A grey footer names the agt version, what
-  ran (🔍 review, 🧪 QA), the reviewers and their models, and the review time. A summary
+  push, by the time it was closed, and a blocking finding opened since shows them again); only the QA table stays in the QA summary. A grey footer names the agt version, what
+  ran (🔍 review or 🧪 QA), the reviewers and their models, and the review time. A summary
   longer than 65,000 characters continues in part comments, split at item boundaries and
-  edited in place: `<!-- agent-review id=summary/p<N> attempt=<attempt> -->`, each starting
-  `Part <N> of the agt summary` and holding items only; the summary ends with a pointer to
-  them. The summary ends with one
+  edited in place: `<!-- agent-review id=summary/p<N> attempt=<attempt> -->` (`qa-summary/p<N>`
+  for the QA summary), each starting `Part <N> of the agt summary` (`agt QA summary`) and
+  holding items only; the summary ends with a pointer to them. The summary ends with one
   `<!-- review-record v2 id=<run> head=<repaired head> reviews-at-head=<N> open=<O> -->`
-  per run it covers and `<!-- agent-review id=summary attempt=<attempt> -->`.
+  per run it covers and `<!-- agent-review id=summary attempt=<attempt> -->`. The QA summary
+  ends with one `<!-- qa-record v1 id=<run> head=<head> -->` per QA run and
+  `<!-- agent-review id=qa-summary attempt=<attempt> -->`. A QA summary hides its closed
+  findings once the head has a QA approval. An open QA finding keeps them shown.
   `N` counts the run's passes covering the repaired head by the same rules as
   `status`. Each covered run's `record` names the summary comment and its `parts`.
 - Concurrent `publish` commands for one repository and PR/MR run one at a time.

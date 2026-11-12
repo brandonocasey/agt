@@ -13,22 +13,51 @@ const CLOSE: &str = "-->";
 /// Local id prefix of the body of a review that `publish` posts; sync skips those.
 const REVIEW_ID: &str = "review/";
 const RECORD_SUFFIX: &str = "/record";
-/// Local id of the one summary comment of a PR/MR, which holds the record of every run.
-pub const SUMMARY_ID: &str = "summary";
+const SUMMARY_ID: &str = "summary";
+const QA_SUMMARY_ID: &str = "qa-summary";
 const PART_INFIX: &str = "/p";
 
-/// Local id of part `number` (2 or more) of a summary that does not fit one comment.
-pub fn summary_part_id(number: usize) -> String {
-    format!("{SUMMARY_ID}{PART_INFIX}{number}")
+/// Each PR/MR has two summary comments, one for review runs and one for QA runs.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum SummaryKind {
+    #[default]
+    Review,
+    Qa,
 }
 
-/// The number of the summary part with local id `id`.
-pub fn summary_part(id: &str) -> Option<usize> {
-    id.strip_prefix(SUMMARY_ID)?
-        .strip_prefix(PART_INFIX)?
-        .parse()
-        .ok()
-        .filter(|number| *number >= 2)
+impl SummaryKind {
+    /// Local id of the first comment of the summary.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Review => SUMMARY_ID,
+            Self::Qa => QA_SUMMARY_ID,
+        }
+    }
+
+    /// Local id of part `number` (2 or more) of a summary that does not fit one comment.
+    pub fn part_id(self, number: usize) -> String {
+        format!("{}{PART_INFIX}{number}", self.id())
+    }
+}
+
+/// Whether `id` is the first comment of either summary.
+pub fn is_summary_id(id: &str) -> bool {
+    id == SUMMARY_ID || id == QA_SUMMARY_ID
+}
+
+/// The summary and part number of the summary part with local id `id`.
+pub fn summary_part(id: &str) -> Option<(SummaryKind, usize)> {
+    [SummaryKind::Review, SummaryKind::Qa]
+        .into_iter()
+        .find_map(|kind| {
+            let number = id
+                .strip_prefix(kind.id())?
+                .strip_prefix(PART_INFIX)?
+                .parse()
+                .ok()
+                .filter(|number| *number >= 2)?;
+            Some((kind, number))
+        })
 }
 
 /// The marker that ties a posted body to a local comment id and, once sent, its attempt.
@@ -290,9 +319,19 @@ mod tests {
         assert_eq!(agent_id(&summary).as_deref(), Some(SUMMARY_ID));
         assert!(parse_records("no marker").is_empty());
         assert_eq!(record_run("rv-7k2m/record"), Some("rv-7k2m"));
-        assert_eq!(summary_part(&summary_part_id(3)), Some(3));
+        assert_eq!(
+            summary_part(&SummaryKind::Review.part_id(3)),
+            Some((SummaryKind::Review, 3))
+        );
+        assert_eq!(
+            summary_part(&SummaryKind::Qa.part_id(4)),
+            Some((SummaryKind::Qa, 4))
+        );
         assert_eq!(summary_part(SUMMARY_ID), None);
+        assert_eq!(summary_part(QA_SUMMARY_ID), None);
         assert_eq!(summary_part("summary/p1"), None);
+        assert!(is_summary_id(QA_SUMMARY_ID) && is_summary_id(SUMMARY_ID));
+        assert!(!is_summary_id("summary/p2"));
         assert!(is_review_id(&review_id("abc")));
         assert_eq!(
             agent_id(&agent(&review_id("abc"), None)).as_deref(),

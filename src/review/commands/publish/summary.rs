@@ -1,16 +1,16 @@
-//! The living summary: one comment per PR/MR that `publish` posts once and then edits in place.
-//! Its headline is the only status; under it come what is left to fix, the commits no review
-//! read and the findings moved to follow-up issues. It collapses the QA checks and the closed
-//! findings, and holds the record marker of every run it covers. One too long for a comment
-//! continues in part comments that hold items only.
+//! The living summaries: one review summary and one QA summary per PR/MR. `publish` posts each
+//! once, then edits it in place. The headline is the only status. Under it: what is left to
+//! fix, unreviewed commits and findings moved to follow-up issues. The QA checks and closed
+//! findings collapse. The record marker of every covered run sits at the end. A summary too
+//! long for a comment continues in part comments that hold items only.
 
 use std::fmt::Write as _;
 
 use super::render::{duration, kind_emoji, location, outcome, short};
 use crate::core::text::cut;
-use crate::forge::markers;
+use crate::forge::markers::{self, SummaryKind};
 use crate::git::CommitInfo;
-use crate::review::commands::approve::{blocking_threads, is_open};
+use crate::review::commands::approve::{blocking, is_open};
 use crate::review::commands::qa::{CheckState, environment};
 use crate::review::commands::usage::run_spend;
 use crate::store::model::{CommitPatch, Outcome, PassKind, QaRun, Resolution, Run, Target, Thread};
@@ -42,9 +42,10 @@ pub(super) struct QaSummary<'a> {
     pub(super) head: String,
 }
 
-/// Where the summary and its parts are on the host, as far as known.
+/// Which summary this is, and where its comments sit on the host, if known.
 #[derive(Default)]
 pub(super) struct Links {
+    pub(super) kind: SummaryKind,
     pub(super) summary: Option<String>,
     /// The urls of the parts already posted, part 2 first.
     pub(super) parts: Vec<Option<String>>,
@@ -74,7 +75,8 @@ fn closed_at(thread: &Thread) -> &str {
     thread.closed_at.as_deref().unwrap_or(&thread.updated_at)
 }
 
-/// The summary text, then the text of each part. `commits` are the PR/MR's commits, oldest
+/// The review or QA summary text, then the text of each part. A review summary takes the
+/// `covered` runs, a QA summary the QA runs. `commits` are the PR/MR's commits, oldest
 /// first, when git could list them; `head_local` is whether the PR/MR head is in the local
 /// repository. A part the host still holds from an earlier, longer summary
 /// is blanked.
@@ -122,7 +124,7 @@ pub(super) fn summary_texts(
         Some(newest) if unlisted => (vec![short(&qa.head).to_owned()], newest.head.as_str()),
         _ => (unreviewed(target, covered, commits), qa.head.as_str()),
     };
-    let approvals = approvals(target, covered, qa);
+    let approvals = approvals(target, covered, qa, links.kind);
     let mut items: Vec<String> = open
         .iter()
         .enumerate()
@@ -143,7 +145,7 @@ pub(super) fn summary_texts(
     follow_ups(&mut tail, &reported, &approvals);
     details(&mut tail, qa, &reported, &approvals);
     footer(&mut tail, covered, qa);
-    let marks = markers_block(covered, &reported, qa, attempt);
+    let marks = markers_block(covered, &reported, qa);
     layout(&head, &items, &tail, &marks, links, attempt)
 }
 
@@ -156,6 +158,10 @@ fn layout(
     links: &Links,
     attempt: &str,
 ) -> Vec<String> {
+    let marks = &format!(
+        "{marks}\n{}",
+        markers::agent(links.kind.id(), Some(attempt))
+    );
     let limit = MAX_BODY.saturating_sub(marks.chars().count());
     let cost = |item: &String| item.chars().count() + 1;
     let whole = join(head, items, tail);
@@ -201,7 +207,7 @@ fn layout(
             0 => marks.to_owned(),
             part => format!(
                 "\n{}",
-                markers::agent(&markers::summary_part_id(part + 1), Some(attempt))
+                markers::agent(&links.kind.part_id(part + 1), Some(attempt))
             ),
         };
         fit(text, MAX_BODY.saturating_sub(mark.chars().count()));
@@ -254,11 +260,15 @@ fn pointer(first: usize, last: usize, parts: usize, links: &Links) -> Option<Str
     Some(format!("Items {first}–{last} continue in {where_}{below}."))
 }
 
-/// `Part 2 of the [agt summary](url).`
+/// `Part 2 of the [agt summary](url).`, or `agt QA summary` for the QA summary.
 fn part_lead(number: usize, links: &Links) -> String {
+    let name = match links.kind {
+        SummaryKind::Review => "agt summary",
+        SummaryKind::Qa => "agt QA summary",
+    };
     match &links.summary {
-        Some(url) => format!("Part {number} of the [agt summary]({url})."),
-        None => format!("Part {number} of the agt summary."),
+        Some(url) => format!("Part {number} of the [{name}]({url})."),
+        None => format!("Part {number} of the {name}."),
     }
 }
 
@@ -288,7 +298,12 @@ fn headline(sha: &str, todo: usize, missing: usize, approvals: &Approvals) -> St
 
 /// The approvals of the PR/MR head: a review approval thread's, and a QA run's. A finding that
 /// blocks approval, opened after it, withdraws the review approval and what it hides.
-fn approvals<'a>(target: &'a Target, covered: &[Covered], qa: &QaSummary) -> Approvals<'a> {
+fn approvals<'a>(
+    target: &'a Target,
+    covered: &[Covered],
+    qa: &QaSummary,
+    kind: SummaryKind,
+) -> Approvals<'a> {
     let approvals = || {
         target
             .threads
@@ -301,9 +316,13 @@ fn approvals<'a>(target: &'a Target, covered: &[Covered], qa: &QaSummary) -> App
             .iter()
             .filter_map(|run| run.approval.as_ref())
     };
-    let blocked = blocking_threads(target).next().is_some();
-    let review = !blocked && approvals().any(|(approval, _)| approval.head == qa.head);
-    let qa_now = qa_approvals().any(|approval| approval.head == qa.head);
+    // Only QA findings block the QA summary.
+    let blocked =
+        blocking(target).any(|thread| kind == SummaryKind::Review || thread.check.is_some());
+    let review = kind == SummaryKind::Review
+        && !blocked
+        && approvals().any(|(approval, _)| approval.head == qa.head);
+    let qa_now = kind == SummaryKind::Qa && qa_approvals().any(|approval| approval.head == qa.head);
     let reviewed = !blocked && (covered.is_empty() || review);
     let tested = qa.runs.is_empty() || qa_now;
     // The last approval that left every covered kind approved: the older of the latest of each.
@@ -594,7 +613,7 @@ fn qa_table(text: &mut String, qa: &QaSummary) {
     }
 }
 
-/// `agt 0.19.0 · 🔍 review and 🧪 QA · 2 reviewers, claude-opus-5-5 · 14m · updated after each review`.
+/// `agt 0.19.0 · 🔍 review · 2 reviewers, claude-opus-5-5 · 14m · updated after each review`.
 fn footer(text: &mut String, covered: &[Covered], qa: &QaSummary) {
     let mut reviewers: Vec<(&str, &str)> = Vec::new();
     let mut models: Vec<&str> = Vec::new();
@@ -616,10 +635,9 @@ fn footer(text: &mut String, covered: &[Covered], qa: &QaSummary) {
             *total.get_or_insert(0) += secs;
         }
     }
-    let what = match (covered.is_empty(), qa.runs.is_empty()) {
-        (false, false) => "🔍 review and 🧪 QA",
-        (false, true) => "🔍 review",
-        _ => "🧪 QA",
+    let (what, updated) = match covered.is_empty() {
+        true => ("🧪 QA", "updated after each QA run"),
+        false => ("🔍 review", "updated after each review"),
     };
     let mut parts = vec![
         format!("agt {}", env!("CARGO_PKG_VERSION")),
@@ -640,7 +658,7 @@ fn footer(text: &mut String, covered: &[Covered], qa: &QaSummary) {
     if let Some(secs) = total {
         parts.push(duration(secs));
     }
-    parts.push("updated after each review".to_owned());
+    parts.push(updated.to_owned());
     let _ = write!(text, "\n\n> <sub>{}</sub>", parts.join(" · "));
 }
 
@@ -689,13 +707,8 @@ fn reviewed(target: &Target, commit: &CommitInfo) -> bool {
         .any(|pass| pass.kind != PassKind::Reveal && pass.commits.iter().any(same))
 }
 
-/// The record marker of every covered run, newest first, then the marker of this summary.
-fn markers_block(
-    covered: &[Covered],
-    reported: &[&Thread],
-    qa: &QaSummary,
-    attempt: &str,
-) -> String {
+/// The record marker of every covered run, newest first.
+fn markers_block(covered: &[Covered], reported: &[&Thread], qa: &QaSummary) -> String {
     let mut marks = String::new();
     for run in qa.runs.iter().rev() {
         let _ = write!(marks, "\n{}", markers::qa_record(&run.id, &qa.head));
@@ -711,11 +724,6 @@ fn markers_block(
             markers::record(&covered.run.id, &covered.head, covered.at_head, open)
         );
     }
-    let _ = write!(
-        marks,
-        "\n{}",
-        markers::agent(markers::SUMMARY_ID, Some(attempt))
-    );
     marks
 }
 
@@ -971,11 +979,11 @@ mod tests {
             checks: Vec::new(),
             head: "abc".into(),
         };
-        let approved = super::approvals(&target, &[], &qa);
+        let approved = super::approvals(&target, &[], &qa, SummaryKind::Review);
         assert!(approved.review && approved.all);
         // A finding opened at the same head leaves nothing approved.
         target.threads.push(thread("f1"));
-        let blocked = super::approvals(&target, &[], &qa);
+        let blocked = super::approvals(&target, &[], &qa, SummaryKind::Review);
         assert!(!blocked.review && !blocked.all && blocked.since.is_none());
     }
 
@@ -992,13 +1000,14 @@ mod tests {
             .collect();
         let head = "**⚠️ 300 to fix** at `abc1234`";
         let tail = "\n\n> <sub>agt</sub>";
-        let marks = "\n<!-- agent-review id=summary attempt=a -->";
+        let marks = "\n<!-- review-record -->";
+        let agent = "\n<!-- agent-review id=summary attempt=a -->";
         let links = Links::default();
         let texts = layout(head, &items, tail, marks, &links, "a");
         assert!(texts.len() > 2, "{}", texts.len());
         assert!(texts.iter().all(|text| text.chars().count() <= MAX_BODY));
         assert!(texts[0].starts_with(head));
-        assert!(texts[0].ends_with(marks));
+        assert!(texts[0].ends_with(&format!("{marks}{agent}")));
         assert!(texts[0].contains("> <sub>agt</sub>"));
         assert!(
             texts[0].contains("continue in part 2 to part"),
@@ -1027,6 +1036,7 @@ mod tests {
         let known = Links {
             summary: Some("https://h/1".into()),
             parts: vec![Some("https://h/2".into()), Some("https://h/3".into())],
+            ..Links::default()
         };
         assert_eq!(
             pointer(5, 9, 1, &known).as_deref(),
@@ -1045,6 +1055,14 @@ mod tests {
             part_lead(2, &known),
             "Part 2 of the [agt summary](https://h/1)."
         );
+        let qa = Links {
+            kind: SummaryKind::Qa,
+            ..known
+        };
+        assert_eq!(
+            part_lead(2, &qa),
+            "Part 2 of the [agt QA summary](https://h/1)."
+        );
     }
 
     #[test]
@@ -1052,6 +1070,7 @@ mod tests {
         let links = Links {
             summary: Some("https://h/1".into()),
             parts: vec![Some("https://h/2".into())],
+            ..Links::default()
         };
         let texts = layout(
             "**✅ Nothing to fix** at `abc`",
