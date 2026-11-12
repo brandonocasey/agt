@@ -761,7 +761,7 @@ impl<'a> Planner<'a> {
         comment: &Comment,
     ) -> String {
         let lines = is_first(thread, comment)
-            .then(|| self.posted_location(thread, kind))
+            .then(|| posted_location(thread, comment))
             .flatten();
         let text = body(target, thread, comment, lines.as_deref(), self.attempt);
         if self.replied_plainly(thread, kind, comment) {
@@ -771,16 +771,6 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// The lines a post of a thread's first comment names in its text, if the diff does not
-    /// place it. A thread on a file names them only when it has a line.
-    fn posted_location(&self, thread: &Thread, kind: RemoteKind) -> Option<String> {
-        let anchor = thread.anchor.as_ref()?;
-        let on_file = kind == RemoteKind::ReviewThread;
-        let named =
-            !matches!(self.spot(anchor), Spot::InDiff(_)) && (!on_file || anchor.line.is_some());
-        named.then(|| location(anchor))
-    }
-
     fn reply(
         &self,
         target: &Target,
@@ -788,7 +778,7 @@ impl<'a> Planner<'a> {
         remote: &RemoteThread,
         comment: &Comment,
     ) -> std::result::Result<Write, Skip> {
-        let text = body(target, thread, comment, None, self.attempt);
+        let text = self.posted_text(target, thread, remote.kind, comment);
         let item = Item::Reply {
             comment: comment.id.clone(),
         };
@@ -801,7 +791,6 @@ impl<'a> Planner<'a> {
         if matches!(comment.author, Author::Agent { .. }) {
             return Err(Skip::NoReply);
         }
-        let text = format!("{}{text}", quote(thread));
         Ok(self.write(item, self.service().note(subject, &text), &text))
     }
 
@@ -1042,6 +1031,14 @@ fn body_groups(paragraphs: Vec<Paragraph>) -> Vec<Vec<Paragraph>> {
         }
     }
     groups
+}
+
+/// The lines the post of a thread's first comment named in its text, read from the text
+/// that went out, so an edit keeps the shape the post had.
+fn posted_location(thread: &Thread, comment: &Comment) -> Option<String> {
+    let lines = location(thread.anchor.as_ref()?);
+    let sent = comment.delivery.sent.as_deref()?;
+    sent.starts_with(&format!("`{lines}`\n\n")).then_some(lines)
 }
 
 /// The quote that opens a reply to a general comment, in the form GitHub's own quote reply

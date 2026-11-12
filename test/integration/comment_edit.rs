@@ -254,6 +254,31 @@ fn editing_a_posted_comment_on_another_file_keeps_its_lines() {
         text.starts_with("`lib/b.txt:2`\n\nBetter opening."),
         "{text}"
     );
+    an_in_diff_comment_is_edited_without_lines_after_its_commit_leaves_the_head();
+}
+
+/// An in-diff comment went out with no lines in its text.
+/// When its commit is no longer in the head, an edit must not add them.
+fn an_in_diff_comment_is_edited_without_lines_after_its_commit_leaves_the_head() {
+    let svc = Github::new();
+    let mut setup = Setup::reviewed(svc.origin());
+    let f1 = setup.finding(1);
+    let remote = svc.land_inline(&setup);
+    let env = &setup.env;
+    assert!(!sent(env, &f1).contains("a.txt:3"), "posted in the diff");
+
+    env.git(&["switch", "-q", "-c", "other", "main"]);
+    env.write("other.txt", "elsewhere\n");
+    let moved = env.commit_all("another head");
+    env.git(&["switch", "-q", "feat"]);
+    setup.head = moved;
+    let env = &setup.env;
+    svc.sync(&setup, &remote);
+    env.run(&["edit", &format!("{f1}/c1"), "--body", "Better finding."]);
+    let dry = dry_run(env, &f1, &[]);
+    assert_eq!(kinds(&dry, "writes"), ["edit"], "{dry}");
+    let text = write_text(&dry, "body", "Better finding.");
+    assert!(!text.contains("a.txt"), "no stray lines: {text}");
 }
 
 /// A reply on a review's thread went out as a plain comment.
@@ -315,6 +340,9 @@ fn a_fresh_general_comment_is_planned_before_any_sync(
     svc.accept(env, Call::PostThread, 602);
     let posted = env.run(&["publish", "--pr", svc.number(), "--only", "h1"]);
     assert_eq!(kinds(&posted, "posted"), ["thread"], "{posted}");
+    let listed = env.run(&["list"]);
+    let linked = &thread(&listed, "h1")["remote"];
+    assert!(linked.is_null(), "no sync linked h1: {linked}");
     let comment = "h1/c1";
     let plan = || {
         let args = ["publish", "--pr", svc.number(), "--dry-run", "--only", "h1"];
