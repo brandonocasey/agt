@@ -80,6 +80,36 @@
       "body": "text"
     }
   },
+  "edit_comment": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "PATCH",
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      "@-",
+      "repos/me/proj/issues/comments/8000"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "delete_comment": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "DELETE",
+      "repos/me/proj/issues/comments/8000"
+    ],
+    "body": null
+  },
   "reply": {
     "args": [
       "api",

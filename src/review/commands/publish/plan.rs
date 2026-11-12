@@ -68,6 +68,14 @@ pub(super) enum Item {
     Reply {
         comment: String,
     },
+    /// New text for a comment already posted.
+    Edit {
+        comment: String,
+    },
+    /// Removal of a comment already posted.
+    Delete {
+        comment: String,
+    },
     Resolve {
         thread: String,
         resolved: bool,
@@ -109,6 +117,8 @@ impl Write {
             Item::Draft { .. } => "draft",
             Item::PublishDraft { .. } => "publish-draft",
             Item::Reply { .. } => "reply",
+            Item::Edit { .. } => "edit",
+            Item::Delete { .. } => "delete",
             Item::Resolve { resolved: true, .. } => "resolve",
             Item::Resolve { .. } => "unresolve",
             Item::Summary { .. } | Item::SummaryPart { .. } => "summary",
@@ -124,7 +134,9 @@ impl Write {
             | Item::ApprovalReview { comment }
             | Item::Draft { comment }
             | Item::PublishDraft { comment, .. }
-            | Item::Reply { comment } => vec![comment.clone()],
+            | Item::Reply { comment }
+            | Item::Edit { comment }
+            | Item::Delete { comment } => vec![comment.clone()],
             Item::Resolve { thread, .. } | Item::Approve { thread } => vec![thread.clone()],
             Item::Summary { .. } => vec![markers::SUMMARY_ID.to_owned()],
             Item::SummaryPart { number, .. } => vec![markers::summary_part_id(*number)],
@@ -533,16 +545,7 @@ impl<'a> Planner<'a> {
             if thread.deleted_remote {
                 continue;
             }
-            let held = if imported(thread) {
-                self.unnamed(thread)
-            } else {
-                self.held(thread)
-            };
-            let before_pr = || match self.run {
-                Some(run) => self.run_before_pr(target, run),
-                None => self.pre_pr(target, thread),
-            };
-            if let Some(reason) = held.or_else(before_pr) {
+            if let Some(reason) = self.thread_held(target, thread) {
                 skipped.push(Skipped::new(&thread.id, reason));
                 continue;
             }
@@ -604,7 +607,105 @@ impl<'a> Planner<'a> {
             }
             writes.push(self.resolve(&thread.id, remote, resolved));
         }
+        let (changes, held) = self.changes(target);
+        writes.extend(changes);
+        skipped.extend(held);
         (writes, skipped)
+    }
+
+    /// Why a posted thread gets nothing now: not named by `--only`, held on someone else's
+    /// PR/MR, or from before the PR/MR.
+    fn thread_held(&self, target: &Target, thread: &Thread) -> Option<Skip> {
+        let held = if imported(thread) {
+            self.unnamed(thread)
+        } else {
+            self.held(thread)
+        };
+        let before_pr = || match self.run {
+            Some(run) => self.run_before_pr(target, run),
+            None => self.pre_pr(target, thread),
+        };
+        held.or_else(before_pr)
+    }
+
+    /// The edits and deletes of posted comments that wait for `publish`.
+    fn changes(&self, target: &Target) -> (Vec<Write>, Vec<Skipped>) {
+        let mut writes = Vec::new();
+        let mut skipped = Vec::new();
+        for thread in &target.threads {
+            let Some(remote) = &thread.remote else {
+                continue;
+            };
+            let waiting: Vec<(&Comment, &RemoteComment)> = thread
+                .comments
+                .iter()
+                .filter(|comment| comment.edit_pending || comment.delete_pending)
+                .filter(|comment| self.run.is_none_or(|run| comment_in_run(comment, run)))
+                .filter_map(|comment| Some((comment, comment.remote.as_ref()?)))
+                .collect();
+            if waiting.is_empty() {
+                continue;
+            }
+            if let Some(reason) = self.thread_held(target, thread) {
+                skipped.push(Skipped::new(&thread.id, reason));
+                continue;
+            }
+            for (comment, posted) in waiting {
+                match self.change(target, thread, remote, (comment, posted)) {
+                    Ok(write) => writes.push(write),
+                    Err(reason) => skipped.push(Skipped::new(&comment.id, reason)),
+                }
+            }
+        }
+        (writes, skipped)
+    }
+
+    /// The delete or edit of one posted comment, `comment` and its host side `posted`. A comment
+    /// the host no longer has is only cleared locally.
+    fn change(
+        &self,
+        target: &Target,
+        thread: &Thread,
+        remote: &RemoteThread,
+        (comment, posted): (&Comment, &RemoteComment),
+    ) -> std::result::Result<Write, Skip> {
+        let gone = thread.deleted_remote || comment.deleted_remote;
+        let subject = self.connection.subject();
+        let comment_id = comment.id.clone();
+        let sendable = |request: Option<Request>, what| {
+            if gone {
+                return Ok(None);
+            }
+            request.map(Some).ok_or_else(|| Skip::Unsupported {
+                service: self.service().name(),
+                what,
+            })
+        };
+        if comment.delete_pending {
+            let request = self
+                .service()
+                .delete_comment(subject, remote.kind, &posted.id);
+            return Ok(Write {
+                item: Item::Delete {
+                    comment: comment_id,
+                },
+                request: sendable(request, Unsupported::DeleteComment)?,
+                sent: vec![None],
+                fallback: None,
+            });
+        }
+        let text = body(target, thread, comment, None, self.attempt);
+        let request = self
+            .service()
+            .edit_comment(subject, remote.kind, &posted.id, &text);
+        Ok(Write {
+            item: Item::Edit {
+                comment: comment_id,
+            },
+            request: sendable(request, Unsupported::EditComment)?,
+            sent: vec![Some(text)],
+            fallback: None,
+        })
     }
 
     fn reply(

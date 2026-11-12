@@ -526,7 +526,8 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
                 comment.remote = Some(incoming.remote(login));
                 // The review or comment that carries an approval holds only its marker, or the
                 // text as rendered with its footer; the approval text stays in the store.
-                if thread.approval.is_none() || found != 0 {
+                // A pending edit holds the text `publish` will send.
+                if (thread.approval.is_none() || found != 0) && !comment.edit_pending {
                     comment.body = incoming.body;
                 }
                 comment.delivery.post = PostState::Posted;

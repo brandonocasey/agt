@@ -154,6 +154,33 @@ fn an_open_finding_blocks_approval_until_resolved() {
 }
 
 #[test]
+fn qa_comments_are_edited_and_deleted_and_stay_qa() {
+    let env = changed_branch();
+    let run = start(&env, &["--model", "m1", "--harness", "claude-code"]);
+    let k1 = check(&env, &run, "checkout", "pass", &[]);
+    let opened = qa(
+        &env,
+        &["comment", "--check", &k1, "--body", "Is it capped?"],
+    )["thread"]
+        .clone();
+    let id = opened["id"].as_str().unwrap().to_owned();
+    qa(&env, &["reply", &id, "--body", "Yes, at 50."]);
+
+    let edited = qa(
+        &env,
+        &["edit", &format!("{id}/c2"), "--body", "Yes, at 60."],
+    )["thread"]
+        .clone();
+    assert_eq!(edited["comments"][1]["body"], "Yes, at 60.");
+    assert_eq!(edited["comments"][1]["qa"], true);
+    let deleted = qa(&env, &["delete", &format!("{id}/c2")]);
+    assert_eq!(deleted["thread_removed"], false);
+    let deleted = qa(&env, &["delete", &format!("{id}/c1")]);
+    assert_eq!(deleted["thread_removed"], true);
+    assert_eq!(qa(&env, &["list"])["threads"], serde_json::json!([]));
+}
+
+#[test]
 fn qa_comments_and_replies_are_marked_as_qa() {
     let env = changed_branch();
     let run = start(&env, &["--model", "m1", "--harness", "claude-code"]);

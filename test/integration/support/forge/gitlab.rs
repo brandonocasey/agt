@@ -201,6 +201,8 @@ impl FakeService for Gitlab {
                 write("PUT", &format!("{MR}/discussions/{thread}"))
             }
             Call::Approve => write("POST", &format!("{MR}/approve")),
+            Call::EditComment(id) => write("PUT", &format!("{MR}/notes/{id}")),
+            Call::DeleteComment(id) => args(&["api", "-X", "DELETE", &format!("{MR}/notes/{id}")]),
         }
     }
 
@@ -212,6 +214,8 @@ impl FakeService for Gitlab {
             Call::Resolve(thread) => json!({ "id": thread, "resolved": true }),
             Call::Unresolve(thread) => json!({ "id": thread, "resolved": false }),
             Call::Approve => json!({ "approved": true }),
+            Call::EditComment(_) => json!({ "id": id }),
+            Call::DeleteComment(_) => return String::new(),
         }
         .to_string()
     }
@@ -222,6 +226,10 @@ impl FakeService for Gitlab {
 
     fn alice_general(&self) -> u64 {
         4002
+    }
+
+    fn landed_inline(&self) -> u64 {
+        5001
     }
 
     fn local_thread(&self, id: u64) -> String {

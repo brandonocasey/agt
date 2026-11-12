@@ -66,6 +66,8 @@ pub(super) enum Unsupported {
     FormalApproval,
     Resolve,
     Unresolve,
+    EditComment,
+    DeleteComment,
 }
 
 impl std::fmt::Display for Skip {
@@ -136,6 +138,14 @@ impl std::fmt::Display for Skip {
                 Unsupported::Unresolve => {
                     write!(f, "{service} cannot reopen threads; cleared locally")
                 }
+                Unsupported::EditComment => write!(
+                    f,
+                    "{service} cannot edit a comment that is part of a review's body; the edit stays pending"
+                ),
+                Unsupported::DeleteComment => write!(
+                    f,
+                    "{service} cannot delete a comment that is part of a review's body; the delete stays pending"
+                ),
             },
         }
     }
@@ -360,6 +370,14 @@ mod tests {
         assert_eq!(
             unsupported(Unsupported::Resolve).to_string(),
             "Forgejo cannot resolve threads; cleared locally"
+        );
+        assert_eq!(
+            unsupported(Unsupported::EditComment).to_string(),
+            "Forgejo cannot edit a comment that is part of a review's body; the edit stays pending"
+        );
+        assert_eq!(
+            unsupported(Unsupported::DeleteComment).to_string(),
+            "Forgejo cannot delete a comment that is part of a review's body; the delete stays pending"
         );
         assert_eq!(
             unsupported(Unsupported::SelfApproval { commented: true }).to_string(),

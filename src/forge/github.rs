@@ -127,6 +127,14 @@ fn reviews_path(subject: ReviewSubject) -> String {
     format!("{}/pulls/{}/reviews", base(subject), subject.number)
 }
 
+fn issue_comment_path(subject: ReviewSubject, id: &str) -> String {
+    format!("{}/issues/comments/{}", base(subject), forge::encode(id))
+}
+
+fn review_comment_path(subject: ReviewSubject, id: &str) -> String {
+    format!("{}/pulls/comments/{}", base(subject), forge::encode(id))
+}
+
 impl Service for Github {
     fn forge(&self) -> Forge {
         Forge::Github
@@ -205,9 +213,42 @@ impl ReviewService for Github {
     fn edit_note(&self, subject: ReviewSubject, id: &str, text: &str) -> Request {
         Request::rest(
             Method::Patch,
-            format!("{}/issues/comments/{}", base(subject), forge::encode(id)),
+            issue_comment_path(subject, id),
             Some(json!({ "body": text })),
         )
+    }
+
+    fn edit_comment(
+        &self,
+        subject: ReviewSubject,
+        kind: RemoteKind,
+        id: &str,
+        text: &str,
+    ) -> Option<Request> {
+        let path = match kind {
+            RemoteKind::Review => return None,
+            RemoteKind::ReviewThread => review_comment_path(subject, id),
+            RemoteKind::General | RemoteKind::Discussion => issue_comment_path(subject, id),
+        };
+        Some(Request::rest(
+            Method::Patch,
+            path,
+            Some(json!({ "body": text })),
+        ))
+    }
+
+    fn delete_comment(
+        &self,
+        subject: ReviewSubject,
+        kind: RemoteKind,
+        id: &str,
+    ) -> Option<Request> {
+        let path = match kind {
+            RemoteKind::Review => return None,
+            RemoteKind::ReviewThread => review_comment_path(subject, id),
+            RemoteKind::General | RemoteKind::Discussion => issue_comment_path(subject, id),
+        };
+        Some(Request::rest(Method::Delete, path, None))
     }
 
     fn reply(&self, _subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request {
@@ -733,6 +774,31 @@ mod tests {
         contract::golden("github/fetched.golden.json", &contract::dump(&fetched));
     }
 
+    fn edit(github: &Github, kind: RemoteKind) -> Request {
+        github
+            .edit_comment(subject(), kind, "8000", "text")
+            .unwrap()
+    }
+
+    fn delete(github: &Github, kind: RemoteKind) -> Request {
+        github.delete_comment(subject(), kind, "8000").unwrap()
+    }
+
+    #[test]
+    fn a_comment_in_a_review_body_is_neither_edited_nor_deleted_alone() {
+        let github = github();
+        assert!(
+            github
+                .edit_comment(subject(), RemoteKind::Review, "8000", "text")
+                .is_none()
+        );
+        assert!(
+            github
+                .delete_comment(subject(), RemoteKind::Review, "8000")
+                .is_none()
+        );
+    }
+
     #[test]
     fn requests_render_to_the_canonical_argv() {
         let github = github();
@@ -752,6 +818,17 @@ mod tests {
             ("resolve", github.resolve(subject(), &thread, true)),
             ("unresolve", github.resolve(subject(), &thread, false)),
             ("approve", github.approve(subject(), "c", Some("ok"))),
+            ("edit_note", github.edit_note(subject(), "8000", "text")),
+            ("edit_comment", edit(&github, RemoteKind::General)),
+            (
+                "edit_review_comment",
+                edit(&github, RemoteKind::ReviewThread),
+            ),
+            ("delete_comment", delete(&github, RemoteKind::General)),
+            (
+                "delete_review_comment",
+                delete(&github, RemoteKind::ReviewThread),
+            ),
         ];
         contract::golden(
             "github/requests.golden.json",

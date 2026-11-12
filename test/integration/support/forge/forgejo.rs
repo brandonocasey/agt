@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::super::scenario::{Setup, ids, marked, sent, thread};
 use super::super::{Env, fixture, strs};
-use super::argv::{TEA_LOGIN, tea_get, tea_get_as, tea_is_read, tea_write};
+use super::argv::{TEA_LOGIN, tea_bodyless, tea_get, tea_get_as, tea_is_read, tea_write};
 use super::{Call, Comment, Expect, FakeService, Item, Remote, TIME};
 
 pub const HOST: &str = "codeberg.org";
@@ -229,6 +229,12 @@ impl FakeService for Forgejo {
             Call::PostThread | Call::PostNote | Call::Reply(_) => post(COMMENTS),
             // No route resolves a thread, so a resolve is never sent; its builder is a read.
             Call::Resolve(_) | Call::Unresolve(_) => tea_get(PULL),
+            Call::EditComment(id) => {
+                tea_write("PATCH", &format!("repos/me/proj/issues/comments/{id}"))
+            }
+            Call::DeleteComment(id) => {
+                tea_bodyless("DELETE", &format!("repos/me/proj/issues/comments/{id}"))
+            }
             Call::PublishDraft => unreachable!("Forgejo has no drafts"),
         }
     }
@@ -244,6 +250,8 @@ impl FakeService for Forgejo {
                 "html_url": format!("{URL}#issuecomment-{id}"),
             }),
             Call::Resolve(_) | Call::Unresolve(_) => json!({}),
+            Call::EditComment(_) => json!({ "id": id }),
+            Call::DeleteComment(_) => return String::new(),
             Call::PublishDraft => unreachable!("Forgejo has no drafts"),
         }
         .to_string()
@@ -255,6 +263,10 @@ impl FakeService for Forgejo {
 
     fn alice_general(&self) -> u64 {
         900
+    }
+
+    fn landed_inline(&self) -> u64 {
+        501
     }
 
     fn local_thread(&self, id: u64) -> String {

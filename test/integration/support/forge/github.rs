@@ -29,6 +29,11 @@ pub fn post(path: &str) -> Vec<String> {
     gh_write("POST", path)
 }
 
+/// A write that sends no body, such as a DELETE.
+fn bodyless(method: &str, path: &str) -> Vec<String> {
+    args(&["api", "--method", method, path])
+}
+
 /// A GraphQL write on a review thread; `body` is whether it sends text.
 pub fn mutation(thread: &str, query: &str, body: bool) -> Vec<String> {
     let mut list = args(&["api", "graphql", "-f", &format!("threadId={thread}")]);
@@ -240,6 +245,12 @@ impl FakeService for Github {
             Call::Reply(thread) => mutation(thread, "AddReply", true),
             Call::Resolve(thread) => mutation(thread, "ResolveThread", false),
             Call::Unresolve(thread) => mutation(thread, "UnresolveThread", false),
+            Call::EditComment(id) => {
+                gh_write("PATCH", &format!("repos/me/repo/pulls/comments/{id}"))
+            }
+            Call::DeleteComment(id) => {
+                bodyless("DELETE", &format!("repos/me/repo/pulls/comments/{id}"))
+            }
             Call::PublishDraft => unreachable!("GitHub has no drafts"),
         }
     }
@@ -261,6 +272,8 @@ impl FakeService for Github {
             Call::Unresolve(_) => {
                 json!({ "data": { "unresolveReviewThread": { "thread": { "isResolved": false } } } })
             }
+            Call::EditComment(id) => json!({ "id": id }),
+            Call::DeleteComment(_) => return String::new(),
             Call::PublishDraft => unreachable!("GitHub has no drafts"),
         }
         .to_string()
@@ -272,6 +285,10 @@ impl FakeService for Github {
 
     fn alice_general(&self) -> u64 {
         900
+    }
+
+    fn landed_inline(&self) -> u64 {
+        501
     }
 
     fn local_thread(&self, id: u64) -> String {

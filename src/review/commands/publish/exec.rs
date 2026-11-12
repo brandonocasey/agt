@@ -24,11 +24,15 @@ pub(super) fn run_writes(
 ) -> Result<()> {
     for write in writes {
         let Some(request) = &write.request else {
-            if let Item::Resolve { thread, .. } = &write.item {
-                change(ctx, target, |target| {
+            match &write.item {
+                Item::Resolve { thread, .. } => change(ctx, target, |target| {
                     clear_pending(target, thread);
                     Ok(())
-                })?;
+                })?,
+                Item::Edit { .. } | Item::Delete { .. } => {
+                    save(ctx, connection, target, &write.item, &Value::Null)?;
+                }
+                _ => {}
             }
             posted.push(json!({ "kind": write.kind(), "items": write.ids(), "local_only": true }));
             continue;
@@ -82,6 +86,14 @@ pub(super) fn run_writes(
                 if let Some(again) = again {
                     run_writes(ctx, connection, target, vec![again], attempt, posted)?;
                 }
+                continue;
+            }
+            // A comment the host no longer has is as good as deleted.
+            Err(error)
+                if error.status == Some(404) && matches!(write.item, Item::Delete { .. }) =>
+            {
+                save(ctx, connection, target, &write.item, &Value::Null)?;
+                posted.push(json!({ "kind": write.kind(), "items": write.ids(), "gone": true }));
                 continue;
             }
             // The summary comment or one of its parts was deleted on the host: post it anew.
@@ -225,9 +237,32 @@ pub(super) fn clear_pending(target: &mut Target, id: &str) {
     }
 }
 
+/// Drops a comment the host deleted, and its thread when it was the thread's last one.
+fn remove_comment(target: &mut Target, id: &str) {
+    let Some(at) = target
+        .threads
+        .iter()
+        .position(|thread| thread.comments.iter().any(|comment| comment.id == id))
+    else {
+        return;
+    };
+    let thread = &mut target.threads[at];
+    thread.comments.retain(|comment| comment.id != id);
+    if thread.comments.is_empty() {
+        target.threads.remove(at);
+    }
+}
+
 pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
+        // The comment stays posted; only the text sync may meet on the host changes.
+        Item::Edit { comment } => {
+            if let Some(local) = target.comment_mut(comment) {
+                local.delivery.sent = texts.next().flatten();
+            }
+            return;
+        }
         Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
         Item::Thread { comment }
         | Item::Placed { comment }
@@ -317,7 +352,10 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
             }
             return;
         }
-        Item::PublishDraft { .. } | Item::Resolve { .. } | Item::Approve { .. } => return,
+        Item::PublishDraft { .. }
+        | Item::Delete { .. }
+        | Item::Resolve { .. }
+        | Item::Approve { .. } => return,
     };
     for id in ids {
         let text = texts.next().flatten();
@@ -402,6 +440,22 @@ pub(super) fn save(
                 Ok(())
             })?;
             Ok(Some(id))
+        }
+        Item::Edit { comment } => {
+            change(ctx, target, |target| {
+                if let Some(local) = target.comment_mut(comment) {
+                    local.edit_pending = false;
+                }
+                Ok(())
+            })?;
+            Ok(None)
+        }
+        Item::Delete { comment } => {
+            change(ctx, target, |target| {
+                remove_comment(target, comment);
+                Ok(())
+            })?;
+            Ok(None)
         }
         Item::Draft { comment } => {
             let draft = service.draft_created(response).ok_or_else(|| {

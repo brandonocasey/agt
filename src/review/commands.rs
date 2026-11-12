@@ -14,6 +14,7 @@ use crate::store::model::{
 
 mod approve;
 mod auto;
+mod edit;
 mod findings;
 mod gate;
 mod input;
@@ -32,6 +33,7 @@ mod sync;
 mod usage;
 mod view;
 use self::approve::approve;
+use self::edit::{delete, edit};
 use self::findings::{comment, finding_kill, reply, resolve};
 pub use self::gate::branch_review;
 pub use self::qa::run_qa;
@@ -323,6 +325,8 @@ fn run_with(cli: Cli, section: Section) -> Result<Output> {
         } => finding_kill(&ctx, &id, &reason)?,
         Command::Comment(args) => comment(&ctx, &args, false, None)?,
         Command::Reply(args) => reply(&ctx, &args, false)?,
+        Command::Edit(args) => edit(&ctx, &args)?,
+        Command::Delete(args) => delete(&ctx, &args)?,
         Command::Resolve(args) => resolve(&ctx, &args)?,
         Command::List(args) => return list(&ctx, &args),
         Command::Show { id } => show(&ctx, &id)?,
@@ -402,6 +406,8 @@ fn run_hint(command: &Command) -> Option<String> {
         }
         | Command::Show { id } => from_id(id),
         Command::Reply(args) => author_run(&args.author).or_else(|| from_id(&args.id)),
+        Command::Edit(args) => from_id(&args.id),
+        Command::Delete(args) => from_id(&args.id),
         Command::Resolve(args) => {
             author_run(&args.author).or_else(|| args.ids.first().and_then(|id| from_id(id)))
         }

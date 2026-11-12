@@ -256,6 +256,8 @@ agt review reply h1 --body "Matches the API limit."
 agt review reply rv-7k2m.c1p0.r1.f1 --body "Fixed in 9e8d7c6" \
   --reviewer rv-7k2m.c1p0.fix --model claude-opus-5-5 --harness claude-code \
   --session dcec84d5-4c7a-492f-ba78-a9ddd3d1bc7f
+agt review edit h1/c2 --body "Matches the API limit, see #12."   # rewrite a comment
+agt review delete h1/c2                                        # remove a comment
 agt review resolve h1 --answered
 agt review resolve rv-7k2m.c1p0.r1.f3 --issue '#57'          # left for a follow-up issue
 agt review comment --body "Same race as #12." --issue '#12'  # names a related issue
@@ -282,6 +284,19 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
 - `reply --local` keeps the reply in the store only, such as the user's answer
   to a held question: `list --format prompt` shows it and `publish` never posts
   it.
+- `edit <comment-id> --body <text|->` and `delete <comment-id>` change one comment, a thread's
+  opener or a reply, named by its id: the thread id and `/c<n>`, such as `h1/c2` or
+  `rv-7k2m.c1p0.r1.f1/c1`. A comment not posted yet is rewritten by `edit` and removed by
+  `delete`; deleting the comment that opens a thread removes the thread with its replies. A
+  posted comment only records the change: `edit` stores the new text and sets `edit_pending`
+  (`sync` keeps that text over the host's), `delete` sets `delete_pending` (and drops a pending
+  edit), and neither calls the host, so both work with `--offline`. `publish` sends them
+  (see [Publish](#publish)); `--offline` and `push = "off"` still hold that back, and `publish
+  --dry-run` prints the call. A comment imported from the host (`remote-<id>`) is read-only: both
+  commands fail, and so they do on a comment that is being posted until a `sync` shows whether
+  it landed, and `edit` fails on one queued for deletion. `edit` prints the `thread`; `delete`
+  prints `deleted` (the id), `pending` (a posted comment, left for `publish`) and
+  `thread_removed`.
 - `resolve` takes one outcome flag, or none to resolve the thread as it is:
   `--fixed <sha>` (triage `fixed`, resolution `fixed <sha>`, plus a reply
   `✅ Fixed in [<sha> <subject>](<commit URL>).`, linked once the target is linked
@@ -458,6 +473,8 @@ cannot write to a target that has them.
 - `agt qa comment` takes the arguments of `agt review comment` and an optional `--check <qa-id.kN>`
   that sets the thread's `check`; `agt qa reply` takes those of `agt review reply`. Both store
   the comment with `qa: true`, as `finding` does, and sign it as QA (`--reviewer` is refused).
+  `agt qa edit` and `agt qa delete` take those of `agt review edit` and `agt review delete`; the
+  comment keeps `qa: true`.
 - `approve` records an approval of the head on the newest QA run. It needs a clean work tree, at
   least one check, no latest check that fails, is blocked or is stale, and no open bug,
   requirement or question found by a check. It sends no host approval.
@@ -725,7 +742,8 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   `outdated` is `null` (unknown). `sync` never fetches commits or writes to the
   repository.
 - Merge: remote wins for posted text and resolved state, except a local resolve
-  or reopen that `publish` has not sent yet (`resolve_pending`). The review or comment that carries an approval, whose body is only a marker or
+  or reopen that `publish` has not sent yet (`resolve_pending`) and the text of a posted comment
+  with an edit that `publish` has not sent yet (`edit_pending`). The review or comment that carries an approval, whose body is only a marker or
   the rendered text, keeps the approval text stored. Local fields
   (type, severity, triage, held, killed findings, anchors of our findings) and
   comments not yet posted stay. Remote threads match local ones by remote id
@@ -826,10 +844,14 @@ local reads continue.
   replies and resolves; every other thread and the summary are listed under
   `skipped`.
   `publish` syncs first, then posts in this order: new threads, sync, replies,
-  resolves and reopens, the summary, then a last sync to fill in ids.
+  resolves and reopens, edits and deletes of posted comments, the summary, then a last sync to
+  fill in ids.
 - Posted: new surviving findings of ended passes (a locked pass's findings wait
   until a later `reveal` pass of the same cycle, or the run, has ended) and
-  local comment threads, new replies, resolve and reopen changes, and the
+  local comment threads, new replies, resolve and reopen changes, the edits and deletes of
+  posted comments that `edit` and `delete` recorded (`edit_pending`, `delete_pending`; held by
+  `--only` and `--not-own` like the thread's replies, and an automatic publish after `run end`
+  sends only those of that run's agent comments), and the
   summary when a run ended since it was posted or its text changed. Never posted: killed findings,
   findings and QA threads resolved before they were posted (the summary counts them), QA
   threads of runs that ended before the target's `attached_at`, imported comments, local
@@ -875,6 +897,17 @@ local reads continue.
   `unresolveReviewThread` mutations; your reply to a general comment is a new
   issue comment in GitHub's quote form (`> <first line>`, `> — @<author>, [comment](<url>)`,
   then your text). An agent's reply to one is not posted.
+- Edits and deletes of posted comments: GitHub `PATCH` or `DELETE` of
+  `repos/<repo>/pulls/comments/<id>` for a comment in a diff thread and of
+  `repos/<repo>/issues/comments/<id>` for a general one; GitLab `PUT` or `DELETE` of
+  `.../merge_requests/<n>/notes/<id>`; Forgejo `PATCH` or `DELETE` of
+  `repos/<repo>/issues/comments/<id>`, which the host also uses for comments on a diff line. The
+  kind is `edit` or `delete` under `posted`, and the edit is sent as the comment is posted (its
+  title, footer and markers kept). A comment that is a paragraph of a review's body (a
+  `--not-own` finding on GitHub or Forgejo) cannot be changed alone: `skipped` names it and the
+  change stays pending. A comment or thread the host no longer has is only cleared here (`local_only`),
+  and a `DELETE` the host answers with 404 counts as done (`gone`). After a delete the comment
+  leaves the store, and its thread with it when it was the last comment.
 - GitLab: in-diff comments are draft notes at the latest MR diff, each
   published on its own (never `bulk_publish`), with a `line_range` for a range
   (line codes are the SHA-1 of the path plus the old and new line counters).
@@ -951,12 +984,15 @@ links are refused. After `sync`, the key is `gh-<number>` or `gl-<iid>`. Other J
 documents in a repository directory (their `kind` is not `branch`, `range` or `commit`)
 are ignored. A file with a newer `version` than the binary supports is refused with a
 message to upgrade, and so is writing a file that holds fields the binary does not know.
+The current `version` is 2: it adds `edit_pending` and `delete_pending` to comments, written only
+while set. A version 1 file loads unchanged and is saved as version 2 after a one-time backup
+(`agt cleanup --only backups` lists it); an agt from before version 2 refuses it.
 
 Target file:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "revision": 7,
   "key": "branch-feat%2Flogin-1a2b3c...-1792152000-5d6e7f...",
   "repo": "github.com/owner/repo",

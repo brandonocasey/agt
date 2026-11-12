@@ -137,6 +137,14 @@ fn reviews_path(subject: ReviewSubject) -> String {
     format!("{}/reviews", base(subject))
 }
 
+fn comment_path(subject: ReviewSubject, id: &str) -> String {
+    format!(
+        "repos/{}/issues/comments/{}",
+        subject.repo,
+        forge::encode(id)
+    )
+}
+
 impl Service for Forgejo {
     fn forge(&self) -> Forge {
         Forge::Forgejo
@@ -224,13 +232,31 @@ impl ReviewService for Forgejo {
     fn edit_note(&self, subject: ReviewSubject, id: &str, text: &str) -> Request {
         Request::rest(
             Method::Patch,
-            format!(
-                "repos/{}/issues/comments/{}",
-                subject.repo,
-                forge::encode(id)
-            ),
+            comment_path(subject, id),
             Some(json!({ "body": text })),
         )
+    }
+
+    // The host keeps a comment on a diff line beside the general ones, under the same route. A
+    // review's own id names the review, not a comment.
+    fn edit_comment(
+        &self,
+        subject: ReviewSubject,
+        kind: RemoteKind,
+        id: &str,
+        text: &str,
+    ) -> Option<Request> {
+        (kind != RemoteKind::Review).then(|| self.edit_note(subject, id, text))
+    }
+
+    fn delete_comment(
+        &self,
+        subject: ReviewSubject,
+        kind: RemoteKind,
+        id: &str,
+    ) -> Option<Request> {
+        (kind != RemoteKind::Review)
+            .then(|| Request::rest(Method::Delete, comment_path(subject, id), None))
     }
 
     // `caps().reply` is `None`, so the workflow answers with a general comment instead.
@@ -574,6 +600,21 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_in_a_review_body_is_neither_edited_nor_deleted_alone() {
+        let forgejo = forgejo();
+        assert!(
+            forgejo
+                .edit_comment(subject(), RemoteKind::Review, "8000", "text")
+                .is_none()
+        );
+        assert!(
+            forgejo
+                .delete_comment(subject(), RemoteKind::Review, "8000")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn requests_render_to_the_canonical_argv() {
         let forgejo = forgejo();
         let thread = RemoteThread::new(RemoteKind::General, "8000".to_owned(), false);
@@ -589,6 +630,18 @@ mod tests {
             ("thread", forgejo.thread(subject(), "text")),
             ("note", forgejo.note(subject(), "text")),
             ("edit_note", forgejo.edit_note(subject(), "8000", "text")),
+            (
+                "edit_comment",
+                forgejo
+                    .edit_comment(subject(), RemoteKind::ReviewThread, "8000", "text")
+                    .unwrap(),
+            ),
+            (
+                "delete_comment",
+                forgejo
+                    .delete_comment(subject(), RemoteKind::ReviewThread, "8000")
+                    .unwrap(),
+            ),
             ("reply", forgejo.reply(subject(), &thread, "text")),
             ("approve", forgejo.approve(subject(), "c", Some("ok"))),
         ];

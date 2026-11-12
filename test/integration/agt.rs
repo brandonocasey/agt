@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::support::Env;
 
-const COMMANDS: [&str; 11] = [
-    "run", "pass", "finding", "comment", "reply", "resolve", "list", "show", "status", "sync",
-    "publish",
+const COMMANDS: [&str; 13] = [
+    "run", "pass", "finding", "comment", "reply", "edit", "delete", "resolve", "list", "show",
+    "status", "sync", "publish",
 ];
 
 fn agt(args: &[&str]) -> std::process::Output {
@@ -98,9 +98,15 @@ fn a_0_4_0_store_reads_and_updates_unchanged() {
 
     env.run(&["--target", KEY, "reply", "h2", "--body", "agreed"]);
     let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert_eq!(document["version"], 1);
+    assert_eq!(document["version"], 2);
     assert_eq!(document["revision"], 5);
     assert!(document.to_string().contains("agreed"));
+
+    let edited = env.run(&["--target", KEY, "edit", "h2/c2", "--body", "agreed, thanks"]);
+    assert_eq!(edited["thread"]["comments"][1]["body"], "agreed, thanks");
+    env.run(&["--target", KEY, "delete", "h2/c2"]);
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(!document.to_string().contains("agreed"));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Target {
@@ -913,6 +913,13 @@ pub struct Comment {
     /// Written by `agt qa`; `publish` marks the post as QA.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub qa: bool,
+    /// A local edit of this posted comment that `publish` has not sent yet: `body` holds the
+    /// new text, and `sync` keeps it over the host's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub edit_pending: bool,
+    /// A local delete of this posted comment that `publish` has not sent yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_pending: bool,
     pub deleted_remote: bool,
     pub deleted_seen_at: Option<String>,
 }
@@ -949,6 +956,8 @@ impl Comment {
             draft_id: None,
             local: false,
             qa: false,
+            edit_pending: false,
+            delete_pending: false,
             deleted_remote: false,
             deleted_seen_at: None,
         }

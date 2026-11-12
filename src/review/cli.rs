@@ -42,6 +42,11 @@ pub enum Command {
     Comment(CommentArgs),
     /// Add a comment to a thread.
     Reply(ReplyArgs),
+    /// Rewrite a comment's text; `publish` sends the edit of one already posted.
+    Edit(EditArgs),
+    /// Delete a comment, and the thread it opens when it is not posted; `publish` deletes one
+    /// already posted.
+    Delete(DeleteArgs),
     /// Resolve, triage or reopen a thread.
     Resolve(ResolveArgs),
     /// List threads and killed findings.
@@ -347,6 +352,21 @@ pub struct ReplyArgs {
 }
 
 #[derive(Args)]
+pub struct EditArgs {
+    /// Comment to change, such as `h1/c2`; one imported from the host is read-only.
+    pub id: String,
+    /// New text, or `-` for stdin.
+    #[arg(long)]
+    pub body: String,
+}
+
+#[derive(Args)]
+pub struct DeleteArgs {
+    /// Comment to remove, such as `h1/c2`; one imported from the host is read-only.
+    pub id: String,
+}
+
+#[derive(Args)]
 #[command(group = ArgGroup::new("outcome")
     .args(["fixed", "not_fixed", "rejected", "stale", "answered", "issue", "triage"]))]
 pub struct ResolveArgs {
@@ -482,6 +502,10 @@ pub enum QaCommand {
     Comment(QaCommentArgs),
     /// Reply to a thread as QA, as `agt review reply` does.
     Reply(ReplyArgs),
+    /// Rewrite a QA comment's text, as `agt review edit` does.
+    Edit(EditArgs),
+    /// Delete a QA comment, as `agt review delete` does.
+    Delete(DeleteArgs),
     /// List the latest outcome of every check and the QA threads.
     List,
     /// Show a QA run (`qa-xxxx`), check (`qa-xxxx.k1`) or thread.

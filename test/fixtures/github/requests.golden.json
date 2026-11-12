@@ -14,6 +14,63 @@
       "event": "APPROVE"
     }
   },
+  "delete_comment": {
+    "args": [
+      "api",
+      "--method",
+      "DELETE",
+      "repos/me/repo/issues/comments/8000"
+    ],
+    "body": null
+  },
+  "delete_review_comment": {
+    "args": [
+      "api",
+      "--method",
+      "DELETE",
+      "repos/me/repo/pulls/comments/8000"
+    ],
+    "body": null
+  },
+  "edit_comment": {
+    "args": [
+      "api",
+      "--method",
+      "PATCH",
+      "repos/me/repo/issues/comments/8000",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "edit_note": {
+    "args": [
+      "api",
+      "--method",
+      "PATCH",
+      "repos/me/repo/issues/comments/8000",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "edit_review_comment": {
+    "args": [
+      "api",
+      "--method",
+      "PATCH",
+      "repos/me/repo/pulls/comments/8000",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
   "note": {
     "args": [
       "api",

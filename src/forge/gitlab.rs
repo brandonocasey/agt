@@ -230,6 +230,30 @@ impl ReviewService for Gitlab {
         )
     }
 
+    // A note of a discussion is edited and removed through the same route as a general one.
+    fn edit_comment(
+        &self,
+        subject: ReviewSubject,
+        _kind: RemoteKind,
+        id: &str,
+        text: &str,
+    ) -> Option<Request> {
+        Some(self.edit_note(subject, id, text))
+    }
+
+    fn delete_comment(
+        &self,
+        subject: ReviewSubject,
+        _kind: RemoteKind,
+        id: &str,
+    ) -> Option<Request> {
+        Some(Request::rest(
+            Method::Delete,
+            format!("{}/notes/{}", base(subject), forge::encode(id)),
+            None,
+        ))
+    }
+
     fn reply(&self, subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request {
         Request::rest(
             Method::Post,
@@ -669,6 +693,19 @@ mod tests {
             ("resolve", gitlab.resolve(subject(), &thread, true)),
             ("unresolve", gitlab.resolve(subject(), &thread, false)),
             ("approve", gitlab.approve(subject(), "c", Some("ok"))),
+            ("edit_note", gitlab.edit_note(subject(), "5001", "text")),
+            (
+                "edit_comment",
+                gitlab
+                    .edit_comment(subject(), RemoteKind::Discussion, "5001", "text")
+                    .unwrap(),
+            ),
+            (
+                "delete_comment",
+                gitlab
+                    .delete_comment(subject(), RemoteKind::Discussion, "5001")
+                    .unwrap(),
+            ),
         ];
         contract::golden(
             "gitlab/requests.golden.json",
