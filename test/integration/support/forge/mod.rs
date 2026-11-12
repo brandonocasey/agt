@@ -151,6 +151,9 @@ pub enum Call<'a> {
     Unresolve(&'a str),
     /// The formal approval.
     Approve,
+    /// New text for the posted comment with this host id.
+    EditComment(u64),
+    DeleteComment(u64),
 }
 
 /// What a scenario expects of a service. The facts are written out here by hand, not read from
@@ -345,6 +348,8 @@ pub trait FakeService {
     fn alice_thread(&self) -> u64;
     /// The comment id of Alice's general comment in [`FakeService::before`].
     fn alice_general(&self) -> u64;
+    /// The host id of the comment of finding f1 once [`FakeService::land_inline`] has landed it.
+    fn landed_inline(&self) -> u64;
     /// The local id a thread opened by comment `id` is imported as.
     fn local_thread(&self, id: u64) -> String;
     /// The local id a general comment `id` is imported as.

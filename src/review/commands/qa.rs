@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::approve::is_open;
+use super::edit::{delete, edit};
 use super::findings::{self, NewThread, author, linked_issue, local_thread};
 use super::input::{implementer_name, limited, read_body};
 use super::report::{self, Section};
@@ -91,6 +92,8 @@ pub fn run_qa(cli: QaCli) -> Result<Output> {
             findings::comment(&ctx, &args.comment, true, args.check.as_deref())?
         }
         QaCommand::Reply(args) => findings::reply(&ctx, &args, true)?,
+        QaCommand::Edit(args) => edit(&ctx, &args)?,
+        QaCommand::Delete(args) => delete(&ctx, &args)?,
         QaCommand::List => list(&ctx)?,
         QaCommand::Show { id } => view::show(&ctx, &id)?,
         QaCommand::Status { head, report } => {
@@ -131,6 +134,8 @@ fn run_hint(command: &QaCommand) -> Option<String> {
         QaCommand::Finding(args) => from_id(&args.check),
         QaCommand::Comment(args) => args.check.as_deref().and_then(from_id),
         QaCommand::Reply(args) => from_id(&args.id),
+        QaCommand::Edit(args) => from_id(&args.id),
+        QaCommand::Delete(args) => from_id(&args.id),
         QaCommand::Show { id } => from_id(id),
         _ => None,
     }

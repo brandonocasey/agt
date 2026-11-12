@@ -635,6 +635,40 @@ fn offline_blocks_explicit_review_network_commands() {
     assert!(setup.env.forge_calls().is_empty());
 }
 
+/// A pending edit waits for the next explicit publish.
+/// An automatic publish of another run leaves it.
+#[test]
+fn automatic_publish_leaves_a_pending_edit_of_another_run_for_publish() {
+    use crate::support::forge::{Call, FakeService};
+    use crate::support::scenario::{PUBLISH, Review, start_review};
+    let current = Review {
+        reviewers: PUBLISH.reviewers,
+        findings: r#"[{"type":"nit","scenario":"CURRENT FINDING"}]"#,
+    };
+    let service = github::Github::new();
+    let setup = Setup::reviewed(ORIGIN);
+    let env = &setup.env;
+    let f1 = setup.finding(1);
+    service.land_inline(&setup);
+    env.run(&["edit", &format!("{f1}/c1"), "--body", "Edited text."]);
+    let run = start_review(env, &current, false);
+    github::pulls(env, "me/repo", r#"[{"number":42,"state":"open"}]"#);
+    service.accept(env, Call::PostNote, 601);
+    auto_push(env);
+    review_json(&env.exec(&["run", "end", "--run", &run], None, &[]));
+    assert_eq!(
+        service.count(env, Call::PostNote),
+        1,
+        "the run was published"
+    );
+    let edit = Call::EditComment(service.landed_inline());
+    assert_eq!(service.count(env, edit), 0);
+
+    service.accept(env, edit, service.landed_inline());
+    let published = env.run(&["publish", "--pr", "42", "--only", &f1]);
+    assert_eq!(published["posted"][0]["kind"], "edit", "{published}");
+}
+
 #[test]
 fn automatic_publish_attaches_and_sends_only_the_completed_run() {
     use crate::support::forge::{Call, FakeService, Remote};

@@ -194,6 +194,11 @@ impl Env {
         fs::write(self.forge_file(args, "fail"), stderr).unwrap();
     }
 
+    /// Runs the shell script `script` while the fake serves a call with these arguments.
+    pub fn hook_call(&self, args: &[&str], script: &str) {
+        fs::write(self.forge_file(args, "hook"), script).unwrap();
+    }
+
     /// Undoes [`Env::fail_call`].
     pub fn pass_call(&self, args: &[&str]) {
         fs::remove_file(self.forge_file(args, "fail")).unwrap();

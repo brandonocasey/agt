@@ -653,6 +653,26 @@ mod tests {
         assert_eq!(document, json!({"version": 3, "twice": true}));
     }
 
+    /// A target as the release before the pending-change fields wrote it, kept as literal JSON.
+    #[test]
+    fn a_version_1_target_loads_with_no_pending_changes_and_writes_none() {
+        let mut document = stored(1);
+        document["threads"] = json!([thread(
+            "h1",
+            Some("900"),
+            vec![comment("h1/c1", "Posted text", Some("77"))]
+        )]);
+        let (_dir, path) = file("k.json", &document);
+        let schema = Namespace::Reviews.schema();
+        let target = read_target_for_write(&path, schema).unwrap().unwrap();
+        assert_eq!(target.version, VERSION);
+        let first = &target.threads[0].comments[0];
+        assert!(!first.edit_pending && !first.delete_pending);
+        let written = serde_json::to_value(first).unwrap();
+        assert!(written.get("edit_pending").is_none(), "{written}");
+        assert!(written.get("delete_pending").is_none(), "{written}");
+    }
+
     #[test]
     fn writing_refuses_to_drop_unknown_fields() {
         let mut document = stored(VERSION.into());
@@ -741,6 +761,14 @@ mod tests {
         assert!(reviews.load(&dir, "k").unwrap().is_some());
     }
 
+    fn noop(_: &mut Value) {}
+
+    /// A schema one version past the current one, as a later release would have.
+    const NEXT: Schema = Schema {
+        version: VERSION + 1,
+        migrations: &[noop as fn(&mut Value); VERSION as usize],
+    };
+
     #[test]
     fn migrating_write_backs_up_the_namespace_first_and_only_once() {
         let base = tempfile::tempdir().unwrap();
@@ -751,10 +779,7 @@ mod tests {
         assert!(!backups.exists(), "a current-version write needs no backup");
         let before = fs::read_to_string(dir.join("k.json")).unwrap();
 
-        store.schema = Schema {
-            version: 2,
-            migrations: &[|_| {}],
-        };
+        store.schema = NEXT;
         write_target_named(&store, &dir);
         let made: Vec<_> = fs::read_dir(&backups)
             .unwrap()
@@ -787,14 +812,10 @@ mod tests {
         )
         .unwrap();
         let backups = base.path().join("agents").join("backups");
-        let v2 = Schema {
-            version: 2,
-            migrations: &[|_| {}],
-        };
         // Two processes, each with its own store, migrate different files from version 1.
         for key in ["k", "old"] {
             let mut next = Store::at(base.path(), Namespace::Reviews);
-            next.schema = v2;
+            next.schema = NEXT;
             next.update(&dir, key, NOW, || target(Vec::new()), |_| Ok(()))
                 .unwrap();
         }
@@ -803,7 +824,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(made.len(), 1, "{made:?}");
-        assert!(made[0].starts_with("reviews-v1-"), "{made:?}");
+        assert!(
+            made[0].starts_with(&format!("reviews-v{VERSION}-")),
+            "{made:?}"
+        );
     }
 
     #[test]
@@ -814,22 +838,22 @@ mod tests {
         write_target_named(&store, &dir);
         let backups = base.path().join("agents").join("backups");
         // What a copy that failed part way leaves behind.
-        fs::create_dir_all(backups.join(".reviews-v1-2026-01-01T00-00-00Z.partial")).unwrap();
+        fs::create_dir_all(
+            backups.join(format!(".reviews-v{VERSION}-2026-01-01T00-00-00Z.partial")),
+        )
+        .unwrap();
         let mut next = Store::at(base.path(), Namespace::Reviews);
-        next.schema = Schema {
-            version: 2,
-            migrations: &[|_| {}],
-        };
+        next.schema = NEXT;
         write_target_named(&next, &dir);
         let finished: Vec<String> = fs::read_dir(&backups)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("reviews-v1-"))
+            .filter(|name| name.starts_with(&format!("reviews-v{VERSION}-")))
             .collect();
         assert_eq!(finished.len(), 1, "{finished:?}");
         assert!(
             !backups
-                .join(".reviews-v1-2026-01-01T00-00-00Z.partial")
+                .join(format!(".reviews-v{VERSION}-2026-01-01T00-00-00Z.partial"))
                 .exists(),
             "the stale partial copy is removed"
         );
@@ -848,15 +872,12 @@ mod tests {
         std::thread::scope(|scope| {
             let migrating = scope.spawn(|| {
                 let mut next = Store::at(base.path(), Namespace::Reviews);
-                next.schema = Schema {
-                    version: 2,
-                    migrations: &[|_| {}],
-                };
+                next.schema = NEXT;
                 write_target_named(&next, &dir);
             });
             // The other process finishes its backup while this one waits on the lock.
             std::thread::sleep(std::time::Duration::from_millis(200));
-            fs::create_dir(backups.join("reviews-v1-x")).unwrap();
+            fs::create_dir(backups.join(format!("reviews-v{VERSION}-x"))).unwrap();
             drop(guard);
             migrating.join().unwrap();
         });
@@ -864,7 +885,7 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["reviews-v1-x".to_string()], "{names:?}");
+        assert_eq!(names, vec![format!("reviews-v{VERSION}-x")], "{names:?}");
     }
 
     #[test]
@@ -884,10 +905,7 @@ mod tests {
                 let (barrier, dir, root) = (&barrier, &dir, base.path());
                 scope.spawn(move || {
                     let mut next = Store::at(root, Namespace::Reviews);
-                    next.schema = Schema {
-                        version: 2,
-                        migrations: &[|_| {}],
-                    };
+                    next.schema = NEXT;
                     barrier.wait();
                     next.update(dir, key, NOW, || target(Vec::new()), |_| Ok(()))
                         .unwrap();
@@ -899,7 +917,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
-        assert!(names[0].starts_with("reviews-v1-"), "{names:?}");
+        assert!(
+            names[0].starts_with(&format!("reviews-v{VERSION}-")),
+            "{names:?}"
+        );
         assert!(!names[0].ends_with(".partial"), "{names:?}");
     }
 }

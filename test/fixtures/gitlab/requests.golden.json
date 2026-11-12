@@ -14,6 +14,15 @@
       "sha": "c"
     }
   },
+  "delete_comment": {
+    "args": [
+      "api",
+      "-X",
+      "DELETE",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/notes/5001"
+    ],
+    "body": null
+  },
   "delete_draft": {
     "args": [
       "api",
@@ -41,6 +50,36 @@
         "new_path": "a.txt",
         "position_type": "text"
       }
+    }
+  },
+  "edit_comment": {
+    "args": [
+      "api",
+      "-X",
+      "PUT",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/notes/5001",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
+    }
+  },
+  "edit_note": {
+    "args": [
+      "api",
+      "-X",
+      "PUT",
+      "projects/group%2Fsub%2Fproj/merge_requests/3/notes/5001",
+      "-H",
+      "Content-Type: application/json",
+      "--input",
+      "-"
+    ],
+    "body": {
+      "body": "text"
     }
   },
   "note": {

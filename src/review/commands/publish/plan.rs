@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::Options;
 
-use super::render::{body, location, paragraph, record_head};
+use super::render::{body, is_first, location, paragraph, record_head};
 use super::summary::{Covered, Links, QaSummary, summary_texts};
 use crate::core::error::{Error, Result};
 use crate::core::text::cut;
@@ -68,6 +68,15 @@ pub(super) enum Item {
     Reply {
         comment: String,
     },
+    /// New text for a comment already posted. `body` is its text when planned; a newer edit stays pending.
+    Edit {
+        comment: String,
+        body: String,
+    },
+    /// Removal of a comment already posted.
+    Delete {
+        comment: String,
+    },
     Resolve {
         thread: String,
         resolved: bool,
@@ -109,6 +118,8 @@ impl Write {
             Item::Draft { .. } => "draft",
             Item::PublishDraft { .. } => "publish-draft",
             Item::Reply { .. } => "reply",
+            Item::Edit { .. } => "edit",
+            Item::Delete { .. } => "delete",
             Item::Resolve { resolved: true, .. } => "resolve",
             Item::Resolve { .. } => "unresolve",
             Item::Summary { .. } | Item::SummaryPart { .. } => "summary",
@@ -124,7 +135,9 @@ impl Write {
             | Item::ApprovalReview { comment }
             | Item::Draft { comment }
             | Item::PublishDraft { comment, .. }
-            | Item::Reply { comment } => vec![comment.clone()],
+            | Item::Reply { comment }
+            | Item::Edit { comment, .. }
+            | Item::Delete { comment } => vec![comment.clone()],
             Item::Resolve { thread, .. } | Item::Approve { thread } => vec![thread.clone()],
             Item::Summary { .. } => vec![markers::SUMMARY_ID.to_owned()],
             Item::SummaryPart { number, .. } => vec![markers::summary_part_id(*number)],
@@ -533,16 +546,7 @@ impl<'a> Planner<'a> {
             if thread.deleted_remote {
                 continue;
             }
-            let held = if imported(thread) {
-                self.unnamed(thread)
-            } else {
-                self.held(thread)
-            };
-            let before_pr = || match self.run {
-                Some(run) => self.run_before_pr(target, run),
-                None => self.pre_pr(target, thread),
-            };
-            if let Some(reason) = held.or_else(before_pr) {
+            if let Some(reason) = self.thread_held(target, thread) {
                 skipped.push(Skipped::new(&thread.id, reason));
                 continue;
             }
@@ -604,7 +608,165 @@ impl<'a> Planner<'a> {
             }
             writes.push(self.resolve(&thread.id, remote, resolved));
         }
+        let (changes, held) = self.changes(target);
+        writes.extend(changes);
+        skipped.extend(held);
         (writes, skipped)
+    }
+
+    /// Why a posted thread gets nothing now: not named by `--only`, held on someone else's
+    /// PR/MR, or from before the PR/MR.
+    fn thread_held(&self, target: &Target, thread: &Thread) -> Option<Skip> {
+        let held = if imported(thread) {
+            self.unnamed(thread)
+        } else {
+            self.held(thread)
+        };
+        let before_pr = || match self.run {
+            Some(run) => self.run_before_pr(target, run),
+            None => self.pre_pr(target, thread),
+        };
+        held.or_else(before_pr)
+    }
+
+    /// The edits and deletes of posted comments that wait for `publish`.
+    fn changes(&self, target: &Target) -> (Vec<Write>, Vec<Skipped>) {
+        let mut writes = Vec::new();
+        let mut skipped = Vec::new();
+        for thread in &target.threads {
+            let waiting: Vec<(&Comment, &RemoteComment)> = thread
+                .comments
+                .iter()
+                .filter(|comment| comment.edit_pending || comment.delete_pending)
+                .filter(|comment| self.run.is_none_or(|run| comment_in_run(comment, run)))
+                .filter_map(|comment| Some((comment, comment.remote.as_ref()?)))
+                .collect();
+            if waiting.is_empty() || self.thread_held(target, thread).is_some() {
+                continue;
+            }
+            // A paragraph of a review's body has no thread on the host.
+            let (paragraphs, waiting): (Vec<_>, Vec<_>) = waiting
+                .into_iter()
+                .partition(|(comment, posted)| self.in_review_body_of(thread, comment, posted));
+            for (comment, _) in paragraphs {
+                let reason = self.unsupported_change(comment, RemoteKind::Review);
+                skipped.push(Skipped::new(&comment.id, reason));
+            }
+            // `replies` already lists a held thread.
+            if waiting.is_empty() {
+                continue;
+            }
+            for (comment, posted) in waiting {
+                match self.change(target, thread, (comment, posted)) {
+                    Ok(write) => writes.push(write),
+                    Err(reason) => skipped.push(Skipped::new(&comment.id, reason)),
+                }
+            }
+        }
+        (writes, skipped)
+    }
+
+    /// The delete or edit of one posted comment, `comment` and its host side `posted`.
+    /// A comment the host lost is only cleared here.
+    fn change(
+        &self,
+        target: &Target,
+        thread: &Thread,
+        (comment, posted): (&Comment, &RemoteComment),
+    ) -> std::result::Result<Write, Skip> {
+        let subject = self.connection.subject();
+        let thread_kind = self.thread_kind(thread);
+        let kind = if self.replied_plainly(thread, thread_kind, comment) {
+            RemoteKind::General
+        } else {
+            thread_kind
+        };
+        let id = comment.id.clone();
+        let (item, request, text) = if comment.delete_pending {
+            let request = self.service().delete_comment(subject, kind, posted);
+            (Item::Delete { comment: id }, request, None)
+        } else {
+            let text = self.posted_text(target, thread, thread_kind, comment);
+            let request = self.service().edit_comment(subject, kind, posted, &text);
+            (
+                Item::Edit {
+                    comment: id,
+                    body: comment.body.clone(),
+                },
+                request,
+                Some(text),
+            )
+        };
+        let gone = thread.deleted_remote || comment.deleted_remote;
+        let request = if gone {
+            None
+        } else {
+            Some(request.ok_or_else(|| self.unsupported_change(comment, kind))?)
+        };
+        Ok(Write {
+            item,
+            request,
+            sent: vec![text],
+            fallback: None,
+        })
+    }
+
+    /// The kind of host thread holding the comments of `thread`. A thread no sync has linked yet
+    /// went out as a general comment.
+    fn thread_kind(&self, thread: &Thread) -> RemoteKind {
+        thread
+            .remote
+            .as_ref()
+            .map_or(self.caps().general_kind, |remote| remote.kind)
+    }
+
+    /// Whether `posted` is a paragraph of a review's body.
+    /// Before a sync, a holding review or a diff-less agent comment decides.
+    fn in_review_body_of(
+        &self,
+        thread: &Thread,
+        comment: &Comment,
+        posted: &RemoteComment,
+    ) -> bool {
+        thread.remote.is_none() && (posted.review_id.is_some() || self.in_review_body(comment))
+    }
+
+    /// Why the host cannot change `comment` of a thread of `kind` on its own.
+    fn unsupported_change(&self, comment: &Comment, kind: RemoteKind) -> Skip {
+        let what = match (comment.delete_pending, kind) {
+            (false, _) => Unsupported::EditComment,
+            (true, RemoteKind::Review) => Unsupported::DeleteComment,
+            (true, _) => Unsupported::DeleteNeedsReview,
+        };
+        Skip::Unsupported {
+            service: self.service().name(),
+            what,
+        }
+    }
+
+    /// Whether `comment` went out as a general comment that quotes the thread.
+    /// That is a reply where the host has no reply in place.
+    fn replied_plainly(&self, thread: &Thread, kind: RemoteKind, comment: &Comment) -> bool {
+        !is_first(thread, comment) && !self.caps().replies_natively(kind)
+    }
+
+    /// The text a post of `comment` would send now.
+    fn posted_text(
+        &self,
+        target: &Target,
+        thread: &Thread,
+        kind: RemoteKind,
+        comment: &Comment,
+    ) -> String {
+        let lines = is_first(thread, comment)
+            .then(|| posted_location(thread, comment))
+            .flatten();
+        let text = body(target, thread, comment, lines.as_deref(), self.attempt);
+        if self.replied_plainly(thread, kind, comment) {
+            format!("{}{text}", quote(thread))
+        } else {
+            text
+        }
     }
 
     fn reply(
@@ -614,7 +776,7 @@ impl<'a> Planner<'a> {
         remote: &RemoteThread,
         comment: &Comment,
     ) -> std::result::Result<Write, Skip> {
-        let text = body(target, thread, comment, None, self.attempt);
+        let text = self.posted_text(target, thread, remote.kind, comment);
         let item = Item::Reply {
             comment: comment.id.clone(),
         };
@@ -627,7 +789,6 @@ impl<'a> Planner<'a> {
         if matches!(comment.author, Author::Agent { .. }) {
             return Err(Skip::NoReply);
         }
-        let text = format!("{}{text}", quote(thread));
         Ok(self.write(item, self.service().note(subject, &text), &text))
     }
 
@@ -868,6 +1029,13 @@ fn body_groups(paragraphs: Vec<Paragraph>) -> Vec<Vec<Paragraph>> {
         }
     }
     groups
+}
+
+/// The location the first comment's post named in its text, if any.
+fn posted_location(thread: &Thread, comment: &Comment) -> Option<String> {
+    let lines = location(thread.anchor.as_ref()?);
+    let sent = comment.delivery.sent.as_deref()?;
+    sent.starts_with(&format!("`{lines}`\n\n")).then_some(lines)
 }
 
 /// The quote that opens a reply to a general comment, in the form GitHub's own quote reply

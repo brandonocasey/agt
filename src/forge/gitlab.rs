@@ -14,7 +14,9 @@ use crate::forge::service::{
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Draft, Fetched, PrInfo, PullNode, ThreadData};
 use crate::git::Repo;
-use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
+use crate::store::model::{
+    Anchor, Forge, RemoteComment, RemoteKind, RemoteThread, Review, ReviewState, Side,
+};
 use serde_json::json;
 
 pub const KIND: Kind = Kind {
@@ -228,6 +230,30 @@ impl ReviewService for Gitlab {
             format!("{}/notes/{}", base(subject), forge::encode(id)),
             Some(json!({ "body": text })),
         )
+    }
+
+    // A discussion note uses the same route as a general one.
+    fn edit_comment(
+        &self,
+        subject: ReviewSubject,
+        _kind: RemoteKind,
+        comment: &RemoteComment,
+        text: &str,
+    ) -> Option<Request> {
+        Some(self.edit_note(subject, &comment.id, text))
+    }
+
+    fn delete_comment(
+        &self,
+        subject: ReviewSubject,
+        _kind: RemoteKind,
+        comment: &RemoteComment,
+    ) -> Option<Request> {
+        Some(Request::rest(
+            Method::Delete,
+            format!("{}/notes/{}", base(subject), forge::encode(&comment.id)),
+            None,
+        ))
     }
 
     fn reply(&self, subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request {
@@ -669,6 +695,28 @@ mod tests {
             ("resolve", gitlab.resolve(subject(), &thread, true)),
             ("unresolve", gitlab.resolve(subject(), &thread, false)),
             ("approve", gitlab.approve(subject(), "c", Some("ok"))),
+            ("edit_note", gitlab.edit_note(subject(), "5001", "text")),
+            (
+                "edit_comment",
+                gitlab
+                    .edit_comment(
+                        subject(),
+                        RemoteKind::Discussion,
+                        &contract::posted("5001", None),
+                        "text",
+                    )
+                    .unwrap(),
+            ),
+            (
+                "delete_comment",
+                gitlab
+                    .delete_comment(
+                        subject(),
+                        RemoteKind::Discussion,
+                        &contract::posted("5001", None),
+                    )
+                    .unwrap(),
+            ),
         ];
         contract::golden(
             "gitlab/requests.golden.json",

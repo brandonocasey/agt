@@ -143,7 +143,11 @@ pub(super) fn parse_versioned<T: DeserializeOwned>(
 
 /// One step per schema version: `MIGRATIONS[n - 1]` rewrites a version `n` document into
 /// version `n + 1`'s shape. Bumping [`VERSION`] means adding a step here and a frozen-JSON test.
-pub(super) const REVIEW_MIGRATIONS: &[fn(&mut Value)] = &[];
+pub(super) const REVIEW_MIGRATIONS: &[fn(&mut Value)] = &[add_pending_comment_changes];
+
+/// Version 2 adds `edit_pending` and `delete_pending` to comments. Both default to false when
+/// absent, so a version 1 document needs no rewrite.
+fn add_pending_comment_changes(_document: &mut Value) {}
 
 pub(super) fn migrate_with(document: &mut Value, from: u32, steps: &[fn(&mut Value)]) {
     let from = from as usize;

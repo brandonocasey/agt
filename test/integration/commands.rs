@@ -518,7 +518,7 @@ fn store_layout_and_permissions() {
         0o700
     );
     let stored: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert_eq!(stored["version"], 1);
+    assert_eq!(stored["version"], 2);
     assert_eq!(stored["revision"], 1);
     assert_eq!(stored["repo"], "github.com/Owner/Repo");
     env.run(&["reply", "h1", "--body", "y"]);

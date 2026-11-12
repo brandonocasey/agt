@@ -5,7 +5,9 @@ use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::markers::{self, agent_id};
 use crate::forge::service::Inline;
+use crate::forge::transport::TransportError;
 use crate::review::commands::Ctx;
+use crate::review::commands::edit::locate;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::sync::merge::landed;
 use crate::store::model::{
@@ -24,12 +26,7 @@ pub(super) fn run_writes(
 ) -> Result<()> {
     for write in writes {
         let Some(request) = &write.request else {
-            if let Item::Resolve { thread, .. } = &write.item {
-                change(ctx, target, |target| {
-                    clear_pending(target, thread);
-                    Ok(())
-                })?;
-            }
+            save(ctx, connection, target, &write.item, &Value::Null)?;
             posted.push(json!({ "kind": write.kind(), "items": write.ids(), "local_only": true }));
             continue;
         };
@@ -82,6 +79,12 @@ pub(super) fn run_writes(
                 if let Some(again) = again {
                     run_writes(ctx, connection, target, vec![again], attempt, posted)?;
                 }
+                continue;
+            }
+            // The host does not have the comment, so the delete is done.
+            Err(error) if already_gone(&error, &write.item) => {
+                save(ctx, connection, target, &write.item, &Value::Null)?;
+                posted.push(json!({ "kind": write.kind(), "items": write.ids(), "gone": true }));
                 continue;
             }
             // The summary comment or one of its parts was deleted on the host: post it anew.
@@ -177,6 +180,11 @@ pub(super) fn run_writes(
     Ok(())
 }
 
+/// Whether the host answered a delete with 404: it does not have the comment.
+fn already_gone(error: &TransportError, item: &Item) -> bool {
+    error.status == Some(404) && matches!(item, Item::Delete { .. })
+}
+
 /// The summary item that posts anew what an edit found deleted.
 fn reposted(item: &Item) -> Option<Item> {
     match item {
@@ -225,9 +233,50 @@ pub(super) fn clear_pending(target: &mut Target, id: &str) {
     }
 }
 
+/// Drops a comment the host deleted, and its thread when no comment is left.
+/// A thread linked to that comment loses the link, so sync imports none twice.
+fn remove_comment(target: &mut Target, id: &str) {
+    let Ok((at, index)) = locate(target, id) else {
+        return;
+    };
+    let thread = &mut target.threads[at];
+    let removed = thread.comments.remove(index);
+    if thread.comments.is_empty() {
+        target.threads.remove(at);
+        return;
+    }
+    let linked = thread.remote.as_ref().zip(removed.remote.as_ref());
+    if linked.is_some_and(|(thread, comment)| thread.id == comment.id) {
+        thread.remote = None;
+    }
+}
+
+/// Records the text an edit sends, which a sync may meet on the host.
+fn set_sent(target: &mut Target, id: &str, text: Option<String>) {
+    if let Some(comment) = target.comment_mut(id) {
+        comment.delivery.sent = text;
+    }
+}
+
+/// Clears the pending edit of `id` once the host has the body `sent`.
+/// A newer edit stays pending.
+fn clear_edit(target: &mut Target, id: &str, sent: &str) {
+    if let Some(comment) = target
+        .comment_mut(id)
+        .filter(|comment| comment.body == sent)
+    {
+        comment.edit_pending = false;
+    }
+}
+
 pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
+        // The comment stays posted. Record the new text, which sync can see on the host.
+        Item::Edit { comment, .. } => {
+            set_sent(target, comment, texts.next().flatten());
+            return;
+        }
         Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
         Item::Thread { comment }
         | Item::Placed { comment }
@@ -317,7 +366,10 @@ pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
             }
             return;
         }
-        Item::PublishDraft { .. } | Item::Resolve { .. } | Item::Approve { .. } => return,
+        Item::PublishDraft { .. }
+        | Item::Delete { .. }
+        | Item::Resolve { .. }
+        | Item::Approve { .. } => return,
     };
     for id in ids {
         let text = texts.next().flatten();
@@ -402,6 +454,20 @@ pub(super) fn save(
                 Ok(())
             })?;
             Ok(Some(id))
+        }
+        Item::Edit { comment, body } => {
+            change(ctx, target, |target| {
+                clear_edit(target, comment, body);
+                Ok(())
+            })?;
+            Ok(None)
+        }
+        Item::Delete { comment } => {
+            change(ctx, target, |target| {
+                remove_comment(target, comment);
+                Ok(())
+            })?;
+            Ok(None)
         }
         Item::Draft { comment } => {
             let draft = service.draft_created(response).ok_or_else(|| {

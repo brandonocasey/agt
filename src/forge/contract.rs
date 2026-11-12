@@ -13,12 +13,24 @@ use serde_json::{Value, json};
 use crate::forge::Fetched;
 use crate::forge::service::{ApproveCap, Inline, Pagination, ReplyCap, Request, ReviewService};
 use crate::forge::transport::{Response, Transport, TransportError};
-use crate::store::model::RemoteKind;
+use crate::store::model::{RemoteComment, RemoteKind};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("test/fixtures")
         .join(name)
+}
+
+/// Our posted comment `id`, in review `review_id` when it has one.
+pub fn posted(id: &str, review_id: Option<&str>) -> RemoteComment {
+    RemoteComment {
+        id: id.to_owned(),
+        url: None,
+        login: Some("me".to_owned()),
+        is_me: true,
+        editor: None,
+        review_id: review_id.map(str::to_owned),
+    }
 }
 
 /// A response of the host, from a fixture (JSON, or the pages of a paginated list) whose `{{NAME}}` placeholders are replaced.

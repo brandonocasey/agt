@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 
 use crate::support::forge::{Call, Comment, FakeService, Remote, assert_read_only};
 use crate::support::scenario::{
-    Review, Setup, ids, kinds, local_changes, marked, open_ids, skipped_items, thread,
-    write_starting, write_text, writes_for,
+    Review, Setup, count_calls, ids, input_of, kinds, local_changes, marked, open_ids,
+    skipped_items, thread, write_starting, write_text, writes_for,
 };
-use crate::support::{Env, numbered, snapshot, unix_now};
+use crate::support::{Env, numbered, snapshot, strs, unix_now};
 
 type Svc<'a> = &'a dyn FakeService;
 
@@ -83,6 +83,12 @@ matrix!(
     the_summary_counts_commits_reviewed_before_the_pr,
     the_summary_of_one_open_finding_leads_with_what_to_fix,
     inline_finding_and_review_batch_carry_only_the_model_and_a_marker,
+    editing_a_posted_comment_waits_for_publish,
+    deleting_a_posted_comment_waits_for_publish,
+    a_comment_the_host_already_lost_is_deleted_here_without_a_call,
+    a_delete_the_host_answers_with_not_found_is_done,
+    imported_comments_are_read_only,
+    pending_changes_are_not_sent_offline_or_while_push_is_off,
 );
 
 /// The kinds of the write of the general finding f2, where the service posts one. A general
@@ -1476,4 +1482,221 @@ fn inline_finding_and_review_batch_carry_only_the_model_and_a_marker(svc: Svc) {
     svc.link(&setup);
     let dry = dry_run(env, svc, &[]);
     svc.assert_inline_dry(&setup, &dry);
+}
+
+/// The first comment of thread `id` as `list` shows it.
+fn first_comment(env: &Env, id: &str) -> Value {
+    thread(&env.run(&["list"]), id)["comments"][0].clone()
+}
+
+fn editing_a_posted_comment_waits_for_publish(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let (f1, host_id) = (setup.finding(1), svc.landed_inline());
+    svc.land_inline(&setup);
+    let comment = format!("{f1}/c1");
+    let calls = env.forge_calls().len();
+
+    let edited = env.run(&["edit", &comment, "--body", "Edited text."]);
+    assert_eq!(edited["thread"]["comments"][0]["edit_pending"], true);
+    assert_eq!(env.forge_calls().len(), calls, "an edit calls no host");
+
+    // The host still shows the old text; a sync keeps the edit.
+    sync(env, svc);
+    let first = first_comment(env, &f1);
+    assert_eq!(first["body"], "Edited text.");
+    assert_eq!(first["edit_pending"], true);
+
+    let state = snapshot(&env.state());
+    let held = dry_run(env, svc, &["--only", "h9"]);
+    assert_eq!(kinds(&held, "writes"), Vec::<String>::new(), "{held}");
+    let listed = skipped_items(&held);
+    assert_eq!(
+        listed.iter().filter(|item| **item == f1).count(),
+        1,
+        "{held}"
+    );
+    let dry = dry_run(env, svc, &["--only", &f1]);
+    assert_eq!(snapshot(&env.state()), state, "a dry run writes nothing");
+    assert_eq!(kinds(&dry, "writes"), ["edit"], "{dry}");
+    assert_eq!(dry["writes"][0]["items"], json!([comment]));
+    assert_eq!(
+        dry["writes"][0]["call"],
+        json!(svc.call(Call::EditComment(host_id)))
+    );
+    let text = write_text(&dry, "body", "Edited text.");
+    assert!(
+        text.contains(&format!("agent-review id={comment}")),
+        "{text}"
+    );
+
+    svc.accept(env, Call::EditComment(host_id), host_id);
+    let published = publish(env, svc, &["--only", &f1]);
+    assert_eq!(kinds(&published, "posted"), ["edit"], "{published}");
+    let call = svc.call(Call::EditComment(host_id));
+    let sent = input_of(&env.forge_inputs(), &call);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let text = sent[0]["body"].as_str().unwrap();
+    // The finding marker stays, so a later sync still matches the thread.
+    assert!(text.contains("\nEdited text.\n"), "{text}");
+    assert!(text.contains("review-finding v1 id="), "{text}");
+    assert!(
+        text.contains(&format!("agent-review id={comment}")),
+        "{text}"
+    );
+    let first = first_comment(env, &f1);
+    assert!(first.get("edit_pending").is_none(), "{first}");
+    assert_eq!(first["sent"], text, "sync can still vouch for the new text");
+
+    let again = publish(env, svc, &["--only", &f1]);
+    assert_eq!(again["posted"], json!([]), "{again}");
+    assert_eq!(count_calls(env, &call), 1);
+}
+
+fn deleting_a_posted_comment_waits_for_publish(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let (f1, host_id) = (setup.finding(1), svc.landed_inline());
+    let landed = svc.land_inline(&setup);
+    let comment = format!("{f1}/c1");
+    let calls = env.forge_calls().len();
+
+    env.run(&["edit", &comment, "--body", "Edited, then deleted."]);
+    let deleted = env.run(&["delete", "--force", &comment]);
+    assert_eq!(deleted["pending"], true);
+    assert_eq!(deleted["thread_removed"], false);
+    assert_eq!(env.forge_calls().len(), calls, "a delete calls no host");
+    let first = first_comment(env, &f1);
+    assert_eq!(first["delete_pending"], true);
+    assert!(first.get("edit_pending").is_none(), "{first}");
+    let error = env.fail(&["edit", &comment, "--body", "Too late."], None);
+    assert!(
+        error.contains(&format!("comment {comment} is queued for deletion")),
+        "{error}"
+    );
+
+    let dry = dry_run(env, svc, &["--only", &f1]);
+    assert_eq!(kinds(&dry, "writes"), ["delete"], "{dry}");
+    let call = svc.call(Call::DeleteComment(host_id));
+    assert_eq!(dry["writes"][0]["call"], json!(call));
+    assert_eq!(dry["writes"][0]["input"], Value::Null);
+
+    // The host shows the comment while publish syncs before the delete. After the delete it does not.
+    env.reset_calls();
+    svc.sync_with(&setup, Some(1), &landed);
+    svc.sync_with(&setup, Some(2), &landed);
+    svc.sync(&setup, &Remote::new());
+    svc.accept(env, Call::DeleteComment(host_id), host_id);
+    let published = publish(env, svc, &["--only", &f1]);
+    assert_eq!(kinds(&published, "posted"), ["delete"], "{published}");
+    assert_eq!(count_calls(env, &call), 1);
+    assert!(
+        !ids(&env.run(&["list"])).contains(&f1),
+        "the thread is gone"
+    );
+
+    let again = publish(env, svc, &["--only", &f1]);
+    assert_eq!(again["posted"], json!([]), "{again}");
+    assert_eq!(count_calls(env, &call), 1);
+}
+
+fn imported_comments_are_read_only(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    svc.sync(&setup, &svc.before(&setup));
+    sync(env, svc);
+    let alice = format!("remote-{}", svc.alice_thread());
+    let before = env.run(&["list"]);
+    let imported = thread(&before, &svc.local_thread(svc.alice_thread()));
+    assert_eq!(imported["comments"][0]["id"], alice.as_str());
+    for args in [
+        vec!["edit", &alice, "--body", "Mine now."],
+        vec!["delete", "--force", &alice],
+    ] {
+        let error = env.fail(&args, None);
+        assert!(
+            error.contains(&format!(
+                "comment {alice} was imported from the host and is read-only"
+            )),
+            "{error}"
+        );
+    }
+    assert_eq!(env.run(&["list"]), before);
+}
+
+fn pending_changes_are_not_sent_offline_or_while_push_is_off(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let (f1, host_id) = (setup.finding(1), svc.landed_inline());
+    svc.land_inline(&setup);
+    let comment = format!("{f1}/c1");
+
+    // Recording the change is local, so it works offline too.
+    env.run_with(
+        &["edit", &comment, "--body", "Edited text."],
+        None,
+        &[("AGT_OFFLINE", "1")],
+    );
+    let calls = env.forge_calls().len();
+
+    let output = env.exec(
+        &["publish", "--pr", svc.number()],
+        None,
+        &[("AGT_OFFLINE", "1")],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("offline mode forbids review sync and publish"),
+        "{error}"
+    );
+
+    env.write_config("[sync]\npush = \"off\"\n");
+    let kept = publish(env, svc, &[]);
+    assert_eq!(kept["posted"], json!([]), "{kept}");
+    assert!(kept["kept_local"].is_string(), "{kept}");
+    assert_eq!(env.forge_calls().len(), calls, "nothing reached the host");
+    assert_eq!(first_comment(env, &f1)["edit_pending"], true);
+
+    // A dry run still shows the call that stays unsent.
+    let dry = dry_run(env, svc, &["--only", &f1]);
+    assert_eq!(
+        dry["writes"][0]["call"],
+        json!(svc.call(Call::EditComment(host_id)))
+    );
+}
+
+fn a_comment_the_host_already_lost_is_deleted_here_without_a_call(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let (f1, host_id) = (setup.finding(1), svc.landed_inline());
+    svc.land_inline(&setup);
+    env.run(&["delete", "--force", &format!("{f1}/c1")]);
+
+    svc.sync(&setup, &Remote::new());
+    let published = publish(env, svc, &["--only", &f1]);
+    assert_eq!(published["posted"][0]["kind"], "delete", "{published}");
+    assert_eq!(published["posted"][0]["local_only"], true, "{published}");
+    assert_eq!(svc.count(env, Call::DeleteComment(host_id)), 0);
+    assert!(
+        !ids(&env.run(&["list"])).contains(&f1),
+        "the thread is gone"
+    );
+}
+
+fn a_delete_the_host_answers_with_not_found_is_done(svc: Svc) {
+    let setup = Setup::reviewed(svc.origin());
+    let env = &setup.env;
+    let (f1, host_id) = (setup.finding(1), svc.landed_inline());
+    svc.land_inline(&setup);
+    env.run(&["delete", "--force", &format!("{f1}/c1")]);
+
+    env.fail_call_with(
+        &strs(&svc.call(Call::DeleteComment(host_id))),
+        "Not Found (HTTP 404)",
+    );
+    let published = publish(env, svc, &["--only", &f1]);
+    assert_eq!(published["posted"][0]["kind"], "delete", "{published}");
+    assert_eq!(published["posted"][0]["gone"], true, "{published}");
+    assert_eq!(svc.count(env, Call::DeleteComment(host_id)), 1);
 }

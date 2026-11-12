@@ -13,7 +13,7 @@ use crate::forge::issue::{
 };
 use crate::forge::transport::{Response, Transport, TransportError};
 use crate::git::Repo;
-use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review};
+use crate::store::model::{Anchor, Forge, RemoteComment, RemoteKind, RemoteThread, Review};
 
 /// The PR/MR a write or read is about.
 #[derive(Clone, Copy)]
@@ -325,6 +325,23 @@ pub trait ReviewService: Service {
     fn note(&self, subject: ReviewSubject, text: &str) -> Request;
     /// New text for the posted general comment `id`, such as the summary.
     fn edit_note(&self, subject: ReviewSubject, id: &str, text: &str) -> Request;
+    /// New text for the posted `comment` of a remote thread of `kind`.
+    /// `None` when the host cannot change it alone, as for a review's body.
+    fn edit_comment(
+        &self,
+        subject: ReviewSubject,
+        kind: RemoteKind,
+        comment: &RemoteComment,
+        text: &str,
+    ) -> Option<Request>;
+    /// Removes the posted `comment` of a remote thread of `kind`.
+    /// `None` as for [`ReviewService::edit_comment`], or when the host needs a review id the comment lacks.
+    fn delete_comment(
+        &self,
+        subject: ReviewSubject,
+        kind: RemoteKind,
+        comment: &RemoteComment,
+    ) -> Option<Request>;
     /// A native reply; only for kinds [`Capabilities::replies_natively`] accepts.
     fn reply(&self, subject: ReviewSubject, remote: &RemoteThread, text: &str) -> Request;
     /// Only for threads of a service with `caps().resolve`; `resolved == false` reopens.
