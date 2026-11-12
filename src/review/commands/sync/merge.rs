@@ -477,6 +477,12 @@ fn claim_paragraphs(threads: &mut [Thread], review: &CommentData, trust: &Trust)
     }
 }
 
+/// Whether the host's text replaces the text of comment `found` of `thread`.
+/// Not for an approval's text, and not for a comment with an unsent edit.
+fn takes_host_text(thread: &Thread, found: usize, comment: &Comment) -> bool {
+    (thread.approval.is_none() || found != 0) && !comment.edit_pending
+}
+
 /// Remote wins for posted text and resolved state; local fields and unposted comments stay.
 fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust, now: &str) {
     let login = trust.login;
@@ -526,8 +532,7 @@ fn update(thread: &mut Thread, data: ThreadData, by_marker: bool, trust: &Trust,
                 comment.remote = Some(incoming.remote(login));
                 // The review or comment that carries an approval holds only its marker, or the
                 // text as rendered with its footer; the approval text stays in the store.
-                // A pending edit holds the text `publish` will send.
-                if (thread.approval.is_none() || found != 0) && !comment.edit_pending {
+                if takes_host_text(thread, found, &comment) {
                     comment.body = incoming.body;
                 }
                 comment.delivery.post = PostState::Posted;

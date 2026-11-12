@@ -15,7 +15,9 @@ use crate::forge::service::{
 use crate::forge::transport::{Cli, CliTransport, Transport};
 use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData};
 use crate::git::Repo;
-use crate::store::model::{Anchor, Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
+use crate::store::model::{
+    Anchor, Forge, RemoteComment, RemoteKind, RemoteThread, Review, ReviewState, Side,
+};
 use serde_json::json;
 
 const COMMENT_FIELDS: &str = "databaseId url body createdAt author{login} editor{login} originalCommit{oid} pullRequestReview{databaseId}";
@@ -222,13 +224,15 @@ impl ReviewService for Github {
         &self,
         subject: ReviewSubject,
         kind: RemoteKind,
-        id: &str,
+        comment: &RemoteComment,
         text: &str,
     ) -> Option<Request> {
         let path = match kind {
             RemoteKind::Review => return None,
-            RemoteKind::ReviewThread => review_comment_path(subject, id),
-            RemoteKind::General | RemoteKind::Discussion => issue_comment_path(subject, id),
+            RemoteKind::ReviewThread => review_comment_path(subject, &comment.id),
+            RemoteKind::General | RemoteKind::Discussion => {
+                issue_comment_path(subject, &comment.id)
+            }
         };
         Some(Request::rest(
             Method::Patch,
@@ -241,12 +245,14 @@ impl ReviewService for Github {
         &self,
         subject: ReviewSubject,
         kind: RemoteKind,
-        id: &str,
+        comment: &RemoteComment,
     ) -> Option<Request> {
         let path = match kind {
             RemoteKind::Review => return None,
-            RemoteKind::ReviewThread => review_comment_path(subject, id),
-            RemoteKind::General | RemoteKind::Discussion => issue_comment_path(subject, id),
+            RemoteKind::ReviewThread => review_comment_path(subject, &comment.id),
+            RemoteKind::General | RemoteKind::Discussion => {
+                issue_comment_path(subject, &comment.id)
+            }
         };
         Some(Request::rest(Method::Delete, path, None))
     }
@@ -776,12 +782,14 @@ mod tests {
 
     fn edit(github: &Github, kind: RemoteKind) -> Request {
         github
-            .edit_comment(subject(), kind, "8000", "text")
+            .edit_comment(subject(), kind, &contract::posted("8000", None), "text")
             .unwrap()
     }
 
     fn delete(github: &Github, kind: RemoteKind) -> Request {
-        github.delete_comment(subject(), kind, "8000").unwrap()
+        github
+            .delete_comment(subject(), kind, &contract::posted("8000", None))
+            .unwrap()
     }
 
     #[test]
@@ -789,12 +797,21 @@ mod tests {
         let github = github();
         assert!(
             github
-                .edit_comment(subject(), RemoteKind::Review, "8000", "text")
+                .edit_comment(
+                    subject(),
+                    RemoteKind::Review,
+                    &contract::posted("8000", None),
+                    "text"
+                )
                 .is_none()
         );
         assert!(
             github
-                .delete_comment(subject(), RemoteKind::Review, "8000")
+                .delete_comment(
+                    subject(),
+                    RemoteKind::Review,
+                    &contract::posted("8000", None)
+                )
                 .is_none()
         );
     }

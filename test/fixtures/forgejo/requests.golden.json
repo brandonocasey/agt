@@ -106,6 +106,18 @@
       "-i",
       "-X",
       "DELETE",
+      "repos/me/proj/pulls/5/reviews/700/comments/8000"
+    ],
+    "body": null
+  },
+  "delete_general_comment": {
+    "args": [
+      "api",
+      "--login",
+      "codeberg",
+      "-i",
+      "-X",
+      "DELETE",
       "repos/me/proj/issues/comments/8000"
     ],
     "body": null

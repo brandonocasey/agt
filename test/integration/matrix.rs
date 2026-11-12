@@ -1510,7 +1510,12 @@ fn editing_a_posted_comment_waits_for_publish(svc: Svc) {
     let state = snapshot(&env.state());
     let held = dry_run(env, svc, &["--only", "h9"]);
     assert_eq!(kinds(&held, "writes"), Vec::<String>::new(), "{held}");
-    assert!(skipped_items(&held).contains(&f1), "{held}");
+    let listed = skipped_items(&held);
+    assert_eq!(
+        listed.iter().filter(|item| **item == f1).count(),
+        1,
+        "{held}"
+    );
     let dry = dry_run(env, svc, &["--only", &f1]);
     assert_eq!(snapshot(&env.state()), state, "a dry run writes nothing");
     assert_eq!(kinds(&dry, "writes"), ["edit"], "{dry}");
@@ -1576,7 +1581,7 @@ fn deleting_a_posted_comment_waits_for_publish(svc: Svc) {
     assert_eq!(dry["writes"][0]["call"], json!(call));
     assert_eq!(dry["writes"][0]["input"], Value::Null);
 
-    // The host shows the comment while the publish syncs before the delete, and not after it.
+    // The host shows the comment while publish syncs before the delete. After the delete it does not.
     env.reset_calls();
     svc.sync_with(&setup, Some(1), &landed);
     svc.sync_with(&setup, Some(2), &landed);
@@ -1611,7 +1616,7 @@ fn imported_comments_are_read_only(svc: Svc) {
         let error = env.fail(&args, None);
         assert!(
             error.contains(&format!(
-                "comment {alice} was written by someone else on the host; imported comments are read-only"
+                "comment {alice} was imported from the host and is read-only"
             )),
             "{error}"
         );

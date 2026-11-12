@@ -1,5 +1,5 @@
-//! `edit` and `delete`: change or remove a comment. An unposted comment changes in the store; a
-//! posted one is marked, and `publish` sends the change.
+//! `edit` and `delete` change or remove one comment. A comment not posted yet changes in the
+//! store. A posted one is marked, and `publish` sends the change.
 
 use serde_json::{Value, json};
 
@@ -14,12 +14,15 @@ fn is_posted(comment: &Comment) -> Result<bool> {
     let id = &comment.id;
     if comment.is_imported() {
         return fail(format!(
-            "comment {id} was written by someone else on the host; imported comments are read-only"
+            "comment {id} was imported from the host and is read-only"
         ));
     }
     match comment.delivery.post {
         PostState::Pending => Ok(false),
         PostState::Posted => Ok(true),
+        PostState::Posting if comment.draft_id.is_some() => fail(format!(
+            "comment {id} is a draft that is not published; run publish to publish it first"
+        )),
         PostState::Posting => fail(format!(
             "comment {id} is being posted; run sync first to see whether it landed"
         )),
@@ -27,7 +30,7 @@ fn is_posted(comment: &Comment) -> Result<bool> {
 }
 
 /// The index of the thread holding comment `id`, and the comment's index in it.
-fn locate(target: &Target, id: &str) -> Result<(usize, usize)> {
+pub(super) fn locate(target: &Target, id: &str) -> Result<(usize, usize)> {
     target
         .threads
         .iter()

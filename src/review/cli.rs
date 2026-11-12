@@ -42,10 +42,10 @@ pub enum Command {
     Comment(CommentArgs),
     /// Add a comment to a thread.
     Reply(ReplyArgs),
-    /// Rewrite a comment's text; `publish` sends the edit of one already posted.
+    /// Rewrite a comment. `publish` sends the edit of a posted one.
     Edit(EditArgs),
-    /// Delete a comment, and the thread it opens when it is not posted; `publish` deletes one
-    /// already posted.
+    /// Delete a comment. `publish` sends the delete of a posted one.
+    /// An unposted opener takes its thread along.
     Delete(DeleteArgs),
     /// Resolve, triage or reopen a thread.
     Resolve(ResolveArgs),
@@ -353,7 +353,7 @@ pub struct ReplyArgs {
 
 #[derive(Args)]
 pub struct EditArgs {
-    /// Comment to change, such as `h1/c2`; one imported from the host is read-only.
+    /// Comment to change, such as `h1/c2`. One imported from the host is read-only.
     pub id: String,
     /// New text, or `-` for stdin.
     #[arg(long)]
@@ -362,7 +362,7 @@ pub struct EditArgs {
 
 #[derive(Args)]
 pub struct DeleteArgs {
-    /// Comment to remove, such as `h1/c2`; one imported from the host is read-only.
+    /// Comment to remove, such as `h1/c2`. One imported from the host is read-only.
     pub id: String,
 }
 

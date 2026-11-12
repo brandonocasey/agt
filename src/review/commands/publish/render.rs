@@ -98,7 +98,7 @@ pub(super) fn body(
     text
 }
 
-fn is_first(thread: &Thread, comment: &Comment) -> bool {
+pub(super) fn is_first(thread: &Thread, comment: &Comment) -> bool {
     thread
         .comments
         .first()

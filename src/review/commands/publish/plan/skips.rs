@@ -68,6 +68,7 @@ pub(super) enum Unsupported {
     Unresolve,
     EditComment,
     DeleteComment,
+    DeleteNeedsReview,
 }
 
 impl std::fmt::Display for Skip {
@@ -145,6 +146,10 @@ impl std::fmt::Display for Skip {
                 Unsupported::DeleteComment => write!(
                     f,
                     "{service} cannot delete a comment that is part of a review's body; the delete stays pending"
+                ),
+                Unsupported::DeleteNeedsReview => write!(
+                    f,
+                    "{service} deletes a diff comment through its review, which is not known yet; the delete stays pending"
                 ),
             },
         }
@@ -378,6 +383,10 @@ mod tests {
         assert_eq!(
             unsupported(Unsupported::DeleteComment).to_string(),
             "Forgejo cannot delete a comment that is part of a review's body; the delete stays pending"
+        );
+        assert_eq!(
+            unsupported(Unsupported::DeleteNeedsReview).to_string(),
+            "Forgejo deletes a diff comment through its review, which is not known yet; the delete stays pending"
         );
         assert_eq!(
             unsupported(Unsupported::SelfApproval { commented: true }).to_string(),

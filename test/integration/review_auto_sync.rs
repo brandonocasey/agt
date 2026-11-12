@@ -635,7 +635,8 @@ fn offline_blocks_explicit_review_network_commands() {
     assert!(setup.env.forge_calls().is_empty());
 }
 
-/// A pending edit belongs to the next explicit publish, not to the automatic one of another run.
+/// A pending edit waits for the next explicit publish.
+/// An automatic publish of another run leaves it.
 #[test]
 fn automatic_publish_leaves_a_pending_edit_of_another_run_for_publish() {
     use crate::support::forge::{Call, FakeService};

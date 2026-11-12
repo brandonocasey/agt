@@ -232,10 +232,22 @@ impl FakeService for Forgejo {
             Call::EditComment(id) => {
                 tea_write("PATCH", &format!("repos/me/proj/issues/comments/{id}"))
             }
-            Call::DeleteComment(id) => {
-                tea_bodyless("DELETE", &format!("repos/me/proj/issues/comments/{id}"))
-            }
+            // The fake deletes only a diff comment, which a review holds.
+            Call::DeleteComment(id) => tea_bodyless(
+                "DELETE",
+                &format!("repos/me/proj/pulls/5/reviews/{REVIEW}/comments/{id}"),
+            ),
             Call::PublishDraft => unreachable!("Forgejo has no drafts"),
+        }
+    }
+
+    /// A delete through the general route answers 204 and keeps a diff comment.
+    /// Only the route of the review counts as the delete.
+    fn accept(&self, env: &Env, call: Call, id: u64) {
+        env.respond(&strs(&self.call(call)), &self.created(call, id));
+        if let Call::DeleteComment(comment) = call {
+            let general = format!("repos/me/proj/issues/comments/{comment}");
+            env.respond(&strs(&tea_bodyless("DELETE", &general)), "");
         }
     }
 

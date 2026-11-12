@@ -17,6 +17,8 @@
 # stderr under `-i`: `200 OK`, or the content of `<key>.status` such as `404 Not Found` with
 # the body of the answer on stdout. A `<key>.fail` whose text names `HTTP <code>` is such an
 # answer with that status and an empty body; any other `<key>.fail` is tea itself failing.
+# A `<key>.hook` is a shell script run once the call has read its input.
+# It stands for another agt command that overlaps the call.
 set -eu
 dir=$FAKE_FORGE_DIR
 body=
@@ -90,6 +92,7 @@ announce() {
     printf 'HTTP/1.1 200 OK\n\n' >&2
   fi
 }
+[ ! -f "$dir/$key.hook" ] || sh "$dir/$key.hook" >&2
 if [ -f "$dir/$key.fail" ]; then
   code=$(sed -n 's/.*HTTP \([0-9][0-9][0-9]\).*/\1/p' "$dir/$key.fail" | head -n 1)
   if [ -n "${FAKE_FORGE_TEA:-}" ] && [ "$include" = 1 ] && [ -n "$code" ]; then

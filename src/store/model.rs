@@ -913,11 +913,11 @@ pub struct Comment {
     /// Written by `agt qa`; `publish` marks the post as QA.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub qa: bool,
-    /// A local edit of this posted comment that `publish` has not sent yet: `body` holds the
-    /// new text, and `sync` keeps it over the host's.
+    /// An edit of this posted comment that `publish` has not sent. `body` holds the new text.
+    /// `sync` keeps it over the host's text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub edit_pending: bool,
-    /// A local delete of this posted comment that `publish` has not sent yet.
+    /// A delete of this posted comment that `publish` has not sent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete_pending: bool,
     pub deleted_remote: bool,

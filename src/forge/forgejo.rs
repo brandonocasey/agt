@@ -17,7 +17,9 @@ use crate::forge::service::{
 use crate::forge::transport::{CliTransport, Transport, TransportError, tea_login_for, tea_logins};
 use crate::forge::{self, CommentData, Fetched, PrInfo, PullNode, ThreadData, anchors};
 use crate::git::Repo;
-use crate::store::model::{Forge, RemoteKind, RemoteThread, Review, ReviewState, Side};
+use crate::store::model::{
+    Forge, RemoteComment, RemoteKind, RemoteThread, Review, ReviewState, Side,
+};
 
 /// Items per page: the most a default Forgejo or Gitea answers with (`MAX_RESPONSE_ITEMS`).
 pub const PAGE_SIZE: usize = 50;
@@ -237,26 +239,36 @@ impl ReviewService for Forgejo {
         )
     }
 
-    // The host keeps a comment on a diff line beside the general ones, under the same route. A
-    // review's own id names the review, not a comment.
+    // Forgejo edits a comment on a diff line through the general route too. A review's own id
+    // names the review, not a comment.
     fn edit_comment(
         &self,
         subject: ReviewSubject,
         kind: RemoteKind,
-        id: &str,
+        comment: &RemoteComment,
         text: &str,
     ) -> Option<Request> {
-        (kind != RemoteKind::Review).then(|| self.edit_note(subject, id, text))
+        (kind != RemoteKind::Review).then(|| self.edit_note(subject, &comment.id, text))
     }
 
+    // The general route answers 204 but keeps a diff comment. Only its review removes it.
     fn delete_comment(
         &self,
         subject: ReviewSubject,
         kind: RemoteKind,
-        id: &str,
+        comment: &RemoteComment,
     ) -> Option<Request> {
-        (kind != RemoteKind::Review)
-            .then(|| Request::rest(Method::Delete, comment_path(subject, id), None))
+        let path = match kind {
+            RemoteKind::Review => return None,
+            RemoteKind::ReviewThread => format!(
+                "{}/{}/comments/{}",
+                reviews_path(subject),
+                forge::encode(comment.review_id.as_deref()?),
+                forge::encode(&comment.id)
+            ),
+            RemoteKind::General | RemoteKind::Discussion => comment_path(subject, &comment.id),
+        };
+        Some(Request::rest(Method::Delete, path, None))
     }
 
     // `caps().reply` is `None`, so the workflow answers with a general comment instead.
@@ -604,13 +616,38 @@ mod tests {
         let forgejo = forgejo();
         assert!(
             forgejo
-                .edit_comment(subject(), RemoteKind::Review, "8000", "text")
+                .edit_comment(
+                    subject(),
+                    RemoteKind::Review,
+                    &contract::posted("8000", None),
+                    "text"
+                )
                 .is_none()
         );
         assert!(
             forgejo
-                .delete_comment(subject(), RemoteKind::Review, "8000")
+                .delete_comment(
+                    subject(),
+                    RemoteKind::Review,
+                    &contract::posted("8000", None)
+                )
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_diff_comment_with_no_known_review_is_not_deleted() {
+        let forgejo = forgejo();
+        let unknown = contract::posted("8000", None);
+        assert!(
+            forgejo
+                .delete_comment(subject(), RemoteKind::ReviewThread, &unknown)
+                .is_none()
+        );
+        assert!(
+            forgejo
+                .delete_comment(subject(), RemoteKind::General, &unknown)
+                .is_some()
         );
     }
 
@@ -633,13 +670,32 @@ mod tests {
             (
                 "edit_comment",
                 forgejo
-                    .edit_comment(subject(), RemoteKind::ReviewThread, "8000", "text")
+                    .edit_comment(
+                        subject(),
+                        RemoteKind::ReviewThread,
+                        &contract::posted("8000", Some("700")),
+                        "text",
+                    )
                     .unwrap(),
             ),
             (
                 "delete_comment",
                 forgejo
-                    .delete_comment(subject(), RemoteKind::ReviewThread, "8000")
+                    .delete_comment(
+                        subject(),
+                        RemoteKind::ReviewThread,
+                        &contract::posted("8000", Some("700")),
+                    )
+                    .unwrap(),
+            ),
+            (
+                "delete_general_comment",
+                forgejo
+                    .delete_comment(
+                        subject(),
+                        RemoteKind::General,
+                        &contract::posted("8000", None),
+                    )
                     .unwrap(),
             ),
             ("reply", forgejo.reply(subject(), &thread, "text")),

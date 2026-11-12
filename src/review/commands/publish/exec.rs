@@ -5,7 +5,9 @@ use crate::core::clock;
 use crate::core::error::{Error, Result};
 use crate::forge::markers::{self, agent_id};
 use crate::forge::service::Inline;
+use crate::forge::transport::TransportError;
 use crate::review::commands::Ctx;
+use crate::review::commands::edit::locate;
 use crate::review::commands::sync::Connection;
 use crate::review::commands::sync::merge::landed;
 use crate::store::model::{
@@ -24,16 +26,7 @@ pub(super) fn run_writes(
 ) -> Result<()> {
     for write in writes {
         let Some(request) = &write.request else {
-            match &write.item {
-                Item::Resolve { thread, .. } => change(ctx, target, |target| {
-                    clear_pending(target, thread);
-                    Ok(())
-                })?,
-                Item::Edit { .. } | Item::Delete { .. } => {
-                    save(ctx, connection, target, &write.item, &Value::Null)?;
-                }
-                _ => {}
-            }
+            save(ctx, connection, target, &write.item, &Value::Null)?;
             posted.push(json!({ "kind": write.kind(), "items": write.ids(), "local_only": true }));
             continue;
         };
@@ -88,10 +81,8 @@ pub(super) fn run_writes(
                 }
                 continue;
             }
-            // A comment the host no longer has is as good as deleted.
-            Err(error)
-                if error.status == Some(404) && matches!(write.item, Item::Delete { .. }) =>
-            {
+            // The host no longer has the comment, so the delete is done.
+            Err(error) if already_gone(&error, &write.item) => {
                 save(ctx, connection, target, &write.item, &Value::Null)?;
                 posted.push(json!({ "kind": write.kind(), "items": write.ids(), "gone": true }));
                 continue;
@@ -189,6 +180,11 @@ pub(super) fn run_writes(
     Ok(())
 }
 
+/// Whether the host answered a delete with 404: it no longer has the comment.
+fn already_gone(error: &TransportError, item: &Item) -> bool {
+    error.status == Some(404) && matches!(item, Item::Delete { .. })
+}
+
 /// The summary item that posts anew what an edit found deleted.
 fn reposted(item: &Item) -> Option<Item> {
     match item {
@@ -237,30 +233,49 @@ pub(super) fn clear_pending(target: &mut Target, id: &str) {
     }
 }
 
-/// Drops a comment the host deleted, and its thread when it was the thread's last one.
+/// Drops a comment the host deleted, and its thread when no comment is left.
+/// A thread linked to that comment loses the link. Sync then finds the remaining comments by
+/// their own ids, so none is imported twice.
 fn remove_comment(target: &mut Target, id: &str) {
-    let Some(at) = target
-        .threads
-        .iter()
-        .position(|thread| thread.comments.iter().any(|comment| comment.id == id))
-    else {
+    let Ok((at, index)) = locate(target, id) else {
         return;
     };
     let thread = &mut target.threads[at];
-    thread.comments.retain(|comment| comment.id != id);
+    let removed = thread.comments.remove(index);
     if thread.comments.is_empty() {
         target.threads.remove(at);
+        return;
+    }
+    let linked = thread.remote.as_ref().zip(removed.remote.as_ref());
+    if linked.is_some_and(|(thread, comment)| thread.id == comment.id) {
+        thread.remote = None;
+    }
+}
+
+/// Keeps the text an edit sends as the one a sync may meet on the host.
+fn set_sent(target: &mut Target, id: &str, text: Option<String>) {
+    if let Some(comment) = target.comment_mut(id) {
+        comment.delivery.sent = text;
+    }
+}
+
+/// Clears the pending edit of `id` once the host has the body `sent`; an edit made since stays
+/// pending.
+fn clear_edit(target: &mut Target, id: &str, sent: &str) {
+    if let Some(comment) = target
+        .comment_mut(id)
+        .filter(|comment| comment.body == sent)
+    {
+        comment.edit_pending = false;
     }
 }
 
 pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
-        // The comment stays posted; only the text sync may meet on the host changes.
-        Item::Edit { comment } => {
-            if let Some(local) = target.comment_mut(comment) {
-                local.delivery.sent = texts.next().flatten();
-            }
+        // The comment stays posted. Record the new text, which sync may now see on the host.
+        Item::Edit { comment, .. } => {
+            set_sent(target, comment, texts.next().flatten());
             return;
         }
         Item::Review { comments, bodies } => comments.iter().chain(bodies).cloned().collect(),
@@ -441,11 +456,9 @@ pub(super) fn save(
             })?;
             Ok(Some(id))
         }
-        Item::Edit { comment } => {
+        Item::Edit { comment, body } => {
             change(ctx, target, |target| {
-                if let Some(local) = target.comment_mut(comment) {
-                    local.edit_pending = false;
-                }
+                clear_edit(target, comment, body);
                 Ok(())
             })?;
             Ok(None)

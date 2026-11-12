@@ -30,7 +30,7 @@ pub fn post(path: &str) -> Vec<String> {
 }
 
 /// A write that sends no body, such as a DELETE.
-fn bodyless(method: &str, path: &str) -> Vec<String> {
+pub fn bodyless(method: &str, path: &str) -> Vec<String> {
     args(&["api", "--method", method, path])
 }
 
