@@ -258,7 +258,7 @@ fn editing_a_posted_comment_on_another_file_keeps_its_lines() {
 }
 
 /// An in-diff comment went out with no lines in its text.
-/// When its commit is no longer in the head, an edit must not add them.
+/// When its commit is not in the head, an edit MUST NOT add them.
 fn an_in_diff_comment_is_edited_without_lines_after_its_commit_leaves_the_head() {
     let svc = Github::new();
     let mut setup = Setup::reviewed(svc.origin());
@@ -333,7 +333,7 @@ fn a_fresh_general_comment_is_planned_before_any_sync(
     let env = &setup.env;
     env.run(&["comment", "--body", "Opening.", "--author", "me"]);
     svc.link(&setup);
-    // The host lists the comment under its id, but with text no sync can match to h1.
+    // The host lists the comment under its id, with text no sync matches to h1.
     let mut remote = Remote::new();
     remote.general("n-602", Comment::new(602, "me", "Not the posted text."));
     svc.sync(&setup, &remote);
@@ -381,7 +381,7 @@ fn a_fresh_forgejo_comment_is_edited_and_deleted_before_any_sync() {
 }
 
 /// A reply stays when its opener is deleted.
-/// Sync must not import it again.
+/// Sync MUST NOT import it again.
 #[test]
 fn deleting_a_posted_opener_does_not_import_its_reply_twice() {
     let Posted { svc, setup, remote } = posted_pair(None);

@@ -68,8 +68,7 @@ pub(super) enum Item {
     Reply {
         comment: String,
     },
-    /// New text for a comment already posted. `body` is its text when planned.
-    /// An edit made while this one is sent stays pending.
+    /// New text for a comment already posted. `body` is its text when planned; a newer edit stays pending.
     Edit {
         comment: String,
         body: String,
@@ -668,7 +667,7 @@ impl<'a> Planner<'a> {
     }
 
     /// The delete or edit of one posted comment, `comment` and its host side `posted`.
-    /// An edit carries the text a post would send. A comment the host lost is only cleared here.
+    /// A comment the host lost is only cleared here.
     fn change(
         &self,
         target: &Target,
@@ -721,9 +720,8 @@ impl<'a> Planner<'a> {
             .map_or(self.caps().general_kind, |remote| remote.kind)
     }
 
-    /// Whether `posted` is a paragraph of a review's body. Until a sync links the thread, a
-    /// review that holds the comment says so, and so does an agent's comment that has no
-    /// diff line on a service that posts those in a review.
+    /// Whether `posted` is a paragraph of a review's body.
+    /// Before a sync, a holding review or a diff-less agent comment decides.
     fn in_review_body_of(
         &self,
         thread: &Thread,
@@ -1033,8 +1031,7 @@ fn body_groups(paragraphs: Vec<Paragraph>) -> Vec<Vec<Paragraph>> {
     groups
 }
 
-/// The lines the post of a thread's first comment named in its text, read from the text
-/// that went out, so an edit keeps the shape the post had.
+/// The location the first comment's post named in its text, if any.
 fn posted_location(thread: &Thread, comment: &Comment) -> Option<String> {
     let lines = location(thread.anchor.as_ref()?);
     let sent = comment.delivery.sent.as_deref()?;

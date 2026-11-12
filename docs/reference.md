@@ -748,14 +748,15 @@ rest of the pass goes on. With `--yes` it adds `deleted`, `skipped` (with
   (`git diff -U0 -M`); when its commits are not in the local repository,
   `outdated` is `null` (unknown). `sync` never fetches commits or writes to the
   repository.
-- Merge: remote wins for posted text and resolved state.
-  Two local changes stay until `publish` sends them.
-  One is a resolve or reopen (`resolve_pending`).
-  The other is the text of an edited posted comment (`edit_pending`).
-  The review or comment that carries an approval, whose body is only a marker or
-  the rendered text, keeps the approval text stored. Local fields
-  (type, severity, triage, held, killed findings, anchors of our findings) and
-  comments not yet posted stay. Remote threads match local ones by remote id
+- Merge: remote wins for posted text and resolved state, except two local
+  changes that stay until `publish` sends them:
+  - a resolve or reopen (`resolve_pending`)
+  - the text of an edited posted comment (`edit_pending`)
+- The review or comment that carries an approval, whose body is only a marker or
+  the rendered text, keeps the approval text stored.
+- Local fields (type, severity, triage, held, killed findings, anchors of our
+  findings) and comments not yet posted stay.
+- Remote threads match local ones by remote id
   and kind (a review, an inline comment and a general comment can share a host id on GitHub and
   Forgejo; GitLab matches a note and its discussion by id alone),
   then by a trusted `<!-- review-finding v1 id=<id> ... -->` marker in the first
@@ -928,7 +929,7 @@ local reads continue.
   - A paragraph of a review's body cannot change alone.
     An example is a `--not-own` finding on GitHub or Forgejo.
     `skipped` names it once, and the change stays pending.
-  - A comment or thread the host no longer has is only cleared here (`local_only`).
+  - A comment or thread the host does not have is only cleared here (`local_only`).
     A `DELETE` the host answers with 404 counts as done (`gone`).
   - A deleted comment leaves the store, and its thread when it was the last comment.
     Replies of a deleted opener stay in the thread.
@@ -1009,13 +1010,13 @@ links are refused. After `sync`, the key is `gh-<number>` or `gl-<iid>`. Other J
 documents in a repository directory (their `kind` is not `branch`, `range` or `commit`)
 are ignored. A file with a newer `version` than the binary supports is refused with a
 message to upgrade, and so is writing a file that holds fields the binary does not know.
-The current `version` is 2.
-It adds `edit_pending` and `delete_pending` to comments, written only while set.
-A version 1 file loads unchanged.
-It is saved as version 2 after a one-time backup.
+
+The current `version` is 2. It adds `edit_pending` and `delete_pending`, written only while set.
+Version 1 files load unchanged and are saved as version 2 after a one-time backup.
+An agt from before version 2 refuses the file.
+
 `agt cleanup --only backups` lists that backup once it is 90 days old.
 It never lists the newest backup.
-An agt from before version 2 refuses the file.
 
 Target file:
 

@@ -44,8 +44,8 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Rewrite a comment. `publish` sends the edit of a posted one.
     Edit(EditArgs),
-    /// Delete a comment. `publish` sends the delete of a posted one.
-    /// An unposted opener takes its thread along.
+    /// Delete a comment. `publish` sends the delete of a posted one;
+    /// an unposted opener takes its thread along.
     Delete(DeleteArgs),
     /// Resolve, triage or reopen a thread.
     Resolve(ResolveArgs),

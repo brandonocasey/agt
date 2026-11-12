@@ -81,7 +81,7 @@ pub(super) fn run_writes(
                 }
                 continue;
             }
-            // The host no longer has the comment, so the delete is done.
+            // The host does not have the comment, so the delete is done.
             Err(error) if already_gone(&error, &write.item) => {
                 save(ctx, connection, target, &write.item, &Value::Null)?;
                 posted.push(json!({ "kind": write.kind(), "items": write.ids(), "gone": true }));
@@ -180,7 +180,7 @@ pub(super) fn run_writes(
     Ok(())
 }
 
-/// Whether the host answered a delete with 404: it no longer has the comment.
+/// Whether the host answered a delete with 404: it does not have the comment.
 fn already_gone(error: &TransportError, item: &Item) -> bool {
     error.status == Some(404) && matches!(item, Item::Delete { .. })
 }
@@ -234,8 +234,7 @@ pub(super) fn clear_pending(target: &mut Target, id: &str) {
 }
 
 /// Drops a comment the host deleted, and its thread when no comment is left.
-/// A thread linked to that comment loses the link. Sync then finds the remaining comments by
-/// their own ids, so none is imported twice.
+/// A thread linked to that comment loses the link, so sync imports none twice.
 fn remove_comment(target: &mut Target, id: &str) {
     let Ok((at, index)) = locate(target, id) else {
         return;
@@ -252,15 +251,15 @@ fn remove_comment(target: &mut Target, id: &str) {
     }
 }
 
-/// Keeps the text an edit sends as the one a sync may meet on the host.
+/// Records the text an edit sends, which a sync may meet on the host.
 fn set_sent(target: &mut Target, id: &str, text: Option<String>) {
     if let Some(comment) = target.comment_mut(id) {
         comment.delivery.sent = text;
     }
 }
 
-/// Clears the pending edit of `id` once the host has the body `sent`; an edit made since stays
-/// pending.
+/// Clears the pending edit of `id` once the host has the body `sent`.
+/// A newer edit stays pending.
 fn clear_edit(target: &mut Target, id: &str, sent: &str) {
     if let Some(comment) = target
         .comment_mut(id)
@@ -273,7 +272,7 @@ fn clear_edit(target: &mut Target, id: &str, sent: &str) {
 pub(super) fn mark(target: &mut Target, write: &Write, attempt: &str) {
     let mut texts = write.sent.iter().cloned();
     let ids = match &write.item {
-        // The comment stays posted. Record the new text, which sync may now see on the host.
+        // The comment stays posted. Record the new text, which sync can see on the host.
         Item::Edit { comment, .. } => {
             set_sent(target, comment, texts.next().flatten());
             return;

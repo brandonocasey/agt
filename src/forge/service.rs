@@ -335,8 +335,7 @@ pub trait ReviewService: Service {
         text: &str,
     ) -> Option<Request>;
     /// Removes the posted `comment` of a remote thread of `kind`.
-    /// `None` as for [`ReviewService::edit_comment`]. Also `None` when the host needs a review id
-    /// the comment lacks.
+    /// `None` as for [`ReviewService::edit_comment`], or when the host needs a review id the comment lacks.
     fn delete_comment(
         &self,
         subject: ReviewSubject,
