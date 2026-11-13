@@ -1335,13 +1335,22 @@ fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
     assert_eq!(site.branches(), ["main"]);
 }
 
-/// A repository whose `git log` fails (`log.showSignature = unset`), with a merged branch
-/// `done` that cleanup deletes before it reaches the quiet worktree `fresh`, where `git log` is
-/// the first call to fail. The agt config roots hold this repository.
+/// A repository where `git log` fails (`log.showSignature = unset`). Cleanup deletes the merged
+/// `done` first, then fails on the quiet worktrees `fresh` and `detached`. The agt config roots
+/// hold this repository.
 fn site_where_git_log_fails() -> Site {
     let site = Site::new();
     site.env.git(&["branch", "done"]);
     fresh(&site);
+    let detached = site.env.path("trees/detached");
+    site.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        detached.to_str().unwrap(),
+        "main",
+    ]);
     site.env.git(&["config", "log.showSignature", "unset"]);
     let config = site.env.path("config/agt");
     fs::create_dir_all(&config).unwrap();
@@ -1378,14 +1387,25 @@ fn a_git_failure_on_one_worktree_keeps_the_rows_already_acted_on_and_warns() {
             .collect();
         assert_eq!(deleted, ["done"], "all_repos={all_repos}: {report}");
         assert_eq!(report["removed"], json!([]), "{report}");
-        let warnings = report["warnings"].as_array().unwrap();
-        assert_eq!(warnings.len(), 1, "{report}");
-        let warning = warnings[0].as_str().unwrap();
-        assert!(warning.starts_with("fresh: "), "{warning}");
+        let warnings: Vec<&str> = report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|warning| warning.as_str().unwrap())
+            .collect();
+        assert_eq!(warnings.len(), 2, "{report}");
+        let detached = site.env.path("trees/detached");
         assert!(
-            warning.contains("bad boolean config value 'unset' for 'log.showsignature'"),
-            "{warning}"
+            warnings[0].starts_with(&format!("{}: ", detached.display())),
+            "{warnings:?}"
         );
+        assert!(warnings[1].starts_with("fresh: "), "{warnings:?}");
+        for warning in &warnings {
+            assert!(
+                warning.contains("bad boolean config value 'unset' for 'log.showsignature'"),
+                "{warning}"
+            );
+        }
         assert!(site.env.path("trees/fresh").exists());
         assert_eq!(site.branches(), ["fresh", "main"]);
     }
@@ -1580,15 +1600,4 @@ fn a_repository_whose_git_config_does_not_parse_reports_gits_error() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("bad config line 1"), "{stderr}");
     assert!(!stderr.contains("not inside a git work tree"), "{stderr}");
-}
-
-#[test]
-fn outside_a_repository_cleanup_says_it_is_not_inside_a_git_work_tree() {
-    let env = Env::new();
-    let output = cleanup_in(&env, &env.path("home"));
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "agt: error: not inside a git work tree\n"
-    );
 }

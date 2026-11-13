@@ -207,7 +207,7 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
         scene,
         sources,
     };
-    // A failure on one row warns and the sweep goes on; the rows already acted on stay.
+    // A failing row warns and the sweep goes on. Rows already acted on stay.
     for entry in sweep
         .scene
         .entries
@@ -215,14 +215,14 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
         .skip(1)
         .filter(|e| e.branch.is_none())
     {
-        if let Err(error) = sweep.detached(entry, cwds, &mut report) {
+        if let Err(error) = sweep.sweep_detached(entry, cwds, &mut report) {
             report
                 .warnings
                 .push(format!("{}: {error}", entry.path.display()));
         }
     }
     for (branch, tip) in &branches {
-        if let Err(error) = sweep.branch(branch, tip, cwds, &mut report) {
+        if let Err(error) = sweep.sweep_branch(branch, tip, cwds, &mut report) {
             report.warnings.push(format!("{branch}: {error}"));
         }
     }
@@ -231,7 +231,7 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
 
 impl Sweep<'_> {
     /// A linked worktree on a detached HEAD.
-    fn detached(&self, entry: &Worktree, cwds: &mut Cwds, report: &mut Report) -> Result<()> {
+    fn sweep_detached(&self, entry: &Worktree, cwds: &mut Cwds, report: &mut Report) -> Result<()> {
         let named = self.only.hits(None, Some(&entry.path));
         if !self.cli.only.is_empty() && named.is_empty() {
             return Ok(());
@@ -274,7 +274,13 @@ impl Sweep<'_> {
     }
 
     /// A local branch and the worktree that has it checked out, if any.
-    fn branch(&self, branch: &str, tip: &str, cwds: &mut Cwds, report: &mut Report) -> Result<()> {
+    fn sweep_branch(
+        &self,
+        branch: &str,
+        tip: &str,
+        cwds: &mut Cwds,
+        report: &mut Report,
+    ) -> Result<()> {
         let scene = &self.scene;
         let named = self.only.hits(
             Some(branch),

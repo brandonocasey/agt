@@ -711,6 +711,21 @@ fn port_in_a_repository_whose_git_config_does_not_parse_reports_gits_error() {
 }
 
 #[test]
+fn port_for_a_missing_directory_says_it_is_not_inside_a_git_work_tree() {
+    let env = repo();
+    let missing = env.path("no/such/dir");
+    let output = agt(&env, &env.repo, &["port", missing.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "agt: error: {} is not inside a git work tree\n",
+            missing.display()
+        )
+    );
+}
+
+#[test]
 fn port_outside_a_repository_says_the_directory_is_not_inside_a_git_work_tree() {
     let env = repo();
     let outside = env.path("home");

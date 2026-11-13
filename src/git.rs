@@ -13,8 +13,7 @@ pub mod fast_forward;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;
 
-/// What `git rev-parse --show-toplevel` prints, in English, when the directory is in no
-/// repository or in a bare one.
+/// Git's English messages for `rev-parse --show-toplevel` outside a repository or in a bare one.
 const NO_WORK_TREE: [&str; 2] = [
     "not a git repository",
     "this operation must be run in a work tree",
@@ -208,12 +207,10 @@ impl Repo {
         Ok(Self::at(top))
     }
 
-    /// The root of the work tree that contains this directory, or `None` when there is none.
-    /// Any other failure (a config git cannot parse, a broken repository) is an error carrying
-    /// git's own text. Git exits 128 for all of them, so the two "no work tree" messages are
-    /// told apart by their text, with git's messages forced to English so a locale cannot
-    /// change them.
+    /// The work tree root that contains this directory, or `None` outside any work tree.
+    /// Other failures return an error with git's own text.
     pub fn find_toplevel(&self) -> Result<Option<PathBuf>> {
+        // Git exits 128 for both messages, so the text decides; LC_ALL=C keeps it English.
         let output = self.exec(
             &["rev-parse", "--show-toplevel"],
             None,
