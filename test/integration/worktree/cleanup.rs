@@ -1335,6 +1335,81 @@ fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
     assert_eq!(site.branches(), ["main"]);
 }
 
+/// The agt config roots hold a repository where `git log` fails (`log.showSignature = unset`).
+/// Cleanup sweeps detached worktrees before branches, so `detached` fails before `done` is deleted.
+fn site_where_git_log_fails() -> Site {
+    let site = Site::new();
+    site.env.git(&["branch", "done"]);
+    fresh(&site);
+    let detached = site.env.path("trees/detached");
+    site.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        detached.to_str().unwrap(),
+        "main",
+    ]);
+    site.env.git(&["config", "log.showSignature", "unset"]);
+    let config = site.env.path("config/agt");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!("[worktree]\nroots = [\"{}\"]\n", site.env.repo.display()),
+    )
+    .unwrap();
+    site
+}
+
+#[test]
+fn a_git_failure_on_one_worktree_keeps_the_rows_already_acted_on_and_warns() {
+    for all_repos in [true, false] {
+        let site = site_where_git_log_fails();
+        let args: &[&str] = if all_repos {
+            &["--all-repos", "--offline", "--yes"]
+        } else {
+            &["--offline", "--yes"]
+        };
+        let dir = if all_repos {
+            site.env.path("home")
+        } else {
+            site.env.repo.clone()
+        };
+
+        let report = site.run_in(&dir, args);
+
+        let deleted: Vec<&str> = report["deleted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["branch"].as_str().unwrap())
+            .collect();
+        assert_eq!(deleted, ["done"], "all_repos={all_repos}: {report}");
+        assert_eq!(report["removed"], json!([]), "{report}");
+        let warnings: Vec<&str> = report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|warning| warning.as_str().unwrap())
+            .collect();
+        assert_eq!(warnings.len(), 2, "{report}");
+        let detached = site.env.path("trees/detached");
+        assert!(
+            warnings[0].starts_with(&format!("{}: ", detached.display())),
+            "{warnings:?}"
+        );
+        assert!(warnings[1].starts_with("fresh: "), "{warnings:?}");
+        for warning in &warnings {
+            assert!(
+                warning.contains("bad boolean config value 'unset' for 'log.showsignature'"),
+                "{warning}"
+            );
+        }
+        assert!(site.env.path("trees/fresh").exists());
+        assert_eq!(site.branches(), ["fresh", "main"]);
+    }
+}
+
 #[test]
 fn main_master_and_develop_are_protected_by_name() {
     let site = Site::new();
@@ -1506,4 +1581,22 @@ fn the_calling_sessions_own_process_in_a_landed_worktree_is_a_warning_not_a_bloc
         }),
         "{report}"
     );
+}
+
+fn cleanup_in(env: &Env, dir: &Path) -> Output {
+    env.bin(dir)
+        .args(["cleanup", "--only", "worktrees", "--offline"])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_repository_whose_git_config_does_not_parse_reports_gits_error() {
+    let env = Env::new();
+    fs::write(env.repo.join(".git/config"), "[core\n").unwrap();
+    let output = cleanup_in(&env, &env.repo);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("bad config line 1"), "{stderr}");
+    assert!(!stderr.contains("not inside a git work tree"), "{stderr}");
 }

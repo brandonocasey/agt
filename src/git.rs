@@ -13,6 +13,12 @@ pub mod fast_forward;
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;
 
+/// Git's English messages for `rev-parse --show-toplevel` outside a repository or in a bare one.
+const NO_WORK_TREE: [&str; 2] = [
+    "not a git repository",
+    "this operation must be run in a work tree",
+];
+
 // Fixed diff options so patch-ids and anchors do not depend on user diff config.
 const DIFF_FLAGS: [&str; 5] = [
     "--no-color",
@@ -196,9 +202,29 @@ impl Repo {
 
     pub fn discover() -> Result<Self> {
         let top = Self::at(".")
-            .git_opt(&["rev-parse", "--show-toplevel"])?
+            .find_toplevel()?
             .ok_or_else(|| Error("not inside a git work tree".into()))?;
         Ok(Self::at(top))
+    }
+
+    /// The work tree root that contains this directory, or `None` outside any work tree.
+    /// Other failures return an error with git's own text.
+    pub fn find_toplevel(&self) -> Result<Option<PathBuf>> {
+        // Git exits 128 for both messages, so the text decides; LC_ALL=C keeps it English.
+        let output = self.exec(
+            &["rev-parse", "--show-toplevel"],
+            None,
+            &[("LC_ALL", Path::new("C"))],
+        )?;
+        if output.status.success() {
+            return Ok(Some(PathBuf::from(text(output.stdout)?)));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if NO_WORK_TREE.iter().any(|message| stderr.contains(message)) {
+            return Ok(None);
+        }
+        fail(format!("git rev-parse --show-toplevel failed: {stderr}"))
     }
 
     /// Makes this `Repo` remember answers about refs, HEAD and config; failed reads are not kept.
