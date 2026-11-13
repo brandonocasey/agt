@@ -1324,34 +1324,40 @@ fn merged_repo(prune: &Prune, name: &str) -> PathBuf {
 
 #[test]
 fn the_manual_list_warns_about_a_repository_git_cannot_read_and_lists_the_rest() {
-    let prune = Prune::new();
-    let good = merged_repo(&prune, "good");
-    let broken = merged_repo(&prune, "broken");
-    let status = prune
-        .env
-        .command("git", &broken)
-        .args(["config", "log.showSignature", "unset"])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    // Appended to `.git/config`: a value only `git log` rejects, and a line git cannot parse.
+    for (config, error) in [
+        (
+            "[log]\n\tshowSignature = unset\n",
+            "bad boolean config value",
+        ),
+        ("[core\n", "bad config line"),
+    ] {
+        let prune = Prune::new();
+        let good = merged_repo(&prune, "good");
+        let broken = merged_repo(&prune, "broken");
+        let path = broken.join(".git/config");
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str(config);
+        fs::write(&path, text).unwrap();
 
-    let report = prune.run_at(later(), &["--only", "manual"]);
-    assert_eq!(
-        report["manual"]["branches"],
-        json!([format!(
-            "git -C {} branch -d done",
-            good.canonicalize().unwrap().display()
-        )])
-    );
-    let warnings = report["warnings"].as_array().unwrap();
-    assert!(
-        warnings.iter().any(|warning| {
-            let warning = warning.as_str().unwrap();
-            warning.contains(&*broken.canonicalize().unwrap().to_string_lossy())
-                && warning.contains("bad boolean config value")
-        }),
-        "{warnings:?}"
-    );
+        let report = prune.run_at(later(), &["--only", "manual"]);
+        assert_eq!(
+            report["manual"]["branches"],
+            json!([format!(
+                "git -C {} branch -d done",
+                good.canonicalize().unwrap().display()
+            )])
+        );
+        let warnings = report["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|warning| {
+                let warning = warning.as_str().unwrap();
+                warning.contains(&*broken.canonicalize().unwrap().to_string_lossy())
+                    && warning.contains(error)
+            }),
+            "{error}: {warnings:?}"
+        );
+    }
 }
 
 #[test]

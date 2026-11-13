@@ -92,10 +92,10 @@ pub struct Scene {
 impl Scene {
     /// `None` when the repository has no default branch.
     pub fn read(repo: &Repo) -> Result<Option<Self>> {
+        let entries = repo.worktrees()?;
         let Some((name, reference)) = repo.default_branch_ref()? else {
             return Ok(None);
         };
-        let entries = repo.worktrees()?;
         let cwd = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
         let held = cwd.ok().and_then(|cwd| {
             entries

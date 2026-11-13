@@ -1231,7 +1231,7 @@ fn a_worktree_changed_in_the_last_3_days_is_recent_unless_recent_is_passed() {
     assert_eq!(site.branches(), ["main"]);
 }
 
-/// The time of a signed HEAD MUST still count as recent when git shows signatures in `git log`.
+/// A signed HEAD's commit time MUST still decide recency when `git log` shows signatures.
 #[test]
 fn a_signed_commit_from_the_last_3_days_keeps_the_worktree_when_git_shows_signatures() {
     let site = Site::new();
@@ -1244,7 +1244,7 @@ fn a_signed_commit_from_the_last_3_days_keeps_the_worktree_when_git_shows_signat
         site.env.git(&["config", name, value]);
     }
     let wt = fresh(&site);
-    // An hour before the sweep's clock, while the files of the worktree are 4 days old on it.
+    // Commit an hour before the sweep's clock. The files are then 4 days old.
     let committed = unix_now() + site.days_on.unsigned_abs() * 86_400 - 3_600;
     site.env.git_env(
         &[
