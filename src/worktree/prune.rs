@@ -42,13 +42,14 @@ pub fn backups() -> Result<Vec<Backup>> {
         .collect())
 }
 
-/// The candidates of every repository under the configured roots, in repository order.
-pub fn candidates() -> Result<Vec<Found>> {
+/// The candidates of every repository under the configured roots, in repository order. A
+/// repository git cannot read adds a warning and no candidates.
+pub fn candidates(warnings: &mut Vec<String>) -> Result<Vec<Found>> {
     let mut found = Vec::new();
     for root in roots::repositories()? {
-        // A repository git cannot read is none of cleanup's business.
-        if let Ok(mut here) = of(&Repo::at(&root)) {
-            found.append(&mut here);
+        match of(&Repo::at(&root)) {
+            Ok(mut here) => found.append(&mut here),
+            Err(error) => warnings.push(format!("{}: {error}", root.display())),
         }
     }
     Ok(found)
@@ -95,14 +96,7 @@ fn of(repo: &Repo) -> Result<Vec<Found>> {
         }
         if let Some(branch) = local.branch {
             let tip = format!("refs/heads/{branch}");
-            let committed = repo.git(&[
-                "-c",
-                "log.showSignature=false",
-                "log",
-                "-1",
-                "--format=%ct",
-                &tip,
-            ])?;
+            let committed = repo.git(&["log", "-1", "--format=%ct", &tip])?;
             let committed = committed
                 .trim()
                 .parse()

@@ -116,7 +116,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         plan.processes(now)?;
     }
     let candidates = if only(Only::Manual) {
-        Some(manual::candidates(now)?)
+        Some(manual::candidates(now, &mut plan.warnings)?)
     } else {
         None
     };

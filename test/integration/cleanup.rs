@@ -1306,6 +1306,54 @@ fn a_merged_branch_with_a_signed_tip_is_listed_when_git_shows_signatures() {
     );
 }
 
+/// A repository with one merged branch, `done`, under the configured roots.
+fn merged_repo(prune: &Prune, name: &str) -> PathBuf {
+    let repo = prune.env.path("home/projects/owner").join(name);
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "one"],
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        &["branch", "done"],
+    ] {
+        let status = prune.env.command("git", &repo).args(args).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    repo
+}
+
+#[test]
+fn the_manual_list_warns_about_a_repository_git_cannot_read_and_lists_the_rest() {
+    let prune = Prune::new();
+    let good = merged_repo(&prune, "good");
+    let broken = merged_repo(&prune, "broken");
+    let status = prune
+        .env
+        .command("git", &broken)
+        .args(["config", "log.showSignature", "unset"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let report = prune.run_at(later(), &["--only", "manual"]);
+    assert_eq!(
+        report["manual"]["branches"],
+        json!([format!(
+            "git -C {} branch -d done",
+            good.canonicalize().unwrap().display()
+        )])
+    );
+    let warnings = report["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            let warning = warning.as_str().unwrap();
+            warning.contains(&*broken.canonicalize().unwrap().to_string_lossy())
+                && warning.contains("bad boolean config value")
+        }),
+        "{warnings:?}"
+    );
+}
+
 #[test]
 fn scratch_never_follows_a_link_out_of_the_harness_root() {
     let prune = Prune::new();
