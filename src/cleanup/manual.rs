@@ -223,7 +223,7 @@ fn playwright_in(root: &Path, now: i64, found: &mut Vec<Candidate>) {
     }
 }
 
-/// Every leftover at least [`MIN_DAYS`] old at `now`. A repository git cannot read adds a warning.
+/// Every leftover at least [`MIN_DAYS`] old at `now`, and one warning per repository git cannot read.
 pub fn candidates(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
     merged(now, &mut found, warnings)?;
