@@ -1507,3 +1507,32 @@ fn the_calling_sessions_own_process_in_a_landed_worktree_is_a_warning_not_a_bloc
         "{report}"
     );
 }
+
+fn cleanup_in(env: &Env, dir: &Path) -> Output {
+    env.bin(dir)
+        .args(["cleanup", "--only", "worktrees", "--offline"])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_repository_whose_git_config_does_not_parse_reports_gits_error() {
+    let env = Env::new();
+    fs::write(env.repo.join(".git/config"), "[core\n").unwrap();
+    let output = cleanup_in(&env, &env.repo);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("bad config line 1"), "{stderr}");
+    assert!(!stderr.contains("not inside a git work tree"), "{stderr}");
+}
+
+#[test]
+fn outside_a_repository_cleanup_says_it_is_not_inside_a_git_work_tree() {
+    let env = Env::new();
+    let output = cleanup_in(&env, &env.path("home"));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "agt: error: not inside a git work tree\n"
+    );
+}

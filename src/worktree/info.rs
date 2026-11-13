@@ -23,8 +23,8 @@ pub fn main_checkout(repo: &Repo) -> Result<Worktree> {
 /// The root of the work tree that contains `dir`.
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     Repo::at(dir)
-        .toplevel()
-        .map_err(|_| Error(format!("{} is not inside a git work tree", dir.display())))
+        .find_toplevel()?
+        .ok_or_else(|| Error(format!("{} is not inside a git work tree", dir.display())))
 }
 
 /// The ignored paths in the work tree at `root` and its submodules, sorted, with a directory
