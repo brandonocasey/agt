@@ -162,6 +162,19 @@ pub fn run(cli: &Options) -> Result<Value> {
     Ok(out)
 }
 
+/// What one sweep of a repository reads once and every row needs.
+struct Sweep<'a> {
+    repo: &'a Repo,
+    cli: &'a Options,
+    only: &'a Only,
+    scene: Scene,
+    sources: Vec<Source>,
+    /// The main checkout, resolved.
+    main: PathBuf,
+    /// The repository at the main checkout, which deletes branches.
+    shared: Repo,
+}
+
 fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Report> {
     let mut report = Report::default();
     let Some(scene) = Scene::read(repo)? else {
@@ -183,15 +196,49 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
         }
     };
     let main = info::real(&scene.main().path)?;
-    let shared = Repo::at(&main);
-    for entry in scene.entries.iter().skip(1).filter(|e| e.branch.is_none()) {
-        let named = only.hits(None, Some(&entry.path));
-        if !cli.only.is_empty() && named.is_empty() {
-            continue;
+    // Read before the first row is acted on, so a failure here loses no row.
+    let branches = scene.branches(repo)?;
+    let sweep = Sweep {
+        repo,
+        cli,
+        only,
+        shared: Repo::at(&main),
+        main,
+        scene,
+        sources,
+    };
+    // A failure on one row warns and the sweep goes on; the rows already acted on stay.
+    for entry in sweep
+        .scene
+        .entries
+        .iter()
+        .skip(1)
+        .filter(|e| e.branch.is_none())
+    {
+        if let Err(error) = sweep.detached(entry, cwds, &mut report) {
+            report
+                .warnings
+                .push(format!("{}: {error}", entry.path.display()));
+        }
+    }
+    for (branch, tip) in &branches {
+        if let Err(error) = sweep.branch(branch, tip, cwds, &mut report) {
+            report.warnings.push(format!("{branch}: {error}"));
+        }
+    }
+    Ok(report)
+}
+
+impl Sweep<'_> {
+    /// A linked worktree on a detached HEAD.
+    fn detached(&self, entry: &Worktree, cwds: &mut Cwds, report: &mut Report) -> Result<()> {
+        let named = self.only.hits(None, Some(&entry.path));
+        if !self.cli.only.is_empty() && named.is_empty() {
+            return Ok(());
         }
         report.hit.extend(named);
-        if scene.holds_cwd(&entry.path) {
-            if !cli.only.is_empty() {
+        if self.scene.holds_cwd(&entry.path) {
+            if !self.cli.only.is_empty() {
                 report.kept.push(json!({
                     "branch": null,
                     "path": entry.path,
@@ -200,53 +247,64 @@ fn sweep(repo: &Repo, cli: &Options, only: &Only, cwds: &mut Cwds) -> Result<Rep
                     "reason": "the current directory is inside it; run from elsewhere",
                 }));
             }
-            continue;
+            return Ok(());
         }
-        let verdict = scene.detached(repo, &entry.head)?;
+        let verdict = self.scene.detached(self.repo, &entry.head)?;
         let subject = Subject {
             branch: None,
             tip: &entry.head,
             finding: &verdict,
         };
         if verdict.verdict.landed() {
-            remove_worktree(&scene, entry, &main, &subject, cli, cwds, &mut report)?;
+            remove_worktree(
+                &self.scene,
+                entry,
+                &self.main,
+                &subject,
+                self.cli,
+                cwds,
+                report,
+            )?;
         } else {
             report
                 .kept
                 .push(kept(&subject, Some(&entry.path), &verdict.evidence));
         }
+        Ok(())
     }
-    for (branch, tip) in scene.branches(repo)? {
-        let named = only.hits(
-            Some(&branch),
-            scene.worktree_of(&branch).map(|e| e.path.as_path()),
+
+    /// A local branch and the worktree that has it checked out, if any.
+    fn branch(&self, branch: &str, tip: &str, cwds: &mut Cwds, report: &mut Report) -> Result<()> {
+        let scene = &self.scene;
+        let named = self.only.hits(
+            Some(branch),
+            scene.worktree_of(branch).map(|e| e.path.as_path()),
         );
-        if !cli.only.is_empty() && named.is_empty() {
-            continue;
+        if !self.cli.only.is_empty() && named.is_empty() {
+            return Ok(());
         }
         report.hit.extend(named);
-        let finding = scene.judge(repo, &sources, &branch, &tip)?;
+        let finding = scene.judge(self.repo, &self.sources, branch, tip)?;
         let subject = Subject {
-            branch: Some(&branch),
-            tip: &tip,
+            branch: Some(branch),
+            tip,
             finding: &finding,
         };
         if !finding.verdict.landed() {
             report.kept.push(kept(
                 &subject,
-                scene.worktree_of(&branch).map(|e| &e.path),
+                scene.worktree_of(branch).map(|e| &e.path),
                 &finding.evidence,
             ));
-            continue;
+            return Ok(());
         }
-        if let Some(entry) = scene.worktree_of(&branch)
-            && !remove_worktree(&scene, entry, &main, &subject, cli, cwds, &mut report)?
+        if let Some(entry) = scene.worktree_of(branch)
+            && !remove_worktree(scene, entry, &self.main, &subject, self.cli, cwds, report)?
         {
-            continue;
+            return Ok(());
         }
-        delete_branch(&shared, &subject, cli.yes, &mut report)?;
+        delete_branch(&self.shared, &subject, self.cli.yes, report)
     }
-    Ok(report)
 }
 
 /// The branch (or detached HEAD) under judgment.

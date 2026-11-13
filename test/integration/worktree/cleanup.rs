@@ -1335,6 +1335,62 @@ fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
     assert_eq!(site.branches(), ["main"]);
 }
 
+/// A repository whose `git log` fails (`log.showSignature = unset`), with a merged branch
+/// `done` that cleanup deletes before it reaches the quiet worktree `fresh`, where `git log` is
+/// the first call to fail. The agt config roots hold this repository.
+fn site_where_git_log_fails() -> Site {
+    let site = Site::new();
+    site.env.git(&["branch", "done"]);
+    fresh(&site);
+    site.env.git(&["config", "log.showSignature", "unset"]);
+    let config = site.env.path("config/agt");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!("[worktree]\nroots = [\"{}\"]\n", site.env.repo.display()),
+    )
+    .unwrap();
+    site
+}
+
+#[test]
+fn a_git_failure_on_one_worktree_keeps_the_rows_already_acted_on_and_warns() {
+    for all_repos in [true, false] {
+        let site = site_where_git_log_fails();
+        let args: &[&str] = if all_repos {
+            &["--all-repos", "--offline", "--yes"]
+        } else {
+            &["--offline", "--yes"]
+        };
+        let dir = if all_repos {
+            site.env.path("home")
+        } else {
+            site.env.repo.clone()
+        };
+
+        let report = site.run_in(&dir, args);
+
+        let deleted: Vec<&str> = report["deleted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["branch"].as_str().unwrap())
+            .collect();
+        assert_eq!(deleted, ["done"], "all_repos={all_repos}: {report}");
+        assert_eq!(report["removed"], json!([]), "{report}");
+        let warnings = report["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{report}");
+        let warning = warnings[0].as_str().unwrap();
+        assert!(warning.starts_with("fresh: "), "{warning}");
+        assert!(
+            warning.contains("bad boolean config value 'unset' for 'log.showsignature'"),
+            "{warning}"
+        );
+        assert!(site.env.path("trees/fresh").exists());
+        assert_eq!(site.branches(), ["fresh", "main"]);
+    }
+}
+
 #[test]
 fn main_master_and_develop_are_protected_by_name() {
     let site = Site::new();
