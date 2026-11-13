@@ -1335,9 +1335,8 @@ fn all_warns_about_an_unreadable_repository_and_sweeps_the_rest() {
     assert_eq!(site.branches(), ["main"]);
 }
 
-/// A repository where `git log` fails (`log.showSignature = unset`). Cleanup deletes the merged
-/// `done` first, then fails on the quiet worktrees `fresh` and `detached`. The agt config roots
-/// hold this repository.
+/// The agt config roots hold a repository where `git log` fails (`log.showSignature = unset`).
+/// Cleanup sweeps detached worktrees before branches, so `detached` fails before `done` is deleted.
 fn site_where_git_log_fails() -> Site {
     let site = Site::new();
     site.env.git(&["branch", "done"]);

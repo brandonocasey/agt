@@ -23,6 +23,7 @@ pub fn main_checkout(repo: &Repo) -> Result<Worktree> {
 /// The root of the work tree that contains `dir`.
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     let not_in_work_tree = || Error(format!("{} is not inside a git work tree", dir.display()));
+    // Git cannot run in a missing directory, so report it as outside any work tree.
     if !dir.is_dir() {
         return Err(not_in_work_tree());
     }
