@@ -237,7 +237,14 @@ impl Repo {
             .current_dir(&self.root)
             // `git status` and friends would otherwise refresh and rewrite the index of a
             // worktree that is only being read.
-            .args(["--no-optional-locks", "-c", "core.quotepath=false"])
+            // A user's `log.showSignature` would put signature text ahead of every parsed field.
+            .args([
+                "--no-optional-locks",
+                "-c",
+                "core.quotepath=false",
+                "-c",
+                "log.showSignature=false",
+            ])
             .args(args)
             .envs(self.env.iter().map(|(key, value)| (key, value)));
         command
@@ -775,8 +782,6 @@ impl Repo {
         let mut args = vec![
             "-c",
             "log.showRoot=true",
-            "-c",
-            "log.showSignature=false",
             "log",
             "--reverse",
             "--no-merges",

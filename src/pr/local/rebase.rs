@@ -231,10 +231,7 @@ impl Local<'_> {
     /// A rebase writes each commit in turn, so a path added then removed still counts.
     fn replayed_paths(&self, base: &str, tip: &str) -> Result<Vec<String>> {
         let range = format!("{base}..{tip}");
-        // A user's `log.showSignature` would put signature text among the paths.
         let listed = self.repo.git(&[
-            "-c",
-            "log.showSignature=false",
             "log",
             "--no-renames",
             "--name-only",

@@ -56,8 +56,8 @@ pub struct Candidate {
 
 /// Merged branches under the configured roots no worktree holds and whose tip is old, each with
 /// the command that deletes it. Merged worktrees are `agt cleanup --only worktrees`.
-fn merged(now: i64, found: &mut Vec<Candidate>) -> Result<()> {
-    for work in prune::candidates()?
+fn merged(now: i64, found: &mut Vec<Candidate>, warnings: &mut Vec<String>) -> Result<()> {
+    for work in prune::candidates(warnings)?
         .into_iter()
         .filter(|work| old(work.committed, now))
     {
@@ -223,10 +223,10 @@ fn playwright_in(root: &Path, now: i64, found: &mut Vec<Candidate>) {
     }
 }
 
-/// Every leftover at least [`MIN_DAYS`] old at `now`.
-pub fn candidates(now: i64) -> Result<Vec<Candidate>> {
+/// Every leftover at least [`MIN_DAYS`] old at `now`, and one warning per repository git cannot read.
+pub fn candidates(now: i64, warnings: &mut Vec<String>) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
-    merged(now, &mut found)?;
+    merged(now, &mut found, warnings)?;
     backups(now, &mut found)?;
     let home = local::home()?;
     codex_releases(&home, now, &mut found);

@@ -1231,6 +1231,41 @@ fn a_worktree_changed_in_the_last_3_days_is_recent_unless_recent_is_passed() {
     assert_eq!(site.branches(), ["main"]);
 }
 
+/// A signed HEAD's commit time MUST still decide recency when `git log` shows signatures.
+#[test]
+fn a_signed_commit_from_the_last_3_days_keeps_the_worktree_when_git_shows_signatures() {
+    let site = Site::new();
+    let key = site.env.signing_key();
+    for (name, value) in [
+        ("gpg.format", "ssh"),
+        ("user.signingkey", key.to_str().unwrap()),
+        ("log.showSignature", "true"),
+    ] {
+        site.env.git(&["config", name, value]);
+    }
+    let wt = fresh(&site);
+    // Commit an hour before the sweep's clock. The files are then 4 days old.
+    let committed = unix_now() + site.days_on.unsigned_abs() * 86_400 - 3_600;
+    site.env.git_env(
+        &[
+            "-C",
+            wt.to_str().unwrap(),
+            "commit",
+            "-q",
+            "-S",
+            "--allow-empty",
+            "-m",
+            "signed",
+        ],
+        &[("GIT_COMMITTER_DATE", &format!("{committed} +0000"))],
+    );
+    site.env.git(&["merge", "-q", "fresh"]);
+
+    let report = site.run(&["--yes"]);
+    assert_eq!(site.kept(&report, "fresh")["verdict"], "recent");
+    assert!(wt.exists());
+}
+
 #[test]
 fn a_worktree_quiet_for_4_days_is_removed() {
     let site = Site::new();

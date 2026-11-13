@@ -609,8 +609,11 @@ commit time, a worktree backup by its record's creation time, anything else by t
 of any file in it), in `manual` by section: `branches` (local branches in
 the default branch, not protected and not checked out, as `git -C <repo> branch -d <name>`), for
 the repositories under the `agt worktree` roots; this uses local ancestry, without network calls.
+A repository git cannot read adds a `warnings` entry. The rest are still listed.
 Merged worktrees are not listed: `agt cleanup --only worktrees --all-repos --offline` plans their
-removal. `backups` (worktree backups as `agt worktree backups rm <id> --yes`, then everything in
+removal.
+
+`backups` (worktree backups as `agt worktree backups rm <id> --yes`, then everything in
 the backups directory but agt's own, largest first); `codex_releases` (all but the current
 and the one before it); and `playwright` (superseded browser builds, in
 `$PLAYWRIGHT_BROWSERS_PATH`, else `~/Library/Caches/ms-playwright` and the cache root's
