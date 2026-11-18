@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::iter;
 
 use serde_json::{Value, json};
 
@@ -223,13 +224,24 @@ pub(super) fn merge_origins<'a, 'h>(
     if merges.is_empty() {
         return Ok(found);
     }
+    let mut revs: Vec<&str> = Vec::new();
+    for pass in targets
+        .iter()
+        .flat_map(|target| &target.runs)
+        .flat_map(|run| &run.passes)
+        .filter(|pass| pass.ended_at.is_some())
+    {
+        revs.push(&pass.head);
+        revs.extend(pass.base.as_deref());
+    }
+    let known = repo.commit_ids(&revs)?;
     for target in targets {
         for run in &target.runs {
             for pass in run.passes.iter().filter(|pass| pass.ended_at.is_some()) {
-                let known = |rev: &str| repo.object_exists(&format!("{rev}^{{commit}}"));
-                if !known(&pass.head)?
-                    || pass.base.as_deref().map(known).transpose()? == Some(false)
-                {
+                let ends_known = iter::once(pass.head.as_str())
+                    .chain(pass.base.as_deref())
+                    .all(|rev| known.contains_key(rev));
+                if !ends_known {
                     continue;
                 }
                 let inside = repo.merges(pass.base.as_deref(), &pass.head)?;
@@ -946,9 +958,8 @@ pub(super) fn status_without_head(ctx: &Ctx, scope: &Scope) -> Value {
 /// repaired heads of this repository's branch and range targets. It scopes the next review,
 /// such as on the default branch after a merge.
 pub(super) fn last_reviewed_head(ctx: &Ctx, head: &str) -> Result<Option<String>> {
-    let mut best: Option<(u64, String)> = None;
     let targets = ctx.store.targets(&ctx.dir)?;
-    let mut candidates: Vec<&String> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for run in targets
         .iter()
         .filter(|target| matches!(target.kind, TargetKind::Branch | TargetKind::Range))
@@ -958,31 +969,56 @@ pub(super) fn last_reviewed_head(ctx: &Ctx, head: &str) -> Result<Option<String>
             run.passes
                 .iter()
                 .filter(|pass| pass.ended_at.is_some() && !pass.dirty && !pass.partial)
-                .map(|pass| &pass.head),
+                .map(|pass| Candidate {
+                    head: &pass.head,
+                    must_descend_from: None,
+                }),
         );
         // A run of only partial passes repaired a delta, not the branch; and a repaired head
         // that does not descend from the run's last pass (a rebase before `run end`) names
         // commits that no pass of the run saw.
         if let (Some(repaired), Some(last)) = (&run.repaired_head, run.passes.last())
             && run.passes.iter().any(|pass| !pass.partial)
-            && ctx.repo.is_ancestor(&last.head, repaired)?
         {
-            candidates.push(repaired);
+            candidates.push(Candidate {
+                head: repaired,
+                must_descend_from: Some(&last.head),
+            });
         }
     }
-    for candidate in candidates {
-        if best.as_ref().is_some_and(|(_, sha)| sha == candidate)
-            || !ctx.repo.object_exists(&format!("{candidate}^{{commit}}"))?
-            || !ctx.repo.is_ancestor(candidate, head)?
+    let heads: Vec<&str> = candidates.iter().map(|candidate| candidate.head).collect();
+    let reachable = ctx.repo.ancestors_of(head, &heads)?;
+    let mut eligible: Vec<&str> = Vec::new();
+    for candidate in &candidates {
+        if !reachable.contains(candidate.head) {
+            continue;
+        }
+        // A reachable commit exists, so one that is its own required ancestor needs no check.
+        if let Some(earlier) = candidate.must_descend_from
+            && earlier != candidate.head
+            && !ctx.repo.is_ancestor(earlier, candidate.head)?
         {
             continue;
         }
-        let distance = ctx.repo.distance(candidate, head)?;
-        if best.as_ref().is_none_or(|(nearest, _)| distance < *nearest) {
-            best = Some((distance, candidate.clone()));
+        eligible.push(candidate.head);
+    }
+    // A candidate that another descends from is never the nearest. Count distance only for the
+    // rest.
+    let mut best: Option<(u64, &str)> = None;
+    for tip in ctx.repo.independent(&eligible)? {
+        let distance = ctx.repo.distance(tip, head)?;
+        if best.is_none_or(|(nearest, _)| distance < nearest) {
+            best = Some((distance, tip));
         }
     }
-    Ok(best.map(|(_, sha)| sha))
+    Ok(best.map(|(_, sha)| sha.to_owned()))
+}
+
+/// A head that may stand for the last reviewed one. It MUST descend from `must_descend_from`,
+/// when set.
+struct Candidate<'a> {
+    head: &'a str,
+    must_descend_from: Option<&'a str>,
 }
 
 /// Merge commits whose tree is not git's automatic merge of their parents: a conflict
