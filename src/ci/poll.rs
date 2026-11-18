@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use super::classify::{
-    Head, State, blocked, classify, classify_gitlab, classify_pipeline, present, rollup_grace_secs,
-    select_named, with,
+    Head, State, blocked, classify, classify_commit_pipelines, classify_gitlab, classify_pipeline,
+    latest_pipelines, present, rollup_grace_secs, select_named, status, with,
 };
 use super::target::Resolved;
 use crate::forge::gitlab::project_path;
@@ -69,6 +69,8 @@ pub fn snapshot(
         Forge::Gitlab if target.target.pipeline => {
             pipeline(target).map(|state| (state, head.clone(), None))
         }
+        Forge::Gitlab if target.target.commit => gitlab_commit(target, head.clone(), waited_secs)
+            .map(|(state, head)| (state, head, None)),
         Forge::Gitlab => gitlab(target, head.clone(), awaiting, waited_secs)
             .map(|(state, head)| (state, head, None)),
         Forge::Forgejo => forgejo(target, head.clone(), awaiting, (waited_secs, idle_since)),
@@ -116,8 +118,20 @@ fn github(
     idle_since: Option<i64>,
 ) -> Result<(State, Option<String>, Option<i64>), TransportError> {
     let github = github::connect(&target.host);
-    let pull = github.pull_checks(&target.repo, target.target.number)?;
-    let head = pin(head, &pull.view["headRefOid"]);
+    let subject = &target.target;
+    let pull = if subject.commit {
+        github.commit_checks(&target.repo, subject.sha.as_deref().unwrap_or_default())?
+    } else if subject.pipeline {
+        github.run_checks(&target.repo, subject.number)?
+    } else {
+        github.pull_checks(&target.repo, subject.number)?
+    };
+    // A commit or run is read by its own id. Its head is what the host names, not a pin.
+    let head = if subject.commit || subject.pipeline {
+        pull.view["headRefOid"].as_str().map(str::to_owned)
+    } else {
+        pin(head, &pull.view["headRefOid"])
+    };
     let expected = head.as_deref().unwrap_or("");
     let head_state = Head {
         expected,
@@ -126,7 +140,11 @@ fn github(
     };
     if !target.jobs.is_empty() {
         let (state, idle_since) = watch_jobs(target, &pull, &head_state, (waited_secs, idle_since));
-        return Ok((state, head, idle_since));
+        return Ok((
+            hold_open_run(state, subject.pipeline && pull.running),
+            head,
+            idle_since,
+        ));
     }
     let checks = if pull.checks.is_empty() {
         &pull.all_checks
@@ -142,7 +160,23 @@ fn github(
         state,
         (waited_secs, idle_since),
     )?;
-    Ok((state, head, idle_since))
+    Ok((
+        hold_open_run(state, subject.pipeline && pull.running),
+        head,
+        idle_since,
+    ))
+}
+
+/// An unfinished run is pending even when its jobs so far passed.
+fn hold_open_run(state: State, open_run: bool) -> State {
+    if open_run && status(&state) == "complete" {
+        return with(
+            "pending",
+            "checks_pending",
+            json!({"checks": state["checks"]}),
+        );
+    }
+    state
 }
 
 /// Check names that have not reported yet, and the reason the wait ends with when they never do.
@@ -297,8 +331,22 @@ fn forgejo(
     clock: (i64, Option<i64>),
 ) -> Result<(State, Option<String>, Option<i64>), TransportError> {
     let forgejo = forgejo::connect(&target.host);
-    let pull = forgejo.pull_checks(&target.repo, target.target.number)?;
-    let head = pin(head, &pull.view["headRefOid"]);
+    let (pull, head) = match target
+        .target
+        .sha
+        .as_deref()
+        .filter(|_| target.target.commit)
+    {
+        Some(sha) => (
+            forgejo.commit_checks(&target.repo, sha)?,
+            Some(sha.to_owned()),
+        ),
+        None => {
+            let pull = forgejo.pull_checks(&target.repo, target.target.number)?;
+            let head = pin(head, &pull.view["headRefOid"]);
+            (pull, head)
+        }
+    };
     let expected = head.as_deref().unwrap_or("");
     let head_state = Head {
         expected,
@@ -327,6 +375,28 @@ fn pipeline(target: &Resolved) -> Result<State, TransportError> {
     let pipeline = gitlab.pipeline(&base, target.target.number)?;
     let jobs = gitlab.pipeline_jobs(&base, target.target.number, false)?;
     Ok(classify_pipeline(&pipeline, &jobs, &target.jobs))
+}
+
+/// The newest pipeline of each ref and source of one commit. The full commit id, once known, is
+/// the head pin.
+fn gitlab_commit(target: &Resolved, head: Option<String>, waited_secs: i64) -> Polled {
+    let gitlab = gitlab::connect(&target.host);
+    let base = project_path(&target.repo);
+    let sha = head
+        .as_deref()
+        .or(target.target.sha.as_deref())
+        .unwrap_or_default();
+    let (full, pipelines) = gitlab.commit_pipelines(&base, sha)?;
+    let pipelines = latest_pipelines(&pipelines);
+    let mut jobs = Vec::new();
+    if !target.jobs.is_empty() {
+        for pipeline in &pipelines {
+            let id = pipeline["id"].as_u64().unwrap_or_default();
+            jobs.extend(gitlab.pipeline_jobs(&base, id, false)?);
+        }
+    }
+    let state = classify_commit_pipelines(&pipelines, &jobs, &target.jobs, waited_secs);
+    Ok((state, Some(full)))
 }
 
 fn gitlab(target: &Resolved, head: Option<String>, awaiting: bool, waited_secs: i64) -> Polled {

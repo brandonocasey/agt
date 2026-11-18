@@ -1,5 +1,6 @@
 //! `agt ci`: `failures` compares an MR's failing tests with recent default-branch pipelines
-//! (GitLab only); `wait` polls PRs, MRs and pipelines until their checks finish.
+//! (GitLab only); `wait` polls PRs, MRs, pipelines, commits and Actions runs until their
+//! checks finish.
 
 mod api;
 mod classify;
@@ -63,6 +64,18 @@ enum Command {
     /// #PR or !IID in the current repository, or a GitLab pipeline id or URL. Without @SHA, the
     /// head read at the start is pinned. Right after a push, pass `<target>@$(git rev-parse HEAD)`
     /// to wait for checks on that commit first (a PR or MR; a pipeline pins it only).
+    ///
+    /// A commit is a target, so a push can be followed without a PR. OWNER/REPO@SHA is the
+    /// checks and statuses of the commit on GitHub. GROUP/PROJECT@SHA is its pipelines on
+    /// GitLab. @SHA is the commit in the current repository's tracker (GitHub, GitLab or
+    /// Forgejo). SHA is a full or abbreviated commit id.
+    /// A path of three or more parts is GitLab. A two-part path uses the forge of the current
+    /// repository's tracker for it, else GitHub.
+    /// A commit with no checks is pending for the first 120 seconds, then blocked. On GitLab
+    /// the newest pipeline of each ref and source for the commit counts. Older superseded
+    /// pipelines do not.
+    /// A GitHub Actions run URL (https://github.com/OWNER/REPO/actions/runs/N) waits on that
+    /// run's jobs.
     ///
     /// Stdout gets one JSON event per line: `initial` and `change` per target, then `final` with
     /// each target's state and failed jobs or checks. Exit codes: 0 all targets passed or

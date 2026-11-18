@@ -1,6 +1,5 @@
-//! `agt ci wait`: polls selected GitHub checks or the GitLab head pipelines of PRs, MRs and
-//! pipelines, and prints one JSON event per line when a target's state first appears or
-//! changes, then a final event.
+//! `agt ci wait`: polls the checks of PRs, MRs, pipelines, commits and Actions runs, and prints
+//! one JSON event per line when a target's state first appears or changes, then a final event.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};

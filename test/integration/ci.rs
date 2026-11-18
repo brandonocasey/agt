@@ -156,7 +156,11 @@ fn failures_is_gitlab_only_and_refuses_a_forgejo_pull_request_without_running_te
 #[test]
 fn offline_refuses_ci_commands() {
     let env = Env::new();
-    for args in [vec!["ci", "wait", "o/r#1"], vec!["ci", "failures", "g/p!1"]] {
+    for args in [
+        vec!["ci", "wait", "o/r#1"],
+        vec!["ci", "wait", "o/r@abc123"],
+        vec!["ci", "failures", "g/p!1"],
+    ] {
         let output = env
             .bin(&env.repo)
             .arg("--offline")

@@ -1,6 +1,8 @@
 //! Turns one poll's data into a state: `status` (`complete`, `pending` or `blocked`), a
 //! `reason` and the evidence.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value, json};
 
 use crate::forge::{github_state, gitlab_state};
@@ -118,6 +120,14 @@ pub fn rollup_grace_secs() -> i64 {
         .unwrap_or(ROLLUP_GRACE_SECS)
 }
 
+/// Pending while `young`, since a push can precede its first check. Blocked after.
+fn no_checks(young: bool) -> State {
+    if young {
+        return with("pending", "checks_pending", json!({"checks": []}));
+    }
+    with("blocked", "no_required_checks", json!({"checks": []}))
+}
+
 fn head_mismatch(head: &Head, observed: &Value, url: &Value) -> State {
     if head.awaiting {
         return with(
@@ -164,10 +174,7 @@ pub fn classify(head: &Head, view: &Value, rollup: usize, checks: &[Value]) -> S
     }
     let normalized = normalize_checks(checks);
     if normalized.is_empty() {
-        if rollup == 0 && head.waited_secs < rollup_grace_secs() {
-            return with("pending", "checks_pending", json!({"checks": []}));
-        }
-        return with("blocked", "no_required_checks", json!({"checks": []}));
+        return no_checks(rollup == 0 && head.waited_secs < rollup_grace_secs());
     }
     let incomplete = normalized.iter().any(|check| {
         !present(&check["name"]) || !present(&check["state"]) || !present(&check["bucket"])
@@ -282,6 +289,23 @@ fn named_jobs_reason(
     ("complete", "required_checks_passed")
 }
 
+/// The checks of `jobs`, limited to `wanted`, and the wanted names that match no job.
+fn named_checks(jobs: &[Value], wanted: &[String]) -> (Vec<Value>, Vec<String>) {
+    if wanted.is_empty() {
+        return (normalize_jobs(jobs), Vec::new());
+    }
+    let (selected, missing) = select_named(jobs, wanted);
+    let mut checks = normalize_jobs(&selected);
+    // A job asked for by name is reported when it fails. This holds even if the pipeline allows
+    // it to fail.
+    for check in &mut checks {
+        if let Some(fields) = check.as_object_mut() {
+            fields.remove("allowFailure");
+        }
+    }
+    (checks, missing)
+}
+
 /// The state of a pipeline and its jobs, or, when `wanted` names jobs, of those jobs alone.
 /// `merge_status` is the MR's `detailed_merge_status`; a pipeline of its own has none.
 fn pipeline_state(
@@ -306,20 +330,7 @@ fn pipeline_state(
             .extend(extra.as_object().cloned().unwrap_or_default());
         fields
     };
-    let (selected, missing) = if wanted.is_empty() {
-        (jobs.to_vec(), Vec::new())
-    } else {
-        select_named(jobs, wanted)
-    };
-    let mut checks = normalize_jobs(&selected);
-    if !wanted.is_empty() {
-        // A job asked for by name is reported when it fails, even if the pipeline allows it to.
-        for check in &mut checks {
-            if let Some(fields) = check.as_object_mut() {
-                fields.remove("allowFailure");
-            }
-        }
-    }
+    let (checks, missing) = named_checks(jobs, wanted);
     if !present(&pipeline["id"])
         || !present(&pipeline["status"])
         || checks
@@ -347,6 +358,65 @@ fn pipeline_state(
 
 pub fn classify_pipeline(pipeline: &Value, jobs: &[Value], wanted: &[String]) -> State {
     pipeline_state(pipeline, jobs, None, wanted)
+}
+
+/// The newest pipeline of each (`ref`, `source`) pair, in input order. One with no numeric `id` is
+/// kept.
+pub fn latest_pipelines(pipelines: &[Value]) -> Vec<Value> {
+    let pair = |pipeline: &Value| (pipeline["ref"].to_string(), pipeline["source"].to_string());
+    let mut newest: HashMap<(String, String), u64> = HashMap::new();
+    for pipeline in pipelines {
+        if let Some(id) = pipeline["id"].as_u64() {
+            let entry = newest.entry(pair(pipeline)).or_default();
+            *entry = (*entry).max(id);
+        }
+    }
+    pipelines
+        .iter()
+        .filter(|pipeline| {
+            pipeline["id"]
+                .as_u64()
+                .is_none_or(|id| newest.get(&pair(pipeline)) == Some(&id))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Judges the newest `pipelines` of a commit, each as a check named `pipeline <id>`. With none, it
+/// is pending until `rollup_grace_secs` pass, then blocked.
+pub fn classify_commit_pipelines(
+    pipelines: &[Value],
+    jobs: &[Value],
+    wanted: &[String],
+    waited_secs: i64,
+) -> State {
+    if pipelines.is_empty() {
+        return no_checks(waited_secs < rollup_grace_secs());
+    }
+    let as_jobs: Vec<Value> = pipelines
+        .iter()
+        .map(|pipeline| {
+            json!({
+                "name": format!("pipeline {}", pipeline["id"]),
+                "status": pipeline["status"],
+                "web_url": pipeline["web_url"],
+            })
+        })
+        .collect();
+    let (checks, missing) = named_checks(if wanted.is_empty() { &as_jobs } else { jobs }, wanted);
+    let running = pipelines
+        .iter()
+        .any(|pipeline| pipeline_reason(pipeline["status"].as_str().unwrap_or("")).0 == "pending");
+    let (status, reason) = named_jobs_reason(
+        if running { "running" } else { "success" },
+        &checks,
+        &missing,
+    );
+    let mut extra = json!({"checks": checks});
+    if !missing.is_empty() {
+        extra["missingChecks"] = json!(missing);
+    }
+    with(status, reason, extra)
 }
 
 /// An MR whose head pipeline's jobs were read, or `None` when it has no pipeline.

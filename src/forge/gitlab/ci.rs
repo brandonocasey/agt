@@ -7,6 +7,9 @@ use crate::forge;
 use crate::forge::service::{Pagination, Request};
 use crate::forge::transport::TransportError;
 
+/// Hex digits in a full commit id.
+const FULL_SHA_LEN: usize = 40;
+
 type Result<T> = std::result::Result<T, TransportError>;
 
 /// The API path of a project by its id.
@@ -61,6 +64,22 @@ impl Gitlab {
             Value::String(text) => Ok(text),
             _ => Ok(String::new()),
         }
+    }
+
+    /// The full id of commit `sha` and the pipelines that ran it, newest first. A full `sha` is
+    /// not looked up, since the pipeline list takes only full ones.
+    pub fn commit_pipelines(&self, base: &str, sha: &str) -> Result<(String, Vec<Value>)> {
+        let full = if sha.len() == FULL_SHA_LEN {
+            sha.to_owned()
+        } else {
+            let commit = self.read(format!("{base}/repository/commits/{sha}"))?;
+            commit["id"]
+                .as_str()
+                .ok_or_else(|| TransportError::new(format!("{sha} is not a commit of {base}")))?
+                .to_owned()
+        };
+        let pipelines = self.list(format!("{base}/pipelines?sha={full}&per_page=100"))?;
+        Ok((full, pipelines))
     }
 
     /// Whether the head pipeline of the MR `iid` tested `sha`; false without a pipeline.

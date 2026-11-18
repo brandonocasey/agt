@@ -322,7 +322,7 @@ impl<'ast> syn::visit::Visit<'ast> for BoundaryScan<'_> {
     }
 }
 
-fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
