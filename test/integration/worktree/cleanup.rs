@@ -1187,6 +1187,34 @@ fn the_default_the_main_the_current_branch_and_its_worktree_are_never_touched() 
 }
 
 #[test]
+fn the_directory_agt_started_in_is_held_even_after_dash_c_moves_away() {
+    let site = Site::new();
+    let current = site.branch("current");
+    site.branch("side");
+    site.env.git(&["merge", "-q", "current"]);
+    site.env.git(&["merge", "-q", "side"]);
+    let repo = site.env.repo.to_str().unwrap();
+
+    let report = site.run_in(&current, &["--yes", "-C", repo]);
+    assert!(current.exists());
+    assert_eq!(report["deleted"][0]["branch"], "side");
+    assert_eq!(report["deleted"].as_array().unwrap().len(), 1);
+    assert_eq!(site.branches(), ["current", "main"]);
+}
+
+#[test]
+fn a_detached_worktree_the_shell_started_in_is_kept_after_dash_c() {
+    let site = Site::new();
+    let wt = site.branch("gone");
+    site.env.git(&["merge", "-q", "gone"]);
+    site.git(&wt, &["checkout", "-q", "--detach"]);
+    let repo = site.env.repo.to_str().unwrap();
+
+    let report = site.run_in(&wt, &["--yes", "-C", repo]);
+    assert!(wt.exists(), "{report}");
+}
+
+#[test]
 fn all_sweeps_every_configured_repository() {
     let site = Site::new();
     let wt = site.branch("done");

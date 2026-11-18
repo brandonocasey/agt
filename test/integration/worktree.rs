@@ -271,6 +271,22 @@ fn plan_mode_changes_nothing() {
 }
 
 #[test]
+fn remove_refuses_the_worktree_the_shell_started_in_even_after_dash_c_moves_away() {
+    let f = Fixture::new();
+    let wt = f.wt.to_string_lossy().into_owned();
+    let repo = f.env.repo.to_string_lossy().into_owned();
+    fs::create_dir(f.wt.join("deep")).unwrap();
+    for start in [f.wt.clone(), f.wt.join("deep")] {
+        f.refuses(
+            &start,
+            &["remove", &wt, "--yes", "-C", &repo],
+            "current directory is inside",
+        );
+        assert!(f.wt.exists(), "{}", start.display());
+    }
+}
+
+#[test]
 fn refuses_what_it_must_not_remove() {
     let f = Fixture::new();
     let wt = f.wt.to_string_lossy().into_owned();

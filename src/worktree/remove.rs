@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::idle::Cwds;
 use super::info;
 use super::{gate, hooks, snapshot};
+use crate::core::cwd;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
 use crate::git::{Repo, Worktree};
@@ -219,9 +220,7 @@ pub(super) fn refuse<'a>(
     if entry.locked {
         return fail(format!("{} is locked; unlock it first", path.display()));
     }
-    if let Ok(cwd) = std::env::current_dir().and_then(|cwd| cwd.canonicalize())
-        && cwd.starts_with(path)
-    {
+    if cwd::held().iter().any(|held| held.starts_with(path)) {
         return fail(format!(
             "the current directory is inside {}; run from elsewhere",
             path.display()

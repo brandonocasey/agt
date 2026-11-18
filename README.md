@@ -108,6 +108,11 @@ Issues and reviews stay local by default.
 `agt issue sync` and `agt review sync` always pull (review sync only refreshes reviews already stored; `--pr` starts one), then push local changes only where `[sync] push` is `"manual"` or `"auto"`; the default `off` only pulls. `issue push` and `review publish` only push.
 One `[[tracker]]` list, filled from all your git remotes (`[sync] remotes = "all"`; `"origin"` and `"none"` narrow it), serves issues and pull requests. `pull` (`manual`, `auto`) and `push` (`off`, `manual`, `auto`) modes are set once in `[sync]` and can be overridden for issues, for pull requests and for each tracker. The default is manual pulls and no pushes.
 
+The global `-C, --directory <DIR>` flag runs a command as if agt started in `DIR`, like `git -C`.
+It goes before or after the subcommand.
+Relative path arguments are taken from `DIR`.
+`agt worktree remove` and `agt cleanup --only worktrees` protect the worktree agt started in.
+
 `--offline` (also `AGT_OFFLINE=1`) is a global flag that blocks network access.
 The reference lists each command's behavior.
 

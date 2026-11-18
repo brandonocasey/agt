@@ -6,14 +6,14 @@ For installation and a local example, follow [Getting started](getting-started.m
 
 ## On this page
 
-- [Output and errors](#output-and-errors) and [configuration and environment](#configuration-and-environment)
+- [Output and errors](#output-and-errors), [global flags](#global-flags) and [configuration and environment](#configuration-and-environment)
 - Review: [targets](#targets), [commands](#commands), [coverage](#reviewed-counting-and-pruning-rules), [sync](#sync), [publish](#publish), [store](#store), [finding input](#finding-input)
 - [QA](#qa): checks, QA findings and the QA approval
 - [Issues](#issues) and [tasks](#tasks)
 - [Worktrees](#worktrees) and [branch checks](#branch)
 - [Pull and merge requests](#pr) and [CI](#ci)
 - [Sessions](#sessions) and [running agents](#ps)
-- [Secrets](#secrets), [wait](#wait), [doctor](#doctor), and [cleanup](#cleanup)
+- [Secrets](#secrets), [check](#check), [wait](#wait), [doctor](#doctor), and [cleanup](#cleanup)
 - [Compatibility](#compatibility) and [testing](#testing)
 
 ## Compatibility
@@ -41,6 +41,24 @@ Errors print `agt: error: <message>` on stderr and normally exit with status 1.
 Usage errors exit with status 2. Some commands use additional exit statuses for
 results such as conflicts, timeouts, or warnings; see their sections below.
 Timestamps are RFC 3339 in UTC, such as `2026-10-16T12:00:00Z`.
+
+## Global flags
+
+`--offline` blocks network access (see [Offline](#offline)).
+
+`-C, --directory <DIR>` runs the command as if agt started in `DIR`, like `git -C`.
+It goes before or after the subcommand.
+A relative `DIR` is taken from the directory agt started in.
+A missing `DIR` is an error.
+Relative path arguments, such as the files of `agt secrets`, are taken from `DIR`.
+
+After the `--` of `agt wait`, `-C` belongs to the command that `wait` runs.
+
+Two guards protect the shell that called agt.
+Each treats both the directory agt started in and `DIR` as the current directory:
+
+- `agt worktree remove PATH` refuses a worktree that holds either one.
+- `agt cleanup --only worktrees` keeps a worktree that holds either one, and its branch.
 
 ## Configuration and environment
 
