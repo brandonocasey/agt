@@ -7,5 +7,5 @@
  "responses": [],
  "code": 2,
  "stdout": "",
- "stderr": "agt: error: expected an id, !id, or URL, got 'abc'\n"
+ "stderr": "agt: error: expected an MR or PR (an id, !id, GROUP/PROJECT!IID, OWNER/REPO#PR, #PR or a PR or MR URL), got 'abc'\n"
 }

@@ -5,9 +5,11 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::ErrorKind;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use regex::Regex;
 use serde_json::Value;
 
 use crate::core::env;
@@ -415,6 +417,44 @@ impl CliTransport {
     }
 }
 
+impl CliTransport {
+    /// Runs `args`. Once a gh rejects [`GH_ESCAPES`], this process drops it from every call.
+    fn run_api(
+        &self,
+        mut args: Vec<String>,
+        input: Option<&[u8]>,
+    ) -> std::result::Result<(Vec<u8>, String), TransportError> {
+        if GH_REJECTS_ESCAPES.load(Ordering::Relaxed) {
+            args.retain(|arg| arg != GH_ESCAPES);
+        }
+        let result = self.run_args(&args, input);
+        let rejected = format!("unknown flag: {GH_ESCAPES}");
+        match result {
+            Err(error)
+                if args.iter().any(|arg| arg == GH_ESCAPES)
+                    && error.message.contains(&rejected) =>
+            {
+                GH_REJECTS_ESCAPES.store(true, Ordering::Relaxed);
+                args.retain(|arg| arg != GH_ESCAPES);
+                self.run_args(&args, input)
+            }
+            result => result,
+        }
+    }
+
+    fn run_args(
+        &self,
+        args: &[String],
+        input: Option<&[u8]>,
+    ) -> std::result::Result<(Vec<u8>, String), TransportError> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.cli.run_with_stderr(&args, input)
+    }
+}
+
+/// Whether this process found that gh rejects [`GH_ESCAPES`].
+static GH_REJECTS_ESCAPES: AtomicBool = AtomicBool::new(false);
+
 impl Transport for CliTransport {
     fn send(&self, request: &Request) -> std::result::Result<Response, TransportError> {
         if let Some(tea) = &self.tea {
@@ -423,14 +463,12 @@ impl Transport for CliTransport {
             }
             tea.login(&self.cli)?;
         }
-        let args = self.render(request);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let input = request
             .body
             .as_ref()
             .map(|body| serde_json::to_vec(body).map_err(ctx("serialize request")))
             .transpose()?;
-        let (output, stderr) = self.cli.run_with_stderr(&args, input.as_deref())?;
+        let (output, stderr) = self.run_api(self.render(request), input.as_deref())?;
         if self.tea.is_some()
             && let Some(refusal) = tea_refusal(&stderr, &output)
         {
@@ -458,15 +496,34 @@ impl Transport for CliTransport {
     }
 }
 
-/// The JSON a CLI printed for `request`: one value, or for a paginated read the items of every
-/// page; the text itself for a raw read, and `Null` for no output.
+/// Terminal escape sequences and control characters, except newline, tab and carriage return. An
+/// unterminated string sequence ends at the line end.
+static TERMINAL_ESCAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[\]PX^_][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|[\x{80}-\x{9f}]",
+    )
+    .expect("valid pattern")
+});
+
+/// `text` without escapes and control characters. `\r\n` and a lone `\r` each become one newline.
+fn without_escapes(text: &str) -> String {
+    TERMINAL_ESCAPE
+        .replace_all(text, "")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+}
+
+/// The JSON a CLI printed for `request`, with pages of a paginated read joined. A raw read gives
+/// text without escape sequences.
 fn read_body(
     name: &str,
     request: &Request,
     output: &[u8],
 ) -> std::result::Result<Value, TransportError> {
     if request.raw {
-        return Ok(Value::String(String::from_utf8_lossy(output).into_owned()));
+        return Ok(Value::String(without_escapes(&String::from_utf8_lossy(
+            output,
+        ))));
     }
     if request.paginate {
         // One JSON array per page.
@@ -512,7 +569,13 @@ struct ApiFlags {
     json_input: &'static [&'static str],
     /// What precedes the file in a file upload, and what the file path follows in its argument.
     file_input: (&'static [&'static str], &'static str),
+    /// What a raw (text) read adds to the arguments.
+    raw: &'static [&'static str],
 }
+
+/// The `gh api` flag that prints a reply with terminal escape sequences. Since 2.97.0, gh refuses
+/// to print one without it.
+const GH_ESCAPES: &str = "--allow-escape-sequences";
 
 const GH_FLAGS: ApiFlags = ApiFlags {
     method: "--method",
@@ -521,12 +584,14 @@ const GH_FLAGS: ApiFlags = ApiFlags {
         &["-H", "Content-Type: application/octet-stream", "--input"],
         "",
     ),
+    raw: &[GH_ESCAPES],
 };
 
 const GLAB_FLAGS: ApiFlags = ApiFlags {
     method: "-X",
     json_input: &["-H", "Content-Type: application/json", "--input", "-"],
     file_input: (&["--form"], "file=@"),
+    raw: &[],
 };
 
 fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
@@ -536,6 +601,9 @@ fn api_args(request: &Request, flags: &ApiFlags) -> Vec<String> {
             args.extend([flags.method.to_owned(), request.method.as_str().to_owned()]);
             if request.paginate {
                 args.push("--paginate".to_owned());
+            }
+            if request.raw {
+                args.extend(flags.raw.iter().map(|arg| (*arg).to_owned()));
             }
             args.push(path.clone());
             if request.body.is_some() {
@@ -798,6 +866,37 @@ mod tests {
                 "query=query Q{x}"
             ]
         );
+    }
+
+    #[test]
+    fn a_raw_read_drops_escape_sequences_and_control_characters_but_not_text() {
+        for (raw, plain) in [
+            ("\u{1b}[31;1mred\u{1b}[0m", "red"),
+            ("a\u{1b}[2Kb\u{1b}[?25lc", "abc"),
+            ("\u{1b}]0;title\u{7}x", "x"),
+            (
+                "\u{1b}]8;;https://x.test\u{1b}\\link\u{1b}]8;;\u{1b}\\",
+                "link",
+            ),
+            ("\u{1b}Pq data\u{1b}\\after", "after"),
+            ("one\u{1b}]0;never ends\ntwo", "one\ntwo"),
+            ("a\u{1b}(Bb\u{1b}c", "ab"),
+            ("a\u{8}b\u{7f}c\u{9b}31md\rle\u{0}", "abc31md\nle"),
+            ("one\r\ntwo\r\n", "one\ntwo\n"),
+            ("one\rtwo\r", "one\ntwo\n"),
+            ("one\r\u{1b}[0Ktwo\r\u{1b}[0K\nthree", "one\ntwo\nthree"),
+            (
+                "section_end:1:a\r\u{1b}[0Ksection_start:2:b",
+                "section_end:1:a\nsection_start:2:b",
+            ),
+            ("tab\there\nnext\n", "tab\there\nnext\n"),
+            (
+                "\u{4e16}\u{754c} \u{25cf} \u{e9}\u{a0}x",
+                "\u{4e16}\u{754c} \u{25cf} \u{e9}\u{a0}x",
+            ),
+        ] {
+            assert_eq!(without_escapes(raw), plain, "{raw:?}");
+        }
     }
 
     #[test]

@@ -1294,11 +1294,12 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 
 ## CI
 
-`agt ci` waits for the checks of PRs, MRs, commits and Actions runs. It also triages GitLab failures.
+`agt ci` waits for the checks of PRs, MRs, commits and Actions runs.
+It also lists failed checks and failing specs.
 
 ```sh
 agt ci wait TARGET... [--job NAME]... [--timeout SEC] [--interval SEC] [--max-interval SEC] [--remote NAME|HOST/REPO]
-agt ci failures <mr> [--limit N] [--remote NAME|HOST/REPO]
+agt ci failures <TARGET> [--limit N] [--remote NAME|HOST/REPO]
 ```
 
 `wait` takes one or more targets: GitHub `OWNER/REPO#PR[@SHA]`, GitLab `GROUP/PROJECT!IID[@SHA]`,
@@ -1350,11 +1351,23 @@ A pipe that closes at the `final` event keeps the exit status above.
 
 Compared with the removed `agt watch`, query-failure events no longer carry `command`, `exitCode` or `signal` (only `detail`), a deadline exits 3 instead of 124, usage errors exit 2 instead of 64, and a target needing action exits 1 instead of 2.
 
-`failures <mr>` is GitLab only (`123`, `!123`, `group/project!123` or an MR URL; without a project the current repository
-is used, or the tracker `--remote` names). It lists the failed and retried jobs of the MR's head pipeline, the failing
-specs in their logs (Playwright, WebdriverIO, Karma, Jest) and how often each failed in the last
-`--limit` (10) finished default-branch pipelines, as a verdict per spec: `new`, `pre-existing`, `flaky`,
-`pending` or `unclear`.
+`failures` takes an MR (`123`, `!123`, `group/project!123` or an MR URL).
+Without a project it uses the current repository, or the tracker `--remote` names.
+It lists the failed and retried jobs of the head pipeline.
+It also lists the failing specs in their logs (Playwright, WebdriverIO, Karma, Jest).
+Each spec gets a verdict: `new`, `pre-existing`, `flaky`, `pending` or `unclear`.
+It counts how often the spec failed in the last `--limit` (10) finished default-branch pipelines.
+
+`failures` also takes a PR.
+A GitHub PR is `OWNER/REPO#PR`, `#PR` or a PR URL.
+A Forgejo PR is `#PR` or a PR URL.
+A PR lists the failed and cancelled checks with id, name, state and link.
+The summary line counts both; there are no verdicts, and `--limit` is ignored.
+An Actions run URL or a commit is not a `failures` target.
+
+On GitHub a PR also lists the failing specs in logs of failed Actions jobs.
+A cancelled job's log is not read.
+agt does not read job logs on Forgejo, so a Forgejo PR lists no specs.
 
 ## Forgejo and Gitea
 
@@ -1384,7 +1397,7 @@ on GitHub and GitLab, with these differences:
   GitHub and GitLab a same-named fork PR still counts.
 - `agt ci wait` reads the combined commit status of the PR head, or of a commit given as `@SHA`. Every status counts, a `warning` or `skipped` one as `skipping` (it passes); there is no
   required-check logic. Name the PR as `#<number>`; an Actions run URL is refused.
-  `agt ci failures` stays GitLab only.
+  `agt ci failures` lists the failed statuses of a PR but no specs.
 - Issues have no parent or child: `--parent` stays local and `issue push` skips it. Labels are set by name.
 - The lists the API pages (pull requests, reviews, issues, labels, commit statuses) are read page by page
   (`limit` and `page`) until a short page; the page size is 50. The comments of an issue or PR and

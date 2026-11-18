@@ -7,9 +7,9 @@ use crate::forge::service::{Pagination, Request, Var};
 use crate::forge::split_repo_strict;
 use crate::forge::transport::TransportError;
 
-const QUERY: &str = "query PullChecks($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){number url baseRefName state mergedAt closed headRefOid commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion title detailsUrl isRequired(pullRequestNumber:$number) checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl isRequired(pullRequestNumber:$number)}}}}}}}}}}";
+const QUERY: &str = "query PullChecks($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){number url baseRefName state mergedAt closed headRefOid commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{databaseId name status conclusion title detailsUrl isRequired(pullRequestNumber:$number) checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl isRequired(pullRequestNumber:$number)}}}}}}}}}}";
 
-const COMMIT_QUERY: &str = "query CommitChecks($owner:String!,$name:String!,$sha:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$sha){__typename ... on Commit{oid url statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion title detailsUrl checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl}}}}}}}}";
+const COMMIT_QUERY: &str = "query CommitChecks($owner:String!,$name:String!,$sha:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$sha){__typename ... on Commit{oid url statusCheckRollup{contexts(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{databaseId name status conclusion title detailsUrl checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state description targetUrl}}}}}}}}";
 
 /// Jobs a REST list returns per page.
 const JOBS_PER_PAGE: usize = 100;
@@ -19,7 +19,7 @@ pub struct Pull {
     /// `number`, `url`, `state` (`OPEN`, `CLOSED` or `MERGED`), `mergedAt`, `closed` and
     /// `headRefOid`.
     pub view: Value,
-    /// `bucket` is `pass`, `fail`, `pending`, `skipping` or `cancel`.
+    /// `id` is null for a status. `bucket` is `pass`, `fail`, `pending`, `skipping` or `cancel`.
     pub checks: Vec<Value>,
     /// Every check and status, used when no required contexts are configured.
     pub all_checks: Vec<Value>,
@@ -73,6 +73,7 @@ fn check(node: &Value) -> Option<Value> {
                 .find(|state| !state.is_empty())
                 .unwrap_or("");
             Some(json!({
+                "id": node["databaseId"],
                 "name": node["name"],
                 "state": state,
                 "bucket": bucket(text("/status"), text("/conclusion")),
@@ -83,6 +84,7 @@ fn check(node: &Value) -> Option<Value> {
             }))
         }
         "StatusContext" => Some(json!({
+            "id": null,
             "name": node["context"],
             "state": node["state"],
             "bucket": status_bucket(text("/state")),
@@ -247,6 +249,7 @@ impl Github {
             let upper = |field: &str| job[field].as_str().unwrap_or("").to_uppercase();
             let (status, conclusion) = (upper("status"), upper("conclusion"));
             json!({
+                "id": job["id"],
                 "name": job["name"],
                 "state": job["conclusion"].as_str().unwrap_or(job["status"].as_str().unwrap_or("")),
                 "bucket": bucket(&status, &conclusion),
@@ -258,7 +261,7 @@ impl Github {
         };
         let checks: Vec<Value> = if jobs.is_empty() {
             vec![check_of(&json!({
-                "name": run["name"], "status": run["status"],
+                "id": run["id"], "name": run["name"], "status": run["status"],
                 "conclusion": run["conclusion"], "html_url": run["html_url"],
             }))]
         } else {
@@ -279,6 +282,18 @@ impl Github {
             checks: checks.clone(),
             all_checks: checks,
         })
+    }
+
+    /// The log of the Actions job `id` of `repo`, as text.
+    pub fn job_log(&self, repo: &str, id: u64) -> Result<String, TransportError> {
+        let request = Request {
+            raw: true,
+            ..Request::get(format!("repos/{repo}/actions/jobs/{id}/logs"))
+        };
+        match self.transport.send(&request)?.body {
+            Value::String(text) => Ok(text),
+            _ => Ok(String::new()),
+        }
     }
 }
 

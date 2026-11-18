@@ -140,16 +140,19 @@ fn failures_take_the_host_from_an_mr_url() {
 }
 
 #[test]
-fn failures_is_gitlab_only_and_refuses_a_forgejo_pull_request_without_running_tea() {
+fn failures_refuses_a_forgejo_actions_run_without_running_tea() {
     let env = Env::new();
     let output = env
         .bin(&env.repo)
-        .args(["ci", "failures", "https://codeberg.org/o/r/pulls/5"])
+        .args(["ci", "failures", "https://codeberg.org/o/r/actions/runs/4"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("failures needs a GitLab MR"), "{stderr}");
+    assert!(
+        stderr.contains("failures takes a PR, not an Actions run"),
+        "{stderr}"
+    );
     assert!(env.forge_calls().is_empty());
 }
 

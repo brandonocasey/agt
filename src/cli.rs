@@ -45,7 +45,7 @@ enum Command {
     Branch(branch::Cli),
     /// Cached test and lint runs: skip a command that already passed on the same git tree.
     Check(check::Cli),
-    /// Wait for PR, MR, commit and run checks; GitLab failing specs versus the default branch.
+    /// Wait for PR, MR, commit and run checks, list failures.
     Ci(ci::Cli),
     /// Local issues with optional GitHub, GitLab and Forgejo sync.
     Issue(issue::Cli),
