@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::Github;
-use crate::forge::service::{Pagination, Request, Var};
+use crate::forge::service::{Method, Pagination, Request, Var};
 use crate::forge::split_repo_strict;
 use crate::forge::transport::TransportError;
 
@@ -294,6 +294,22 @@ impl Github {
             Value::String(text) => Ok(text),
             _ => Ok(String::new()),
         }
+    }
+
+    /// Reruns the Actions job `id` of `repo`.
+    pub fn rerun_job(&self, repo: &str, id: u64) -> Result<(), TransportError> {
+        self.post(format!("repos/{repo}/actions/jobs/{id}/rerun"))
+    }
+
+    /// Reruns the failed jobs of the Actions run `id` of `repo`.
+    pub fn rerun_failed_jobs(&self, repo: &str, id: u64) -> Result<(), TransportError> {
+        self.post(format!("repos/{repo}/actions/runs/{id}/rerun-failed-jobs"))
+    }
+
+    fn post(&self, path: String) -> Result<(), TransportError> {
+        self.transport
+            .send(&Request::rest(Method::Post, path, None))
+            .map(drop)
     }
 }
 

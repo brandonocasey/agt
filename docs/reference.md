@@ -11,7 +11,8 @@ For installation and a local example, follow [Getting started](getting-started.m
 - [QA](#qa): checks, QA findings and the QA approval
 - [Issues](#issues) and [tasks](#tasks)
 - [Worktrees](#worktrees) and [branch checks](#branch)
-- [Pull and merge requests](#pr) and [CI](#ci)
+- [Pull and merge requests](#pr) and [CI](#ci) (`wait`, `failures`, `log` and `retry`)
+- [Offline](#offline) and [Forgejo and Gitea](#forgejo-and-gitea)
 - [Sessions](#sessions) and [running agents](#ps)
 - [Secrets](#secrets), [check](#check), [wait](#wait), [doctor](#doctor), and [cleanup](#cleanup)
 - [Compatibility](#compatibility) and [testing](#testing)
@@ -1295,11 +1296,13 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 ## CI
 
 `agt ci` waits for the checks of PRs, MRs, commits and Actions runs.
-It also lists failed checks and failing specs.
+It also lists failed checks and failing specs, reads one job's log and retries jobs.
 
 ```sh
 agt ci wait TARGET... [--job NAME]... [--timeout SEC] [--interval SEC] [--max-interval SEC] [--remote NAME|HOST/REPO]
 agt ci failures <TARGET> [--limit N] [--remote NAME|HOST/REPO]
+agt ci log <JOB> [--tail N] [--remote NAME|HOST/REPO]
+agt ci retry <TARGET> [--remote NAME|HOST/REPO]
 ```
 
 `wait` takes one or more targets: GitHub `OWNER/REPO#PR[@SHA]`, GitLab `GROUP/PROJECT!IID[@SHA]`,
@@ -1368,6 +1371,34 @@ An Actions run URL or a commit is not a `failures` target.
 On GitHub a PR also lists the failing specs in logs of failed Actions jobs.
 A cancelled job's log is not read.
 agt does not read job logs on Forgejo, so a Forgejo PR lists no specs.
+The id of a GitHub check is the job id that `log` and `retry` take.
+
+`log <JOB>` prints the last `--tail` (200) lines of one job's log.
+It removes terminal escape sequences and other control characters.
+It keeps tabs and newlines, and turns a lone carriage return into a line break.
+`<JOB>` is one of:
+
+- a GitLab job URL (`https://HOST/GROUP/PROJECT/-/jobs/N`)
+- a GitHub Actions job URL (`.../actions/runs/N/job/M`)
+- a job id in the current repository's tracker (as for `wait`, `--remote` picks it)
+
+An unknown job exits 2, and a run is not a job.
+agt does not read job logs on Forgejo, so a Forgejo job is refused.
+
+`retry <TARGET>` prints JSON that names what was retried.
+The target is one of:
+
+- a GitLab job URL, which starts that job again
+- a GitHub Actions job URL, which reruns that job
+- a GitHub Actions run URL, which reruns the failed jobs of that run
+- a job id, as for `log`
+
+`retry` writes to the host.
+Before any call it is refused offline.
+It is also refused when `push = "off"` was set explicitly for the tracker.
+The writes of `agt pr` follow the same rule.
+agt does not rerun jobs on Forgejo, so a Forgejo target is refused.
+An Actions URL with a longer path is no target. It exits 2 and sends nothing.
 
 ## Forgejo and Gitea
 
@@ -1398,6 +1429,7 @@ on GitHub and GitLab, with these differences:
 - `agt ci wait` reads the combined commit status of the PR head, or of a commit given as `@SHA`. Every status counts, a `warning` or `skipped` one as `skipping` (it passes); there is no
   required-check logic. Name the PR as `#<number>`; an Actions run URL is refused.
   `agt ci failures` lists the failed statuses of a PR but no specs.
+  `agt ci log` and `agt ci retry` refuse a Forgejo target. agt does not support them there.
 - Issues have no parent or child: `--parent` stays local and `issue push` skips it. Labels are set by name.
 - The lists the API pages (pull requests, reviews, issues, labels, commit statuses) are read page by page
   (`limit` and `page`) until a short page; the page size is 50. The comments of an issue or PR and
@@ -1949,7 +1981,8 @@ and `review publish` (a review of someone else's PR/MR is never published). With
 local store, on whichever tracker each belongs to (`--remote` limits it to one), and never
 imports a new PR/MR; `--pr <n|url>` starts a local review of one, as `review run` on a branch can.
 
-Only an explicit `push = "off"` refuses `agt pr create`, `update`, `merge`, `auto-merge` and `upload`.
+Only an explicit `push = "off"` refuses `agt ci retry`.
+It also refuses `agt pr create`, `update`, `merge`, `auto-merge` and `upload`.
 Unset, they stay allowed. `agt pr --local` is never refused by it, as it writes nothing remote.
 Reads of any command are never refused by `push`.
 `review publish`, `qa publish` and `issue push` need `manual` or `auto`: with `off`, or unset,

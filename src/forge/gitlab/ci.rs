@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{Gitlab, project_path};
 use crate::forge;
-use crate::forge::service::{Pagination, Request};
+use crate::forge::service::{Method, Pagination, Request};
 use crate::forge::transport::TransportError;
 
 /// Hex digits in a full commit id.
@@ -80,6 +80,16 @@ impl Gitlab {
         };
         let pipelines = self.list(format!("{base}/pipelines?sha={full}&per_page=100"))?;
         Ok((full, pipelines))
+    }
+
+    /// Retries the job `job`; the new job it starts.
+    pub fn retry_job(&self, base: &str, job: u64) -> Result<Value> {
+        let transport: &dyn forge::transport::Transport = self.transport.as_ref();
+        transport.json(&Request::rest(
+            Method::Post,
+            format!("{base}/jobs/{job}/retry"),
+            None,
+        ))
     }
 
     /// Whether the head pipeline of the MR `iid` tested `sha`; false without a pipeline.

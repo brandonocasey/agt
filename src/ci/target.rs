@@ -48,15 +48,17 @@ pub struct Target {
     pub commit: bool,
 }
 
-/// A GitHub or Forgejo Actions URL: a run.
+/// A GitHub or Forgejo Actions URL: a run, or one job of it.
 pub struct ActionsUrl {
     pub forge: Forge,
     pub host: String,
     pub repo: String,
     pub run: u64,
+    /// The job of a GitHub URL; Forgejo's `/jobs/` URLs name none here.
+    pub job: Option<u64>,
 }
 
-/// The run an Actions URL names, else `None`. An unknown host is GitHub for a `/job/` URL
+/// The run and job an Actions URL names, else `None`. An unknown host is GitHub for a `/job/` URL
 /// or the default host, else Forgejo.
 pub fn actions_url(value: &str) -> Option<ActionsUrl> {
     let found = ACTIONS_URL.captures(value)?;
@@ -84,6 +86,7 @@ pub fn actions_url(value: &str) -> Option<ActionsUrl> {
         host,
         repo: found[2].to_owned(),
         run,
+        job,
     })
 }
 
@@ -239,7 +242,7 @@ fn names_same_forge(platform: Forge, found: Forge) -> bool {
 
 /// The host, repository and forge of the tracker `agt pr` picks (see `--remote`), which must be
 /// on the forge the target names, when it names one.
-fn tracker(platform: Option<Forge>, remote: Option<&str>) -> Result<(String, String, Forge)> {
+pub fn tracker(platform: Option<Forge>, remote: Option<&str>) -> Result<(String, String, Forge)> {
     let repo = Repo::discover()?;
     let config = Config::load_for_repo(&repo)?;
     let source = Source::of(&require_tracker(
@@ -409,18 +412,24 @@ mod tests {
     }
 
     #[test]
-    fn an_actions_url_names_its_forge_and_run() {
+    fn an_actions_url_names_its_forge_and_job() {
         let github = actions_url("https://github.com/o/r/actions/runs/5/job/7").unwrap();
-        assert_eq!((github.forge, github.run), (Forge::Github, 5));
+        assert_eq!(
+            (github.forge, github.run, github.job),
+            (Forge::Github, 5, Some(7))
+        );
         let forgejo = actions_url("https://codeberg.org/o/r/actions/runs/4/jobs/1").unwrap();
-        assert_eq!((forgejo.forge, forgejo.run), (Forge::Forgejo, 4));
+        assert_eq!(
+            (forgejo.forge, forgejo.run, forgejo.job),
+            (Forge::Forgejo, 4, None)
+        );
         // Only GitHub spells a job `/job/`, so a host nothing names is GitHub's with one.
         let unknown = actions_url("https://git.example.invalid/o/r/actions/runs/4/job/1").unwrap();
         assert_eq!(unknown.forge, Forge::Github);
         let unknown = actions_url("https://git.example.invalid/o/r/actions/runs/4").unwrap();
         assert_eq!(unknown.forge, Forge::Forgejo);
         let attempt = actions_url("https://github.com/o/r/actions/runs/5/attempts/2/").unwrap();
-        assert_eq!(attempt.run, 5);
+        assert_eq!((attempt.run, attempt.job), (5, None));
         // Forgejo's `/jobs/N` is no GitHub URL, and nothing may trail a run or a job.
         for bad in [
             "https://github.com/o/r/actions/runs/5/jobs/7",

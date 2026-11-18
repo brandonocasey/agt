@@ -90,7 +90,7 @@ These reports help you find earlier decisions and understand where agent time an
 ### Routine checks and GitHub/GitLab/Forgejo workflows
 
 - `agt pr` views, creates, updates, and merges pull requests and merge requests, and uploads images for their descriptions. With `--local`, `view`, `list`, `merge` and `merge --auto` work on local branches with no forge. `merge` fast-forwards, or rebases first with `--method rebase`. `merge --auto` waits up to 270 seconds, then exits 3 if a gate still fails.
-- `agt ci` waits for checks. Its failure report lists the failed checks of a GitHub or Forgejo PR. For a GitLab MR it also compares failures against default-branch history.
+- `agt ci` waits for checks. Its failure report lists the failed checks of a GitHub or Forgejo PR. For a GitLab MR it also compares failures against default-branch history. `ci log` prints one job's log (GitLab or GitHub). `ci retry` reruns a GitLab or GitHub job, or the failed jobs of a GitHub run.
 - `agt secrets` scans repository files for credential patterns without printing matched values.
 - `agt doctor` checks host tools and repository setup, with hints for problems it finds.
 - `agt check run` skips a test or lint command that already passed on the same git tree, recording a pass only if the code did not change during the run.
