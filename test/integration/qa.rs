@@ -183,7 +183,9 @@ fn qa_comments_are_edited_and_deleted_and_stay_qa() {
         .clone();
     assert_eq!(edited["comments"][1]["body"], "Yes, at 60.");
     assert_eq!(edited["comments"][1]["qa"], true);
-    let deleted = qa(&env, &["delete", "--force", &format!("{id}/c2")]);
+    let refused = qa_fail(&env, &["delete", &format!("{id}/c2")]);
+    assert!(refused.contains("needs --yes"), "{refused}");
+    let deleted = qa(&env, &["delete", "--yes", &format!("{id}/c2")]);
     assert_eq!(deleted["thread_removed"], false);
     let deleted = qa(&env, &["delete", "--force", &format!("{id}/c1")]);
     assert_eq!(deleted["thread_removed"], true);
