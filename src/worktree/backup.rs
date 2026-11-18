@@ -47,7 +47,8 @@ pub struct FileMode {
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
-    /// Only this backup (an error when there is none); default: every backup.
+    /// Only this backup, in full; an error when there is none. Default: every backup, with
+    /// `file_mode_count` in place of `file_modes`.
     id: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -66,12 +67,13 @@ enum Command {
 pub fn run(cli: Cli) -> Result<Output> {
     match cli.command {
         None => {
+            let listing = cli.id.is_none();
             let backups: Vec<Value> = match cli.id {
                 Some(id) => vec![find(&id)?],
                 None => all()?,
             }
             .iter()
-            .map(|(record, dir)| summary(record, dir))
+            .map(|(record, dir)| summary(record, dir, listing))
             .collect();
             Ok(Output::Json(json!({ "backups": backups })))
         }
@@ -93,9 +95,15 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
 }
 
-fn summary(record: &Record, dir: &Path) -> Value {
+/// One backup's record plus its directory. In the list view `file_mode_count` replaces
+/// `file_modes`, which can run to megabytes across many backups.
+fn summary(record: &Record, dir: &Path, listing: bool) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     value["dir"] = json!(dir);
+    if listing && let Some(fields) = value.as_object_mut() {
+        fields.remove("file_modes");
+        fields.insert("file_mode_count".to_owned(), json!(record.file_modes.len()));
+    }
     value
 }
 
