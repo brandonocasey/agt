@@ -62,10 +62,49 @@ pub(super) fn local_thread(new: NewThread, author: Author, body: String, now: &s
     }
 }
 
+/// The commands that name an author.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Workflow {
+    Review,
+    /// QA commands, which reject `--reviewer`.
+    Qa,
+}
+
+/// The error for a missing agent author `flag`. QA rejects `--reviewer`, so it names the QA flags.
+fn needs_agent_flag(target: &Target, flag: &str, workflow: Workflow) -> Error {
+    if workflow == Workflow::Qa {
+        return Error(format!(
+            "an agent author needs {flag}; QA takes --model and --harness"
+        ));
+    }
+    let open_pass = target
+        .runs
+        .iter()
+        .filter(|run| run.ended_at.is_none())
+        .find_map(|run| {
+            run.passes
+                .iter()
+                .find(|pass| pass.ended_at.is_none())
+                .map(|pass| (run, pass))
+        });
+    let mut message = format!("an agent author needs {flag}, or a stored --reviewer");
+    if let Some((run, pass)) = open_pass {
+        let ids: Vec<String> = pass
+            .reviewers
+            .iter()
+            .map(|reviewer| format!("{}.{}.{}", run.id, pass.id, reviewer.id))
+            .collect();
+        message.push_str(&format!("; the open pass has {}", ids.join(", ")));
+    }
+    Error(message)
+}
+
+/// The author the flags name for a command of `workflow`.
 pub(super) fn author(
     args: &AuthorArgs,
     target: &Target,
     default: Option<Author>,
+    workflow: Workflow,
 ) -> Result<Author> {
     let agent = args.model.is_some()
         || args.effort.is_some()
@@ -113,12 +152,12 @@ pub(super) fn author(
         .model
         .clone()
         .or_else(|| stored.map(|reviewer| reviewer.model.clone()))
-        .ok_or_else(|| Error("an agent author needs --model, or a stored --reviewer".into()))?;
+        .ok_or_else(|| needs_agent_flag(target, "--model", workflow))?;
     let harness = args
         .harness
         .clone()
         .or_else(|| stored.map(|reviewer| reviewer.harness.clone()))
-        .ok_or_else(|| Error("an agent author needs --harness, or a stored --reviewer".into()))?;
+        .ok_or_else(|| needs_agent_flag(target, "--harness", workflow))?;
     Ok(Author::Agent {
         model,
         effort: args
@@ -412,7 +451,7 @@ pub(super) fn comment(
     let default = ctx.default_author()?;
     // A QA comment on a check is by the tester of the check's run unless the flags say otherwise.
     let comment_by = |target: &Target, default: Option<Author>| match (qa, check) {
-        (false, _) => author(&args.author, target, default),
+        (false, _) => author(&args.author, target, default, Workflow::Review),
         (true, Some(check)) => finding_author(&args.author, target, default, check),
         (true, None) => qa_author(&args.author, target, default, None),
     };
@@ -552,7 +591,7 @@ pub(super) fn reply(ctx: &Ctx, args: &ReplyArgs, qa: bool) -> Result<Value> {
         let author = if qa {
             qa_author(&args.author, target, default, None)?
         } else {
-            author(&args.author, target, default)?
+            author(&args.author, target, default, Workflow::Review)?
         };
         let thread = find_thread_mut(target, &args.id)?;
         let mut comment = local_comment(&thread.id, &thread.comments, author, body, now);
@@ -665,7 +704,7 @@ pub(super) fn resolve(ctx: &Ctx, args: &ResolveArgs) -> Result<Value> {
     };
     let threads = ctx.update(&scope, |target, now| {
         let author = match reply {
-            Some(_) => Some(author(&args.author, target, default)?),
+            Some(_) => Some(author(&args.author, target, default, Workflow::Review)?),
             None => None,
         };
         let mut changed = Vec::new();

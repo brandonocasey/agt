@@ -165,7 +165,7 @@ fn assign_reviewers(passes: &[Pass], inputs: Vec<ReviewerInput>) -> Result<Vec<R
             Some(id) => {
                 if reviewer_number(&id).is_none() && !SPECIAL_REVIEWERS.contains(&id.as_str()) {
                     return fail(format!(
-                        "reviewer id must look like r<n>, or be manual or fix: {id}"
+                        "reviewer id must look like r<n>, or be manual or fix; a writing reviewer also takes r<n>: {id}"
                     ));
                 }
                 id

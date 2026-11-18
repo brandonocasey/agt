@@ -6,7 +6,7 @@ use crate::review::cli::ApprovalArgs;
 use crate::store::model::{Approval, Target, Thread, ThreadType};
 
 use super::Ctx;
-use super::findings::{NewThread, author, local_thread};
+use super::findings::{NewThread, Workflow, author, local_thread};
 use super::input::read_body;
 
 /// Records an approval of the head as a general thread for `publish`.
@@ -44,7 +44,7 @@ pub(super) fn approve(ctx: &Ctx, args: &ApprovalArgs) -> Result<Value> {
             }
             return Ok(existing.clone());
         }
-        let author = author(&args.author, target, default)?;
+        let author = author(&args.author, target, default, Workflow::Review)?;
         let mut thread = local_thread(
             NewThread {
                 id: target.next_thread_id(),
