@@ -2345,3 +2345,654 @@ fn a_bare_hash_reference_names_the_pull_request_of_a_forgejo_origin() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("is Forgejo, but"), "{stderr}");
 }
+
+const FULL_SHA: &str = "abc123def4567890abc123def4567890abc12345";
+const GITHUB_ORIGIN: &str = "https://github.com/owner/repo.git";
+
+/// The outcome of a wait in a repository whose `origin` is `origin`.
+fn run_in_repo(steps: &[Step], target: &str, origin: &str, env: &[(&str, &str)]) -> Outcome {
+    let scenario = Scenario::new(steps);
+    scenario.env.git(&["remote", "add", "origin", origin]);
+    let mut args = vec![target];
+    args.extend(FAST);
+    let output = scenario.command(&args, env).output().unwrap();
+    Outcome {
+        status: output.status.code().unwrap(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        events: events(&output.stdout),
+    }
+}
+
+/// The reply to the one GraphQL read of a commit. It holds its checks, or none when it has no
+/// rollup yet.
+fn commit(contexts: Option<&[Value]>) -> String {
+    let rollup = contexts.map(|nodes| {
+        json!({"contexts": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes}})
+    });
+    json!({"data": {"repository": {"object": {
+        "__typename": "Commit", "oid": FULL_SHA,
+        "url": "https://github.com/owner/repo/commit/abc123", "statusCheckRollup": rollup,
+    }}}})
+    .to_string()
+}
+
+fn commit_wait(steps: &[Step], extra: &[&str]) -> Outcome {
+    run_with(steps, "owner/repo@abc123", extra, &[])
+}
+
+#[test]
+fn a_github_commit_wait_ends_when_every_check_of_the_commit_passes() {
+    let outcome = commit_wait(
+        &[
+            step(
+                "CommitChecks",
+                &commit(Some(&[run_node("test", "IN_PROGRESS", None)])),
+            ),
+            step(
+                "CommitChecks",
+                &commit(Some(&[run_node("test", "COMPLETED", Some("SUCCESS"))])),
+            ),
+        ],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "change", "final"]);
+    assert_eq!(outcome.events[0]["target"], "owner/repo@abc123");
+    assert_eq!(
+        reasons(&outcome)[..2],
+        ["checks_pending", "required_checks_passed"]
+    );
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+    // The abbreviated SHA is expanded once the host names the commit. It is not read as a new
+    // head.
+    assert!(
+        outcome
+            .events
+            .iter()
+            .all(|event| event["reason"] != "head_changed")
+    );
+}
+
+#[test]
+fn a_failed_check_of_a_github_commit_needs_action() {
+    let outcome = commit_wait(
+        &[step(
+            "CommitChecks",
+            &commit(Some(&[
+                run_node("test", "COMPLETED", Some("FAILURE")),
+                run_node("lint", "COMPLETED", Some("SUCCESS")),
+            ])),
+        )],
+        &[],
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    assert_eq!(last(&outcome)["results"][0]["failed"][0]["name"], "test");
+}
+
+#[test]
+fn a_github_commit_wait_times_out_with_status_3() {
+    let outcome = commit_wait(
+        &[step(
+            "CommitChecks",
+            &commit(Some(&[run_node("test", "IN_PROGRESS", None)])),
+        )],
+        &["--interval", "2", "--max-interval", "2", "--timeout", "1"],
+    );
+    assert_eq!(outcome.status, 3, "{}", outcome.stderr);
+    assert_eq!(last(&outcome)["reason"], "deadline_exceeded");
+}
+
+#[test]
+fn a_github_commit_with_no_checks_yet_stays_pending() {
+    let outcome = commit_wait(
+        &[
+            step("CommitChecks", &commit(None)),
+            step("CommitChecks", &commit(Some(&[]))),
+            step(
+                "CommitChecks",
+                &commit(Some(&[run_node("test", "COMPLETED", Some("SUCCESS"))])),
+            ),
+        ],
+        &[],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[0]["checks"], json!([]));
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn a_github_commit_that_keeps_no_checks_is_blocked_after_the_grace() {
+    let outcome = run_with(
+        &[step("CommitChecks", &commit(None))],
+        "owner/repo@abc123",
+        &[],
+        &[("AGT_ROLLUP_GRACE_SECS", "0")],
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "no_required_checks");
+}
+
+#[test]
+fn an_unknown_github_commit_is_a_query_error() {
+    let missing = r#"{"data": {"repository": {"object": null}}}"#;
+    let steps: Vec<Step> = (0..5).map(|_| step("CommitChecks", missing)).collect();
+    let outcome = commit_wait(&steps, &[]);
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "query_error");
+    assert!(
+        outcome.events[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("owner/repo@abc123 was not found")
+    );
+}
+
+#[test]
+fn a_github_commit_wait_with_job_counts_only_the_named_checks() {
+    let outcome = commit_wait(
+        &[step(
+            "CommitChecks",
+            &commit(Some(&[
+                run_node("test", "COMPLETED", Some("SUCCESS")),
+                run_node("lint", "COMPLETED", Some("FAILURE")),
+            ])),
+        )],
+        &["--job", "test"],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(last(&outcome)["reason"], "checks_complete");
+}
+
+#[test]
+fn at_sha_waits_on_the_commit_of_the_current_repositorys_tracker() {
+    let pass = || {
+        [step(
+            "CommitChecks",
+            &commit(Some(&[run_node("test", "COMPLETED", Some("SUCCESS"))])),
+        )]
+    };
+    let outcome = run_in_repo(&pass(), "@abc123", GITHUB_ORIGIN, &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["target"], "owner/repo@abc123");
+    let failing = [step(
+        "CommitChecks",
+        &commit(Some(&[run_node("test", "COMPLETED", Some("FAILURE"))])),
+    )];
+    assert_eq!(
+        run_in_repo(&failing, "@abc123", GITHUB_ORIGIN, &[]).status,
+        1
+    );
+    let running = [step(
+        "CommitChecks",
+        &commit(Some(&[run_node("test", "IN_PROGRESS", None)])),
+    )];
+    let scenario = Scenario::new(&running);
+    scenario
+        .env
+        .git(&["remote", "add", "origin", GITHUB_ORIGIN]);
+    let output = scenario
+        .command(
+            &[
+                "@abc123",
+                "--interval",
+                "2",
+                "--max-interval",
+                "2",
+                "--timeout",
+                "1",
+            ],
+            &[],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+}
+
+/// A pipeline of the commit, made by a push to `main`.
+fn commit_pipeline(id: u64, status: &str) -> Value {
+    commit_pipeline_from(id, status, "main", "push")
+}
+
+fn commit_pipeline_from(id: u64, status: &str, git_ref: &str, source: &str) -> Value {
+    json!({
+        "id": id, "status": status, "sha": FULL_SHA, "ref": git_ref, "source": source,
+        "web_url": format!("https://gitlab.example.test/p/{id}"),
+    })
+}
+
+/// The reads of one poll of the commit `abc123` of `project` (an API project path). They are the
+/// commit, then its pipelines.
+fn commit_poll_of(project: &str, pipelines: &[Value]) -> Vec<Step> {
+    vec![
+        step(
+            &format!("{GET} {project}/repository/commits/abc123"),
+            &json!({"id": FULL_SHA}).to_string(),
+        ),
+        commit_pipelines_of(project, pipelines),
+    ]
+}
+
+fn commit_pipelines_of(project: &str, pipelines: &[Value]) -> Step {
+    step(
+        &format!("{GET} --paginate {project}/pipelines?sha={FULL_SHA}&per_page=100"),
+        &json!(pipelines).to_string(),
+    )
+}
+
+fn gitlab_commit_poll(pipelines: &[Value]) -> Vec<Step> {
+    commit_poll_of(GITLAB_PROJECT, pipelines)
+}
+
+fn gitlab_commit_pipelines(pipelines: &[Value]) -> Step {
+    commit_pipelines_of(GITLAB_PROJECT, pipelines)
+}
+
+fn gitlab_commit_wait(steps: &[Step], extra: &[&str]) -> Outcome {
+    run_with(
+        steps,
+        "group/sub/project@abc123",
+        extra,
+        &[("GITLAB_HOST", "gitlab.example.test")],
+    )
+}
+
+#[test]
+fn a_gitlab_commit_wait_ends_when_every_pipeline_of_the_commit_passes() {
+    let mut steps = gitlab_commit_poll(&[
+        commit_pipeline_from(11, "success", "release", "push"),
+        commit_pipeline(12, "running"),
+    ]);
+    // The full id is known after the first poll, so the second looks nothing up.
+    steps.push(gitlab_commit_pipelines(&[
+        commit_pipeline_from(11, "success", "release", "push"),
+        commit_pipeline(12, "success"),
+    ]));
+    let outcome = gitlab_commit_wait(&steps, &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "change", "final"]);
+    assert_eq!(outcome.events[0]["target"], "group/sub/project@abc123");
+    assert_eq!(
+        reasons(&outcome)[..2],
+        ["checks_pending", "required_checks_passed"]
+    );
+    assert_eq!(outcome.events[1]["checks"][0]["name"], "pipeline 11");
+}
+
+#[test]
+fn a_failed_pipeline_of_a_gitlab_commit_needs_action() {
+    let outcome = gitlab_commit_wait(
+        &gitlab_commit_poll(&[
+            commit_pipeline_from(11, "failed", "main", "schedule"),
+            commit_pipeline(12, "success"),
+        ]),
+        &[],
+    );
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    assert_eq!(
+        last(&outcome)["results"][0]["failed"][0]["name"],
+        "pipeline 11"
+    );
+}
+
+#[test]
+fn a_newer_pipeline_of_the_same_ref_and_source_supersedes_an_older_failed_one() {
+    for older in ["failed", "canceled"] {
+        let outcome = gitlab_commit_wait(
+            &gitlab_commit_poll(&[commit_pipeline(12, "success"), commit_pipeline(11, older)]),
+            &[],
+        );
+        assert_eq!(outcome.status, 0, "{older}: {}", outcome.stderr);
+        assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+        let checks = outcome.events[0]["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 1, "{older}: {checks:?}");
+        assert_eq!(checks[0]["name"], "pipeline 12");
+    }
+}
+
+#[test]
+fn an_older_pipeline_does_not_hide_a_failed_newer_one_or_another_ref_or_source() {
+    for pipelines in [
+        [
+            commit_pipeline(12, "failed"),
+            commit_pipeline(11, "success"),
+        ],
+        [
+            commit_pipeline(12, "success"),
+            commit_pipeline_from(11, "failed", "main", "schedule"),
+        ],
+        [
+            commit_pipeline(12, "success"),
+            commit_pipeline_from(11, "failed", "other", "push"),
+        ],
+    ] {
+        let outcome = gitlab_commit_wait(&gitlab_commit_poll(&pipelines), &[]);
+        assert_eq!(outcome.status, 1, "{pipelines:?}: {}", outcome.stderr);
+        assert_eq!(outcome.events[0]["reason"], "check_failed");
+    }
+}
+
+#[test]
+fn a_gitlab_commit_wait_with_job_reads_only_the_newest_pipeline_of_each_pair() {
+    let mut steps = gitlab_commit_poll(&[
+        commit_pipeline(12, "success"),
+        commit_pipeline(11, "failed"),
+    ]);
+    steps.push(step(
+        &format!(
+            "{GET} --paginate {}",
+            mr_path("pipelines/12/jobs?per_page=100")
+        ),
+        &gitlab_jobs(&[("build", "success")]),
+    ));
+    let outcome = gitlab_commit_wait(&steps, &["--job", "build"]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn a_gitlab_commit_wait_times_out_with_status_3() {
+    let outcome = gitlab_commit_wait(
+        &gitlab_commit_poll(&[commit_pipeline(11, "running")]),
+        &["--interval", "2", "--max-interval", "2", "--timeout", "1"],
+    );
+    assert_eq!(outcome.status, 3, "{}", outcome.stderr);
+    assert_eq!(last(&outcome)["reason"], "deadline_exceeded");
+}
+
+#[test]
+fn a_gitlab_commit_with_no_pipeline_yet_stays_pending() {
+    let mut steps = gitlab_commit_poll(&[]);
+    steps.push(gitlab_commit_pipelines(&[commit_pipeline(11, "success")]));
+    let outcome = gitlab_commit_wait(&steps, &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    assert_eq!(outcome.events[1]["reason"], "required_checks_passed");
+}
+
+#[test]
+fn a_gitlab_commit_wait_with_job_reads_the_jobs_of_its_pipelines() {
+    let mut steps = gitlab_commit_poll(&[commit_pipeline(11, "failed")]);
+    steps.push(step(
+        &format!(
+            "{GET} --paginate {}",
+            mr_path("pipelines/11/jobs?per_page=100")
+        ),
+        &gitlab_jobs(&[("build", "success"), ("test", "failed")]),
+    ));
+    let outcome = gitlab_commit_wait(&steps, &["--job", "build"]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "required_checks_passed");
+    assert_eq!(outcome.events[0]["checks"][0]["name"], "build");
+}
+
+#[test]
+fn a_gitlab_commit_given_in_full_is_not_looked_up() {
+    let steps = [gitlab_commit_pipelines(&[commit_pipeline(11, "success")])];
+    let outcome = run_with(
+        &steps,
+        &format!("group/sub/project@{FULL_SHA}"),
+        &[],
+        &[("GITLAB_HOST", "gitlab.example.test")],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+}
+
+#[test]
+fn a_commit_of_a_two_part_path_uses_the_forge_of_the_trackers_repository() {
+    let steps = commit_poll_of("projects/g%2Fp", &[commit_pipeline(11, "success")]);
+    for target in ["@abc123", "g/p@abc123"] {
+        let outcome = run_in_repo(&steps, target, "https://gitlab.com/g/p.git", &[]);
+        assert_eq!(outcome.status, 0, "{target}: {}", outcome.stderr);
+        assert_eq!(outcome.events[0]["target"], "g/p@abc123");
+    }
+}
+
+fn actions_run(status: &str, conclusion: Option<&str>) -> String {
+    json!({
+        "id": 55, "name": "CI", "event": "push", "status": status, "conclusion": conclusion,
+        "head_sha": FULL_SHA, "html_url": "https://github.com/owner/repo/actions/runs/55",
+    })
+    .to_string()
+}
+
+fn actions_job(id: u64, name: &str, status: &str, conclusion: Option<&str>) -> Value {
+    json!({
+        "id": id, "name": name, "status": status, "conclusion": conclusion,
+        "html_url": format!("https://github.com/owner/repo/actions/runs/55/job/{id}"),
+    })
+}
+
+/// One poll of an Actions run: the run, then its jobs.
+fn run_poll(run: &str, jobs: &[Value]) -> Vec<Step> {
+    vec![
+        step("actions/runs/55", run),
+        step(
+            "actions/runs/55/jobs?per_page=100&page=1",
+            &json!({"total_count": jobs.len(), "jobs": jobs}).to_string(),
+        ),
+    ]
+}
+
+const RUN_URL: &str = "https://github.com/owner/repo/actions/runs/55";
+
+#[test]
+fn a_github_actions_run_url_waits_on_that_run() {
+    let mut steps = run_poll(
+        &actions_run("in_progress", None),
+        &[
+            actions_job(1, "build", "completed", Some("success")),
+            actions_job(2, "test", "in_progress", None),
+        ],
+    );
+    steps.extend(run_poll(
+        &actions_run("completed", Some("success")),
+        &[
+            actions_job(1, "build", "completed", Some("success")),
+            actions_job(2, "test", "completed", Some("success")),
+        ],
+    ));
+    let outcome = run_with(&steps, RUN_URL, &[], &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(names(&outcome), ["initial", "change", "final"]);
+    assert_eq!(outcome.events[0]["target"], "owner/repo/actions/runs/55");
+    assert_eq!(
+        reasons(&outcome)[..2],
+        ["checks_pending", "required_checks_passed"]
+    );
+    assert_eq!(outcome.events[1]["checks"][1]["name"], "test");
+}
+
+#[test]
+fn a_failed_job_of_a_github_actions_run_needs_action() {
+    let steps = run_poll(
+        &actions_run("completed", Some("failure")),
+        &[
+            actions_job(1, "build", "completed", Some("success")),
+            actions_job(2, "test", "completed", Some("failure")),
+        ],
+    );
+    let outcome = run_with(&steps, RUN_URL, &[], &[]);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    assert_eq!(last(&outcome)["results"][0]["failed"][0]["name"], "test");
+}
+
+#[test]
+fn a_failed_job_on_the_second_page_of_a_runs_jobs_needs_action() {
+    let page = |number: u32, jobs: &[Value]| {
+        step(
+            &format!("actions/runs/55/jobs?per_page=100&page={number}"),
+            &json!({"total_count": 101, "jobs": jobs}).to_string(),
+        )
+    };
+    let first: Vec<Value> = (1..=100)
+        .map(|id| actions_job(id, &format!("shard {id}"), "completed", Some("success")))
+        .collect();
+    let steps = [
+        step(
+            "actions/runs/55",
+            &actions_run("completed", Some("failure")),
+        ),
+        page(1, &first),
+        page(2, &[actions_job(101, "late", "completed", Some("failure"))]),
+    ];
+    let outcome = run_with(&steps, RUN_URL, &[], &[]);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+    assert_eq!(last(&outcome)["results"][0]["failed"][0]["name"], "late");
+}
+
+#[test]
+fn a_github_actions_run_wait_times_out_with_status_3() {
+    let steps = run_poll(
+        &actions_run("in_progress", None),
+        &[actions_job(2, "test", "in_progress", None)],
+    );
+    let outcome = run_with(
+        &steps,
+        RUN_URL,
+        &["--interval", "2", "--max-interval", "2", "--timeout", "1"],
+        &[],
+    );
+    assert_eq!(outcome.status, 3, "{}", outcome.stderr);
+    assert_eq!(last(&outcome)["reason"], "deadline_exceeded");
+}
+
+#[test]
+fn an_unfinished_run_is_pending_even_when_its_jobs_so_far_passed() {
+    let mut steps = run_poll(
+        &actions_run("in_progress", None),
+        &[actions_job(1, "build", "completed", Some("success"))],
+    );
+    steps.extend(run_poll(
+        &actions_run("completed", Some("success")),
+        &[actions_job(1, "build", "completed", Some("success"))],
+    ));
+    let outcome = run_with(&steps, RUN_URL, &[], &[]);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(
+        reasons(&outcome)[..2],
+        ["checks_pending", "required_checks_passed"]
+    );
+}
+
+#[test]
+fn a_run_with_no_job_is_judged_as_one_check() {
+    let queued = run_poll(&actions_run("queued", None), &[]);
+    let outcome = run_with(&queued, RUN_URL, &["--timeout", "1"], &[]);
+    assert_eq!(outcome.status, 3, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "checks_pending");
+    let broken = run_poll(&actions_run("completed", Some("startup_failure")), &[]);
+    let outcome = run_with(&broken, RUN_URL, &[], &[]);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "check_failed");
+}
+
+#[test]
+fn an_actions_run_url_with_a_trailing_path_is_not_a_target() {
+    for tail in [
+        "/jobs/9",
+        "/workflow",
+        "/job/9/extra",
+        "/attempts/x",
+        "/attempts/2/extra",
+        "/job/99999999999999999999",
+    ] {
+        let outcome = run_with(&[], &format!("{RUN_URL}{tail}"), &[], &[]);
+        assert_eq!(outcome.status, 2, "{tail}");
+        assert!(outcome.events.is_empty(), "{tail}");
+        assert!(
+            outcome.stderr.contains("invalid target"),
+            "{tail}: {}",
+            outcome.stderr
+        );
+    }
+}
+
+#[test]
+fn an_actions_url_with_run_id_zero_is_not_a_target() {
+    for url in [
+        "https://github.com/owner/repo/actions/runs/0",
+        "https://github.com/owner/repo/actions/runs/0/job/9",
+        "https://github.com/owner/repo/actions/runs/55/job/0",
+    ] {
+        let outcome = run_with(&[], url, &[], &[]);
+        assert_eq!(outcome.status, 2, "{url}");
+        assert!(outcome.events.is_empty(), "{url}");
+        assert!(
+            outcome.stderr.contains("invalid target"),
+            "{url}: {}",
+            outcome.stderr
+        );
+    }
+}
+
+#[test]
+fn an_actions_run_url_may_end_in_a_slash_an_attempt_a_job_a_query_or_a_fragment() {
+    for tail in ["/", "/attempts/2", "/job/9", "?pr=1", "#summary"] {
+        let steps = run_poll(
+            &actions_run("completed", Some("success")),
+            &[actions_job(1, "build", "completed", Some("success"))],
+        );
+        let outcome = run_with(&steps, &format!("{RUN_URL}{tail}"), &[], &[]);
+        assert_eq!(outcome.status, 0, "{tail}: {}", outcome.stderr);
+        assert_eq!(outcome.events[0]["target"], "owner/repo/actions/runs/55");
+    }
+}
+
+#[test]
+fn a_github_run_url_takes_no_sha_and_an_unknown_run_is_an_error() {
+    let outcome = run_with(&[], &format!("{RUN_URL}@abc123"), &[], &[]);
+    assert_eq!(outcome.status, 2);
+    assert!(
+        outcome.stderr.contains("an Actions run takes no @SHA"),
+        "{}",
+        outcome.stderr
+    );
+    let steps = [failing("actions/runs/55", "gh: Not Found (HTTP 404)", 1)];
+    let outcome = run_with(&steps, RUN_URL, &[], &[]);
+    assert_eq!(outcome.status, 2, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["reason"], "query_error");
+}
+
+#[test]
+fn at_sha_on_a_forgejo_origin_waits_on_the_statuses_of_the_commit() {
+    let status = |state: &str| {
+        step(
+            "repos/o/r/commits/abc123/status",
+            &json!({"statuses": [commit_status("ci/build", state)]}).to_string(),
+        )
+    };
+    let steps = [tea_login(), status("pending"), status("success")];
+    let outcome = run_in_repo(&steps, "@abc123", "https://codeberg.org/o/r.git", &TEA);
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert_eq!(outcome.events[0]["target"], "o/r@abc123");
+    assert_eq!(
+        reasons(&outcome)[..2],
+        ["checks_pending", "required_checks_passed"]
+    );
+    let steps = [tea_login(), status("failure")];
+    let outcome = run_in_repo(&steps, "@abc123", "https://codeberg.org/o/r.git", &TEA);
+    assert_eq!(outcome.status, 1, "{}", outcome.stderr);
+}
+
+#[test]
+fn a_commit_target_that_is_not_a_commit_is_rejected() {
+    for bad in [
+        "o/r@abc",
+        "o/r@xyz123",
+        "@",
+        "https://github.com/o/r@abc123",
+    ] {
+        let outcome = run_with(&[], bad, &[], &[]);
+        assert_eq!(outcome.status, 2, "{bad}");
+        assert!(
+            outcome.stderr.contains("invalid target"),
+            "{bad}: {}",
+            outcome.stderr
+        );
+    }
+}

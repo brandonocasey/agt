@@ -74,6 +74,21 @@ impl Forgejo {
         })
     }
 
+    /// The statuses of commit `sha` of `repo`, with `sha` as the head.
+    pub fn commit_checks(&self, repo: &str, sha: &str) -> Result<Pull, TransportError> {
+        Ok(Pull {
+            view: json!({
+                "number": null,
+                "url": null,
+                "state": "OPEN",
+                "mergedAt": null,
+                "closed": false,
+                "headRefOid": sha,
+            }),
+            checks: self.statuses(repo, sha)?.iter().map(check).collect(),
+        })
+    }
+
     /// Whether any status exists for `sha` of `repo`.
     pub fn has_statuses(&self, repo: &str, sha: &str) -> Result<bool, TransportError> {
         Ok(!self.statuses(repo, sha)?.is_empty())

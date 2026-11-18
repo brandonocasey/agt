@@ -10,6 +10,7 @@ mod commands;
 mod comment_edit;
 mod directory;
 mod doctor;
+mod graphql_queries;
 mod issue_discard;
 mod issue_hierarchy;
 mod issue_hierarchy_budget;

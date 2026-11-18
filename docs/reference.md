@@ -1294,7 +1294,7 @@ cannot merge) and `already_in_target` (commits of the branch whose patch the tar
 
 ## CI
 
-`agt ci` waits for PR/MR checks and triages GitLab failures.
+`agt ci` waits for the checks of PRs, MRs, commits and Actions runs. It also triages GitLab failures.
 
 ```sh
 agt ci wait TARGET... [--job NAME]... [--timeout SEC] [--interval SEC] [--max-interval SEC] [--remote NAME|HOST/REPO]
@@ -1305,7 +1305,27 @@ agt ci failures <mr> [--limit N] [--remote NAME|HOST/REPO]
 a PR or MR URL, `#PR` or `!IID` in the current repository (the tracker `agt pr` picks: `--remote <name|host/repo>`, else the
 tracker of `origin`, else the only one; several trackers and no `origin` fail and list the `--remote`
 choices; no tracker at all is an error), and a
-GitLab pipeline id (current repository) or pipeline URL. Without `@SHA` the head read by the first
+GitLab pipeline id (current repository) or pipeline URL.
+
+A commit is a target, so you can follow a push without a PR:
+
+- `OWNER/REPO@SHA` waits on the checks and statuses of that commit on GitHub.
+- `GROUP/PROJECT@SHA` waits on the pipelines of that commit on GitLab.
+- `@SHA` waits on the commit in the current repository's tracker (GitHub, GitLab or Forgejo).
+
+A path of three or more parts is GitLab.
+A path of two parts uses the forge of the current repository's tracker for it. Without one, it is GitHub.
+A commit with no checks is pending for the first 120 seconds of the wait. After that it is blocked.
+On GitLab the wait judges the newest pipeline of each ref and source.
+Older superseded pipelines do not count.
+
+A GitHub Actions run URL waits on that run's jobs and takes no `@SHA`.
+The URL is `https://github.com/OWNER/REPO/actions/runs/N`.
+Only `/job/ID`, `/attempts/N`, a slash, a query or a fragment may follow.
+A run that has not completed stays pending while its jobs so far passed.
+A failed job ends the wait.
+
+Without `@SHA` on a PR, MR or pipeline the head read by the first
 poll is pinned, and a later head is a change. `@SHA` on a PR or MR target is for right after a
 push: the target stays pending (`waiting_for_pipeline`) until the head and, on GitLab, a pipeline
 (or merged-results pipeline) is on that commit. `@SHA` may be abbreviated to 7 or more hex
@@ -1362,7 +1382,7 @@ on GitHub and GitLab, with these differences:
   among the open PRs first, then among every state; a fork's PR of the same name, or one whose head
   repository is gone, is ignored. On
   GitHub and GitLab a same-named fork PR still counts.
-- `agt ci wait` reads the combined commit status of the PR head. Every status counts, a `warning` or `skipped` one as `skipping` (it passes); there is no
+- `agt ci wait` reads the combined commit status of the PR head, or of a commit given as `@SHA`. Every status counts, a `warning` or `skipped` one as `skipping` (it passes); there is no
   required-check logic. Name the PR as `#<number>`; an Actions run URL is refused.
   `agt ci failures` stays GitLab only.
 - Issues have no parent or child: `--parent` stays local and `issue push` skips it. Labels are set by name.
