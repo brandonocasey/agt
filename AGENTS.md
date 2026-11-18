@@ -22,7 +22,7 @@ mise run test
 
 ## Layout
 
-`src/core` (errors, clock, output), `src/store` (locked documents and the
+`src/core` (errors, clock, output, `cwd.rs` for the directory agt started in once `-C` has moved it), `src/store` (locked documents and the
 persisted `model`), `src/git.rs` and `src/forge` (services, transports, anchors,
 markers) are foundations. `src/review` and `src/issue` are domain modules; `agt qa`
 (`src/review/commands/qa.rs`) belongs to the review domain and keeps QA runs in the review

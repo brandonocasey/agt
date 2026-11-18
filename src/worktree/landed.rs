@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use super::info;
 use crate::core::clock;
+use crate::core::cwd;
 use crate::core::error::Result;
 use crate::forge::landed::Source;
 use crate::git::{Repo, Worktree, nul_fields};
@@ -85,8 +86,8 @@ pub struct Scene {
     /// The default branch's name and ref.
     pub name: String,
     pub reference: String,
-    /// The worktree holding the current directory, if one of this repository does.
-    held: Option<PathBuf>,
+    /// The worktrees holding the current directory or the one agt was started in.
+    held: Vec<PathBuf>,
 }
 
 impl Scene {
@@ -96,14 +97,20 @@ impl Scene {
         let Some((name, reference)) = repo.default_branch_ref()? else {
             return Ok(None);
         };
-        let cwd = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
-        let held = cwd.ok().and_then(|cwd| {
-            entries
-                .iter()
-                .filter_map(|entry| info::real(&entry.path).ok())
-                .filter(|path| cwd.starts_with(path))
-                .max_by_key(|path| path.components().count())
-        });
+        let paths: Vec<PathBuf> = entries
+            .iter()
+            .filter_map(|entry| info::real(&entry.path).ok())
+            .collect();
+        let held = cwd::held()
+            .iter()
+            .filter_map(|dir| {
+                paths
+                    .iter()
+                    .filter(|path| dir.starts_with(path))
+                    .max_by_key(|path| path.components().count())
+            })
+            .cloned()
+            .collect();
         Ok(Some(Self {
             entries,
             name,
@@ -116,11 +123,9 @@ impl Scene {
         &self.entries[0]
     }
 
-    /// Whether the current directory is in the worktree at `path`.
+    /// Whether the worktree at `path` holds the current directory or the one agt started in.
     pub fn holds_cwd(&self, path: &Path) -> bool {
-        self.held
-            .as_deref()
-            .is_some_and(|held| info::real(path).is_ok_and(|real| real == held))
+        info::real(path).is_ok_and(|real| self.held.contains(&real))
     }
 
     /// The default branch, `main`, `master` and `develop` by name, the main checkout's branch

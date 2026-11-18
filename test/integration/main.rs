@@ -7,6 +7,7 @@ mod ci_wait;
 mod cleanup;
 mod commands;
 mod comment_edit;
+mod directory;
 mod doctor;
 mod issue_discard;
 mod issue_hierarchy;

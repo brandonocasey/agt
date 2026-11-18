@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::branch;
 use crate::check;
 use crate::ci;
 use crate::cleanup;
-use crate::core::error::Result;
+use crate::core::error::{Result, ctx};
 use crate::core::output::Output;
 use crate::doctor;
 use crate::issue;
@@ -22,6 +24,9 @@ use crate::worktree;
 pub struct Cli {
     #[command(flatten)]
     offline: crate::forge::auto::Offline,
+    /// Run as if started in DIR, like `git -C`. Relative path arguments are taken from it.
+    #[arg(short = 'C', long, global = true, value_name = "DIR")]
+    directory: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -88,6 +93,11 @@ impl pr::Gates for DomainGates {
 
 pub fn run(cli: Cli) -> Result<Output> {
     cli.offline.install();
+    crate::core::cwd::record_start();
+    if let Some(directory) = &cli.directory {
+        std::env::set_current_dir(directory)
+            .map_err(ctx(format!("cannot change to {}", directory.display())))?;
+    }
     match cli.command {
         Command::Review(args) => review::commands::run(*args),
         Command::Qa(args) => review::commands::run_qa(*args),
