@@ -32,7 +32,7 @@ A `v*` tag publishes release archives through the [release workflow](../.github/
 Most commands print JSON on stdout, indented at a terminal and compact when piped.
 Exceptions include session reports, `ps`, `doctor`, `secrets`, and `review list --format prompt`.
 Several offer `--json`; each command's section describes its output.
-Task records and `sessions report --json` always use indented JSON, including when piped.
+`sessions report --json` always uses indented JSON, including when piped.
 `worktree port --env` prints a shell assignment, and `wait` prints a completion message.
 `cleanup --count` prints a count message when saved candidates remain.
 
@@ -1233,7 +1233,7 @@ unknown flag or command, a bad `--status`, a `--revision` below 1, no command at
 
 Task records are one pretty-printed JSON file each in `$XDG_STATE_HOME/agents/tasks/<id>.json`
 (mode 0600, directory 0700), guarded by a `.<id>.flock` file (an advisory lock that goes when the process dies) and a `revision` that every
-write must name (record `version` 1). The command that finds and searches sessions is
+write must name (record `version` 1). The keys are camelCase, such as `updatedAt`. Every `agt task` command prints snake_case keys (`updated_at`). It indents at a terminal and compacts when piped, like other commands. The command that finds and searches sessions is
 `agt sessions search`.
 
 ## Offline
@@ -1593,7 +1593,7 @@ harness is read off each file's first line; `search` additionally reads the prom
 of the human turns in Codex and Claude transcripts, prompt history files and
 `--file` in `agents/tasks/session-index/index.json` (version 4). Every run first updates the
 index incrementally; `--rebuild`, a rewritten file or another index version scans again. Without
-`--query` and `--session` it prints the coverage as JSON (`updatedAt`, the counts of files,
+`--query` and `--session` it prints the coverage as JSON (`updated_at`, the counts of files,
 turns and unreadable sources). With `--session ID` and no `--query` it prints the session's
 sources and turn count and fails when the session is not found. With `--query` it prints up to
 `--limit` (1 to 100, 20) user turns that contain the text, case-insensitively, newest first, with

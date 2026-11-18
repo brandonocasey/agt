@@ -7,6 +7,7 @@ pub mod error;
 pub mod group;
 pub mod harness;
 pub mod hash;
+pub mod json_keys;
 pub mod local;
 pub mod output;
 pub mod process;

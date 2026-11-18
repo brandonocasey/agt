@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
+use crate::core::json_keys::snake_case_keys;
 use crate::core::local::{error_code, lock_file_or_busy, private_dir, tasks_dir, write_atomic};
 use crate::core::output::Output;
 use crate::core::text::bounded;
@@ -327,18 +328,21 @@ fn index_sessions(options: &SearchArgs, session: Option<&str>) -> Result<Indexed
     })
 }
 
+/// The coverage as printed, with snake_case keys; the copy stored in the index keeps camelCase.
 fn coverage_value(coverage: &Coverage) -> Result<Value> {
-    serde_json::to_value(coverage).map_err(ctx("serialize coverage"))
+    serde_json::to_value(coverage)
+        .map(snake_case_keys)
+        .map_err(ctx("serialize coverage"))
 }
 
-/// The index coverage as `updatedAt` and the coverage fields.
+/// The index coverage as `updated_at` and the coverage fields.
 fn coverage_report(indexed: &Indexed) -> Result<Output> {
     let mut report = serde_json::Map::new();
-    report.insert("updatedAt".into(), json!(indexed.updated_at));
+    report.insert("updated_at".into(), json!(indexed.updated_at));
     if let Value::Object(coverage) = coverage_value(&indexed.coverage)? {
         report.extend(coverage);
     }
-    Output::pretty(&Value::Object(report))
+    Ok(Output::Json(Value::Object(report)))
 }
 
 fn matching<'a>(turns: &'a [Merged], session: &str) -> Vec<&'a Merged> {
@@ -359,14 +363,14 @@ fn resolve(indexed: &Indexed, session: &str) -> Result<Output> {
         return fail(format!("session {session} was not found"));
     };
     let sources = unique(turns.iter().flat_map(|merged| merged.sources.clone()));
-    Output::pretty(&json!({
-        "sessionId": session,
+    Ok(Output::Json(json!({
+        "session_id": session,
         "host": first.turn.host,
         "sources": sources,
-        "sourceType": first.turn.source_type,
+        "source_type": first.turn.source_type,
         "turns": turns.len(),
         "coverage": coverage_value(&indexed.coverage)?,
-    }))
+    })))
 }
 
 pub fn search(args: &SearchArgs) -> Result<Output> {
@@ -436,9 +440,9 @@ pub fn search(args: &SearchArgs) -> Result<Output> {
         results.push(json!({
             "source": turn.source,
             "sources": merged.sources,
-            "sourceType": turn.source_type,
+            "source_type": turn.source_type,
             "host": turn.host,
-            "sessionId": turn.session_id,
+            "session_id": turn.session_id,
             "timestamp": turn.timestamp,
             "role": turn.role,
             "text": turn.text.chars().skip(start).take(500).collect::<String>(),
@@ -451,5 +455,5 @@ pub fn search(args: &SearchArgs) -> Result<Output> {
         "{}",
         json!({ "coverage": coverage_value(&indexed.coverage)? })
     );
-    Output::pretty(&Value::Array(results))
+    Ok(Output::Json(Value::Array(results)))
 }

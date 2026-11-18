@@ -28,11 +28,6 @@ pub enum Output {
 }
 
 impl Output {
-    /// Always-indented JSON text, even when piped.
-    pub fn pretty(value: &Value) -> Result<Output> {
-        pretty(value).map(Output::Text)
-    }
-
     /// This output, then exit `code`; a zero code is a plain success.
     pub fn exiting(self, code: u8) -> Output {
         if code == 0 {
