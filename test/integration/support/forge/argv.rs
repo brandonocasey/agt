@@ -7,6 +7,11 @@ pub fn gh_get(path: &str) -> Vec<String> {
     args(&["api", "--method", "GET", path])
 }
 
+/// A read of text, such as a job log. gh prints its escape sequences only when told to.
+pub fn gh_raw(path: &str) -> Vec<String> {
+    args(&["api", "--method", "GET", "--allow-escape-sequences", path])
+}
+
 pub fn gh_paginate(path: &str) -> Vec<String> {
     args(&["api", "--method", "GET", "--paginate", path])
 }

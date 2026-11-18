@@ -1,11 +1,12 @@
-//! `agt ci`: `failures` compares an MR's failing tests with recent default-branch pipelines
-//! (GitLab only); `wait` polls PRs, MRs, pipelines, commits and Actions runs until their
-//! checks finish.
+//! `agt ci`: `failures` lists the failed checks of a PR, or compares an MR's failing tests with
+//! recent default-branch pipelines; `wait` polls PRs, MRs, pipelines, commits and Actions runs
+//! until their checks finish.
 
 mod api;
 mod classify;
 mod failures;
 mod poll;
+mod pull_failures;
 mod specs;
 mod table;
 mod target;
@@ -24,7 +25,7 @@ use crate::store::model::Forge;
 use api::Project;
 use table::Out;
 
-/// GitHub, GitLab and Forgejo CI: wait for checks, and triage GitLab failures.
+/// GitHub, GitLab and Forgejo CI: wait for checks, and triage failures.
 #[derive(Args)]
 pub struct Cli {
     #[command(subcommand)]
@@ -33,13 +34,20 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Failed jobs and specs of an MR versus the default branch.
+    /// Failed jobs and specs of a PR or MR (an MR versus the default branch).
     ///
-    /// <MR> is 123, !123, group/project!123 or an MR URL. Without a group/project!N or a URL, the project is the
-    /// current directory's repository. It lists failed and retried jobs of the MR's head pipeline, the
-    /// failing specs in their logs (Playwright, WebdriverIO, Karma, Jest), and how often each
-    /// spec failed in the last --limit finished default-branch pipelines, including retried attempts.
-    /// Verdicts:
+    /// <MR> is 123, !123, group/project!123 or an MR URL. Without a group/project!N or a URL,
+    /// the project is the current directory's repository. It lists the failed and retried jobs
+    /// of the MR's head pipeline. It also lists the failing specs in their logs (Playwright,
+    /// WebdriverIO, Karma, Jest). Each spec gets a verdict. It counts how often the spec failed
+    /// in the last --limit finished default-branch pipelines. Retried attempts count too.
+    ///
+    /// A GitHub PR is OWNER/REPO#PR, #PR or a PR URL. It lists its failed checks with id, name
+    /// and url. So does a Forgejo PR (a PR URL, or #PR in a Forgejo repository). On GitHub it
+    /// also lists the failing specs in the logs of failed Actions jobs. agt does not read job
+    /// logs on Forgejo, so it lists no specs there. A PR has no verdicts and ignores --limit.
+    ///
+    /// GitLab verdicts:
     ///   new           never failed on the default branch
     ///   pre-existing  also fails in the latest default-branch pipeline that ran the job
     ///   flaky         passed on retry in the MR, or failed only in older or retried
@@ -126,14 +134,14 @@ fn positive(text: &str) -> std::result::Result<f64, String> {
     })
 }
 
-/// An id, `!id` or GitLab MR or pipeline URL, or any other form `agt ci wait` takes; a bare id is
-/// an MR.
+/// An MR or PR in any form `agt ci wait` takes. A bare id is an MR.
 fn parse_target(value: &str) -> Result<target::Target> {
     let parsed = target::parse_as(value, false)
-        .map_err(|_| Error(format!("expected an id, !id, or URL, got '{value}'")))?;
-    if parsed.platform != Forge::Gitlab {
-        return fail("failures needs a GitLab MR");
-    }
+        .map_err(|_| {
+            Error(format!(
+                "expected an MR or PR (an id, !id, GROUP/PROJECT!IID, OWNER/REPO#PR, #PR or a PR or MR URL), got '{value}'"
+            ))
+        })?;
     if parsed.sha.is_some() {
         return fail("failures takes no @SHA");
     }
@@ -154,7 +162,6 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 fn execute(cli: Cli) -> Result<u8> {
     Offline::current().forbid("agt ci")?;
-    let out = Out::default();
     let code = match cli.command {
         Command::Failures {
             target,
@@ -164,22 +171,7 @@ fn execute(cli: Cli) -> Result<u8> {
             if limit < 1 {
                 return fail("--limit must be at least 1");
             }
-            let mut target = parse_target(&target)?;
-            if remote.is_some() && target.repo.is_none() {
-                let located = target::resolve(target.clone(), remote.as_deref())?;
-                target.host = Some(located.host);
-                target.repo = Some(located.repo);
-            }
-            let gitlab = connect(&target)?;
-            if target.pipeline {
-                return fail("failures takes an MR, not a pipeline");
-            }
-            failures::run(
-                &gitlab,
-                target.number,
-                usize::try_from(limit).unwrap_or(1),
-                &out,
-            )?;
+            failures_of(&parse_target(&target)?, limit, remote.as_deref())?;
             0
         }
         Command::Wait {
@@ -199,6 +191,34 @@ fn execute(cli: Cli) -> Result<u8> {
         }
     };
     Ok(code)
+}
+
+/// Prints the failures of a GitLab MR, or of a GitHub or Forgejo PR.
+fn failures_of(parsed: &target::Target, limit: i64, remote: Option<&str>) -> Result<()> {
+    let out = Out::default();
+    if parsed.platform != Forge::Gitlab {
+        if parsed.pipeline {
+            return fail("failures takes a PR, not an Actions run");
+        }
+        let resolved = target::resolve(parsed.clone(), remote)?;
+        return pull_failures::run(&resolved, &out);
+    }
+    let mut parsed = parsed.clone();
+    if remote.is_some() && parsed.repo.is_none() {
+        let located = target::resolve(parsed.clone(), remote)?;
+        parsed.host = Some(located.host);
+        parsed.repo = Some(located.repo);
+    }
+    let gitlab = connect(&parsed)?;
+    if parsed.pipeline {
+        return fail("failures takes an MR, not a pipeline");
+    }
+    failures::run(
+        &gitlab,
+        parsed.number,
+        usize::try_from(limit).unwrap_or(1),
+        &out,
+    )
 }
 
 /// The timing options of `agt ci wait`, in seconds.

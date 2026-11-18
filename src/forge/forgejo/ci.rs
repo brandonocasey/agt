@@ -13,7 +13,7 @@ pub struct Pull {
     /// `number`, `url`, `state` (`OPEN`, `CLOSED` or `MERGED`), `mergedAt`, `closed` and
     /// `headRefOid`, as the GitHub view names them.
     pub view: Value,
-    /// `name`, `state`, `bucket` (`pass`, `fail`, `pending` or `skipping`), `description`,
+    /// `id`, `name`, `state`, `bucket` (`pass`, `fail`, `pending` or `skipping`), `description`,
     /// `link`, `workflow` and `event` of each status.
     pub checks: Vec<Value>,
 }
@@ -32,6 +32,7 @@ fn bucket(state: &str) -> String {
 fn check(status: &Value) -> Value {
     let state = status["status"].as_str().unwrap_or_default();
     json!({
+        "id": status["id"],
         "name": status["context"],
         "state": status["status"],
         "bucket": bucket(state),

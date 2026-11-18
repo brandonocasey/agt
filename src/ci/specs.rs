@@ -13,6 +13,7 @@ macro_rules! pattern {
 }
 
 pattern!(ANSI, r"\x1b\[[0-9;]*[A-Za-z]");
+pattern!(GITHUB_PREFIX, r"^\d{4}-\d\d-\d\dT[\d:.]+Z ");
 pattern!(RUNNER_PREFIX, r"^\d{4}-\d\d-\d\dT[\d:.]+Z \d+[OE]\+?\s?");
 pattern!(
     PW_COUNT,
@@ -37,11 +38,23 @@ pub fn family(name: &str) -> String {
     SHARD.replace(name, "").into_owned()
 }
 
+/// [`parse_specs`] for a GitHub job log of `repo` (`OWNER/REPO`), whose lines start with a
+/// timestamp. A runner checks out to `<workspace>/REPO/REPO`.
+pub fn parse_github_specs(log: &str, repo: &str) -> IndexMap<String, &'static str> {
+    let plain: Vec<_> = log
+        .lines()
+        .map(|line| GITHUB_PREFIX.replace(line, ""))
+        .collect();
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    parse_specs(&plain.join("\n"), &format!("{name}/{name}"))
+}
+
 /// Maps spec to `failed` or `flaky` from a job log.
 pub fn parse_specs(trace: &str, project_path: &str) -> IndexMap<String, &'static str> {
     let mut specs: IndexMap<String, &'static str> = IndexMap::new();
     let mut section: Option<&'static str> = None;
-    let prefix = format!("{project_path}/");
+    // The leading slash keeps `ork/ork` from matching inside `work/ork/ork`.
+    let prefix = format!("/{project_path}/");
     for raw in trace.lines() {
         let plain = ANSI.replace_all(raw, "");
         let line = RUNNER_PREFIX.replace(&plain, "");

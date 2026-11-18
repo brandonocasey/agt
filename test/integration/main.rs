@@ -3,6 +3,7 @@ mod auto_sync;
 mod branch;
 mod check;
 mod ci;
+mod ci_pr_failures;
 mod ci_wait;
 mod cleanup;
 mod closed_pipe;
