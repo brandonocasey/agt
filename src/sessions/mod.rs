@@ -13,7 +13,6 @@ mod spend;
 mod timing;
 mod tools;
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -22,7 +21,7 @@ use crate::core::clock;
 use crate::core::error::{Result, fail};
 use crate::core::harness::Harness;
 use crate::core::local;
-use crate::core::output::Output;
+use crate::core::output::{Output, write_stdout};
 
 /// Cost, time, tools, cache gaps, errors, friction, sub-agent spawns and hook context from Claude Code and Codex transcripts in
 /// `~/.claude*/projects` and `~/.codex`. Prices come from
@@ -305,11 +304,6 @@ pub fn run(cli: Cli) -> Result<Output> {
         Command::Report(args) => report(args)?,
         Command::Search(args) => return index::search(&args),
     };
-    // A reader that stops early, such as `head`, is not an error.
-    match std::io::stdout().lock().write_all(text.as_bytes()) {
-        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
-            fail(format!("write stdout: {error}"))
-        }
-        _ => Ok(Output::Exit(0)),
-    }
+    write_stdout(text.as_bytes())?;
+    Ok(Output::Exit(0))
 }

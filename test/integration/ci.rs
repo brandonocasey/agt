@@ -2,7 +2,9 @@
 //! its arguments and the stdout, stderr and exit status expected for them.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -19,9 +21,8 @@ fn strings(value: &Value) -> Vec<&str> {
         .collect()
 }
 
-fn run_case(path: &Path) {
-    let case: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    let name = path.file_stem().unwrap().to_string_lossy();
+/// The environment of a case, with its fake responses registered, and the command it runs.
+fn prepare(case: &Value) -> (Env, Command) {
     let env = Env::new();
     for response in case["responses"].as_array().unwrap() {
         let args = strings(&response["args"]);
@@ -39,6 +40,18 @@ fn run_case(path: &Path) {
     for (key, value) in case["env"].as_object().unwrap() {
         command.env(key, value.as_str().unwrap());
     }
+    (env, command)
+}
+
+fn load(name: &str) -> Value {
+    serde_json::from_slice(&fs::read(Path::new(FIXTURES).join(format!("{name}.json"))).unwrap())
+        .unwrap()
+}
+
+fn run_case(path: &Path) {
+    let case: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let name = path.file_stem().unwrap().to_string_lossy();
+    let (_env, mut command) = prepare(&case);
     let output = command.output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
@@ -171,4 +184,54 @@ fn offline_refuses_ci_wait_on_a_forgejo_pull_request_without_running_tea() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("offline mode forbids agt ci"));
     assert!(env.forge_calls().is_empty());
+}
+
+#[test]
+fn a_closed_stdout_stops_failures_before_it_reads_the_jobs() {
+    let (env, mut command) = prepare(&load("failures-mix"));
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    // Only the project and the MR were read; the jobs and the history were not.
+    assert_eq!(env.forge_calls().len(), 2, "{:?}", env.forge_calls());
+}
+
+#[test]
+fn a_stdout_closed_after_the_header_stops_failures_before_it_reads_the_job_logs() {
+    let (env, mut command) = prepare(&load("failures-mix"));
+    // The reader closes the pipe while the jobs of the head pipeline are being read.
+    env.hook_call(
+        &[
+            "api",
+            "-X",
+            "GET",
+            "--paginate",
+            "projects/12/pipelines/100/jobs?include_retried=true&per_page=100",
+        ],
+        "sleep 0.5",
+    );
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut header = String::new();
+    stdout.read_line(&mut header).unwrap();
+    assert!(header.starts_with("!5 Fix login"), "{header}");
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let calls = env.forge_calls();
+    assert!(
+        calls.iter().all(|call| !call.contains("/trace")),
+        "{calls:?}"
+    );
 }
