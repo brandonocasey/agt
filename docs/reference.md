@@ -1802,7 +1802,13 @@ warning); the running agt version against the one `mise ls --current` pins for
 `mise trust` or "fix the mise error above"); the global git ignore covering
 `.worktrees/`, `/.agt/` and `/.cache/agents/scratch/`; the state and config directories and both config
 files parsing; and, inside a repository, the origin, the default branch and stray agt lock
-files. The scratch-ignore and mise-pin checks are agt conventions, not requirements of git or
+files. Outside a repository the ignore check reads the global excludes file itself.
+A line that names a probe path or a parent directory counts. A later `!` line re-includes it.
+Patterns are compared literally, with no globs.
+A line with no slash but a trailing one matches a name at any depth.
+A line with another slash matches from the root.
+A trailing slash limits a line to directories.
+The scratch-ignore and mise-pin checks are agt conventions, not requirements of git or
 mise: a missing `/.cache/agents/scratch/` ignore is a warning, and the version is compared only
 when mise pins `github:brandonocasey/agt` (no pin is ok). All subprocesses share a
 30-second budget. Exit status: 0 all ok, 1 any fail, 2 only warnings.

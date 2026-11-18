@@ -27,8 +27,13 @@ fn setup(pin: &str) -> Env {
 
 /// Exit code and the JSON report of `agt doctor --json`.
 fn doctor(env: &Env) -> (Option<i32>, Value) {
+    doctor_in(env, &env.repo)
+}
+
+/// The same, started in `dir`.
+fn doctor_in(env: &Env, dir: &std::path::Path) -> (Option<i32>, Value) {
     let output = env
-        .bin(&env.repo)
+        .bin(dir)
         .env("AGT_MISE_BIN", env.path("mise"))
         .args(["doctor", "--json"])
         .output()
@@ -82,6 +87,50 @@ fn an_unignored_agt_directory_is_a_warning() {
     );
     let (_, report) = doctor(&env);
     assert_eq!(row(&report, "git ignore")["status"], "ok", "{report}");
+}
+
+/// The git ignore row of `agt doctor` run outside any repository. `lines` is the excludes file.
+fn ignore_row_outside_a_repository(lines: &str) -> Value {
+    let env = setup("0.0.1");
+    std::fs::write(env.path("gitignore"), lines).unwrap();
+    let outside = env.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let (_, report) = doctor_in(&env, &outside);
+    row(&report, "git ignore").clone()
+}
+
+#[test]
+fn outside_a_repository_a_parent_directory_line_ignores_the_scratch_path() {
+    let ignore = ignore_row_outside_a_repository(".worktrees/\n/.agt/\n/.cache/agents/\n");
+    assert_eq!(ignore["status"], "ok", "{ignore}");
+    let ignore = ignore_row_outside_a_repository(".worktrees/\n/.agt/\n/.cache/agents/scratch/\n");
+    assert_eq!(ignore["status"], "ok", "{ignore}");
+}
+
+#[test]
+fn outside_a_repository_an_uncovered_path_still_warns() {
+    let ignore = ignore_row_outside_a_repository(".worktrees/\n/.agt/\n");
+    assert_eq!(ignore["status"], "warn", "{ignore}");
+    assert_eq!(ignore["detail"], "not ignored: /.cache/agents/scratch/");
+    // A line for a sibling directory or a longer path covers nothing.
+    let ignore = ignore_row_outside_a_repository(
+        ".worktrees/\n/.agt/\n/.cache/other/\n/.cache/agents/scratch/probe/deeper/\n",
+    );
+    assert_eq!(ignore["status"], "warn", "{ignore}");
+}
+
+#[test]
+fn outside_a_repository_a_later_negation_reincludes_the_path() {
+    let ignore =
+        ignore_row_outside_a_repository(".worktrees/\n/.agt/\n/.cache/agents/\n!/.cache/agents/\n");
+    assert_eq!(ignore["status"], "warn", "{ignore}");
+    let ignore =
+        ignore_row_outside_a_repository(".worktrees/\n!.worktrees/\n/.agt/\n/.cache/agents/\n");
+    assert_eq!(ignore["detail"], "not ignored: .worktrees/", "{ignore}");
+    // An earlier negation is overridden by the later ignore line.
+    let ignore =
+        ignore_row_outside_a_repository("!/.cache/agents/\n.worktrees/\n/.agt/\n/.cache/agents/\n");
+    assert_eq!(ignore["status"], "ok", "{ignore}");
 }
 
 #[test]

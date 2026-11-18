@@ -324,6 +324,40 @@ fn excludes_file() -> Option<PathBuf> {
         .or_else(|| Some(local::config_home().ok()?.join("git").join("ignore")))
 }
 
+/// Whether the excludes-file `text` ignores `probe`, with no repository to ask `git check-ignore`.
+/// The last matching line wins, so a later `!` line re-includes it.
+fn excluded(text: &str, probe: &str) -> bool {
+    let parts: Vec<&str> = probe.split('/').collect();
+    let mut ignored = false;
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = line
+            .strip_prefix('!')
+            .map_or((false, line), |rest| (true, rest));
+        let directory_only = pattern.ends_with('/');
+        let pattern = pattern.trim_end_matches('/');
+        let anchored = pattern.contains('/');
+        let pattern = pattern.trim_start_matches('/');
+        let names = (1..=parts.len()).any(|depth| {
+            // The probe itself is a file; a directory-only line cannot name it.
+            if directory_only && depth == parts.len() {
+                return false;
+            }
+            if anchored {
+                parts[..depth].join("/") == pattern
+            } else {
+                parts[depth - 1] == pattern
+            }
+        });
+        if names {
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
 fn git_ignore(repo: Option<&Repo>) -> Row {
     let file = excludes_file();
     let text = file
@@ -332,13 +366,11 @@ fn git_ignore(repo: Option<&Repo>) -> Row {
         .unwrap_or_default();
     let missing: Vec<&str> = IGNORED
         .iter()
-        .filter(|(pattern, probe)| match repo {
+        .filter(|(_, probe)| match repo {
             Some(repo) => !repo
                 .succeeds(&["check-ignore", "-q", "--", probe])
                 .unwrap_or(false),
-            None => !text
-                .lines()
-                .any(|line| line.trim().trim_start_matches('/') == pattern.trim_start_matches('/')),
+            None => !excluded(&text, probe),
         })
         .map(|(pattern, _)| *pattern)
         .collect();
