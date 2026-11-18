@@ -1,5 +1,5 @@
 //! `create`, `list`, `show` and `update` (which also records a check): one pretty-printed JSON file per task in
-//! `agents/tasks`.
+//! `agents/tasks`, stored with camelCase keys and printed with snake_case keys.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::core::clock;
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::json_keys::snake_case_keys;
 use crate::core::local::{hostname, lock_file_or_busy, write_json};
 use crate::core::output::Output;
 use crate::git::Repo;
@@ -269,7 +270,7 @@ fn add_check(task: &mut Value, args: &Update, name: &str, at: &str) -> Result<()
 }
 
 fn show_task(id: &str) -> Result<Output> {
-    Output::pretty(&read_task(id)?)
+    Ok(Output::Json(snake_case_keys(read_task(id)?)))
 }
 
 pub fn show(target: &Target) -> Result<Output> {
@@ -309,10 +310,10 @@ pub fn list() -> Result<Output> {
                 "id": field("id"),
                 "revision": field("revision"),
                 "status": field("status"),
-                "updatedAt": field("updatedAt"),
+                "updated_at": field("updatedAt"),
                 "objective": field("objective"),
             })
         })
         .collect();
-    Output::pretty(&Value::Array(summaries))
+    Ok(Output::Json(Value::Array(summaries)))
 }

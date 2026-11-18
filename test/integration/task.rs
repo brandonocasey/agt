@@ -134,9 +134,9 @@ fn creates_checks_updates_and_lists_a_private_task() {
         "session lookup",
     ]);
     assert_eq!(created["revision"], 1);
-    assert_eq!(created["parentPr"], "42");
-    assert_eq!(created["targetBranch"], "main");
-    assert_eq!(created["taskBoundary"], "session lookup");
+    assert_eq!(created["parent_pr"], "42");
+    assert_eq!(created["target_branch"], "main");
+    assert_eq!(created["task_boundary"], "session lookup");
     assert_eq!(mode(&task.tasks()), 0o700);
     assert_eq!(mode(&task.tasks().join("demo.json")), 0o600);
     let checked = task.run(&[
@@ -173,11 +173,92 @@ fn creates_checks_updates_and_lists_a_private_task() {
     ]);
     assert_eq!(updated["revision"], 3);
     assert_eq!(updated["corrections"][0]["text"], "Use B");
-    assert_eq!(updated["parentPr"], "43");
-    assert_eq!(updated["targetBranch"], "release");
-    assert_eq!(updated["taskBoundary"], "follow-up");
+    assert_eq!(updated["parent_pr"], "43");
+    assert_eq!(updated["target_branch"], "release");
+    assert_eq!(updated["task_boundary"], "follow-up");
     assert_eq!(updated["status"], "paused");
     assert_eq!(task.run(&["list"])[0]["id"], "demo");
+}
+
+/// Every object key at every depth is snake_case.
+pub(crate) fn assert_snake_case_keys(value: &Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                assert!(
+                    key.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                    "key {key} is not snake_case"
+                );
+                assert_snake_case_keys(item);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(assert_snake_case_keys),
+        _ => {}
+    }
+}
+
+#[test]
+fn task_commands_print_compact_snake_case_and_store_camel_case() {
+    let task = Task::new();
+    let stored = task.tasks().join("stored.json");
+    fs::create_dir_all(task.tasks()).unwrap();
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test/fixtures/task/stored-task.json"
+        ),
+        &stored,
+    )
+    .unwrap();
+    let created = task.run(&[
+        "create",
+        "fresh",
+        "--objective",
+        "New",
+        "--authorization",
+        "user",
+        "--next-step",
+        "go",
+    ]);
+    let shown = task.run(&["show", "stored"]);
+    let updated = task.run(&[
+        "update",
+        "stored",
+        "--revision",
+        "4",
+        "--next-step",
+        "Done",
+        "--check-name",
+        "lint",
+        "--check-result",
+        "pass",
+    ]);
+    let listed = task.run(&["list"]);
+    for value in [&created, &shown, &updated, &listed] {
+        assert_snake_case_keys(value);
+    }
+    assert_eq!(shown["parent_pr"], "42");
+    assert_eq!(shown["next_step"], "Ship");
+    assert_eq!(shown["updated_at"], "2026-01-02T00:00:00.000Z");
+    assert_eq!(shown["corrections"][0]["text"], "Use B");
+    assert_eq!(updated["next_step"], "Done");
+    assert_eq!(updated["checks"][1]["name"], "lint");
+    assert_eq!(listed[0]["id"], "stored");
+    assert!(listed[0]["updated_at"].is_string());
+    for args in [&["show", "stored"][..], &["list"][..]] {
+        let output = task.raw(args);
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(text.trim_end().lines().count(), 1, "{args:?}: {text}");
+    }
+    let on_disk: Value = serde_json::from_str(&fs::read_to_string(&stored).unwrap()).unwrap();
+    assert_eq!(on_disk["nextStep"], "Done");
+    assert!(on_disk.get("next_step").is_none());
+    assert!(on_disk["updatedAt"].is_string());
+    let fresh: Value =
+        serde_json::from_str(&fs::read_to_string(task.tasks().join("fresh.json")).unwrap())
+            .unwrap();
+    assert_eq!(fresh["parentPr"], Value::Null);
 }
 
 #[test]

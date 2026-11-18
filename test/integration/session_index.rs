@@ -5,7 +5,7 @@ use std::os::unix::fs::symlink;
 
 use serde_json::{Value, json};
 
-use crate::task::{Task, lines, mode, sources, texts, user};
+use crate::task::{Task, assert_snake_case_keys, lines, mode, sources, texts, user};
 
 #[test]
 fn indexes_metadata_ids_and_searches_human_turns_with_bounded_context() {
@@ -38,7 +38,7 @@ fn indexes_metadata_ids_and_searches_human_turns_with_bounded_context() {
         texts(&results),
         ["needle claude request", "needle codex request"]
     );
-    assert_eq!(results[1]["sessionId"], "codex-session");
+    assert_eq!(results[1]["session_id"], "codex-session");
     let roles: Vec<&str> = results[1]["context"]
         .as_array()
         .unwrap()
@@ -79,7 +79,7 @@ fn discovers_old_claude_history_archive_and_alternate_profiles() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|result| result["sessionId"].as_str().unwrap())
+        .map(|result| result["session_id"].as_str().unwrap())
         .collect();
     sessions.sort_unstable();
     assert_eq!(sessions, ["claude-0", "claude-1", "claude-2"]);
@@ -98,7 +98,7 @@ fn filters_injected_and_inherited_duplicate_events_from_index_counts() {
     task.write(&second, &lines(&[transcript]));
     task.run(&["search", "--file", first.to_str().unwrap()]);
     let stats = task.run(&["search", "--file", second.to_str().unwrap()]);
-    assert_eq!(stats["humanTurns"], 1);
+    assert_eq!(stats["human_turns"], 1);
     let results = task.run(&[
         "search",
         "--query",
@@ -122,7 +122,7 @@ fn incrementally_handles_append_truncation_malformed_lines_and_private_modes() {
         &source,
         &format!("{}\n{{bad}}\n", user("one", "first needle")),
     );
-    assert_eq!(task.run(&["search", "--file", file])["malformedLines"], 1);
+    assert_eq!(task.run(&["search", "--file", file])["malformed_lines"], 1);
     let mut appended = fs::read_to_string(&source).unwrap();
     appended.push_str(&format!("{}\n", user("one", "second needle")));
     fs::write(&source, appended).unwrap();
@@ -131,12 +131,12 @@ fn incrementally_handles_append_truncation_malformed_lines_and_private_modes() {
     let replacement = format!("replacement needle {}", "x".repeat(300));
     fs::write(&source, lines(&[user("two", &replacement)])).unwrap();
     let replaced = task.run(&["search", "--query", "needle", "--file", file]);
-    assert_eq!(replaced[0]["sessionId"], "two");
+    assert_eq!(replaced[0]["session_id"], "two");
     assert_eq!(replaced.as_array().unwrap().len(), 1);
     let index = task.tasks().join("session-index/index.json");
     assert_eq!(mode(index.parent().unwrap()), 0o700);
     assert_eq!(mode(&index), 0o600);
-    assert_eq!(task.run(&["search", "--file", file])["indexedTurns"], 1);
+    assert_eq!(task.run(&["search", "--file", file])["indexed_turns"], 1);
 }
 
 #[test]
@@ -217,6 +217,38 @@ fn finds_an_exact_session_among_other_transcripts() {
 }
 
 #[test]
+fn every_search_form_prints_compact_snake_case_while_the_index_stays_camel_case() {
+    let task = Task::sessions();
+    let source = task.file("shape.jsonl");
+    task.write(
+        &source,
+        &lines(&[user("shape", "needle one"), user("shape", "needle two")]),
+    );
+    let file = source.to_str().unwrap();
+    let forms: [&[&str]; 3] = [
+        &["search", "--file", file],
+        &["search", "--file", file, "--session", "shape"],
+        &["search", "--file", file, "--query", "needle"],
+    ];
+    for args in forms {
+        let output = task.raw(args);
+        assert!(output.status.success(), "{args:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(text.trim_end().lines().count(), 1, "{args:?}: {text}");
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_snake_case_keys(&value);
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap_or(Value::Null);
+        assert_snake_case_keys(&error);
+    }
+    let found = task.run(&["search", "--file", file, "--query", "needle"]);
+    assert_eq!(found[0]["session_id"], "shape");
+    assert!(found[0]["source_type"].is_string());
+    let index = fs::read_to_string(task.tasks().join("session-index/index.json")).unwrap();
+    assert!(index.contains("\"sessionId\""), "{index}");
+    assert!(!index.contains("\"session_id\""), "{index}");
+}
+
+#[test]
 fn reports_coverage_for_zero_search_results() {
     let task = Task::sessions();
     let output = task.raw(&["search", "--query", "absent"]);
@@ -247,8 +279,8 @@ fn excludes_inherited_fork_turns_from_human_effort_but_resolves_them() {
         ]),
     );
     let stats = task.run(&["search", "--file", file]);
-    assert_eq!(stats["humanTurns"], 1);
-    assert_eq!(stats["inheritedTurns"], 1);
+    assert_eq!(stats["human_turns"], 1);
+    assert_eq!(stats["inherited_turns"], 1);
     assert_eq!(
         task.run(&["search", "--session", "fork-id", "--file", file])["turns"],
         2
@@ -273,7 +305,7 @@ fn skips_an_oversized_line_and_indexes_the_lines_after_it() {
         ]),
     );
     let coverage = task.run(&["search", "--file", file]);
-    assert_eq!(coverage["oversizedLines"], 1);
+    assert_eq!(coverage["oversized_lines"], 1);
     let found = task.run(&["search", "--query", "after needle", "--file", file]);
     assert_eq!(found.as_array().unwrap().len(), 1);
 }
@@ -303,7 +335,7 @@ fn valid_eof_records_stay_visible_and_partial_utf8_appends_do_not_duplicate_them
     };
     fs::write(&source, record("needle caf\u{e9}")).unwrap();
     assert_eq!(count(), 1);
-    assert_eq!(task.run(&["search", "--file", file])["scannedBytes"], 0);
+    assert_eq!(task.run(&["search", "--file", file])["scanned_bytes"], 0);
     let second = record("needle second");
     let mut text = fs::read_to_string(&source).unwrap();
     text.push('\n');
@@ -364,7 +396,7 @@ fn a_growing_rewrite_near_the_old_tail_rebuilds_the_source() {
     let found = task.run(&["search", "--query", "needle", "--file", file]);
     assert_eq!(texts(&found), ["replacement needle that is longer"]);
     assert_eq!(
-        task.run(&["search", "--rebuild", "--file", file])["humanTurns"],
+        task.run(&["search", "--rebuild", "--file", file])["human_turns"],
         1
     );
 }

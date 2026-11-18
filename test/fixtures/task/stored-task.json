@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "stored",
+  "revision": 4,
+  "objective": "Read a record written by an earlier agt",
+  "parentPr": "42",
+  "targetBranch": "main",
+  "taskBoundary": "output shape",
+  "corrections": [{"text": "Use B", "at": "2026-01-02T00:00:00.000Z"}],
+  "context": {"host": "box", "repo": "/work/repo", "worktree": "/work/repo", "head": "abc123"},
+  "checks": [{"name": "unit", "result": "pass", "revision": "abc123", "inputs": null, "environment": "linux x64 box", "at": "2026-01-02T00:00:00.000Z"}],
+  "authorization": {"provenance": "user request", "scope": "local edits"},
+  "nextStep": "Ship",
+  "status": "active",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-02T00:00:00.000Z"
+}
