@@ -668,6 +668,102 @@ impl Repo {
         self.succeeds(&["cat-file", "-e", "--end-of-options", spec])
     }
 
+    /// The commit of each of `revs`, keyed by rev, from one git process. A rev that names no
+    /// commit, is empty or holds a newline is absent.
+    pub fn commit_ids<'a>(&self, revs: &[&'a str]) -> Result<HashMap<&'a str, String>> {
+        let asked: Vec<&'a str> = revs
+            .iter()
+            .copied()
+            .filter(|rev| !rev.is_empty() && !rev.contains('\n'))
+            .collect();
+        if asked.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let input: String = asked
+            .iter()
+            .map(|rev| format!("{rev}^{{commit}}\n"))
+            .collect();
+        let checked = text(self.checked(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(input.into_bytes()),
+            &[],
+        )?)?;
+        let lines: Vec<&str> = checked.lines().collect();
+        if lines.len() != asked.len() {
+            return fail(format!(
+                "git cat-file --batch-check printed {} lines for {} revisions",
+                lines.len(),
+                asked.len()
+            ));
+        }
+        Ok(asked
+            .into_iter()
+            .zip(lines)
+            .filter_map(|(rev, line)| Some((rev, line.strip_suffix(" commit")?.to_owned())))
+            .collect())
+    }
+
+    /// The `candidates` that [`Self::is_ancestor`] says are ancestors of `head`, in two git
+    /// processes. A name that is no commit is not an ancestor.
+    pub fn ancestors_of<'a>(&self, head: &str, candidates: &[&'a str]) -> Result<HashSet<&'a str>> {
+        let mut revs = candidates.to_vec();
+        revs.push(head);
+        let ids = self.commit_ids(&revs)?;
+        let Some(head_id) = ids.get(head) else {
+            return Ok(HashSet::new());
+        };
+        // Lists what a candidate reaches that the head does not. A candidate in that list is
+        // not an ancestor of the head.
+        let mut seen = HashSet::new();
+        let mut input = String::new();
+        for id in candidates.iter().filter_map(|candidate| ids.get(candidate)) {
+            if seen.insert(id) {
+                input.push_str(&format!("{id}\n"));
+            }
+        }
+        if seen.is_empty() {
+            return Ok(HashSet::new());
+        }
+        input.push_str(&format!("^{head_id}\n"));
+        let outside =
+            text(self.checked(&["rev-list", "--stdin"], Some(input.into_bytes()), &[])?)?;
+        let outside: HashSet<&str> = outside.lines().collect();
+        Ok(candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                ids.get(candidate)
+                    .is_some_and(|id| !outside.contains(id.as_str()))
+            })
+            .collect())
+    }
+
+    /// The `revs`, in order, that are not an ancestor of another of them. Revs naming one commit
+    /// keep the first; revs naming no commit are dropped.
+    pub fn independent<'a>(&self, revs: &[&'a str]) -> Result<Vec<&'a str>> {
+        let ids = self.commit_ids(revs)?;
+        let mut first: Vec<(&'a str, &str)> = Vec::new();
+        for rev in revs {
+            if let Some(id) = ids.get(rev)
+                && first.iter().all(|(_, seen)| *seen != id.as_str())
+            {
+                first.push((rev, id));
+            }
+        }
+        if first.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = vec!["merge-base", "--independent", "--end-of-options"];
+        args.extend(first.iter().map(|(_, id)| *id));
+        let tips = text(self.checked(&args, None, &[])?)?;
+        let tips: HashSet<&str> = tips.lines().collect();
+        Ok(first
+            .into_iter()
+            .filter(|(_, id)| tips.contains(id))
+            .map(|(rev, _)| rev)
+            .collect())
+    }
+
     pub fn user_name(&self) -> Result<Option<String>> {
         self.git_opt(&["config", "user.name"])
     }
@@ -1512,6 +1608,115 @@ mod tests {
         assert_eq!(
             fs::canonicalize(repo.common_dir().unwrap()).unwrap(),
             fs::canonicalize(root.join(".git")).unwrap()
+        );
+    }
+
+    /// A repo with `main` (c0-c2), `side` off c0 (d1, d2) and tag `v1` on c1. Also returns revs
+    /// to ask about, including a blob and an absent object.
+    fn history(sandbox: &Sandbox) -> (Repo, Vec<String>) {
+        let root = sandbox.repo();
+        let repo = sandboxed(sandbox);
+        sandbox.git(&root, &["init", "-q", "-b", "main"]);
+        let empty = |message: &str| {
+            sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", message]);
+            repo.git(&["rev-parse", "HEAD"]).unwrap()
+        };
+        let c0 = empty("c0");
+        sandbox.git(&root, &["switch", "-q", "-c", "side"]);
+        let d1 = empty("d1");
+        let d2 = empty("d2");
+        sandbox.git(&root, &["switch", "-q", "main"]);
+        let c1 = empty("c1");
+        sandbox.git(&root, &["tag", "-a", "-m", "release", "v1"]);
+        let c2 = empty("c2");
+        fs::write(root.join("blob.txt"), "blob\n").unwrap();
+        let blob = repo.git(&["hash-object", "-w", "blob.txt"]).unwrap();
+        let absent = "deadbeef".repeat(5);
+        let revs = [
+            c0,
+            d1,
+            d2,
+            c1.clone(),
+            c1,
+            c2,
+            "v1".into(),
+            "main~1".into(),
+            "HEAD".into(),
+            blob,
+            absent,
+            String::new(),
+        ];
+        (repo, revs.into())
+    }
+
+    #[test]
+    fn commit_ids_agree_with_object_exists_for_each_rev() {
+        let sandbox = Sandbox::new();
+        let (repo, revs) = history(&sandbox);
+        let asked: Vec<&str> = revs.iter().map(String::as_str).collect();
+        let ids = repo.commit_ids(&asked).unwrap();
+        for rev in &asked {
+            let exists =
+                !rev.is_empty() && repo.object_exists(&format!("{rev}^{{commit}}")).unwrap();
+            assert_eq!(ids.contains_key(rev), exists, "{rev:?}");
+            if exists {
+                assert_eq!(ids[rev], repo.commit(rev).unwrap(), "{rev}");
+            }
+        }
+        assert!(
+            ids.len() >= 8,
+            "the commits, the tag and the relative names resolve"
+        );
+        assert!(repo.commit_ids(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ancestors_of_agrees_with_is_ancestor_for_each_head_and_candidate() {
+        let sandbox = Sandbox::new();
+        let (repo, revs) = history(&sandbox);
+        let asked: Vec<&str> = revs.iter().map(String::as_str).collect();
+        let absent = "deadbeef".repeat(5);
+        for head in ["main", "side", revs[0].as_str(), "v1", absent.as_str()] {
+            let batch = repo.ancestors_of(head, &asked).unwrap();
+            for candidate in &asked {
+                assert_eq!(
+                    batch.contains(candidate),
+                    repo.is_ancestor(candidate, head).unwrap(),
+                    "{candidate:?} below {head}"
+                );
+            }
+        }
+        assert!(repo.ancestors_of("main", &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn independent_keeps_what_no_other_rev_descends_from() {
+        let sandbox = Sandbox::new();
+        let (repo, revs) = history(&sandbox);
+        let asked: Vec<&str> = revs.iter().map(String::as_str).collect();
+        let ids = repo.commit_ids(&asked).unwrap();
+        let mut seen = Vec::new();
+        let mut expected = Vec::new();
+        for rev in &asked {
+            let Some(id) = ids.get(rev) else { continue };
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let covered = asked.iter().any(|other| {
+                ids.get(other).is_some_and(|other_id| other_id != id)
+                    && repo.is_ancestor(rev, other).unwrap()
+            });
+            if !covered {
+                expected.push(*rev);
+            }
+        }
+        assert_eq!(repo.independent(&asked).unwrap(), expected);
+        assert_eq!(expected.len(), 2, "the tips of main and side: {expected:?}");
+        assert!(
+            repo.independent(&["", &"deadbeef".repeat(5)])
+                .unwrap()
+                .is_empty()
         );
     }
 

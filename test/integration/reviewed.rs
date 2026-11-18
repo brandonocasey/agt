@@ -442,6 +442,45 @@ fn status_reports_last_reviewed_head() {
 }
 
 #[test]
+fn last_reviewed_head_is_the_nearest_of_the_reviewed_heads_below_the_inspected_head() {
+    let env = Env::with_branch();
+    env.write("a1.txt", "a1\n");
+    env.commit_all("A1");
+    env.review("full");
+    env.write("a2.txt", "a2\n");
+    let a2 = env.commit_all("A2");
+    env.review("full");
+    env.git(&["switch", "-q", "main"]);
+    env.git(&["switch", "-q", "-c", "other"]);
+    for name in ["b1", "b2", "b3"] {
+        env.write(&format!("{name}.txt"), "b\n");
+        env.commit_all(&name.to_uppercase());
+    }
+    let b3 = env.git(&["rev-parse", "HEAD"]);
+    env.review("full");
+    env.git(&["switch", "-q", "main"]);
+    env.git(&["merge", "-q", "--no-ff", "-m", "M1", "feat"]);
+    let merged_feat = env.git(&["rev-parse", "HEAD"]);
+    env.git(&["merge", "-q", "--no-ff", "-m", "M2", "other"]);
+    let nearest = |head: &str| env.run(&["status", "--head", head])["last_reviewed_head"].clone();
+    assert_eq!(
+        nearest("main"),
+        b3,
+        "B3 is 4 commits from M2, A2 is 5; A1 is a further ancestor of A2"
+    );
+    assert_eq!(
+        nearest(&merged_feat),
+        a2,
+        "B3 is not an ancestor of M1, and A2 is nearer than A1"
+    );
+    assert_eq!(
+        nearest("feat~2"),
+        Value::Null,
+        "nothing reviewed at or below base"
+    );
+}
+
+#[test]
 fn review_from_starts_at_oldest_unreviewed_commit() {
     let env = Env::with_branch();
     let main = env.git(&["rev-parse", "main"]);
