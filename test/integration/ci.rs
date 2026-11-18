@@ -163,6 +163,8 @@ fn offline_refuses_ci_commands() {
         vec!["ci", "wait", "o/r#1"],
         vec!["ci", "wait", "o/r@abc123"],
         vec!["ci", "failures", "g/p!1"],
+        vec!["ci", "log", "9"],
+        vec!["ci", "retry", "9"],
     ] {
         let output = env
             .bin(&env.repo)

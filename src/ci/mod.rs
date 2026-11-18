@@ -1,10 +1,9 @@
-//! `agt ci`: `failures` lists the failed checks of a PR, or compares an MR's failing tests with
-//! recent default-branch pipelines; `wait` polls PRs, MRs, pipelines, commits and Actions runs
-//! until their checks finish.
+//! `agt ci` triages failed jobs, waits for checks, prints job logs and retries jobs.
 
 mod api;
 mod classify;
 mod failures;
+mod job;
 mod poll;
 mod pull_failures;
 mod specs;
@@ -25,7 +24,7 @@ use crate::store::model::Forge;
 use api::Project;
 use table::Out;
 
-/// GitHub, GitLab and Forgejo CI: wait for checks, and triage failures.
+/// GitHub, GitLab and Forgejo CI: wait for checks, triage failures, read job logs, retry jobs.
 #[derive(Args)]
 pub struct Cli {
     #[command(subcommand)]
@@ -46,6 +45,7 @@ enum Command {
     /// and url. So does a Forgejo PR (a PR URL, or #PR in a Forgejo repository). On GitHub it
     /// also lists the failing specs in the logs of failed Actions jobs. agt does not read job
     /// logs on Forgejo, so it lists no specs there. A PR has no verdicts and ignores --limit.
+    /// `agt ci log` and `agt ci retry` take the id of a GitHub check.
     ///
     /// GitLab verdicts:
     ///   new           never failed on the default branch
@@ -115,6 +115,55 @@ enum Command {
         #[arg(long = "job", value_name = "NAME")]
         jobs: Vec<String>,
     },
+    /// Print the end of one job's log.
+    ///
+    /// <JOB> is one of:
+    ///   a GitLab job URL (https://HOST/GROUP/PROJECT/-/jobs/N)
+    ///   a GitHub Actions job URL (https://github.com/OWNER/REPO/actions/runs/N/job/M)
+    ///   a job id in the current repository's tracker (GitLab or GitHub; see --remote)
+    ///
+    /// On GitHub the id is that of an Actions check run in `agt ci failures`.
+    /// An unknown job exits 2. agt does not read job logs on Forgejo, so a Forgejo job is
+    /// refused.
+    #[command(verbatim_doc_comment)]
+    Log {
+        #[arg(value_name = "JOB")]
+        job: String,
+        /// How many of the last lines to print.
+        #[arg(long, value_name = "N", default_value_t = 200, value_parser = at_least_one)]
+        tail: usize,
+        /// Tracker for a job id: a git remote name or `host/repo`.
+        /// Default: origin's tracker, else the only one.
+        #[arg(long, value_name = "NAME|HOST/REPO")]
+        remote: Option<String>,
+    },
+    /// Retry a job, or rerun the failed jobs of a GitHub run.
+    ///
+    /// <TARGET> is one of:
+    ///   a GitLab job URL or a job id (GitLab retries it)
+    ///   a GitHub Actions job URL or a job id (GitHub reruns it)
+    ///   a GitHub Actions run URL (GitHub reruns its failed jobs)
+    ///
+    /// A bare id is a job in the current repository's tracker (see --remote). Prints JSON that
+    /// names what was retried. It writes to the host. It is refused offline, and when the
+    /// tracker's `push` is explicitly "off". `agt pr` writes follow the same rule. agt does not
+    /// rerun jobs on Forgejo, so a Forgejo target is refused.
+    #[command(verbatim_doc_comment)]
+    Retry {
+        #[arg(value_name = "TARGET")]
+        target: String,
+        /// Tracker for a job id: a git remote name or `host/repo`.
+        /// Default: origin's tracker, else the only one.
+        #[arg(long, value_name = "NAME|HOST/REPO")]
+        remote: Option<String>,
+    },
+}
+
+fn at_least_one(text: &str) -> std::result::Result<usize, String> {
+    match text.parse::<usize>() {
+        Ok(count) if count > 0 => Ok(count),
+        _ => Err("expected a whole number of at least 1".to_owned()),
+    }
 }
 
 fn seconds(text: &str) -> std::result::Result<f64, String> {
@@ -154,13 +203,10 @@ fn connect(target: &target::Target) -> Result<Project> {
 
 /// Runs the command; an error exits 2 rather than 1.
 pub fn run(cli: Cli) -> Result<Output> {
-    Ok(match execute(cli) {
-        Ok(code) => Output::Exit(code),
-        Err(error) => Output::Failure(error, FAILED),
-    })
+    Ok(execute(cli).unwrap_or_else(|error| Output::Failure(error, FAILED)))
 }
 
-fn execute(cli: Cli) -> Result<u8> {
+fn execute(cli: Cli) -> Result<Output> {
     Offline::current().forbid("agt ci")?;
     let code = match cli.command {
         Command::Failures {
@@ -187,10 +233,18 @@ fn execute(cli: Cli) -> Result<u8> {
                 interval,
                 max_interval,
             };
-            return wait_targets(&targets, &jobs, &pace, remote.as_deref());
+            wait_targets(&targets, &jobs, &pace, remote.as_deref())?
+        }
+        Command::Log { job, tail, remote } => {
+            let at = job::locate(&job, remote.as_deref())?;
+            return Ok(Output::Text(job::log(&at, tail)?));
+        }
+        Command::Retry { target, remote } => {
+            let at = job::locate(&target, remote.as_deref())?;
+            return Ok(Output::Json(job::retry(&at)?));
         }
     };
-    Ok(code)
+    Ok(Output::Exit(code))
 }
 
 /// Prints the failures of a GitLab MR, or of a GitHub or Forgejo PR.
