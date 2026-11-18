@@ -1,14 +1,28 @@
-//! Output: lines flushed as they are written (a closed pipe is not an error).
+//! Output lines flush as written. A reader that closes the pipe ends the output quietly.
 
-use std::io::Write;
+use std::cell::Cell;
 
-pub struct Out;
+use crate::core::output::write_stdout;
+
+#[derive(Default)]
+pub struct Out {
+    closed: Cell<bool>,
+}
 
 impl Out {
+    /// Writes `text` and a newline. After the reader closes stdout, writes nothing more.
     pub fn line(&self, text: &str) {
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{text}");
-        let _ = stdout.flush();
+        if self.closed.get() {
+            return;
+        }
+        if matches!(write_stdout(format!("{text}\n").as_bytes()), Ok(false)) {
+            self.closed.set(true);
+        }
+    }
+
+    /// Whether no write has found stdout closed.
+    pub fn is_open(&self) -> bool {
+        !self.closed.get()
     }
 }
 

@@ -879,6 +879,55 @@ fn emits_one_final_event_when_terminated() {
 }
 
 #[test]
+fn a_closed_stdout_stops_the_wait_at_the_next_event_without_polling_again() {
+    let pending = |checks: &[Value]| step("PullChecks", &open(checks));
+    let test = |status, conclusion| run_node("test", status, conclusion);
+    let lint = |status, conclusion| run_node("lint", status, conclusion);
+    let scenario = Scenario::new(&[
+        pending(&[test("IN_PROGRESS", None)]),
+        // The reader closes the pipe during this poll. Its event is the first write to it.
+        pending(&[test("IN_PROGRESS", None), lint("IN_PROGRESS", None)]).delay(0.5),
+        pending(&[
+            test("COMPLETED", Some("SUCCESS")),
+            lint("IN_PROGRESS", None),
+        ]),
+        pending(&[
+            test("COMPLETED", Some("SUCCESS")),
+            lint("COMPLETED", Some("SUCCESS")),
+        ]),
+    ]);
+    let mut child = scenario
+        .command(
+            &[
+                GITHUB_TARGET,
+                "--interval",
+                "0.001",
+                "--max-interval",
+                "0.002",
+            ],
+            &[],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.contains("\"event\":\"initial\""), "{first}");
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let calls = fs::read_to_string(scenario.dir.join("calls.log")).unwrap();
+    assert_eq!(
+        calls.lines().count(),
+        2,
+        "polled again after the pipe closed"
+    );
+}
+
+#[test]
 fn waits_for_two_targets_and_reports_each_result() {
     let second = pull(
         json!({"number": 43, "url": "https://github.com/owner/repo/pull/43"}),

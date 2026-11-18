@@ -42,6 +42,10 @@ Usage errors exit with status 2. Some commands use additional exit statuses for
 results such as conflicts, timeouts, or warnings; see their sections below.
 Timestamps are RFC 3339 in UTC, such as `2026-10-16T12:00:00Z`.
 
+A reader that closes stdout early, such as `head`, ends the command quietly.
+It prints no error.
+Its exit status is that of its result, or 0 when it had none.
+
 ## Global flags
 
 `--offline` blocks network access (see [Offline](#offline)).
@@ -1317,7 +1321,9 @@ checks of each under `failed`. A result's `reason` is, for instance, `merged`,
 `manual_action_required`, `required_checks_missing`, `head_changed`, `closed` or `query_error`. Defaults: 3600 seconds, a
 15 second interval doubling up to 120 seconds. A GitHub head whose status check rollup holds no checks at all is `checks_pending` during the first 120 seconds of the wait (right after a push the checks may not exist yet) and `no_required_checks` after; a rollup that has checks but none required waits for all checks and passes or fails from their results. Exit status: 0 all targets passed or merged, 1 a
 target needs action (failed, canceled, skipped or manual, head changed, closed), 2 usage or
-query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM.
+query error, 3 timeout, 130 or 143 after SIGINT or SIGTERM. If a reader closes stdout (`| head -1`), the wait stops at its next event.
+It polls no more and prints no error. It exits 0, as it has no result yet.
+A pipe that closes at the `final` event keeps the exit status above.
 
 `--job NAME` (repeatable, exact and case-sensitive) waits only for the jobs of that name, for every target: on GitHub any check of the head, required or not, on Forgejo the statuses of the head, by exact context name, and on GitLab the jobs of the head pipeline, whose own status is ignored. All named jobs must pass (`required_checks_passed`); a failed one is `check_failed` or `check_cancelled` and is listed under `failed`. A named job that has not appeared is `checks_pending` with `missingChecks` while checks run (GitHub and Forgejo: until no check or status of the head has been pending for 120 seconds; GitLab: until the pipeline stops running, including when it waits on a manual job), then `job_not_found` (exit 1). A named GitLab job that has not started when the pipeline is blocked, for instance behind a manual job, gives the pipeline's reason (`manual_action_required`, `check_failed`) at once. A named job that failed counts even when GitLab allows it to fail. A skipped job passes on GitHub and Forgejo (`skipping`) but needs action on GitLab (`unknown_check_state`). Without `--job` nothing changes.
 

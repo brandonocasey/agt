@@ -141,7 +141,7 @@ pub fn run(cli: Cli) -> Result<Output> {
 
 fn execute(cli: Cli) -> Result<u8> {
     Offline::current().forbid("agt ci")?;
-    let out = Out;
+    let out = Out::default();
     let code = match cli.command {
         Command::Failures {
             target,

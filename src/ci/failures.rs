@@ -159,6 +159,26 @@ fn verdict_order(verdict: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// One table row per flagged job: attempts, final status and the last attempt's log.
+fn flagged_rows(flagged: &Jobs) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (name, attempts) in flagged {
+        let last = &attempts[attempts.len() - 1];
+        let note = if last["allow_failure"] == true && status(last) == "failed" {
+            " (allowed to fail)"
+        } else {
+            ""
+        };
+        rows.push(vec![
+            name.clone(),
+            attempts.iter().map(status).collect::<Vec<_>>().join(" → "),
+            format!("{}{note}", status(last)),
+            text(last, "web_url").to_owned(),
+        ]);
+    }
+    rows
+}
+
 pub fn run(gitlab: &Project, iid: u64, count: usize, out: &Out) -> Result<()> {
     let mr = gitlab.merge_request(iid)?;
     let pipeline = mr.get("head_pipeline").cloned().unwrap_or(Value::Null);
@@ -174,6 +194,9 @@ pub fn run(gitlab: &Project, iid: u64, count: usize, out: &Out) -> Result<()> {
         short(sha),
         text(&pipeline, "web_url")
     ));
+    if !out.is_open() {
+        return Ok(());
+    }
     if !gitlab.runs_commit(&pipeline, sha)? {
         out.line(&format!(
             "⚠ newest commit {} has no pipeline yet; this one is older",
@@ -190,22 +213,11 @@ pub fn run(gitlab: &Project, iid: u64, count: usize, out: &Out) -> Result<()> {
         out.line("No failed or retried jobs.");
         return Ok(());
     }
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for (name, attempts) in &flagged {
-        let last = &attempts[attempts.len() - 1];
-        let note = if last["allow_failure"] == true && status(last) == "failed" {
-            " (allowed to fail)"
-        } else {
-            ""
-        };
-        rows.push(vec![
-            name.clone(),
-            attempts.iter().map(status).collect::<Vec<_>>().join(" → "),
-            format!("{}{note}", status(last)),
-            text(last, "web_url").to_owned(),
-        ]);
-    }
+    let rows = flagged_rows(&flagged);
     table(out, &["job", "attempts", "final", "log"], &rows);
+    if !out.is_open() {
+        return Ok(());
+    }
 
     let mr_fail = pipeline_failures(gitlab, &flagged, None)?;
     let families: HashSet<String> = mr_fail.keys().cloned().collect();

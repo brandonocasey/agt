@@ -2,7 +2,6 @@
 //! pipelines, and prints one JSON event per line when a target's state first appears or
 //! changes, then a final event.
 
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
@@ -14,7 +13,7 @@ use super::classify::{State, blocked, failed_checks, is_query_error, is_waiting,
 use super::poll::snapshot;
 use super::target::Resolved;
 use crate::core::clock;
-use crate::core::output::{FAILED, INTERRUPTED, TERMINATED, TIMED_OUT};
+use crate::core::output::{FAILED, INTERRUPTED, TERMINATED, TIMED_OUT, write_stdout};
 
 pub struct Options {
     pub targets: Vec<Resolved>,
@@ -55,7 +54,9 @@ fn cancelled() -> bool {
     CANCEL.load(Ordering::SeqCst)
 }
 
-fn write_event(event: Value) {
+/// Writes one event line and returns `false` once the reader has closed stdout. Any other write
+/// error is ignored, so the wait goes on.
+fn write_event(event: Value) -> bool {
     let mut fields = Map::new();
     fields.insert(
         "at".to_owned(),
@@ -66,9 +67,7 @@ fn write_event(event: Value) {
     }
     let mut line = Value::Object(fields).to_string();
     line.push('\n');
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(line.as_bytes());
-    let _ = out.flush();
+    write_stdout(line.as_bytes()).unwrap_or(true)
 }
 
 /// The wait before poll number `attempt` (from 0): the interval, doubling up to the maximum.
@@ -178,15 +177,18 @@ fn finish(tracked: &[Tracked], reason: &str, code: u8) -> u8 {
             Value::Object(fields)
         })
         .collect();
+    // A closed pipe cannot hide the result: the exit status still carries it.
     write_event(json!({"event": "final", "reason": reason, "results": results}));
     code
 }
 
-fn emit(tracked: &mut Tracked, state: &State) {
+/// Writes the event for a new or changed state.
+/// Returns `false` once the reader has closed stdout.
+fn emit(tracked: &mut Tracked, state: &State) -> bool {
     let text = state.to_string();
     let previous = tracked.prior.as_ref().map(Value::to_string);
     if previous.as_deref() == Some(text.as_str()) {
-        return;
+        return true;
     }
     let mut event = Map::new();
     event.insert(
@@ -200,12 +202,51 @@ fn emit(tracked: &mut Tracked, state: &State) {
     );
     event.insert("target".to_owned(), tracked.target.key.clone().into());
     event.extend(state.as_object().cloned().unwrap_or_default());
-    write_event(Value::Object(event));
+    let open = write_event(Value::Object(event));
     tracked.prior = Some(state.clone());
+    open
 }
 
-/// Polls until every target is complete, one needs action, the deadline passes or a signal
-/// arrives; returns the exit status.
+/// What one pass over the unfinished targets found.
+struct Round {
+    /// A target needs action.
+    blocker: bool,
+    /// A blocked target failed to be read.
+    query_error: bool,
+    /// The reader closed stdout while an event was written.
+    reader_closed: bool,
+}
+
+/// Polls each unfinished target once and writes the events for the states it reads.
+fn poll_round(tracked: &mut [Tracked], deadline: Instant) -> Round {
+    let mut round = Round {
+        blocker: false,
+        query_error: false,
+        reader_closed: false,
+    };
+    for entry in tracked.iter_mut().filter(|entry| !entry.done) {
+        let state = match poll(entry, deadline) {
+            Polled::Read(state) => state,
+            Polled::Retry => continue,
+            Polled::Interrupted => break,
+        };
+        if !emit(entry, &state) {
+            round.reader_closed = true;
+            break;
+        }
+        match status(&state) {
+            "complete" => entry.done = true,
+            "blocked" => {
+                round.blocker = true;
+                round.query_error |= is_query_error(&state);
+            }
+            _ => {}
+        }
+    }
+    round
+}
+
+/// Polls until every target completes or one stops the wait. Returns the exit status.
 pub fn run(options: &Options) -> u8 {
     let deadline = Instant::now() + options.timeout;
     let started = clock::now_secs().unwrap_or(0);
@@ -231,23 +272,10 @@ pub fn run(options: &Options) -> u8 {
         if Instant::now() >= deadline {
             return finish(&tracked, "deadline_exceeded", TIMED_OUT);
         }
-        let mut blocker = false;
-        let mut query_error = false;
-        for entry in tracked.iter_mut().filter(|entry| !entry.done) {
-            let state = match poll(entry, deadline) {
-                Polled::Read(state) => state,
-                Polled::Retry => continue,
-                Polled::Interrupted => break,
-            };
-            emit(entry, &state);
-            match status(&state) {
-                "complete" => entry.done = true,
-                "blocked" => {
-                    blocker = true;
-                    query_error |= is_query_error(&state);
-                }
-                _ => {}
-            }
+        let round = poll_round(&mut tracked, deadline);
+        if round.reader_closed {
+            // The wait has no result yet, so there is no status to report.
+            return 0;
         }
         if cancelled() {
             return finish(&tracked, "cancelled", signal_exit());
@@ -255,11 +283,11 @@ pub fn run(options: &Options) -> u8 {
         if Instant::now() >= deadline {
             return finish(&tracked, "deadline_exceeded", TIMED_OUT);
         }
-        if blocker {
+        if round.blocker {
             return finish(
                 &tracked,
                 "action_required",
-                if query_error { FAILED } else { BLOCKED },
+                if round.query_error { FAILED } else { BLOCKED },
             );
         }
         if tracked.iter().all(|entry| entry.done) {

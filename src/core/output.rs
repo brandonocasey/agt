@@ -67,8 +67,15 @@ pub fn print(output: Output) -> Result<()> {
         Output::Report(inner, _) => return print(*inner),
         Output::Exit(_) | Output::Failure(..) => return Ok(()),
     };
-    std::io::stdout()
-        .lock()
-        .write_all(text.as_bytes())
-        .map_err(ctx("write stdout"))
+    write_stdout(text.as_bytes()).map(drop)
+}
+
+/// Returns `false` when the reader closed the pipe, such as `head` stopping early.
+pub fn write_stdout(bytes: &[u8]) -> Result<bool> {
+    let mut out = std::io::stdout().lock();
+    match out.write_all(bytes).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(ctx("write stdout")(error)),
+    }
 }

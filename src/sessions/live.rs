@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -16,7 +16,7 @@ use crate::core::clock;
 use crate::core::error::{Result, ctx};
 use crate::core::harness::Harness;
 use crate::core::local;
-use crate::core::output::Output;
+use crate::core::output::{Output, write_stdout};
 use crate::core::transcripts::json::{SHORT_ID, head};
 use crate::core::transcripts::{codex_sessions, session_files};
 use crate::git::Repo;
@@ -247,7 +247,9 @@ fn watch(cli: &Cli) -> Result<()> {
         let now = clock::now_secs()?;
         let rows = claude_rows(now, None, &mut false);
         for event in poll(&mut seen, rows, now, agents::exists) {
-            emit(&event)?;
+            if !emit(&event)? {
+                return Ok(());
+            }
         }
         polls += 1;
         if cli.max_polls.is_some_and(|max| polls >= max) {
@@ -331,12 +333,11 @@ impl Event {
     }
 }
 
-fn emit(event: &Event) -> Result<()> {
-    let line = serde_json::to_string(event).map_err(ctx("encode event"))?;
-    let mut out = std::io::stdout().lock();
-    writeln!(out, "{line}")
-        .and_then(|()| out.flush())
-        .map_err(ctx("write stdout"))
+/// Prints one event line; `false` when the reader closed the pipe and `--watch` should stop.
+fn emit(event: &Event) -> Result<bool> {
+    let mut line = serde_json::to_string(event).map_err(ctx("encode event"))?;
+    line.push('\n');
+    write_stdout(line.as_bytes())
 }
 
 /// The model, context tokens and cost from the session's transcripts. When they or the price

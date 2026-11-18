@@ -5,6 +5,7 @@ mod check;
 mod ci;
 mod ci_wait;
 mod cleanup;
+mod closed_pipe;
 mod commands;
 mod comment_edit;
 mod directory;
