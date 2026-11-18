@@ -532,6 +532,33 @@ fn backups_list_filter_by_id_and_rm() {
 }
 
 #[test]
+fn the_backup_list_counts_file_modes_and_the_view_by_id_lists_them() {
+    let f = Fixture::new();
+    f.dirty();
+    let removed = f.remove();
+    let id = removed["id"].as_str().unwrap();
+
+    let listed = f.json(&["backups"]);
+    let entry = listed["backups"][0].as_object().unwrap();
+    assert!(!entry.contains_key("file_modes"), "{entry:?}");
+    let shown = f.json(&["backups", id]);
+    let modes = shown["backups"][0]["file_modes"].as_array().unwrap();
+    assert!(!modes.is_empty());
+    assert_eq!(entry["file_mode_count"], modes.len());
+    // The record on disk keeps its modes, and every other field matches the by-id view.
+    let record: Value = serde_json::from_slice(
+        &fs::read(Path::new(removed["backup_dir"].as_str().unwrap()).join("backup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["file_modes"].as_array().unwrap().len(), modes.len());
+    for (key, value) in entry {
+        if key != "file_mode_count" {
+            assert_eq!(*value, shown["backups"][0][key], "{key}");
+        }
+    }
+}
+
+#[test]
 fn list_names_the_live_sessions_inside_each_worktree() {
     let f = Fixture::new();
     let me = std::process::id();
