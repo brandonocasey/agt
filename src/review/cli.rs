@@ -366,6 +366,9 @@ pub struct DeleteArgs {
     pub id: String,
     /// Confirm the delete; without it nothing is removed.
     #[arg(long)]
+    pub yes: bool,
+    /// Same as `--yes`.
+    #[arg(long, hide = true)]
     pub force: bool,
 }
 

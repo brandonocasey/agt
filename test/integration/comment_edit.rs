@@ -51,17 +51,17 @@ fn edit_rewrites_an_unposted_comment_from_text_or_stdin() {
 }
 
 #[test]
-fn delete_without_force_removes_nothing() {
+fn delete_without_yes_removes_nothing() {
     let env = thread_with_a_reply();
     let error = env.fail(&["delete", "h1/c2"], None);
-    assert!(error.contains("needs --force"), "{error}");
+    assert!(error.contains("needs --yes"), "{error}");
     assert_eq!(bodies(&env), ["Opening.", "Answer."]);
 }
 
 #[test]
 fn delete_removes_an_unposted_reply_and_keeps_the_thread() {
     let env = thread_with_a_reply();
-    let deleted = env.run(&["delete", "--force", "h1/c2"]);
+    let deleted = env.run(&["delete", "--yes", "h1/c2"]);
     assert_eq!(deleted["deleted"], "h1/c2");
     assert_eq!(deleted["pending"], false);
     assert_eq!(deleted["thread_removed"], false);

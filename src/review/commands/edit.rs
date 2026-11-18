@@ -65,9 +65,9 @@ pub(super) fn edit(ctx: &Ctx, args: &EditArgs) -> Result<Value> {
 }
 
 pub(super) fn delete(ctx: &Ctx, args: &DeleteArgs) -> Result<Value> {
-    if !args.force {
+    if !(args.yes || args.force) {
         return fail(format!(
-            "delete of comment {} needs --force; nothing was removed",
+            "delete of comment {} needs --yes; nothing was removed",
             args.id
         ));
     }
