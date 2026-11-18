@@ -300,7 +300,8 @@ agt review resolve rv-7k2m.c1p0.r1.f1 --not-fixed "still loses data" \
   `--effort`, `--harness`, `--harness-version`, `--reviewer`, `--session`.
   `--reviewer <run>.<pass>.<id>` (such as `rv-7k2m.c1p0.r1`) names a reviewer of a stored
   pass and fills the rest from it, and records that run, pass and reviewer on the author; `--session` is the harness's id for the agent,
-  such as the main session's. With no author flags the author is the forge login that
+  such as the main session's. An agent author that lacks a required flag fails with an error that names `--reviewer`.
+  With an open pass, the error also lists its reviewers as `<run>.<pass>.<id>`. With no author flags the author is the forge login that
   `sync` last authenticated as for this repository, else git `user.name`,
   which the next `sync` (or `publish`) replaces with the forge login.
 - `reply --local` keeps the reply in the store only, such as the user's answer

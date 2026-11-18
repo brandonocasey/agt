@@ -655,3 +655,72 @@ fn a_target_without_issue_fields_loads_and_stays_without_them() {
         );
     });
 }
+
+#[test]
+fn a_bad_reviewer_id_says_a_writing_reviewer_takes_r_n() {
+    let env = changed_branch();
+    let error = env.fail(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        Some(r#"[{"id":"w1","model":"m1","harness":"codex"}]"#),
+    );
+    assert!(
+        error.contains(
+            "reviewer id must look like r<n>, or be manual or fix; a writing reviewer also takes r<n>: w1"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_agent_author_error_lists_the_open_pass_reviewers() {
+    let env = changed_branch();
+    let no_model = ["comment", "--body", "x", "--effort", "high"];
+    let no_harness = ["comment", "--body", "x", "--model", "m1"];
+    for (flags, flag) in [(no_model, "--model"), (no_harness, "--harness")] {
+        let error = env.fail(&flags, None);
+        assert!(
+            error.contains(&format!(
+                "an agent author needs {flag}, or a stored --reviewer"
+            )),
+            "{error}"
+        );
+        assert!(!error.contains("open pass"), "no pass is open: {error}");
+    }
+    let started = env.run_stdin(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        r#"[{"model":"m1","harness":"codex"},{"model":"m2","harness":"codex"}]"#,
+    );
+    let run = started["run"].as_str().unwrap();
+    let pass = started["pass"]["id"].as_str().unwrap();
+    let listed = format!("the open pass has {run}.{pass}.r1, {run}.{pass}.r2");
+    for (flags, flag) in [(no_model, "--model"), (no_harness, "--harness")] {
+        let error = env.fail(&flags, None);
+        assert!(
+            error.contains(&format!(
+                "an agent author needs {flag}, or a stored --reviewer; {listed}"
+            )),
+            "{error}"
+        );
+    }
+    env.run(&["pass", "end", "--run", run, "--pass", pass]);
+    let error = env.fail(&no_model, None);
+    assert!(!error.contains("open pass"), "the pass ended: {error}");
+}
+
+#[test]
+fn a_qa_agent_author_error_names_model_and_harness_not_reviewer() {
+    let env = changed_branch();
+    env.run_stdin(
+        &["pass", "start", "--kind", "full", "--reviewers", "-"],
+        r#"[{"model":"m1","harness":"codex"}]"#,
+    );
+    let output = qa_exec(&env, &["run", "start", "--harness", "codex"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("an agent author needs --model; QA takes --model and --harness"),
+        "{error}"
+    );
+    assert!(!error.contains("--reviewer"), "{error}");
+    assert!(!error.contains("open pass"), "{error}");
+}

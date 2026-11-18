@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::approve::is_open;
 use super::edit::{delete, edit};
-use super::findings::{self, NewThread, author, linked_issue, local_thread};
+use super::findings::{self, NewThread, Workflow, author, linked_issue, local_thread};
 use super::input::{implementer_name, limited, read_body};
 use super::report::{self, Section};
 use super::{
@@ -354,7 +354,7 @@ pub(super) fn qa_author(
     if args.reviewer.is_some() {
         return fail("--reviewer names a review pass reviewer; QA takes --model and --harness");
     }
-    let mut found = author(args, target, default)?;
+    let mut found = author(args, target, default, Workflow::Qa)?;
     if let (Author::Agent { run: owner, .. }, Some(run)) = (&mut found, run) {
         *owner = Some(run.to_owned());
     }
