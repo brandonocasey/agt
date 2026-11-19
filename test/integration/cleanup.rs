@@ -1532,7 +1532,7 @@ fn the_sweep_plan_skips_a_worktree_changed_in_the_last_3_days() {
 }
 
 #[test]
-fn the_sweep_plan_skips_a_worktree_holding_an_ignored_nested_repository() {
+fn the_sweep_plan_offers_a_worktree_holding_only_ignored_nested_repositories() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1556,12 +1556,52 @@ fn the_sweep_plan_skips_a_worktree_holding_an_ignored_nested_repository() {
 
     assert_eq!(sweep_plan(&prune, later()).len(), 1);
 
-    // An ignored clone has history that a backup cannot hold, so the worktree is not offered.
-    let nested = repo.join(".worktrees/done/vendor/lib");
-    fs::create_dir_all(&nested).unwrap();
-    git(&nested, &["init", "-q"]);
-    git(&nested, &["commit", "-q", "--allow-empty", "-m", "lib"]);
+    // A backup holds nothing ignored, so an ignored clone does not stop the worktree.
+    let nest = |path: &str| {
+        let nested = repo.join(".worktrees/done").join(path);
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        git(&nested, &["commit", "-q", "--allow-empty", "-m", "lib"]);
+    };
+    nest("vendor/lib");
+    assert_eq!(sweep_plan(&prune, later()).len(), 1);
+
+    // A clone that git does not ignore has history that a backup cannot hold.
+    nest("tools/lib");
     assert_eq!(sweep_plan(&prune, later()), Vec::<String>::new());
+}
+
+#[test]
+fn the_sweep_plan_lists_a_worktree_inside_an_ignored_folder_only_with_its_outer_one() {
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+    fs::write(repo.join(".git/info/exclude"), "build/\n").unwrap();
+    git(&["worktree", "add", "-q", ".worktrees/done", "-b", "done"]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        ".worktrees/done/build/inner",
+        "-b",
+        "inner",
+    ]);
+
+    let planned = sweep_plan(&prune, later());
+    assert_eq!(planned.len(), 1, "{planned:?}");
+    assert!(planned[0].ends_with("/.worktrees/done"), "{planned:?}");
 }
 
 #[test]

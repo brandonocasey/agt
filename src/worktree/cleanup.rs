@@ -351,6 +351,19 @@ fn remove_worktree(
     report: &mut Report,
 ) -> Result<bool> {
     let path = &entry.path;
+    // A worktree in an ignored folder of one removed earlier went with it, and git
+    // deregistered it, so it needs no row of its own.
+    if let Some(outer) = report
+        .remove
+        .iter()
+        .filter_map(|row| row["path"].as_str())
+        .find(|outer| path.starts_with(outer))
+    {
+        report
+            .warnings
+            .push(format!("{} goes with {outer}", path.display()));
+        return Ok(true);
+    }
     let allow = Allow {
         offline: Offline::current().is_set(),
         recent: cli.recent,

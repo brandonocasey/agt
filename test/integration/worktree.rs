@@ -631,13 +631,107 @@ fn a_nested_repository_blocks_removal_in_plan_and_yes_alike() {
         let output = f.agt(&f.env.repo, &args);
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         let error = String::from_utf8_lossy(&output.stderr);
-        for nested in ["vendor/lib", "tools/deep/clone", "node_modules/pkg"] {
+        for nested in ["vendor/lib", "tools/deep/clone"] {
             assert!(error.contains(nested), "{nested}: {error}");
         }
+        assert!(!error.contains("node_modules/pkg"), "ignored: {error}");
     }
     assert!(f.wt.join("vendor/lib/.git").exists());
     assert!(f.wt.join("node_modules/pkg/.git").exists());
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+}
+
+#[test]
+fn an_ignored_nested_repository_does_not_block_removal() {
+    let f = Fixture::new();
+    nest(&f.env, &f.wt.join("build/scratch/repo"));
+    nest(&f.env, &f.wt.join("node_modules/pkg"));
+    let path = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &path])["plan"], json!(true));
+    f.remove();
+    assert!(!f.wt.exists());
+    assert_ne!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+}
+
+#[test]
+fn a_linked_worktree_in_an_ignored_folder_is_deregistered_and_a_locked_one_blocks() {
+    let f = Fixture::new();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["worktree", "add", "-q", "-b", "inner", "build/inner"],
+    );
+    wgit(&f.env, &f.wt, &["worktree", "lock", "build/inner"]);
+    let path = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &path], "locked worktree");
+    f.refuses(&f.env.repo, &["remove", &path, "--yes"], "locked worktree");
+    wgit(&f.env, &f.wt, &["worktree", "unlock", "build/inner"]);
+    f.remove();
+    assert!(!f.wt.exists());
+    assert!(
+        !f.env
+            .git(&["worktree", "list", "--porcelain"])
+            .contains("build/inner")
+    );
+}
+
+#[test]
+fn a_linked_worktree_in_an_ignored_folder_with_work_nothing_else_holds_blocks_removal() {
+    let f = Fixture::new();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["worktree", "add", "-q", "-b", "inner", "build/inner"],
+    );
+    let inner = f.wt.join("build/inner");
+    fs::write(inner.join("a.txt"), "changed\n").unwrap();
+    let path = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &path], "uncommitted changes");
+    wgit(&f.env, &inner, &["checkout", "-q", "--", "a.txt"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &["worktree", "add", "-q", "--detach", "build/loose"],
+    );
+    let loose = f.wt.join("build/loose");
+    fs::write(loose.join("n.txt"), "n\n").unwrap();
+    wgit(&f.env, &loose, &["add", "n.txt"]);
+    wgit(&f.env, &loose, &["commit", "-q", "-m", "only here"]);
+    f.refuses(&f.env.repo, &["remove", &path, "--yes"], "no branch holds");
+}
+
+#[test]
+fn a_registered_clone_in_an_ignored_folder_is_still_checked() {
+    let f = Fixture::new();
+    nest(&f.env, &f.wt.join("legacy"));
+    f.env.write(".git/info/exclude", "legacy/\n");
+    fs::write(
+        f.wt.join(".gitmodules"),
+        "[submodule \"legacy\"]\n\tpath = legacy\n\turl = ../legacy\n",
+    )
+    .unwrap();
+    wgit(&f.env, &f.wt, &["add", ".gitmodules"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "list legacy"]);
+    let path = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &path], "submodule legacy");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_directory_name_that_is_not_utf8_cannot_hide_an_unignored_nested_repository() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = Fixture::new();
+    f.env.write(".git/info/exclude", "*.log\n");
+    let named = |bytes: &[u8]| f.wt.join(std::ffi::OsStr::from_bytes(bytes));
+    fs::create_dir_all(named(b"x\xff")).unwrap();
+    fs::write(named(b"x\xff").join("a.log"), "").unwrap();
+    nest(&f.env, &named(b"x\xfe").join("repo"));
+    let path = f.wt.to_string_lossy().into_owned();
+    f.refuses(
+        &f.env.repo,
+        &["remove", &path, "--force", "--yes"],
+        "nested git repositories",
+    );
 }
 
 /// Registers a submodule `name` at `path` in the worktree and commits it.
@@ -1281,12 +1375,14 @@ fn a_clone_left_behind_by_deinit_or_rm_in_the_worktree_still_blocks_removal() {
 }
 
 #[test]
-fn a_nested_repository_inside_a_submodule_disposable_directory_blocks_removal() {
+fn a_nested_repository_inside_a_submodule_blocks_removal_unless_the_submodule_ignores_it() {
     let (f, sub) = with_submodule();
     ignore_in(&f, &sub, "node_modules/");
-    let nested = sub.join("node_modules/pkg");
-    nest(&f.env, &nested);
-    refuses_both_ways(&f, "mod/node_modules/pkg");
+    nest(&f.env, &sub.join("node_modules/pkg"));
+    let path = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &path])["plan"], json!(true));
+    nest(&f.env, &sub.join("tools/clone"));
+    refuses_both_ways(&f, "mod/tools/clone");
 }
 
 #[test]
