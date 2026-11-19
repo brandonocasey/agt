@@ -18,6 +18,13 @@ const ASSUME_UNCHANGED: u16 = 0x8000;
 /// `GIT_INDEX_ENTRY_SKIP_WORKTREE`, in the extended flags.
 pub(super) const SKIP_WORKTREE: u16 = 1 << 14;
 
+/// What `git status --ignore-submodules=dirty` still shows of a submodule: a staged change or a
+/// commit other than the recorded one.
+const SUBMODULE_MOVED: git2::SubmoduleStatus = git2::SubmoduleStatus::INDEX_ADDED
+    .union(git2::SubmoduleStatus::INDEX_DELETED)
+    .union(git2::SubmoduleStatus::INDEX_MODIFIED)
+    .union(git2::SubmoduleStatus::WD_MODIFIED);
+
 /// Whether `git status` shows the changes inside a submodule's own work tree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SubmoduleDirt {
@@ -297,14 +304,14 @@ fn is_hidden(entry: &git2::IndexEntry) -> bool {
 /// submodule there, which `--ignore-submodules=dirty` hides.
 fn submodule_is_only_dirty(repo: &git2::Repository, path: &str) -> bool {
     repo.submodule_status(path, git2::SubmoduleIgnore::Dirty)
-        .is_ok_and(|status| !status.contains(git2::SubmoduleStatus::WD_MODIFIED))
+        .is_ok_and(|status| !status.intersects(SUBMODULE_MOVED))
         && repo.find_submodule(path).is_ok()
 }
 
 /// The submodules with a change of their own, whatever `diff.ignoreSubmodules` says: a commit
 /// other than the recorded one, or edits or untracked files in their work tree.
 fn dirty_submodules(repo: &git2::Repository) -> Result<Vec<String>> {
-    let dirt = git2::SubmoduleStatus::WD_MODIFIED
+    let dirt = SUBMODULE_MOVED
         | git2::SubmoduleStatus::WD_INDEX_MODIFIED
         | git2::SubmoduleStatus::WD_WD_MODIFIED
         | git2::SubmoduleStatus::WD_UNTRACKED;
@@ -537,6 +544,73 @@ mod tests {
         );
         assert_eq!(ours, expected);
         assert_eq!(repo.uncommitted_count().unwrap(), expected.len());
+    }
+
+    #[test]
+    fn status_ignoring_submodule_dirt_keeps_a_staged_submodule_as_git_does() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let library = sandbox.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        sandbox.git(&library, &["init", "-q", "-b", "main"]);
+        commit(&sandbox, &library, &[("lib.txt", "lib\n")], "lib");
+        commit(&sandbox, &dir, &[("a.txt", "a\n")], "one");
+        let repo = Repo::at(&dir);
+        let listed = || -> Vec<String> {
+            let ours = repo.status(true, SubmoduleDirt::Ignore).unwrap();
+            let ours = ours.iter().map(|entry| {
+                format!(
+                    "{}{} {}",
+                    entry.staged as char, entry.unstaged as char, entry.path
+                )
+            });
+            ours.collect()
+        };
+        let expected = || -> Vec<String> {
+            let said = sandbox.git_output(
+                &dir,
+                &["status", "--porcelain", "--ignore-submodules=dirty"],
+            );
+            said.lines().map(str::to_owned).collect()
+        };
+
+        sandbox.git(
+            &dir,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                library.to_str().unwrap(),
+                "mod",
+            ],
+        );
+        assert!(
+            expected().iter().any(|line| line == "A  mod"),
+            "{:?}",
+            expected()
+        );
+        assert_eq!(listed(), expected(), "a staged new submodule");
+
+        sandbox.git(&dir, &["commit", "-q", "-m", "add the submodule"]);
+        std::fs::write(dir.join("mod/untracked.txt"), "u\n").unwrap();
+        assert_eq!(expected(), Vec::<String>::new());
+        assert_eq!(listed(), expected(), "only a dirty work tree");
+
+        std::fs::remove_file(dir.join("mod/untracked.txt")).unwrap();
+        sandbox.git(
+            &dir.join("mod"),
+            &["commit", "-q", "--allow-empty", "-m", "next"],
+        );
+        assert_eq!(listed(), expected(), "a new commit, unstaged");
+        sandbox.git(&dir, &["add", "mod"]);
+        assert!(
+            expected().iter().any(|line| line == "M  mod"),
+            "{:?}",
+            expected()
+        );
+        assert_eq!(listed(), expected(), "a new commit, staged");
     }
 
     #[test]
