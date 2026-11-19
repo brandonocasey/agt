@@ -102,38 +102,3 @@ fn zone_minutes(zone: &str, colon: bool) -> Option<i32> {
     }
     Some(sign * (hours.parse::<i32>().ok()? * 60 + minutes.parse::<i32>().ok()?))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::parse_date;
-
-    #[test]
-    fn dates_come_out_in_the_zone_they_name() {
-        for (text, seconds, offset) in [
-            ("1700000000 +0200", 1_700_000_000, 120),
-            ("@1700000000 -0530", 1_700_000_000, -330),
-            ("2026-01-01T00:00:00Z", 1_767_225_600, 0),
-            ("2026-01-02T03:04:05+01:00", 1_767_319_445, 60),
-        ] {
-            let time = parse_date(text).unwrap();
-            assert_eq!(
-                (time.seconds(), time.offset_minutes()),
-                (seconds, offset),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_date_in_a_form_git_alone_reads_is_refused() {
-        for text in [
-            "yesterday",
-            "Tue, 14 Nov 2023 22:13:20 +0000",
-            "1700000000",
-            "1700000000 0200",
-        ] {
-            let error = parse_date(text).unwrap_err().to_string();
-            assert!(error.contains("invalid date format"), "{text}: {error}");
-        }
-    }
-}

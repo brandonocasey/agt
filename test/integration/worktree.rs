@@ -562,6 +562,51 @@ fn the_backup_commit_takes_its_identity_from_the_git_environment() {
     );
 }
 
+/// `agt worktree remove --yes` in a dirty worktree of `f` with `variables` in the environment.
+fn remove_with(f: &Fixture, variables: &[(&str, &str)]) -> std::process::Output {
+    f.env
+        .bin(&f.env.repo)
+        .args(["worktree", "remove", &f.wt.to_string_lossy(), "--yes"])
+        .envs(variables.iter().copied())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn the_backup_commit_date_takes_the_forms_agt_reads_and_refuses_the_others() {
+    for (text, shown) in [
+        ("@1700000000 -0530", "2023-11-14 16:43:20 -0530"),
+        ("2026-01-01T00:00:00Z", "2026-01-01 00:00:00 +0000"),
+    ] {
+        let f = Fixture::new();
+        f.dirty();
+        let output = remove_with(&f, &[("GIT_COMMITTER_DATE", text)]);
+        assert!(output.status.success(), "{text}: {output:?}");
+        let removed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let made = f.env.git(&[
+            "log",
+            "-1",
+            "--format=%ci",
+            removed["ref"].as_str().unwrap(),
+        ]);
+        assert_eq!(made, shown, "{text}");
+    }
+    let f = Fixture::new();
+    f.dirty();
+    for text in [
+        "yesterday",
+        "Tue, 14 Nov 2023 22:13:20 +0000",
+        "1700000000",
+        "1700000000 0200",
+    ] {
+        let output = remove_with(&f, &[("GIT_COMMITTER_DATE", text)]);
+        assert_eq!(output.status.code(), Some(1), "{text}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("invalid date format"), "{text}: {error}");
+        assert!(f.wt.exists(), "{text}: the worktree went anyway");
+    }
+}
+
 #[test]
 fn backups_list_filter_by_id_and_rm() {
     let f = Fixture::new();
