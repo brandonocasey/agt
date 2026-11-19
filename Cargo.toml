@@ -14,6 +14,7 @@ path = "test/integration/main.rs"
 [dependencies]
 base64 = "0.22.1"
 clap = { version = "4.5.51", features = ["derive"] }
+git2 = { version = "0.20", features = ["vendored-openssl"] }
 indexmap = { version = "2.9.0", features = ["serde"] }
 libc = "0.2.186"
 regex = "1.13.1"
