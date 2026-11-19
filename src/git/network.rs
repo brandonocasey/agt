@@ -2,6 +2,7 @@
 //! Credentials come from ssh-agent, keys in `~/.ssh`, and a configured git credential helper,
 //! which [`disable_credential_prompts`] keeps from asking the user.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -50,11 +51,13 @@ impl Repo {
         let url = remote.url().unwrap_or_default().to_owned();
         let mut proxy = git2::ProxyOptions::new();
         proxy.auto();
-        let connection = remote.connect_auth(
-            git2::Direction::Fetch,
-            Some(callbacks(&config, &url)),
-            Some(proxy),
-        )?;
+        let connection = remote
+            .connect_auth(
+                git2::Direction::Fetch,
+                Some(callbacks(&config, &url)),
+                Some(proxy),
+            )
+            .map_err(explain)?;
         let refs = connection
             .list()?
             .iter()
@@ -125,7 +128,9 @@ fn fetch_from(
 ) -> Result<()> {
     let config = repo.config()?;
     let url = remote.url().unwrap_or_default().to_owned();
-    remote.fetch(refspecs, Some(&mut fetch_options(&config, &url)), None)?;
+    remote
+        .fetch(refspecs, Some(&mut fetch_options(&config, &url)), None)
+        .map_err(explain)?;
     Ok(())
 }
 
@@ -214,6 +219,27 @@ fn login_name() -> Option<String> {
         .find_map(|variable| std::env::var(variable).ok().filter(|name| !name.is_empty()))
 }
 
+thread_local! {
+    /// What the host-key check said when it refused the last connection of this thread.
+    static HOST_KEY_REFUSAL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Remembers why a host key was refused. libgit2 replaces the error of the check with its own
+/// text, so [`explain`] puts this one back.
+fn refuse_host_key(message: String) -> git2::Error {
+    HOST_KEY_REFUSAL.with(|refusal| *refusal.borrow_mut() = Some(message.clone()));
+    git2::Error::from_str(&message)
+}
+
+/// `error` of a network call, as the host-key check explained it when it refused the connection.
+pub(super) fn explain(error: git2::Error) -> Error {
+    let refusal = HOST_KEY_REFUSAL.with(|refusal| refusal.borrow_mut().take());
+    match refusal {
+        Some(message) if error.class() == git2::ErrorClass::Ssh => Error(message),
+        _ => error.into(),
+    }
+}
+
 /// Accepts an ssh host key only when a `known_hosts` file lists it; a key of any other
 /// certificate (https) is left to libgit2.
 fn check_host_key(
@@ -228,13 +254,13 @@ fn check_host_key(
         return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
     };
     let verdict = known_hosts::check(&known_hosts::default_files(), host, port, key)
-        .map_err(|error| git2::Error::from_str(&error.0))?;
+        .map_err(|error| refuse_host_key(error.0))?;
     match verdict {
         Verdict::Known => Ok(git2::CertificateCheckStatus::CertificateOk),
-        Verdict::Revoked => Err(git2::Error::from_str(&format!(
+        Verdict::Revoked => Err(refuse_host_key(format!(
             "the ssh host key of {host} is marked @revoked in a known_hosts file"
         ))),
-        Verdict::Unknown => Err(git2::Error::from_str(&known_hosts::unknown_host_message(
+        Verdict::Unknown => Err(refuse_host_key(known_hosts::unknown_host_message(
             host,
             port,
             hostkey.hash_sha256().map(known_hosts::fingerprint),
@@ -268,7 +294,7 @@ fn has_credential_helper(config: &git2::Config) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::user_name_credential;
+    use super::{explain, refuse_host_key, user_name_credential};
 
     use super::super::fixtures::{commit, rev};
     use crate::core::testing::Sandbox;
@@ -303,6 +329,25 @@ mod tests {
         sandbox.git(&other, &["tag", "v2"]);
         sandbox.git(&other, &["push", "-q", "origin", "main", "v2"]);
         rev(sandbox, &other, "HEAD")
+    }
+
+    #[test]
+    fn a_refused_host_key_is_explained_in_place_of_libgit2s_text() {
+        let libgit2_text = || {
+            git2::Error::new(
+                git2::ErrorCode::GenericError,
+                git2::ErrorClass::Ssh,
+                "invalid or unknown remote ssh hostkey",
+            )
+        };
+        let own = "the ssh host key of example.org is not in a known_hosts file";
+        refuse_host_key(own.to_owned());
+        assert_eq!(explain(libgit2_text()).0, own);
+        assert_eq!(
+            explain(libgit2_text()).0,
+            "invalid or unknown remote ssh hostkey",
+            "a refusal explains one failure"
+        );
     }
 
     #[test]
