@@ -19,6 +19,9 @@ pub struct RemoteRef {
     pub symref: Option<String>,
 }
 
+/// The largest buffer `getpwuid_r` is offered for a passwd entry.
+const PASSWD_BUFFER_LIMIT: usize = 1 << 20;
+
 /// The key files tried, in order, after the ssh agent.
 const SSH_KEY_FILES: [&str; 3] = ["id_ed25519", "id_rsa", "id_ecdsa"];
 
@@ -170,7 +173,7 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
     callbacks.certificate_check(move |cert, host| check_host_key(cert, host, port));
     callbacks.credentials(move |url, username_from_url, allowed| {
         if allowed.contains(git2::CredentialType::USERNAME) {
-            return user_name_credential(username_from_url, login_name());
+            return user_name_credential(username_from_url);
         }
         let user = username_from_url.unwrap_or("git");
         if allowed.contains(git2::CredentialType::SSH_KEY) {
@@ -201,22 +204,54 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
 
 /// The answer to libgit2's request for a user name, which it makes for an ssh URL without one:
 /// the name the URL gives, else the login name.
-fn user_name_credential(
-    url_user: Option<&str>,
-    login: Option<String>,
-) -> std::result::Result<git2::Cred, git2::Error> {
-    let name = url_user
-        .map(str::to_owned)
-        .or(login)
+fn user_name_credential(url_user: Option<&str>) -> std::result::Result<git2::Cred, git2::Error> {
+    let name = chosen_user_name(url_user, login_name())
         .ok_or_else(|| git2::Error::from_str("no user name: put one in the URL (user@host)"))?;
     git2::Cred::username(&name)
 }
 
-/// The login name of the current user.
+fn chosen_user_name(url_user: Option<&str>, login: Option<String>) -> Option<String> {
+    url_user.map(str::to_owned).or(login)
+}
+
+/// The login name of the current user: `USER` or `LOGNAME`, else the name the password database
+/// has for the user id, which is what ssh uses.
 fn login_name() -> Option<String> {
     ["USER", "LOGNAME"]
         .iter()
         .find_map(|variable| std::env::var(variable).ok().filter(|name| !name.is_empty()))
+        .or_else(passwd_name)
+}
+
+/// The password database's name for the user id of this process.
+fn passwd_name() -> Option<String> {
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        // SAFETY: `passwd` is plain data that `getpwuid_r` fills; `buffer` outlives the name read
+        // from it, and the call is given its true length.
+        let (status, name) = unsafe {
+            let mut entry: libc::passwd = std::mem::zeroed();
+            let mut found: *mut libc::passwd = std::ptr::null_mut();
+            let status = libc::getpwuid_r(
+                libc::getuid(),
+                &raw mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &raw mut found,
+            );
+            let name = (status == 0 && !found.is_null()).then(|| {
+                std::ffi::CStr::from_ptr(entry.pw_name)
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            (status, name)
+        };
+        if status == libc::ERANGE && buffer.len() < PASSWD_BUFFER_LIMIT {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        return name.filter(|name| !name.is_empty());
+    }
 }
 
 thread_local! {
@@ -294,7 +329,7 @@ fn has_credential_helper(config: &git2::Config) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{explain, refuse_host_key, user_name_credential};
+    use super::{chosen_user_name, explain, passwd_name, refuse_host_key};
 
     use super::super::fixtures::{commit, rev};
     use crate::core::testing::Sandbox;
@@ -332,32 +367,43 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_host_key_is_explained_in_place_of_libgit2s_text() {
-        let libgit2_text = || {
+    fn a_refused_host_key_is_explained_once_and_only_for_an_ssh_failure() {
+        let failure = |class| {
             git2::Error::new(
                 git2::ErrorCode::GenericError,
-                git2::ErrorClass::Ssh,
+                class,
                 "invalid or unknown remote ssh hostkey",
             )
         };
         let own = "the ssh host key of example.org is not in a known_hosts file";
         refuse_host_key(own.to_owned());
-        assert_eq!(explain(libgit2_text()).0, own);
+        assert_eq!(explain(failure(git2::ErrorClass::Ssh)).0, own);
         assert_eq!(
-            explain(libgit2_text()).0,
+            explain(failure(git2::ErrorClass::Ssh)).0,
             "invalid or unknown remote ssh hostkey",
             "a refusal explains one failure"
+        );
+        refuse_host_key(own.to_owned());
+        assert_eq!(
+            explain(failure(git2::ErrorClass::Net)).0,
+            "invalid or unknown remote ssh hostkey",
+            "only an ssh failure carries the refusal"
         );
     }
 
     #[test]
-    fn a_user_name_request_is_answered_from_the_url_or_the_login() {
-        let from_url = user_name_credential(Some("alice"), Some("bob".to_owned())).unwrap();
-        let from_login = user_name_credential(None, Some("bob".to_owned())).unwrap();
-        let username = git2::CredentialType::USERNAME.bits();
-        assert_eq!(from_url.credtype(), username);
-        assert_eq!(from_login.credtype(), username);
-        assert!(user_name_credential(None, None).is_err());
+    fn a_user_name_request_prefers_the_url_over_the_login() {
+        let login = || Some("bob".to_owned());
+        assert_eq!(chosen_user_name(Some("alice"), login()).unwrap(), "alice");
+        assert_eq!(chosen_user_name(None, login()).unwrap(), "bob");
+        assert_eq!(chosen_user_name(None, None), None);
+    }
+
+    #[test]
+    fn the_password_database_names_the_user_as_id_does() {
+        let sandbox = Sandbox::new();
+        let expected = sandbox.shell_output(sandbox.path(), "id -un");
+        assert_eq!(passwd_name().as_deref(), Some(expected.trim()));
     }
 
     #[test]
