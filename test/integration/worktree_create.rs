@@ -2126,3 +2126,17 @@ fn a_linked_worktree_is_repaired_by_git_after_the_repository_moves() {
         git_in(tree, &["status", "-s"]);
     }
 }
+
+#[test]
+fn a_path_that_holds_files_is_refused_and_leaves_no_registration() {
+    let (env, _) = repo_with_commit();
+    let taken = env.repo.join(".worktrees/foo");
+    fs::create_dir_all(&taken).unwrap();
+    fs::write(taken.join("mine.txt"), "mine").unwrap();
+
+    let output = agt(&env, &env.repo, &["create", "foo"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!env.repo.join(".git/worktrees/foo").exists());
+    assert_eq!(fs::read_to_string(taken.join("mine.txt")).unwrap(), "mine");
+}

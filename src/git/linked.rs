@@ -47,11 +47,12 @@ impl Repo {
             .commondir()
             .join("worktrees")
             .join(admin_name(&repo, path));
-        link_worktree(&admin, path, &head)?;
-        fill_worktree(&repo, path).inspect_err(|_| {
-            let _ = fs::remove_dir_all(&admin);
-            let _ = fs::remove_dir_all(path);
-        })
+        link_worktree(&admin, path, &head)
+            .and_then(|()| fill_worktree(&repo, path))
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&admin);
+                let _ = fs::remove_dir_all(path);
+            })
     }
 
     /// Fails when `branch` is checked out, or rebased, in a work tree, which git refuses to check
@@ -162,6 +163,9 @@ fn prepare_path(path: &Path) -> Result<()> {
     }
     if fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()) {
         fs::remove_dir(path).map_err(ctx(format!("prepare {}", path.display())))?;
+    }
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(Error(format!("'{}' already exists", path.display())));
     }
     Ok(())
 }
