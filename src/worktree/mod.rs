@@ -2,6 +2,7 @@
 //! it a stable dev-server port, list linked worktrees, remove one after a snapshot backup, and
 //! restore a backup.
 
+mod archive;
 mod backup;
 pub mod cleanup;
 mod copy;

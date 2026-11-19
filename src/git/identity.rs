@@ -1,57 +1,17 @@
-//! The author and committer of the commits agt writes: `agt <agt@localhost>`.
-//! The `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables override it, as for `git commit-tree`.
+//! The committer of the commits agt replays.
+//! The `GIT_COMMITTER_*` variables override `user.name` and `user.email`, as for `git rebase`.
 
 use super::configured;
 use crate::core::clock;
 use crate::core::error::{Error, Result};
 
-const DEFAULT_NAME: &str = "agt";
-const DEFAULT_EMAIL: &str = "agt@localhost";
-
-/// Which signature of a commit to build.
-#[derive(Clone, Copy)]
-pub(super) enum Role {
-    Author,
-    Committer,
-}
-
-impl Role {
-    fn variable(self, field: &str) -> String {
-        let role = match self {
-            Self::Author => "AUTHOR",
-            Self::Committer => "COMMITTER",
-        };
-        format!("GIT_{role}_{field}")
-    }
-}
-
-/// The signature for `role`, `agt` unless the environment names another. A date is
-/// `<epoch> <±hhmm>` (a leading `@` is allowed) or RFC 3339; git's other date forms are refused.
-pub(super) fn signature(role: Role) -> Result<git2::Signature<'static>> {
-    build(
-        role,
-        Some(DEFAULT_NAME.to_owned()),
-        Some(DEFAULT_EMAIL.to_owned()),
-    )
-}
-
 /// The committer of a commit that replays others, as `git rebase` makes it.
 /// It comes from the environment, else `user.name` and `user.email` of `repo`,
 /// `GIT_CONFIG_COUNT` included.
 pub(super) fn committer_in(repo: &git2::Repository) -> Result<git2::Signature<'static>> {
-    build(
-        Role::Committer,
-        configured(repo, "user.name")?,
-        configured(repo, "user.email")?,
-    )
-}
-
-fn build(
-    role: Role,
-    fallback_name: Option<String>,
-    fallback_email: Option<String>,
-) -> Result<git2::Signature<'static>> {
-    let read = |field: &str| std::env::var(role.variable(field)).ok();
+    let fallback_name = configured(repo, "user.name")?;
+    let fallback_email = configured(repo, "user.email")?;
+    let read = |field: &str| std::env::var(format!("GIT_COMMITTER_{field}")).ok();
     let unknown = |what: &str| Error(format!("committer identity unknown: {what} is not set"));
     let name = read("NAME")
         .or(fallback_name)

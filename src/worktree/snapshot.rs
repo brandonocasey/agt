@@ -1,27 +1,54 @@
-//! Backing a worktree up: a commit of its whole working tree pinned by a ref, plus its
-//! sparse-checkout files. Ignored files stay out of it.
+//! Archives a worktree's tracked files, with working-tree edits, and its sparse-checkout files.
+//! Ignored and untracked files stay out of it.
 
+use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use super::backup::{self, FileMode, REF_PREFIX, Record};
+use super::archive::{self, Writer};
+use super::backup::{self, Record};
 use super::info;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::create_dirs;
-use crate::git::{Repo, Worktree};
+use crate::git::{GITLINK_MODE, Repo, Worktree};
 
 pub struct Taken {
     pub record: Record,
-    pub dir: PathBuf,
-    /// Files that differ between the worktree's HEAD and the snapshot.
+    pub path: PathBuf,
+    /// Files that differ between the worktree's HEAD and its working tree.
     pub changed: usize,
 }
 
-/// Snapshots `entry`, whose repository's main checkout is `main`. Nothing in the worktree
-/// changes; its index is not touched.
+/// One path that differs between two trees.
+pub(super) struct Change {
+    pub path: Vec<u8>,
+    pub deleted: bool,
+    pub gitlink: bool,
+    /// The mode and object id the path has in the second tree.
+    pub mode: u32,
+    pub oid: String,
+}
+
+/// The paths that differ between the trees `from` and `to`.
+pub(super) fn changes(repo: &Repo, from: &str, to: &str) -> Result<Vec<Change>> {
+    Ok(repo
+        .tree_changes(from, to)?
+        .into_iter()
+        .map(|change| Change {
+            deleted: change.status == 'D',
+            gitlink: change.old_mode == GITLINK_MODE || change.new_mode == GITLINK_MODE,
+            path: change.path,
+            mode: change.new_mode,
+            oid: change.new_id,
+        })
+        .collect())
+}
+
 /// Fails when `entry` has no commit, which a backup needs to restore on.
 pub(super) fn require_commit(entry: &Worktree) -> Result<()> {
     if entry.unborn() {
@@ -33,6 +60,8 @@ pub(super) fn require_commit(entry: &Worktree) -> Result<()> {
     Ok(())
 }
 
+/// Snapshots `entry`, whose repository's main checkout is `main`. Nothing in the worktree
+/// changes; its index is not touched.
 pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
     let created = clock::now_secs()?;
     let stamp = clock::format(created);
@@ -47,116 +76,127 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
     require_commit(entry)?;
     let name = ref_safe(&entry.path.file_name().unwrap_or_default().to_string_lossy());
     let repo_name = main.file_name().unwrap_or_default().to_string_lossy();
-    let shared = Repo::at(main);
     let base = backup::root()?.join(repo_name.as_ref());
-    let (id, dir) = (1..)
+    let (id, path) = (1..)
         .map(|attempt| match attempt {
             1 => format!("{stamp}-worktree-{name}"),
             n => format!("{stamp}-worktree-{name}-{n}"),
         })
         .map(|id| {
-            let dir = base.join(&id);
-            (id, dir)
+            let path = base.join(format!("{id}{}", archive::EXT));
+            (id, path)
         })
-        .find(|(id, dir)| {
-            let reference = format!("{REF_PREFIX}{id}");
-            !dir.exists()
-                && !backup::id_taken(id)
-                && shared
-                    .ref_commit(&reference)
-                    .is_ok_and(|found| found.is_none())
+        .find(|(id, path)| {
+            !path.exists() && !Writer::partial_name(path).exists() && !backup::id_taken(id)
         })
         .unwrap_or_default();
-    create_dirs(&dir, 0o700)?;
-    let reference = format!("{REF_PREFIX}{id}");
-    let made = build(main, entry, &dir, id, &reference, created);
-    if made.is_err() {
-        // A failed backup leaves neither the ref nor the directory behind.
-        let _ = shared.delete_ref(&reference);
-        let _ = fs::remove_dir_all(&dir);
-    }
-    made
+    create_dirs(&base, 0o700)?;
+    build(main, entry, &path, id, created)
 }
 
-fn build(
-    main: &Path,
-    entry: &Worktree,
-    dir: &Path,
-    id: String,
-    reference: &str,
-    created: i64,
-) -> Result<Taken> {
+fn build(main: &Path, entry: &Worktree, path: &Path, id: String, created: i64) -> Result<Taken> {
     let shared = &Repo::at(main);
     let tree = Repo::at(&entry.path).worktree_tree_with_hidden_edits()?;
-    let message = format!("agt worktree backup {id}");
-    let snapshot = shared.commit_tree(&tree, &entry.head, &message)?;
-    shared.set_ref(reference, &snapshot, &message)?;
-    let changed = shared.tree_changes(&entry.head, &snapshot)?.len();
-
-    let ignored = info::ignored(&entry.path)?;
-    save_git_files(&entry.path, &dir.join(SAVED_GIT_DIR))?;
-    let paths = shared.tree_files(&tree)?;
-    let mut file_modes = Vec::new();
-    for path in &paths {
-        let source = entry.path.join(std::ffi::OsStr::from_bytes(path));
-        let metadata = match fs::symlink_metadata(&source) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(ctx(format!("stat {}", source.display()))(error)),
-        };
-        if metadata.is_file() {
-            file_modes.push(FileMode {
-                path: path.to_vec(),
-                mode: metadata.permissions().mode() & 0o7777,
-            });
-        }
-    }
+    let changes = changes(shared, &entry.head, &tree)?;
     let record = Record {
         id,
         repository: main.to_owned(),
         worktree: entry.path.clone(),
         branch: entry.branch.clone(),
         head: entry.head.clone(),
-        snapshot,
-        reference: reference.to_owned(),
+        snapshot: None,
+        reference: None,
         created: clock::format(created),
         copied: Vec::new(),
-        skipped: ignored,
-        file_modes,
+        skipped: info::ignored(&entry.path)?,
+        file_modes: Vec::new(),
+        deleted: changes
+            .iter()
+            .filter(|change| change.deleted && !change.gitlink)
+            .map(|change| change.path.clone())
+            .collect(),
     };
-    backup::write(dir, &record)?;
+    let mut writer = Writer::create(path, &record)?;
+    let contents = Contents {
+        shared,
+        root: &entry.path,
+        tree: &tree,
+        changes: &changes,
+    };
+    if let Err(error) =
+        save_git_files(&entry.path, &mut writer).and_then(|()| fill(&mut writer, &contents))
+    {
+        writer.discard();
+        return Err(error);
+    }
+    writer.finish()?;
     Ok(Taken {
         record,
-        dir: dir.to_owned(),
-        changed,
+        path: path.to_owned(),
+        changed: changes.len(),
     })
 }
 
-/// Where a backup keeps the per-worktree git files that `git worktree remove` deletes.
+/// What `fill` saves: the files of `tree` under `root`, which differs from HEAD by `changes`.
+struct Contents<'a> {
+    shared: &'a Repo,
+    root: &'a Path,
+    tree: &'a str,
+    changes: &'a [Change],
+}
+
+/// Adds the tree's files to `writer`. A file the worktree lacks (a sparse checkout) comes from
+/// its object when changed, else HEAD keeps it.
+fn fill(writer: &mut Writer, contents: &Contents) -> Result<()> {
+    let edited: HashMap<&[u8], &Change> = contents
+        .changes
+        .iter()
+        .filter(|change| !change.deleted && !change.gitlink)
+        .map(|change| (change.path.as_slice(), change))
+        .collect();
+    for path in contents.shared.tree_files(contents.tree)? {
+        let path = path.as_slice();
+        let source = contents.root.join(OsStr::from_bytes(path));
+        match fs::symlink_metadata(&source) {
+            Ok(found) if found.is_file() || found.file_type().is_symlink() => {
+                writer.file(path, &source)?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if let Some(change) = edited.get(path) {
+                    add_object(writer, contents.shared, change)?;
+                }
+            }
+            Err(error) => return Err(ctx(format!("stat {}", source.display()))(error)),
+        }
+    }
+    Ok(())
+}
+
+fn add_object(writer: &mut Writer, shared: &Repo, change: &Change) -> Result<()> {
+    let contents = shared.blob_content(&change.oid)?;
+    match change.mode {
+        0o120000 => writer.symlink(&change.path, 0o777, &contents),
+        0o100755 => writer.blob(&change.path, 0o755, &contents),
+        _ => writer.blob(&change.path, 0o644, &contents),
+    }
+}
+
+/// Where a directory backup keeps the per-worktree git files that `git worktree remove` deletes.
 pub const SAVED_GIT_DIR: &str = "worktree-git";
 
 /// The per-worktree files of the worktree's git directory: its sparse-checkout patterns and
 /// its own config (which holds the sparse-checkout settings).
 pub const SAVED_GIT_FILES: [&str; 2] = ["info/sparse-checkout", "config.worktree"];
 
-/// Copies the per-worktree git files that exist from the git directory of the worktree at
-/// `worktree` into `to`.
-fn save_git_files(worktree: &Path, to: &Path) -> Result<()> {
+/// Adds the per-worktree git files found in the worktree's git directory to `writer`.
+fn save_git_files(worktree: &Path, writer: &mut Writer) -> Result<()> {
     let git_dir = Repo::at(worktree).git_dir()?;
     for name in SAVED_GIT_FILES {
         let source = git_dir.join(name);
-        if !source.is_file() {
-            continue;
+        if source.is_file() {
+            writer.git_file(name, &source)?;
         }
-        let target = to.join(name);
-        if let Some(parent) = target.parent() {
-            create_dirs(parent, 0o700)?;
-        }
-        fs::copy(&source, &target).map_err(ctx(format!(
-            "copy {} to {}",
-            source.display(),
-            target.display()
-        )))?;
     }
     Ok(())
 }

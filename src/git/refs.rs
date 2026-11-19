@@ -1,6 +1,5 @@
 //! Refs and the commits they name: listing, filtering, moving and deleting, through libgit2.
 
-use super::identity::{Role, signature};
 use super::{Repo, commit_id, peeled_commit, subject_of};
 use crate::core::error::{Error, Result, fail};
 
@@ -145,13 +144,6 @@ impl Repo {
         Ok(messages)
     }
 
-    /// Points ref `name` at `commit`, creating it. `log` is the reflog message.
-    pub fn set_ref(&self, name: &str, commit: &str, log: &str) -> Result<()> {
-        let repo = self.open_refs()?;
-        repo.reference(name, commit_id(&repo, commit)?, true, log)?;
-        Ok(())
-    }
-
     /// Moves ref `name` from `from` to `to`, and fails when it is no longer at `from`.
     pub fn move_ref(&self, name: &str, from: &str, to: &str, log: &str) -> Result<()> {
         let repo = self.open_refs()?;
@@ -192,20 +184,6 @@ impl Repo {
         }
         branch.delete()?;
         Ok(())
-    }
-
-    /// Writes a commit of `tree` on top of `parent`, returning its id; no ref moves.
-    /// The author and committer are `agt <agt@localhost>` unless `GIT_AUTHOR_*` or
-    /// `GIT_COMMITTER_*` name another.
-    pub fn commit_tree(&self, tree: &str, parent: &str, message: &str) -> Result<String> {
-        let repo = self.open_refs()?;
-        let tree = repo.find_tree(git2::Oid::from_str(tree)?)?;
-        let parent = repo.find_commit(commit_id(&repo, parent)?)?;
-        let author = signature(Role::Author)?;
-        let committer = signature(Role::Committer)?;
-        let message = format!("{}\n", message.trim_end_matches('\n'));
-        let id = repo.commit(None, &author, &committer, &message, &tree, &[&parent])?;
-        Ok(id.to_string())
     }
 
     /// Whether the ignore rules of the repository ignore `path`, a path below the work tree.
