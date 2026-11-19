@@ -24,7 +24,7 @@ impl Repo {
     /// `git rebase --no-autostash`. `tip` is the commit the branch is expected to be at;
     /// when it is at another commit the call fails before it changes anything.
     pub fn rebase_onto(&self, onto: &str, tip: &str) -> Result<Rebased> {
-        let repo = self.open()?;
+        let repo = self.open_writing()?;
         let at = at_tip(&repo, tip)?;
         let onto_id = commit_id(&repo, onto)?;
         if onto_id == at || repo.graph_descendant_of(at, onto_id)? {

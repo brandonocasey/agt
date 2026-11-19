@@ -172,11 +172,12 @@ impl Repo {
                 crate::core::error::libgit2_message(&error)
             ))
         })?;
-        sparse_index::expand_if_sparse(&repo)?;
         Ok(repo)
     }
 
-    fn open(&self) -> Result<Handle<'_>> {
+    /// The repository for a call that reads or changes only refs, objects, config or remotes:
+    /// its index is not looked at.
+    fn open_refs(&self) -> Result<Handle<'_>> {
         match &self.held {
             Some(held) => Ok(Handle::Held(
                 held.lock().unwrap_or_else(PoisonError::into_inner),
@@ -185,9 +186,28 @@ impl Repo {
         }
     }
 
+    /// The repository for a call that may read the index, which is expanded in memory when it
+    /// is a sparse one.
+    fn open(&self) -> Result<Handle<'_>> {
+        let handle = self.open_refs()?;
+        sparse_index::expand_if_sparse(&handle)?;
+        Ok(handle)
+    }
+
+    /// The repository for a call that makes libgit2 change the index. A sparse index file is
+    /// rewritten as a full one first, which a read-only `Repo` never does.
+    fn open_writing(&self) -> Result<Handle<'_>> {
+        if self.held.is_some() {
+            return self.open();
+        }
+        let handle = self.open_refs()?;
+        sparse_index::expand_in_place(&handle)?;
+        Ok(handle)
+    }
+
     /// The absolute git directory of this work tree (a linked worktree's own, not the common one).
     pub fn git_dir(&self) -> Result<PathBuf> {
-        Ok(without_trailing_slash(self.open()?.path()))
+        Ok(without_trailing_slash(self.open_refs()?.path()))
     }
 
     /// The root of the work tree that contains this directory.
@@ -244,7 +264,7 @@ impl Repo {
         key: &str,
         read: impl FnOnce(&git2::Repository) -> Result<Option<String>>,
     ) -> Result<Option<String>> {
-        self.remembered(key, || match self.open() {
+        self.remembered(key, || match self.open_refs() {
             Ok(repo) => read(&repo).map(|value| (value, true)),
             Err(_) => Ok((None, false)),
         })
@@ -280,13 +300,13 @@ impl Repo {
     }
 
     pub fn commit(&self, rev: &str) -> Result<String> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         peeled_commit(&repo, rev)?.ok_or_else(|| Error(format!("unknown commit: {rev}")))
     }
 
     /// The first line of the message of `commit`.
     pub fn subject(&self, commit: &str) -> Result<String> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         reject_bad_config(&repo)?;
         let found = peeled_object(&repo, commit, git2::ObjectType::Commit)?
             .ok_or_else(|| Error(format!("unknown commit: {commit}")))?;
@@ -296,7 +316,7 @@ impl Repo {
     }
 
     pub fn parent(&self, commit: &str) -> Result<Option<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let Some(found) = peeled_object(&repo, commit, git2::ObjectType::Commit)? else {
             return Ok(None);
         };
@@ -305,7 +325,7 @@ impl Repo {
     }
 
     pub fn tree_of(&self, commit: &str) -> Result<String> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         peeled_object(&repo, commit, git2::ObjectType::Tree)?
             .map(|tree| tree.id().to_string())
             .ok_or_else(|| Error(format!("unknown tree of {commit}")))
@@ -439,7 +459,7 @@ impl Repo {
         let key = format!("roots {head}");
         let roots = self
             .remembered(&key, || {
-                let repo = self.open()?;
+                let repo = self.open_refs()?;
                 let mut walk = repo.revwalk()?;
                 let start = peeled_commit(&repo, head)?
                     .ok_or_else(|| Error(format!("unknown commit: {head}")))?;
@@ -464,7 +484,7 @@ impl Repo {
 
     /// Missing objects count as "not an ancestor", since stored commits may have been collected.
     pub fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let (Some(ancestor), Some(commit)) = (resolved(&repo, ancestor), resolved(&repo, commit))
         else {
             return Ok(false);
@@ -474,7 +494,7 @@ impl Repo {
 
     /// Commits in `to` that `from` lacks (`git rev-list --count from..to`).
     pub fn distance(&self, from: &str, to: &str) -> Result<u64> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut walk = self.walk(&repo, Some(from), to)?;
         let mut count = 0;
         for id in &mut walk {
@@ -485,7 +505,7 @@ impl Repo {
     }
 
     pub fn object_exists(&self, spec: &str) -> Result<bool> {
-        Ok(self.open()?.revparse_single(spec).is_ok())
+        Ok(self.open_refs()?.revparse_single(spec).is_ok())
     }
 
     /// A revision walk over `from..to` (all of `to` when `from` is `None`).
@@ -506,7 +526,7 @@ impl Repo {
     /// The commit of each of `revs`, keyed by rev. A rev that names no commit, is empty or holds
     /// a newline is absent.
     pub fn commit_ids<'a>(&self, revs: &[&'a str]) -> Result<HashMap<&'a str, String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut found = HashMap::new();
         for rev in revs
             .iter()
@@ -528,7 +548,7 @@ impl Repo {
         let Some(head_id) = ids.get(head) else {
             return Ok(HashSet::new());
         };
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         // What a candidate reaches that the head does not: a candidate in that list is not an
         // ancestor of the head.
         let mut walk = repo.revwalk()?;
@@ -567,7 +587,7 @@ impl Repo {
                 }
             }
         }
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut tips = Vec::new();
         for (rev, id) in &first {
             let covered = first.iter().any(|(_, other)| {
@@ -581,7 +601,7 @@ impl Repo {
     }
 
     pub fn user_name(&self) -> Result<Option<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let config = repo.config()?;
         Ok(config
             .get_string("user.name")
@@ -594,14 +614,14 @@ impl Repo {
         if let Some(dir) = self.common_dir.get() {
             return Ok(dir.clone());
         }
-        let dir = without_trailing_slash(self.open()?.commondir())
+        let dir = without_trailing_slash(self.open_refs()?.commondir())
             .to_string_lossy()
             .into_owned();
         Ok(self.common_dir.get_or_init(|| dir).clone())
     }
 
     pub fn is_bare(&self) -> Result<bool> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         Ok(env_config::is_bare(&repo))
     }
 

@@ -21,7 +21,7 @@ impl Repo {
     /// The non-merge commits of `head` that `upstream` lacks, oldest first (`git cherry`), each
     /// marked when the upstream has a commit with the same patch-id.
     pub fn cherry(&self, upstream: &str, head: &str) -> Result<Vec<Cherry>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut upstream_ids = HashSet::new();
         for id in self.walk(&repo, Some(head), upstream)? {
             let commit = repo.find_commit(id?)?;
@@ -60,7 +60,7 @@ impl Repo {
         to: &str,
         first_parent: bool,
     ) -> Result<Vec<CommitInfo>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut found = Vec::new();
         for id in self.listed(&repo, from, to, first_parent)? {
             let commit = repo.find_commit(id)?;
@@ -97,7 +97,7 @@ impl Repo {
     /// The patch-id of what a commit changes against its parent (all of it for a root commit);
     /// `None` for a merge or a commit that changes nothing.
     pub fn commit_patch_id(&self, commit: &str) -> Result<Option<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let found = repo.find_commit(commit_id(&repo, commit)?)?;
         if found.parent_count() > 1 {
             return Ok(None);
@@ -108,7 +108,7 @@ impl Repo {
     /// How many commits `commit` has that `other` lacks, and how many `other` has that
     /// `commit` lacks.
     pub fn ahead_behind(&self, commit: &str, other: &str) -> Result<(usize, usize)> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         Ok(repo.graph_ahead_behind(commit_id(&repo, commit)?, commit_id(&repo, other)?)?)
     }
 
@@ -118,7 +118,7 @@ impl Repo {
     }
 
     fn log_with(&self, from: Option<&str>, to: &str, first_parent: bool) -> Result<Vec<LogEntry>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut entries = Vec::new();
         for id in self.listed(&repo, from, to, first_parent)? {
             let commit = repo.find_commit(id)?;
@@ -137,7 +137,7 @@ impl Repo {
 
     /// The author name and subject of each commit of `shas` that exists; others are skipped.
     pub fn authored(&self, shas: &[&str]) -> Result<HashMap<String, (String, String)>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         super::reject_bad_config(&repo)?;
         let mut found = HashMap::new();
         for sha in shas {
@@ -153,7 +153,7 @@ impl Repo {
 
     /// The merge commits in `from..to`.
     pub fn merges(&self, from: Option<&str>, to: &str) -> Result<HashSet<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         super::reject_bad_config(&repo)?;
         let mut merges = HashSet::new();
         for id in self.walk(&repo, from, to)? {
@@ -187,7 +187,7 @@ impl Repo {
         if self.held.is_none() {
             return fail("merge-tree needs a read-only repository");
         }
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let (ours, theirs) = (commit_id(&repo, ours)?, commit_id(&repo, theirs)?);
         if repo.merge_base(ours, theirs).is_err() {
             return Ok(None);
@@ -209,7 +209,7 @@ impl Repo {
 
     /// Patch-id of the whole change from `from` (empty tree when `None`) to a commit or tree.
     pub fn range_patch_id(&self, from: Option<&str>, to: &str) -> Result<Option<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let old = from.map(|from| tree_of(&repo, from)).transpose()?;
         patch_id(&repo, old.as_ref(), &tree_of(&repo, to)?)
     }
@@ -224,7 +224,7 @@ impl Repo {
     }
 
     fn diff(&self, context: u32, from: &str, to: &str) -> Result<String> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let (old, new) = (tree_of(&repo, from)?, tree_of(&repo, to)?);
         let mut diff =
             repo.diff_tree_to_tree(Some(&old), Some(&new), Some(&mut diff_options(context)))?;

@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::index::SKIP_WORKTREE;
+use super::index::{SKIP_WORKTREE, refreshed_index};
 use super::{Repo, commit_id, configured, without_trailing_slash};
 use crate::core::error::{Error, Result, ctx};
 
@@ -91,7 +91,7 @@ impl Repo {
 
     /// Makes the index match HEAD and leaves the files alone (`git reset -q`).
     pub fn reset_index_to_head(&self) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_writing()?;
         let head = repo.head()?.peel(git2::ObjectType::Commit)?;
         repo.reset(&head, git2::ResetType::Mixed, None)?;
         Ok(())
@@ -100,7 +100,7 @@ impl Repo {
     /// Writes the `paths` from `commit` into the work tree and the index, replacing what is
     /// there (`git checkout <commit> -- <paths>`).
     pub fn checkout_paths(&self, commit: &str, paths: &[Vec<u8>]) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_writing()?;
         let commit = repo.find_commit(commit_id(&repo, commit)?)?;
         let mut options = git2::build::CheckoutBuilder::new();
         options.force().disable_pathspec_match(true);
@@ -114,15 +114,8 @@ impl Repo {
     /// Removes from the index the `deleted` paths that a sparse checkout marked skip-worktree
     /// (`git rm --cached --sparse`); returns how many.
     pub fn unstage_skipped(&self, deleted: &[Vec<u8>]) -> Result<usize> {
-        let repo = self.open()?;
-        let real = repo.path().join("index");
-        let mut index = repo.index()?;
-        if index.path() != Some(real.as_path()) {
-            super::sparse_index::expand_in_place(&repo)?;
-            repo.set_index(&mut git2::Index::open(&real)?)?;
-            index = repo.index()?;
-        }
-        index.read(false)?;
+        let repo = self.open_writing()?;
+        let mut index = refreshed_index(&repo)?;
         let mut removed = 0;
         for path in deleted {
             let at = Path::new(OsStr::from_bytes(path));

@@ -90,7 +90,7 @@ impl Repo {
     /// `git merge --ff-only --no-overwrite-ignore`. A local change or an untracked or ignored
     /// file that the move would overwrite is refused with git's wording.
     pub fn fast_forward_checkout(&self, to: &str) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_writing()?;
         let target = repo.find_commit(commit_id(&repo, to)?)?;
         let head = repo.head()?;
         let current = head.peel_to_commit()?.id();

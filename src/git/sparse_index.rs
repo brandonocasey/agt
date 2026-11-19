@@ -1,6 +1,7 @@
 //! Reading a sparse index, which libgit2 refuses (`unsupported mandatory extension: 'sdir'`):
-//! the index is expanded into a full one in memory, each collapsed directory becoming the
-//! files of its tree, marked skip-worktree. The copy is never written back over the real one.
+//! each collapsed directory becomes the files of its tree, marked skip-worktree. Readers get the
+//! expanded index in memory; a change libgit2 makes to the index first rewrites the file as the
+//! full index.
 
 use sha1_smol::Sha1;
 
@@ -25,18 +26,46 @@ struct Entry {
     path: Vec<u8>,
 }
 
-/// Replaces the index of `repo` with its expanded form when the file on disk is a sparse index
-/// that libgit2 cannot read.
-pub(super) fn expand_if_sparse(repo: &git2::Repository) -> Result<()> {
-    if repo.index().is_ok() {
-        return Ok(());
+impl Entry {
+    fn to_index_entry(&self) -> Result<git2::IndexEntry> {
+        let field = |at: usize| be32(&self.stat, at);
+        let time =
+            |at: usize| Ok::<_, Error>(git2::IndexTime::new(field(at)? as i32, field(at + 4)?));
+        Ok(git2::IndexEntry {
+            ctime: time(0)?,
+            mtime: time(8)?,
+            dev: field(16)?,
+            ino: field(20)?,
+            mode: self.mode,
+            uid: field(24)?,
+            gid: field(28)?,
+            file_size: field(32)?,
+            id: git2::Oid::from_bytes(&self.id)?,
+            flags: self.flags | if self.extended != 0 { EXTENDED } else { 0 },
+            flags_extended: self.extended,
+            path: self.path.clone(),
+        })
     }
-    repo.set_index(&mut open_index_file(repo)?)?;
+}
+
+/// Whether the index file of `repo` is a sparse index that libgit2 cannot read. A repository
+/// without `index.sparse` is not asked, so its index is not read here.
+fn is_unreadable_sparse(repo: &git2::Repository) -> Result<bool> {
+    let sparse = repo.config()?.get_bool("index.sparse").unwrap_or(false);
+    Ok(sparse && repo.index().is_err())
+}
+
+/// Gives `repo` the expanded index in memory when its index file is a sparse index. The file is
+/// left alone, so libgit2 cannot write the index until [`expand_in_place`] has run.
+pub(super) fn expand_if_sparse(repo: &git2::Repository) -> Result<()> {
+    if is_unreadable_sparse(repo)? {
+        repo.set_index(&mut open_index_file(repo)?)?;
+    }
     Ok(())
 }
 
-/// The index file of `repo` as a copy that is never written back: a sparse index is expanded,
-/// any other index is read as it is.
+/// The index file of `repo` as a copy that is never written back: a sparse index is expanded in
+/// memory, any other index is read as it is.
 pub(super) fn open_index_file(repo: &git2::Repository) -> Result<git2::Index> {
     let real = repo.path().join("index");
     let error = match git2::Index::open(&real) {
@@ -47,26 +76,31 @@ pub(super) fn open_index_file(repo: &git2::Repository) -> Result<git2::Index> {
         return Err(error.into());
     }
     let bytes = std::fs::read(&real).map_err(ctx(format!("read {}", real.display())))?;
-    let expanded = expand(repo, &bytes)?;
-    let scratch = tempfile::tempdir().map_err(ctx("create temporary index directory"))?;
-    let file = scratch.path().join("index");
-    std::fs::write(&file, expanded).map_err(ctx("write the expanded index"))?;
-    Ok(git2::Index::open(&file)?)
+    let mut index = git2::Index::new()?;
+    for entry in expanded_entries(repo, &bytes)? {
+        index.add(&entry.to_index_entry()?)?;
+    }
+    Ok(index)
 }
 
-/// Rewrites the sparse index file of `repo` as the full index, for a change libgit2 can only
-/// make to an index it can read. Git reads the full index as it does a sparse one.
+/// Rewrites the index file of `repo` as the full index when it is a sparse one, so libgit2 can
+/// read it and write changes to it. Git reads the full index as it does a sparse one.
 pub(super) fn expand_in_place(repo: &git2::Repository) -> Result<()> {
+    if !is_unreadable_sparse(repo)? {
+        return Ok(());
+    }
     let real = repo.path().join("index");
     let bytes = std::fs::read(&real).map_err(ctx(format!("read {}", real.display())))?;
-    let expanded = expand(repo, &bytes)?;
+    let expanded = serialize(&expanded_entries(repo, &bytes)?);
     let next = repo.path().join("index.agt-expanded");
     std::fs::write(&next, expanded).map_err(ctx(format!("write {}", next.display())))?;
     std::fs::rename(&next, &real).map_err(ctx(format!("replace {}", real.display())))?;
     Ok(())
 }
 
-fn expand(repo: &git2::Repository, bytes: &[u8]) -> Result<Vec<u8>> {
+/// The entries of the sparse index `bytes`, sorted by path, with each collapsed directory
+/// replaced by the files of its tree.
+fn expanded_entries(repo: &git2::Repository, bytes: &[u8]) -> Result<Vec<Entry>> {
     let mut entries = parse(bytes)?;
     let mut expanded = Vec::new();
     for entry in entries.drain(..) {
@@ -97,7 +131,7 @@ fn expand(repo: &git2::Repository, bytes: &[u8]) -> Result<Vec<u8>> {
         }
     }
     expanded.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(serialize(&expanded))
+    Ok(expanded)
 }
 
 fn be32(bytes: &[u8], at: usize) -> Result<u32> {

@@ -34,7 +34,7 @@ pub enum BranchFilter<'a> {
 impl Repo {
     /// Every ref under one of `prefixes` (all refs when empty), sorted by name.
     pub fn ref_tips(&self, prefixes: &[&str]) -> Result<Vec<RefTip>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut tips = Vec::new();
         for reference in repo.references()? {
             let reference = reference?;
@@ -66,7 +66,7 @@ impl Repo {
     /// The short names of the refs under `prefix` whose commit is, or has in its history,
     /// `commit` (`git for-each-ref --contains`).
     pub fn refs_containing(&self, commit: &str, prefix: &str) -> Result<Vec<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let wanted = commit_id(&repo, commit)?;
         let mut names = Vec::new();
         for tip in self.ref_tips(&[prefix])? {
@@ -95,7 +95,7 @@ impl Repo {
 
     /// The local branches `filter` picks, newest commit first.
     pub fn branch_rows(&self, filter: &BranchFilter<'_>) -> Result<Vec<BranchRow>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut rows = Vec::new();
         for (name, tip) in self.branches()? {
             let id = git2::Oid::from_str(&tip)?;
@@ -131,7 +131,7 @@ impl Repo {
 
     /// The commits reachable from `roots` and from none of `hidden`, in no particular order.
     pub fn commits_beyond(&self, roots: &[&str], hidden: &[String]) -> Result<Vec<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut walk = repo.revwalk()?;
         for root in roots {
             walk.push(commit_id(&repo, root)?)?;
@@ -148,7 +148,7 @@ impl Repo {
 
     /// The ids of `objects` that the repository does not have.
     pub fn missing_objects(&self, objects: &[String]) -> Result<Vec<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let odb = repo.odb()?;
         Ok(objects
             .iter()
@@ -159,7 +159,7 @@ impl Repo {
 
     /// The committer time of `rev`, in seconds since the epoch.
     pub fn commit_time(&self, rev: &str) -> Result<i64> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         super::reject_bad_config(&repo)?;
         let id = commit_id(&repo, rev)?;
         Ok(repo.find_commit(id)?.committer().when().seconds())
@@ -167,7 +167,7 @@ impl Repo {
 
     /// The full message of every commit in `from..to`, newest first.
     pub fn messages(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut messages = Vec::new();
         for id in self.walk(&repo, Some(from), to)? {
             let commit = repo.find_commit(id?)?;
@@ -178,14 +178,14 @@ impl Repo {
 
     /// Points ref `name` at `commit`, creating it. `log` is the reflog message.
     pub fn set_ref(&self, name: &str, commit: &str, log: &str) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         repo.reference(name, commit_id(&repo, commit)?, true, log)?;
         Ok(())
     }
 
     /// Moves ref `name` from `from` to `to`, and fails when it is no longer at `from`.
     pub fn move_ref(&self, name: &str, from: &str, to: &str, log: &str) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let (from, to) = (commit_id(&repo, from)?, commit_id(&repo, to)?);
         repo.reference_matching(name, to, true, from, log)?;
         Ok(())
@@ -193,7 +193,7 @@ impl Repo {
 
     /// Deletes ref `name`; a ref that is already gone is not an error.
     pub fn delete_ref(&self, name: &str) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         match repo.find_reference(name) {
             Ok(mut reference) => Ok(reference.delete()?),
             Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(()),
@@ -204,7 +204,7 @@ impl Repo {
     /// Deletes local branch `name`: when `force` is false only if it is merged into HEAD or
     /// its upstream, as `git branch -d`.
     pub fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut branch = repo
             .find_branch(name, git2::BranchType::Local)
             .map_err(|_| Error(format!("branch '{name}' not found")))?;
@@ -226,7 +226,7 @@ impl Repo {
     /// A commit of `tree` on top of `parent`, and its id, written by `agt <agt@localhost>` unless
     /// `GIT_AUTHOR_*` or `GIT_COMMITTER_*` name another. No ref moves.
     pub fn commit_tree(&self, tree: &str, parent: &str, message: &str) -> Result<String> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let tree = repo.find_tree(git2::Oid::from_str(tree)?)?;
         let parent = repo.find_commit(commit_id(&repo, parent)?)?;
         let author = signature(Role::Author)?;

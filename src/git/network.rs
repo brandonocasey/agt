@@ -33,7 +33,7 @@ struct Offered {
 impl Repo {
     /// Every ref `remote` (a configured name or a URL) advertises.
     pub fn ls_remote(&self, remote: &str) -> Result<Vec<RemoteRef>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut remote = remote_named(&repo, remote)?;
         let config = repo.config()?;
         let url = remote.url().unwrap_or_default().to_owned();
@@ -84,7 +84,7 @@ impl Repo {
     /// Fetches `refspecs` from the configured `remote` without tags, and updates the refs a
     /// refspec names on the right.
     pub fn fetch(&self, remote: &str, refspecs: &[&str]) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut remote = repo.find_remote(remote)?;
         fetch_from(&repo, &mut remote, refspecs)
     }
@@ -92,7 +92,7 @@ impl Repo {
     /// Fetches `refspec` from `remote` and returns the commit it points at. Only the remote's
     /// URL is used, so no remote-tracking branch moves.
     pub fn fetch_commit(&self, remote: &str, refspec: &str) -> Result<String> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let url = remote_url(&repo, remote)?;
         let mut anonymous = repo.remote_anonymous(&url)?;
         fetch_from(&repo, &mut anonymous, &[refspec])?;

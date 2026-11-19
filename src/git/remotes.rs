@@ -6,7 +6,7 @@ use crate::core::error::Result;
 impl Repo {
     /// The names of the remotes, sorted.
     pub fn remote_names(&self) -> Result<Vec<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut names: Vec<String> = repo
             .remotes()?
             .iter()
@@ -28,7 +28,7 @@ impl Repo {
     }
 
     fn remote_url(&self, name: &str) -> Result<Option<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         Ok(repo
             .find_remote(name)
             .ok()
@@ -37,7 +37,7 @@ impl Repo {
 
     /// The URL of remote `name` as the config file writes it, before `insteadOf`.
     fn written_remote_url(&self, name: &str) -> Result<Option<String>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let config = repo.config()?;
         Ok(config.get_string(&format!("remote.{name}.url")).ok())
     }

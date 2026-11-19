@@ -23,7 +23,7 @@ impl Repo {
     /// The paths of every file of `tree` (a tree or commit), the submodules included, in tree
     /// order.
     pub fn tree_files(&self, tree: &str) -> Result<Vec<Vec<u8>>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let tree = peeled_tree(&repo, tree)?;
         let mut files = Vec::new();
         tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
@@ -37,7 +37,7 @@ impl Repo {
 
     /// The files that differ between two commits or trees, without rename detection.
     pub fn tree_changes(&self, from: &str, to: &str) -> Result<Vec<TreeChange>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let (old, new) = (peeled_tree(&repo, from)?, peeled_tree(&repo, to)?);
         let mut options = git2::DiffOptions::new();
         options.include_typechange(true);
@@ -114,7 +114,7 @@ impl Repo {
 
     /// The content of blob `id`.
     pub fn blob_content(&self, id: &str) -> Result<Vec<u8>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         Ok(repo.find_blob(git2::Oid::from_str(id)?)?.content().to_vec())
     }
 
@@ -172,7 +172,7 @@ impl Repo {
     /// The files that differ between commits `from` and `to`, as `git diff --name-only` lists
     /// them: a renamed file by its new name.
     pub fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let (old, new) = (peeled_tree(&repo, from)?, peeled_tree(&repo, to)?);
         let mut diff = repo.diff_tree_to_tree(Some(&old), Some(&new), None)?;
         diff.find_similar(Some(git2::DiffFindOptions::new().renames(true)))?;
@@ -184,7 +184,7 @@ impl Repo {
 
     /// The paths each non-merge commit of `base..tip` touches, listed once per commit.
     pub fn touched_paths(&self, base: &str, tip: &str) -> Result<Vec<Vec<u8>>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let mut paths = Vec::new();
         for id in self.walk(&repo, Some(base), tip)? {
             let commit = repo.find_commit(id?)?;

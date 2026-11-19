@@ -96,8 +96,7 @@ impl Repo {
     /// The submodules the index records, limited to `pathspec` when it is not empty.
     pub fn gitlinks(&self, pathspec: &[&str]) -> Result<Vec<Gitlink>> {
         let repo = self.open()?;
-        let mut index = repo.index()?;
-        index.read(false)?;
+        let index = refreshed_index(&repo)?;
         let spec = if pathspec.is_empty() {
             None
         } else {
@@ -129,8 +128,7 @@ impl Repo {
 
     fn gitlinks_and_files(&self, pathspec: &str) -> Result<Vec<Vec<u8>>> {
         let repo = self.open()?;
-        let mut index = repo.index()?;
-        index.read(false)?;
+        let index = refreshed_index(&repo)?;
         let spec = git2::Pathspec::new([pathspec])?;
         Ok(index
             .iter()
@@ -226,6 +224,15 @@ impl Repo {
                 .collect())
         })
     }
+}
+
+/// The index of `repo`, reloaded when its file changed. An index expanded in memory has no file.
+pub(super) fn refreshed_index(repo: &git2::Repository) -> Result<git2::Index> {
+    let mut index = repo.index()?;
+    if index.path().is_some() {
+        index.read(false)?;
+    }
+    Ok(index)
 }
 
 /// Clears skip-worktree and assume-unchanged in `index` for each flagged file that exists on

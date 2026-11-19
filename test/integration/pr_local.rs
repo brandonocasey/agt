@@ -459,6 +459,42 @@ fn a_merge_into_a_sparse_checkout_leaves_the_paths_outside_it_unwritten() {
 }
 
 #[test]
+fn a_merge_into_a_checkout_with_a_sparse_index_moves_the_branch_and_the_files() {
+    let env = setup();
+    env.write("sub/keep.txt", "k\n");
+    env.write("other/x.txt", "x\n");
+    env.commit_all("dirs");
+    let sha = commit_on(&env, "main", "sub/y.txt", "y\n");
+    point(&env, "feat", &sha);
+    git_ok(
+        &env,
+        &env.repo,
+        &["sparse-checkout", "set", "--cone", "--sparse-index", "sub"],
+    );
+
+    ok(&env, &merge_args(&sha, "feat", &[]));
+    assert_eq!(tip(&env, "main"), sha);
+    assert_eq!(
+        fs::read_to_string(env.repo.join("sub/y.txt")).unwrap(),
+        "y\n"
+    );
+    assert!(!env.repo.join("other").exists());
+    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_view_of_a_branch_needs_no_readable_index() {
+    let env = setup();
+    add_branch(&env, "feat", "b.txt", "b\n");
+    git_ok(&env, &env.repo, &["update-index", "--split-index"]);
+    env.write("c.txt", "c\n");
+    git_ok(&env, &env.repo, &["add", "c.txt"]);
+
+    let view = ok(&env, &["view", "feat"]);
+    assert_eq!(view["head_branch"], "feat");
+}
+
+#[test]
 fn a_wrong_sha_a_short_sha_and_a_branch_behind_the_target_are_refused() {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");

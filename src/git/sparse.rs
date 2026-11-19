@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::Repo;
-use super::index::{SKIP_WORKTREE, copy_entry};
+use super::index::{SKIP_WORKTREE, copy_entry, refreshed_index};
 use crate::core::error::{Error, Result, ctx, fail};
 
 /// The stage bits of an index entry's flags.
@@ -18,7 +18,7 @@ const STAGE_MASK: u16 = 0x3000;
 impl Repo {
     /// Whether `core.sparseCheckout` is on.
     pub fn sparse_checkout_enabled(&self) -> Result<bool> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let config = repo.config()?;
         Ok(config.get_bool("core.sparseCheckout").unwrap_or(false))
     }
@@ -30,7 +30,7 @@ impl Repo {
         if !self.sparse_checkout_enabled()? {
             return fail("must be in a sparse-checkout to reapply sparsity patterns");
         }
-        let repo = self.open()?;
+        let repo = self.open_writing()?;
         let file = repo.path().join("info").join("sparse-checkout");
         let patterns = Patterns::read(&file)?;
         apply(&repo, |path| patterns.selects(path))
@@ -40,7 +40,7 @@ impl Repo {
     /// disable`). The patterns file stays, and the setting is written to the worktree's own
     /// config, as git writes it.
     pub fn sparse_disable(&self) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_writing()?;
         apply(&repo, |_| true)?;
         repo.config()?.set_bool("extensions.worktreeConfig", true)?;
         let mut own = git2::Config::open(&repo.path().join("config.worktree"))?;
@@ -56,8 +56,7 @@ fn apply(repo: &git2::Repository, selected: impl Fn(&[u8]) -> bool) -> Result<()
     let workdir = repo
         .workdir()
         .ok_or_else(|| Error("this operation must be run in a work tree".into()))?;
-    let mut index = repo.index()?;
-    index.read(false)?;
+    let mut index = refreshed_index(repo)?;
     let entries: Vec<git2::IndexEntry> = index.iter().collect();
     let mut restore = Vec::new();
     let mut emptied = Vec::new();

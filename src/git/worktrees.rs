@@ -12,7 +12,7 @@ const UNBORN_HEAD: &str = "0000000000000000000000000000000000000000";
 impl Repo {
     /// Every worktree of the repository; the first is the main checkout.
     pub fn worktrees(&self) -> Result<Vec<Worktree>> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let common = without_trailing_slash(repo.commondir());
         // A submodule's git directory may name a work tree that is gone: then only its refs
         // and config can be read.

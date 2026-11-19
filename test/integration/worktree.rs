@@ -2093,6 +2093,29 @@ fn restore_keeps_a_staged_deletion_outside_a_cone_with_a_sparse_index() {
 }
 
 #[test]
+fn a_sparse_index_with_an_uninitialized_submodule_removes_and_restores() {
+    let f = Fixture::new();
+    for (dir, name) in [("d1", "a"), ("d3", "c")] {
+        fs::create_dir_all(f.wt.join(dir)).unwrap();
+        fs::write(f.wt.join(dir).join(name), format!("{name}\n")).unwrap();
+    }
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "dirs"]);
+    add_submodule(&f, "mod", "mod");
+    wgit(&f.env, &f.wt, &["submodule", "deinit", "-q", "-f", "mod"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &["sparse-checkout", "set", "--cone", "--sparse-index", "d1"],
+    );
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert_eq!(wgit(&f.env, &f.wt, &["status", "--porcelain"]), "");
+    assert!(!f.wt.join("d3/c").exists());
+}
+
+#[test]
 fn restore_keeps_a_staged_deletion_outside_a_non_cone_sparse_checkout() {
     let f = sparse_fixture();
     wgit(
