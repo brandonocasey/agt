@@ -1,6 +1,6 @@
-//! The root `--offline` flag against commands that would reach a remote: a host that records each
-//! connection origin leads to, and the fake `gh`, `glab` and `tea` call log, show that no call
-//! happens.
+//! The root `--offline` flag against commands that would reach a remote.
+//! A host that records each connection is where `origin` leads.
+//! That host and the fake `gh`, `glab` and `tea` call log show no call.
 
 use std::fs;
 use std::process::Output;
@@ -16,9 +16,9 @@ struct Site {
 }
 
 impl Site {
-    /// A repository with `main` pushed to a bare origin that reads as a GitHub URL, which then
-    /// leads to a host that records each connection, and a `git` in front of the real one that
-    /// records and refuses network commands.
+    /// A repository with `main` pushed to a bare origin that reads as a GitHub URL.
+    /// That URL leads to a host that records each connection.
+    /// A `git` in front of the real one records and refuses network commands.
     fn new() -> Self {
         Self::at("git@github.com:acme/app.git")
     }
@@ -66,7 +66,7 @@ impl Site {
             .git(&["config", &format!("url.{target}.insteadOf"), &self.url]);
     }
 
-    /// Lets origin reach the bare repository, for setup or a control that needs its commits.
+    /// Lets origin reach the bare repository.
     fn reach_origin(&self) {
         self.route_origin_to(self.env.path("origin.git").to_str().unwrap());
     }
@@ -134,8 +134,8 @@ impl Site {
     }
 }
 
-/// A fetch happens in process, where the `git` wrapper cannot see it, so the control run looks at
-/// the result: a commit only the remote has arrives in the repository.
+/// A fetch happens in process, where the `git` wrapper cannot see it.
+/// The control run checks the result instead: a commit only the remote has arrives.
 #[test]
 fn a_run_without_the_flag_fetches() {
     let site = Site::new();

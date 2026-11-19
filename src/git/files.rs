@@ -112,9 +112,8 @@ impl Repo {
     }
 
     /// The ignored paths no commit tracks, as `git ls-files --others --ignored --directory`
-    /// lists them: a directory the ignore rules name is one entry ending in a slash, and so is
-    /// an untracked directory that holds nothing else than ignored paths, followed by those
-    /// paths.
+    /// lists them. A directory the ignore rules name is one entry ending in a slash.
+    /// So is an untracked directory holding only ignored paths, followed by those paths.
     pub fn ignored_entries(&self) -> Result<Vec<Vec<u8>>> {
         let repo = self.open()?;
         let mut options = git2::StatusOptions::new();
@@ -292,9 +291,8 @@ fn ancestor_dirs(path: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Whether the status entry `path` is a directory holding a repository of its own that no ignore
-/// rule names. libgit2 reports it as ignored when nothing else is in it; git lists it as
-/// untracked.
+/// Whether status entry `path` is a nested repository that no ignore rule names.
+/// libgit2 reports it as ignored when it holds nothing else; git lists it as untracked.
 pub(super) fn is_nested_repo(repo: &git2::Repository, path: &[u8]) -> bool {
     let Some(dir) = path.strip_suffix(b"/") else {
         return false;

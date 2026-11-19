@@ -14,8 +14,8 @@ impl Repo {
     pub fn worktrees(&self) -> Result<Vec<Worktree>> {
         let repo = self.open_refs()?;
         let common = without_trailing_slash(repo.commondir());
-        // A submodule's git directory may name a work tree that is gone: then only its refs
-        // and config can be read.
+        // A submodule's git directory may name a work tree that is gone.
+        // Then only its refs and config can be read.
         let main = git2::Repository::open(&common)
             .or_else(|_| git2::Repository::open_bare(&common))
             .map_err(|error| Error(format!("open {}: {}", common.display(), error.message())))?;

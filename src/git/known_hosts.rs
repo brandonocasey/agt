@@ -1,6 +1,6 @@
-//! Checking an ssh host key the way `ssh` does: against the system and user `known_hosts`
-//! files, with plain, wildcard, negated, `[host]:port` and hashed entries. libgit2 reads only
-//! `~/.ssh/known_hosts`. An unknown key is never accepted.
+//! Checks an ssh host key as `ssh` does, against the system and user `known_hosts` files.
+//! It matches plain, wildcard, negated, `[host]:port` and hashed entries.
+//! libgit2 reads only `~/.ssh/known_hosts`; an unknown key is never accepted.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -169,7 +169,7 @@ pub(super) fn port_of(url: &str) -> u16 {
         .unwrap_or(DEFAULT_SSH_PORT)
 }
 
-/// The error for a host key that no file lists: it names the host and how to add the key.
+/// The error for an unlisted host key, naming the host and how to add it.
 pub(super) fn unknown_host_message(host: &str, port: u16, fingerprint: Option<String>) -> String {
     let (connect, scan) = if port == DEFAULT_SSH_PORT {
         (format!("ssh {host}"), format!("ssh-keyscan {host}"))

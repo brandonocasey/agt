@@ -4,8 +4,8 @@ use super::identity::{Role, signature};
 use super::{Repo, commit_id, peeled_commit, subject_of};
 use crate::core::error::{Error, Result, fail};
 
-/// A ref of a repository, with the object it holds and the commit that object leads to (none
-/// for a tag of a blob or tree).
+/// A ref, with the object it holds and the commit that object leads to.
+/// A tag of a blob or tree has no commit.
 pub struct RefTip {
     pub name: String,
     pub object: String,
@@ -194,8 +194,9 @@ impl Repo {
         Ok(())
     }
 
-    /// A commit of `tree` on top of `parent`, and its id, written by `agt <agt@localhost>` unless
-    /// `GIT_AUTHOR_*` or `GIT_COMMITTER_*` name another. No ref moves.
+    /// Writes a commit of `tree` on top of `parent`, returning its id; no ref moves.
+    /// The author and committer are `agt <agt@localhost>` unless `GIT_AUTHOR_*` or
+    /// `GIT_COMMITTER_*` name another.
     pub fn commit_tree(&self, tree: &str, parent: &str, message: &str) -> Result<String> {
         let repo = self.open_refs()?;
         let tree = repo.find_tree(git2::Oid::from_str(tree)?)?;

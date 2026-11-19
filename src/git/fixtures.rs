@@ -1,5 +1,5 @@
-//! Repositories for the unit tests of the git modules, built with the git command line so the
-//! tests can also ask it what it makes of them.
+//! Repositories for the unit tests of the git modules, built with the git command line.
+//! The tests can then ask git what it makes of them.
 
 use std::fs;
 use std::path::Path;

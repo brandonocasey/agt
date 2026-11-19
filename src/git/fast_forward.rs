@@ -152,8 +152,8 @@ pub fn moves_submodule(repo: &Repo, from: &str, to: &str) -> Result<bool> {
         .any(|change| change.old_mode == GITLINK_MODE || change.new_mode == GITLINK_MODE))
 }
 
-/// The outcome of the update. Git may refuse over local changes a merge would overwrite. The
-/// reason is git's message, and `retry` the command to run once that is resolved.
+/// The outcome of the update; git may refuse over local changes a merge would overwrite.
+/// The reason is git's message; `retry` is the command to run once that is resolved.
 fn finish(repo: &Repo, command: &[&str], path: Option<PathBuf>, moved: Result<()>) -> Update {
     let Err(error) = moved else {
         return Update::Moved { path };

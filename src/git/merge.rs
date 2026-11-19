@@ -80,9 +80,8 @@ impl Repo {
             .map(|busy| busy.path))
     }
 
-    /// The git directory of the work tree `entry`. A deleted work tree has an entry under
-    /// `worktrees` in the common git directory. `None` for a bare repository or a missing
-    /// entry.
+    /// The git directory of work tree `entry`; a deleted one has an entry under `worktrees`.
+    /// `None` for a bare repository or a missing entry.
     pub fn git_dir_of(&self, entry: &Worktree) -> Result<Option<PathBuf>> {
         if entry.bare {
             return Ok(None);
@@ -138,10 +137,9 @@ impl Repo {
     }
 }
 
-/// Moves the work tree, the index and the branch HEAD names from HEAD's commit to `target`,
-/// refusing with git's wording when a local change or an untracked or ignored file is in the way.
-/// A file that a sparse checkout left out is not a local change: its index entry takes the new
-/// content and the file stays off disk.
+/// Moves the work tree, the index and HEAD's branch from HEAD's commit to `target`.
+/// It refuses with git's wording over a local change or an untracked or ignored file.
+/// A file a sparse checkout left out is no local change; it stays off disk.
 pub(super) fn move_branch_to(
     repo: &git2::Repository,
     target: &git2::Commit<'_>,
@@ -198,8 +196,8 @@ fn check_out_safely(
     Ok(checked?)
 }
 
-/// Gives the index entries of the `paths` that a sparse checkout left out the content they have
-/// in `tree`, keeping their skip-worktree mark; a path `tree` lacks loses its entry.
+/// Gives the left-out `paths` of a sparse checkout the index content they have in `tree`.
+/// They keep their skip-worktree mark; a path `tree` lacks loses its entry.
 fn update_left_out(
     repo: &git2::Repository,
     tree: &git2::Tree<'_>,

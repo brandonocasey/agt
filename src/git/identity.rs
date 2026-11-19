@@ -1,5 +1,5 @@
-//! The author and committer of the commits agt writes: `agt <agt@localhost>` now, unless the
-//! `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables name another, as they do for `git commit-tree`.
+//! The author and committer of the commits agt writes: `agt <agt@localhost>`.
+//! The `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables override it, as for `git commit-tree`.
 
 use super::configured;
 use crate::core::clock;
@@ -35,8 +35,9 @@ pub(super) fn signature(role: Role) -> Result<git2::Signature<'static>> {
     )
 }
 
-/// The committer of a commit that replays others, as `git rebase` makes it: the environment
-/// first, else `user.name` and `user.email` of `repo`, `GIT_CONFIG_COUNT` included.
+/// The committer of a commit that replays others, as `git rebase` makes it.
+/// It comes from the environment, else `user.name` and `user.email` of `repo`,
+/// `GIT_CONFIG_COUNT` included.
 pub(super) fn committer_in(repo: &git2::Repository) -> Result<git2::Signature<'static>> {
     build(
         Role::Committer,

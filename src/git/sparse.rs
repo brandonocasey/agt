@@ -20,16 +20,16 @@ impl Repo {
         is_enabled(&repo)
     }
 
-    /// Applies the sparse-checkout patterns again (`git sparse-checkout reapply`): files they
-    /// leave out are removed and marked skip-worktree unless they have local changes, files
-    /// they take in come back.
+    /// Applies the sparse-checkout patterns again (`git sparse-checkout reapply`); files they
+    /// take in come back. Files they leave out are removed and marked skip-worktree, unless
+    /// they have local changes.
     pub fn sparse_reapply(&self) -> Result<()> {
         let repo = self.open_writing()?;
         reapply(&repo)
     }
 
-    /// Fills a worktree that has a HEAD but no files and no index with the files of HEAD that
-    /// the patterns select, and writes nothing for the others.
+    /// Fills a worktree that has a HEAD but no files or index.
+    /// It writes the files of HEAD that the patterns select, and none of the others.
     pub(super) fn sparse_check_out_head(&self) -> Result<()> {
         let repo = self.open_writing()?;
         let file = repo
@@ -413,8 +413,9 @@ mod tests {
         sandbox.shell_output(dir, script)
     }
 
-    /// Two clones of one repository with the same sparse checkout, local changes inside the
-    /// directories it is about to leave, and the patterns for what it moves to written in both.
+    /// Two clones of one repository with the same sparse checkout.
+    /// Both hold local changes inside the directories they are about to leave.
+    /// Both have the patterns for the checkout they move to written.
     fn pair(sandbox: &Sandbox, cone: bool) -> (PathBuf, PathBuf) {
         let origin = sandbox.path().join("origin");
         fs::create_dir(&origin).unwrap();

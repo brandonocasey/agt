@@ -2028,7 +2028,8 @@ fn many_tags_in_a_submodule_start_no_git_process() {
     std::io::Write::write_all(&mut update.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
     assert!(update.wait().unwrap().success());
 
-    // A `git` in front of the real one that counts how often it is run; agt runs none.
+    // A `git` in front of the real one counts how often it is run.
+    // agt runs none.
     let count = f.env.path("git-runs");
     let path = f.env.git_wrapper(
         "counting-bin",
@@ -2336,8 +2337,8 @@ fn the_remote_check_gives_up_on_a_host_that_never_answers() {
     );
 }
 
-/// Points the submodule clone's `origin` at `host` through a `url.<host>.insteadOf` rewrite in
-/// the clone's own config, so only a check that reads that config reaches it.
+/// Points the submodule clone's `origin` at `host` through a `url.<host>.insteadOf` rewrite.
+/// The rewrite sits in the clone's own config, so only reads of it reach `host`.
 fn route_origin_through_rewrite(f: &Fixture, sub: &Path, host: &Host) {
     wgit(
         &f.env,

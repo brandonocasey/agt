@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 
 use crate::core::process;
 
-/// The executable hook file `name`: in `core.hooksPath` when it is set (a relative path is
-/// relative to the work tree), else in the `hooks` directory of the common git directory.
+/// The executable hook file `name`, from `core.hooksPath` when set (relative to the work tree).
+/// Otherwise it is in the `hooks` directory of the common git directory.
 fn find(repo: &git2::Repository, name: &str) -> Option<PathBuf> {
     let configured = repo
         .config()
@@ -28,8 +28,8 @@ pub(super) fn exists(repo: &git2::Repository, name: &str) -> bool {
     find(repo, name).is_some()
 }
 
-/// Runs hook `name` with `args` and `stdin` in the work tree. A missing hook succeeds. On
-/// failure, the hook's output on one line.
+/// Runs hook `name` with `args` and `stdin` in the work tree; a missing hook succeeds.
+/// On failure the error is the hook's output on one line.
 pub(super) fn run(
     repo: &git2::Repository,
     name: &str,

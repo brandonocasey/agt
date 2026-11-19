@@ -1,6 +1,6 @@
-//! Creating and removing linked worktrees, moving a work tree to a snapshot, and submodules,
-//! through libgit2. libgit2 runs no hooks and applies no filter drivers (such as Git LFS), so
-//! none of these do.
+//! Creating and removing linked worktrees, moving a work tree to a snapshot, and submodules.
+//! They go through libgit2, which runs no hooks.
+//! It applies no filter drivers, such as Git Large File Storage.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -206,8 +206,8 @@ fn admin_name(repo: &git2::Repository, path: &Path) -> String {
     name
 }
 
-/// The `commondir` file of a linked worktree: its administrative directory is two levels below
-/// the common git directory, and a relative link survives a move of the repository.
+/// The `commondir` file of a linked worktree; a relative link survives moving the repository.
+/// The administrative directory is two levels below the common git directory.
 const COMMONDIR: &str = "../..\n";
 
 /// What the HEAD of a new worktree holds.
@@ -217,9 +217,9 @@ enum Head {
     Detached(git2::Oid),
 }
 
-/// Registers a linked worktree: its administrative directory `admin` and its `path`, which
-/// hold only the links between them and a HEAD, so that no file is checked out yet. A failure
-/// removes only the directories this call created.
+/// Registers a linked worktree from its administrative directory `admin` and its `path`.
+/// They hold only the links between them and a HEAD, with no file checked out.
+/// A failure removes only the directories this call created.
 fn link_worktree(admin: &Path, path: &Path, head: &Head) -> Result<()> {
     let create = |dir: &Path| fs::create_dir(dir).map_err(ctx(format!("create {}", dir.display())));
     if let Some(worktrees) = admin.parent() {

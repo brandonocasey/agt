@@ -24,8 +24,8 @@ const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 pub const PROMPT_PROBE: &str =
     r#"printf '%s %s' "${GIT_TERMINAL_PROMPT-absent}" "${GCM_INTERACTIVE-absent}""#;
 
-/// The prompt variables a user may have set when starting agt, and what a program agt starts
-/// has to print for [`PROMPT_PROBE`] then.
+/// The prompt variables a user may have set when starting agt.
+/// Each is paired with what a program agt starts has to print for [`PROMPT_PROBE`].
 pub const PROMPT_CASES: [(&[(&str, &str)], &str); 3] = [
     (&[], "absent absent"),
     (&[("GIT_TERMINAL_PROMPT", "1")], "1 absent"),
@@ -634,13 +634,13 @@ pub fn silent_host() -> Host {
     host("ssh", move |stream| held.push(stream))
 }
 
-/// A host that closes each connection as soon as it is made, so a client fails at once.
+/// A host that closes each connection at once, so a client fails.
 pub fn refusing_host() -> Host {
     host("ssh", drop)
 }
 
-/// An HTTP host that answers every request with `401` and a Basic challenge, which makes a git
-/// client ask for credentials. `Host::url` is an `http` URL.
+/// An HTTP host that answers every request with `401` and a Basic challenge.
+/// A git client then asks for credentials. `Host::url` is an `http` URL.
 pub fn challenging_host() -> Host {
     host("http", |mut stream| {
         let mut seen = Vec::new();

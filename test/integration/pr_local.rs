@@ -1002,8 +1002,8 @@ fn a_branch_behind_the_target_rebases_and_fast_forwards() {
 }
 
 /// Git 2.31 has no `rebase --no-update-refs`, which Git 2.38 added.
-/// `rebase.updateRefs` makes git's own rebase move the branches inside the rebased range; the
-/// merge must not, so the branch between main and the tip stays where it is.
+/// `rebase.updateRefs` makes git's own rebase move branches inside the rebased range.
+/// The merge MUST NOT move the branch between main and the tip.
 #[test]
 fn a_rebase_merge_leaves_branches_in_the_range_alone_whatever_update_refs_says() {
     let env = setup();
@@ -1083,8 +1083,8 @@ fn a_rebase_keeps_a_commit_that_was_empty_from_the_start_as_git_does() {
     assert_eq!(subjects(&env, &old_main, "main"), ["add b.txt", "empty"]);
 }
 
-/// `main` holds a copy of the branch's first commit and then edits the same line again, so
-/// replaying that commit conflicts; git drops it as already upstream and replays the second.
+/// `main` holds a copy of the branch's first commit, then edits the same line again.
+/// Replaying that commit conflicts, so git drops it as already upstream and replays the second.
 #[test]
 fn a_rebase_skips_a_commit_the_target_already_has_by_patch_id_as_git_does() {
     let env = setup();
@@ -1115,8 +1115,8 @@ fn a_rebase_skips_a_commit_the_target_already_has_by_patch_id_as_git_does() {
     assert_eq!(tip(&env, "main^{tree}"), tip(&env, "oracle^{tree}"));
 }
 
-/// The branch's one commit changes two lines that `main` changed in two commits, so no commit
-/// of `main` has its patch-id but replaying it changes nothing.
+/// The branch's one commit changes two lines that `main` changed in two commits.
+/// No commit of `main` has its patch-id, but replaying it changes nothing.
 #[test]
 fn a_rebase_drops_a_commit_that_becomes_empty_as_git_does() {
     let env = setup();

@@ -270,11 +270,12 @@ fn finish(dir: &Path, branch: Option<&str>, mut value: Value) -> Result<Value> {
     let submodules = dir.join(".gitmodules").exists();
     let mut warnings = Vec::new();
     if submodules && Offline::current().is_set() {
-        // Git takes a submodule's URL from the shared config when the main checkout has
-        // registered it, else from `.gitmodules`; offline only `file` URLs can be cloned, so
-        // the others are skipped with a warning and the worktree and its hooks carry on.
-        // An empty or unreadable `.gitmodules` means no submodules rather than a failure that
-        // would stop `finish` and the create hooks.
+        // A submodule's URL comes from the shared config once the main checkout registered it.
+        // Otherwise it comes from `.gitmodules`.
+        // Offline, only `file` URLs can be cloned; the others are skipped with a warning.
+        // The worktree and its hooks carry on.
+        // An empty or unreadable `.gitmodules` means no submodules.
+        // It never stops `finish` or the create hooks.
         let listed = nested::submodule_paths(dir).unwrap_or_default();
         for path in &listed {
             if let Err(error) = inside.update_submodules(Some(path), Transports::FileOnly) {

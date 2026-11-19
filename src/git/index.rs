@@ -272,8 +272,8 @@ fn unhide(repo: &git2::Repository, index: &mut git2::Index) -> Result<Vec<String
     Ok(flagged)
 }
 
-/// The entries marked skip-worktree or assume-unchanged whose file is not on disk, which
-/// libgit2 would take for deleted.
+/// The entries marked skip-worktree or assume-unchanged whose file is not on disk.
+/// libgit2 would take them for deleted.
 fn absent_hidden(repo: &git2::Repository, index: &git2::Index) -> Vec<git2::IndexEntry> {
     let Some(workdir) = repo.workdir() else {
         return Vec::new();
@@ -285,8 +285,8 @@ fn absent_hidden(repo: &git2::Repository, index: &git2::Index) -> Vec<git2::Inde
         .collect()
 }
 
-/// The paths of the tracked files that a sparse checkout left off disk: skip-worktree or
-/// assume-unchanged entries whose file is gone. libgit2 takes them for deleted.
+/// The paths of tracked files that a sparse checkout left off disk.
+/// Each is a skip-worktree or assume-unchanged entry whose file is gone.
 pub(super) fn left_out_paths(repo: &git2::Repository) -> Result<HashSet<Vec<u8>>> {
     Ok(absent_hidden(repo, &repo.index()?)
         .into_iter()
@@ -317,8 +317,8 @@ fn submodule_is_only_dirty(repo: &git2::Repository, path: &str) -> bool {
         && repo.find_submodule(path).is_ok()
 }
 
-/// The submodules with a change of their own, whatever `diff.ignoreSubmodules` says: a commit
-/// other than the recorded one, or edits or untracked files in their work tree.
+/// The submodules with a change of their own, whatever `diff.ignoreSubmodules` says.
+/// Such a submodule is off its recorded commit, or has edits or untracked files.
 fn dirty_submodules(repo: &git2::Repository) -> Result<Vec<String>> {
     let dirt = SUBMODULE_MOVED
         | git2::SubmoduleStatus::WD_INDEX_MODIFIED
@@ -435,7 +435,7 @@ fn worktree_column(flags: git2::Status) -> u8 {
     }
 }
 
-/// The two columns of each conflicted path, from which sides of the merge have the file:
+/// The two columns of each conflicted path: which sides of the merge have the file.
 /// `UU` both changed, `AA` both added, `DD` both deleted, `AU`/`UA` and `DU`/`UD` one side only.
 fn conflict_columns(repo: &git2::Repository) -> Result<Vec<(String, u8, u8)>> {
     let index = repo.index()?;

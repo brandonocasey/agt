@@ -151,8 +151,8 @@ fn the_local_default_is_fast_forwarded_in_a_sparse_checkout_over_a_change_outsid
     assert_eq!(status, "");
 }
 
-/// A cone checkout of `keep` whose left-out `out/b` blob is deleted from the object database: a
-/// checkout that wrote or read the left-out files would fail on it, as a partial clone's would.
+/// A cone checkout of `keep` whose left-out `out/b` blob is deleted from the object database.
+/// A checkout that read or wrote left-out files would fail, as in a partial clone.
 fn sparse_repo_missing_a_left_out_blob() -> Env {
     let (env, _) = repo_with_commit();
     let repo = env.repo.clone();
@@ -851,8 +851,8 @@ fn submodules_are_initialized_in_the_new_worktree() {
     assert!(env.repo.join(".worktrees/with-sub/vendor/lib.txt").exists());
 }
 
-/// A repository with a submodule `vendor` that is a local path, as `git submodule add` records
-/// it, and `agt worktree create` without the test's blanket `protocol.file.allow=always`.
+/// A repository whose submodule `vendor` is a local path, as `git submodule add` records it.
+/// `agt worktree create` runs in it without the test's blanket `protocol.file.allow=always`.
 fn file_submodule_create(env: &Env, name: &str, extra_env: &[(&str, &str)]) -> Output {
     env.bin(&env.repo)
         .args(["worktree", "create", name])
@@ -956,9 +956,10 @@ fn a_file_path_submodule_needs_what_git_needs_to_clone_over_the_file_transport()
     }
 }
 
-/// A repository with the submodule `vendor`, recorded in `.gitmodules` with a URL that is the
-/// library when `reachable` and a private host otherwise, with `update = none` there when
-/// `update_none`, and `settings` in its config. It is not registered in the config.
+/// A repository with the submodule `vendor`, recorded in `.gitmodules`.
+/// Its URL is the library when `reachable`, else a private host.
+/// It has `update = none` there when `update_none`.
+/// `settings` go in its config, where the submodule is not registered.
 fn submodule_policy_repo(reachable: bool, update_none: bool, settings: &[(&str, &str)]) -> Env {
     let (env, _) = repo_with_commit();
     let library = env.path("library");

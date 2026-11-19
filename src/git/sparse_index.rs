@@ -64,8 +64,8 @@ pub(super) fn expand_if_sparse(repo: &git2::Repository) -> Result<()> {
     Ok(())
 }
 
-/// The index file of `repo` as a copy that is never written back: a sparse index is expanded in
-/// memory, any other index is read as it is.
+/// The index file of `repo`, as a copy that is never written back.
+/// A sparse index is expanded in memory; any other index is read as it is.
 pub(super) fn open_index_file(repo: &git2::Repository) -> Result<git2::Index> {
     let real = repo.path().join("index");
     let error = match git2::Index::open(&real) {
@@ -83,8 +83,8 @@ pub(super) fn open_index_file(repo: &git2::Repository) -> Result<git2::Index> {
     Ok(index)
 }
 
-/// Rewrites the index file of `repo` as the full index when it is a sparse one, so libgit2 can
-/// read it and write changes to it. Git reads the full index as it does a sparse one.
+/// Expands a sparse index of `repo` in place so libgit2 can read and write it.
+/// Git reads the full index as it does a sparse one.
 pub(super) fn expand_in_place(repo: &git2::Repository) -> Result<()> {
     if !is_unreadable_sparse(repo)? {
         return Ok(());

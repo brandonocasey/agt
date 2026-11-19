@@ -1,6 +1,6 @@
-//! Rebasing the checked-out branch onto a commit by cherry-picking its commits in memory, with the
-//! hooks git runs for a rebase: `pre-rebase`, `prepare-commit-msg` and `post-commit` for each
-//! commit, and `post-rewrite`.
+//! Rebasing the checked-out branch onto a commit by cherry-picking its commits in memory.
+//! It runs the hooks git runs for a rebase.
+//! That is `pre-rebase`, `post-rewrite`, and per commit `prepare-commit-msg` and `post-commit`.
 
 use std::fs;
 
@@ -21,9 +21,9 @@ pub enum Rebased {
 }
 
 impl Repo {
-    /// Rebases the branch checked out here onto `onto`, replaying the commits `onto` lacks, as
-    /// `git rebase --no-autostash`. `tip` is the commit the branch is expected to be at;
-    /// when it is at another commit the call fails before it changes anything.
+    /// Rebases the checked-out branch onto `onto`, replaying the commits `onto` lacks.
+    /// It matches `git rebase --no-autostash`.
+    /// The branch is expected at `tip`; otherwise the call fails before changing anything.
     pub fn rebase_onto(&self, onto: &str, tip: &str) -> Result<Rebased> {
         let repo = self.open_writing()?;
         let at = at_tip(&repo, tip)?;
@@ -46,8 +46,8 @@ impl Repo {
         };
         for pick in self.cherry(&onto_id.to_string(), &at.to_string())? {
             let picked = repo.find_commit(git2::Oid::from_str(&pick.sha)?)?;
-            // Like `git rebase`, leave out a commit the base has by patch-id, but keep one that
-            // changes nothing, which has no patch-id to match.
+            // Like `git rebase`, leave out a commit the base has by patch-id.
+            // Keep one that changes nothing: it has no patch-id to match.
             if pick.in_upstream && !changes_nothing(&picked)? {
                 continue;
             }
@@ -63,7 +63,7 @@ impl Repo {
     }
 }
 
-/// The commit HEAD is at, which must be `tip`.
+/// The commit HEAD is at; it MUST be `tip`, else this errors.
 fn at_tip(repo: &git2::Repository, tip: &str) -> Result<git2::Oid> {
     let at = repo.head()?.peel_to_commit()?.id();
     if at != commit_id(repo, tip)? {

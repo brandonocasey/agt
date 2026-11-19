@@ -191,8 +191,8 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
     callbacks
 }
 
-/// The answer to libgit2's request for a user name, which it makes for an ssh URL without one:
-/// the name the URL gives, else the login name.
+/// The answer to libgit2's user name request for an ssh URL that lacks one.
+/// It is the name the URL gives, else the login name.
 fn user_name_credential(url_user: Option<&str>) -> std::result::Result<git2::Cred, git2::Error> {
     let name = chosen_user_name(url_user, login_name())
         .ok_or_else(|| git2::Error::from_str("no user name: put one in the URL (user@host)"))?;
@@ -203,8 +203,9 @@ fn chosen_user_name(url_user: Option<&str>, login: Option<String>) -> Option<Str
     url_user.map(str::to_owned).or(login)
 }
 
-/// The login name of the current user: `USER` or `LOGNAME`, else the name the password database
-/// has for the user id, which is what ssh uses.
+/// The login name of the current user.
+/// It is `USER` or `LOGNAME`, else the password database's name for the user id.
+/// The database lookup is what ssh uses.
 fn login_name() -> Option<String> {
     ["USER", "LOGNAME"]
         .iter()
@@ -248,8 +249,8 @@ thread_local! {
     static HOST_KEY_REFUSAL: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// Remembers why a host key was refused. libgit2 replaces the error of the check with its own
-/// text, so [`explain`] puts this one back.
+/// Remembers why a host key was refused.
+/// libgit2 replaces the check's error with its own text; [`explain`] restores this one.
 fn refuse_host_key(message: String) -> git2::Error {
     HOST_KEY_REFUSAL.with(|refusal| *refusal.borrow_mut() = Some(message.clone()));
     git2::Error::from_str(&message)

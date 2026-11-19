@@ -246,9 +246,8 @@ fn commit_patch_id(repo: &git2::Repository, commit: &git2::Commit<'_>) -> Result
     patch_id(repo, parent.as_ref(), &commit.tree()?)
 }
 
-/// Diff options that do not depend on the user's diff config, so patch-ids and anchors stay
-/// the same: no renames, git's indent heuristic, `context` lines around each change, and the
-/// `a/` and `b/` prefixes whatever `diff.mnemonicPrefix` and `diff.noprefix` say.
+/// Diff options independent of the user's diff config, so patch-ids and anchors stay stable.
+/// Rename detection is off here; `diff` turns it on for anchors.
 fn diff_options(context: u32) -> git2::DiffOptions {
     let mut options = git2::DiffOptions::new();
     options
@@ -273,9 +272,9 @@ fn patch_id(
     Ok(Some(patch_id::stable(&diff)?))
 }
 
-/// Puts the conflicted path into the merged index as git's `merge-tree --write-tree` writes
-/// it (content conflicts with their markers, other conflicts as the side that still has the
-/// file) and returns the path.
+/// Puts the conflicted path into the merged index, as `git merge-tree --write-tree` does.
+/// It returns the path. Content conflicts keep their markers; other conflicts take the side
+/// with the file.
 fn settle(
     repo: &git2::Repository,
     index: &mut git2::Index,

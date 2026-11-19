@@ -1,7 +1,7 @@
-//! Config that git takes from `GIT_CONFIG_COUNT` and `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`,
-//! which libgit2 does not read. Only the reads that go through [`Repo::config_value`] and the
-//! `core.bare` check see it: adding it to the repository's own config would redirect libgit2's
-//! writes to it. `GIT_CONFIG_PARAMETERS` (what `git -c` exports) is not read.
+//! Config that git takes from `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>`,
+//! which libgit2 does not read. Only [`Repo::config_value`] and the `core.bare` check see it,
+//! so libgit2's writes never go to it.
+//! `GIT_CONFIG_PARAMETERS`, which `git -c` exports, is not read.
 //!
 //! [`Repo::config_value`]: super::Repo::config_value
 

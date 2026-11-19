@@ -20,8 +20,8 @@ impl From<git2::Error> for Error {
     }
 }
 
-/// libgit2's text for `error`; a config file it cannot parse reads as git says it:
-/// `bad config line N in file PATH`.
+/// libgit2's text for `error`.
+/// An unparsable config gets git's text: `bad config line N in file PATH`.
 pub fn libgit2_message(error: &git2::Error) -> String {
     let message = error.message();
     let located = (error.class() == git2::ErrorClass::Config)

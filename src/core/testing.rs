@@ -95,8 +95,8 @@ impl Sandbox {
     }
 }
 
-/// Points libgit2's global, XDG and system config search at an empty directory, once per test
-/// process, so a developer's own git config never reaches a unit test.
+/// Points libgit2's global, XDG and system config search at an empty directory.
+/// It runs once per test process, so no developer config reaches a unit test.
 fn hide_global_git_config() {
     static HIDDEN: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     HIDDEN.get_or_init(|| {

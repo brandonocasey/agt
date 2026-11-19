@@ -364,8 +364,8 @@ impl Repo {
         self.ref_commit(&format!("refs/heads/{name}"))
     }
 
-    /// The full name of the ref that the symbolic ref `name` (`HEAD`, `refs/remotes/origin/HEAD`)
-    /// names, or `None` when `name` is missing or not symbolic.
+    /// The full name of the ref that symbolic ref `name` (`HEAD`, `refs/remotes/origin/HEAD`)
+    /// points to. `None` when `name` is missing or not symbolic.
     fn symbolic_ref(&self, name: &str) -> Result<Option<String>> {
         self.fact(&format!("symref {name}"), |repo| {
             symbolic_target(repo, name)
@@ -682,8 +682,8 @@ fn reject_bad_config(repo: &git2::Repository) -> Result<()> {
     }
 }
 
-/// The path configured at `key` in the user's global git config (`GIT_CONFIG_GLOBAL`, else the
-/// home or XDG config), with `~` expanded; `None` when it is unset.
+/// The path set at `key` in the user's global git config, with `~` expanded.
+/// The config is `GIT_CONFIG_GLOBAL`, else the home or XDG config; `None` when unset.
 pub fn global_config_path(key: &str) -> Option<PathBuf> {
     let mut config = git2::Config::new().ok()?;
     let global = std::env::var_os("GIT_CONFIG_GLOBAL")
@@ -754,7 +754,7 @@ fn peeled_commit(repo: &git2::Repository, spec: &str) -> Result<Option<String>> 
     Ok(peeled_object(repo, spec, git2::ObjectType::Commit)?.map(|commit| commit.id().to_string()))
 }
 
-/// The commit `spec` names, or `None`; for callers that only compare commits.
+/// The commit `spec` names, or `None`.
 fn resolved(repo: &git2::Repository, spec: &str) -> Option<git2::Oid> {
     peeled_object(repo, spec, git2::ObjectType::Commit)
         .ok()

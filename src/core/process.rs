@@ -14,8 +14,7 @@ const PROMPT_SWITCHES: [(&str, &str); 2] =
 /// What [`PROMPT_SWITCHES`] held, or did not hold, before [`disable_credential_prompts`].
 static USER_PROMPT_SWITCHES: OnceLock<[Option<OsString>; PROMPT_SWITCHES.len()]> = OnceLock::new();
 
-/// Sets [`PROMPT_SWITCHES`] for this process, so that a credential helper libgit2 starts does
-/// not prompt. Programs agt starts get the original values back through [`keep_user_prompts`].
+/// Sets [`PROMPT_SWITCHES`] so a credential helper that libgit2 starts cannot prompt.
 /// MUST be called before the process starts a thread.
 pub fn disable_credential_prompts() {
     USER_PROMPT_SWITCHES.get_or_init(|| PROMPT_SWITCHES.map(|(name, _)| std::env::var_os(name)));
@@ -26,8 +25,8 @@ pub fn disable_credential_prompts() {
     }
 }
 
-/// Gives a program agt starts the value, or the absence, that [`PROMPT_SWITCHES`] had when agt
-/// started, unless the caller already set the variable on `command`.
+/// Gives `command` the value, or absence, that [`PROMPT_SWITCHES`] had when agt started.
+/// A variable already set on `command` stays as it is.
 pub fn keep_user_prompts(command: &mut Command) {
     let Some(originals) = USER_PROMPT_SWITCHES.get() else {
         return;

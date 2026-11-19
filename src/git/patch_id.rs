@@ -1,6 +1,6 @@
-//! `git patch-id --stable` over the patch text libgit2 prints. libgit2's own `Diff::patchid`
-//! drops the header of a file that only changes mode, where git hashes it together with the
-//! next file's header.
+//! `git patch-id --stable` over the patch text libgit2 prints.
+//! libgit2's own `Diff::patchid` drops the header of a file that only changes mode.
+//! Git hashes that header together with the next file's header.
 
 use sha1_smol::Sha1;
 
@@ -65,8 +65,8 @@ enum Step {
     Hash,
 }
 
-/// The state of git's `builtin/patch-id.c` while it reads a patch. `before` and `after` count the
-/// lines a hunk still has to show, and are -1 while the header of a file is read.
+/// The state of git's `builtin/patch-id.c` while it reads a patch.
+/// `before` and `after` count a hunk's remaining lines, and are -1 in a file header.
 struct Reading<'a> {
     sum: Sum,
     before: i64,
