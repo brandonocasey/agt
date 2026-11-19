@@ -1,5 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -601,6 +602,71 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+/// A worktree backup archive read back: its record and the entries under `files/` (with each
+/// file's mode) and `worktree-git/`.
+pub struct BackupArchive {
+    pub record: Value,
+    pub files: BTreeMap<String, Vec<u8>>,
+    pub modes: BTreeMap<String, u32>,
+    pub git: BTreeMap<String, Vec<u8>>,
+}
+
+/// Where the backup `id` of the fixture repository is.
+pub fn backup_path(env: &Env, id: &str) -> PathBuf {
+    env.path("state/agents/backups/repo")
+        .join(format!("{id}.tar.gz"))
+}
+
+pub fn read_backup(path: &Path) -> BackupArchive {
+    let mut archive =
+        tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(path).unwrap()));
+    let mut backup = BackupArchive {
+        record: Value::Null,
+        files: BTreeMap::new(),
+        modes: BTreeMap::new(),
+        git: BTreeMap::new(),
+    };
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let name = entry.path().unwrap().to_string_lossy().into_owned();
+        let mode = entry.header().mode().unwrap();
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents).unwrap();
+        if name == "backup.json" {
+            backup.record = serde_json::from_slice(&contents).unwrap();
+        } else if let Some(file) = name.strip_prefix("files/") {
+            backup.modes.insert(file.to_owned(), mode & 0o7777);
+            backup.files.insert(file.to_owned(), contents);
+        } else if let Some(file) = name.strip_prefix("worktree-git/") {
+            backup.git.insert(file.to_owned(), contents);
+        }
+    }
+    backup
+}
+
+/// Rewrites the archive at `path` with the contents of its entry `name` replaced.
+pub fn replace_backup_entry(path: &Path, name: &str, contents: &[u8]) {
+    let mut archive =
+        tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(path).unwrap()));
+    let mut rewritten = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let mut header = entry.header().clone();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        if entry.path().unwrap().to_string_lossy() == name {
+            data = contents.to_vec();
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+        }
+        rewritten.append(&header, data.as_slice()).unwrap();
+    }
+    fs::write(path, rewritten.into_inner().unwrap().finish().unwrap()).unwrap();
 }
 
 #[cfg(test)]

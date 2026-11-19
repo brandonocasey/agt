@@ -7,7 +7,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env, proc_start};
+use crate::support::{BIN, Env, proc_start, read_backup, replace_backup_entry};
 
 mod cleanup;
 
@@ -104,33 +104,52 @@ fn remove_then_restore_returns_every_file_byte_for_byte() {
 
     assert_backup(&f, &removed, &feature);
 
-    // The branch is deleted, yet the backup ref keeps its commits.
-    f.env.git(&["branch", "-D", "feat"]);
-    f.env.git(&["reflog", "expire", "--expire=now", "--all"]);
-    f.env.git(&["gc", "-q", "--prune=now"]);
-    let reference = removed["ref"].as_str().unwrap();
-    f.env
-        .git(&["merge-base", "--is-ancestor", &feature, reference]);
-    assert_eq!(f.env.git(&["rev-parse", &format!("{reference}^")]), feature);
-
     let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
     assert_eq!(restored["warnings"], json!([]));
     assert_restored(&f, &feature);
 }
 
+#[test]
+fn a_backup_restores_its_files_into_a_directory_when_head_is_gone_from_the_repository() {
+    let f = Fixture::new();
+    f.dirty();
+    let removed = f.remove();
+    f.env.git(&["branch", "-D", "feat"]);
+    f.env.git(&["reflog", "expire", "--expire=now", "--all"]);
+    f.env.git(&["gc", "-q", "--prune=now"]);
+
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("plain directory"), "{warning}");
+    assert!(!f.wt.join(".git").exists());
+    for (name, contents) in [
+        ("a.txt", "a changed\n"),
+        ("b.txt", "b staged\n"),
+        ("feature.txt", "feature\n"),
+    ] {
+        assert_eq!(fs::read_to_string(f.wt.join(name)).unwrap(), contents);
+    }
+    assert!(!f.wt.join("c.txt").exists());
+}
+
 fn assert_backup(f: &Fixture, removed: &Value, feature: &str) {
     assert!(!f.wt.exists());
     let id = removed["id"].as_str().unwrap();
-    assert_eq!(removed["ref"], format!("refs/agt/backups/{id}"));
+    assert_eq!(removed.get("ref"), None);
+    assert_eq!(f.env.git(&["for-each-ref", "refs/agt"]), "");
     assert_eq!(removed["ignored_lost"], json!([".env"]));
     assert_eq!(removed["snapshot_files"], 4);
     assert_eq!(removed["head_on_local_branch"], true);
     assert_eq!(removed["head_on_remote_branch"], false);
-    let dir = PathBuf::from(removed["backup_dir"].as_str().unwrap());
-    assert!(dir.starts_with(f.env.path("state/agents/backups/repo")));
+    let path = PathBuf::from(removed["backup"].as_str().unwrap());
+    assert_eq!(path, crate::support::backup_path(&f.env, id));
     assert!(id.ends_with("-worktree-feat"), "{id}");
-    let record: Value =
-        serde_json::from_slice(&fs::read(dir.join("backup.json")).unwrap()).unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let backup = read_backup(&path);
+    let record = &backup.record;
     assert_eq!(record["copied"], json!([]));
     assert_eq!(
         record["skipped"],
@@ -138,11 +157,24 @@ fn assert_backup(f: &Fixture, removed: &Value, feature: &str) {
     );
     assert_eq!(record["branch"], "feat");
     assert_eq!(record["head"], feature);
-    // Ignored files stay out of the backup, secrets included.
-    assert!(!dir.join("files").exists());
-    assert_eq!(
-        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-        0o700
+    assert_eq!(record["deleted"], json!(["c.txt".as_bytes()]));
+    assert_eq!(record.get("snapshot"), None);
+    // Every tracked file is saved with its edits; ignored files, secrets included, stay out.
+    assert_eq!(backup.files["a.txt"], b"a changed\n");
+    assert_eq!(backup.files["b.txt"], b"b staged\n");
+    assert_eq!(backup.files["feature.txt"], b"feature\n");
+    assert_eq!(backup.files["new.bin"], [0u8, 159, 146, 150, 10]);
+    assert_eq!(backup.modes["new.bin"], 0o755);
+    assert!(!backup.files.contains_key("c.txt"));
+    assert!(
+        backup
+            .files
+            .keys()
+            .all(|name| !name.starts_with("node_modules")
+                && !name.starts_with("build")
+                && name != ".env"),
+        "{:?}",
+        backup.files.keys()
     );
 }
 
@@ -214,16 +246,60 @@ fn restore_preserves_regular_file_modes_across_umasks() {
     }
 }
 
+/// A backup in the directory format older agt versions wrote: `backup.json` with file modes, a
+/// snapshot commit pinned by a ref, and the per-worktree git files. The worktree is removed.
+fn legacy_backup(f: &Fixture, file_modes: Value) -> (String, PathBuf) {
+    let id = "20260101-0000-worktree-feat".to_owned();
+    let head = wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]);
+    let stashed = wgit(&f.env, &f.wt, &["stash", "create"]);
+    let snapshot = if stashed.is_empty() {
+        head.clone()
+    } else {
+        stashed
+    };
+    f.env
+        .git(&["update-ref", &format!("refs/agt/backups/{id}"), &snapshot]);
+    let dir = f.env.path("state/agents/backups/repo").join(&id);
+    fs::create_dir_all(dir.join("worktree-git/info")).unwrap();
+    let git_dir = PathBuf::from(wgit(
+        &f.env,
+        &f.wt,
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    ));
+    for name in ["info/sparse-checkout", "config.worktree"] {
+        if git_dir.join(name).is_file() {
+            fs::copy(git_dir.join(name), dir.join("worktree-git").join(name)).unwrap();
+        }
+    }
+    let record = json!({
+        "id": id,
+        "repository": f.env.repo,
+        "worktree": f.wt,
+        "branch": "feat",
+        "head": head,
+        "snapshot": snapshot,
+        "ref": format!("refs/agt/backups/{id}"),
+        "created": "2026-01-01T00:00:00Z",
+        "copied": [],
+        "skipped": [],
+        "file_modes": file_modes,
+    });
+    fs::write(dir.join("backup.json"), record.to_string()).unwrap();
+    f.env
+        .git(&["worktree", "remove", "--force", &f.wt.to_string_lossy()]);
+    (id, dir)
+}
+
 #[test]
 fn restore_accepts_a_backup_without_file_mode_metadata() {
     let f = Fixture::new();
     f.dirty();
-    let removed = f.remove();
-    let record = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("backup.json");
+    let (id, dir) = legacy_backup(&f, json!([]));
+    let record = dir.join("backup.json");
     let mut saved: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
     saved.as_object_mut().unwrap().remove("file_modes");
     fs::write(&record, serde_json::to_vec(&saved).unwrap()).unwrap();
-    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    f.json(&["restore", &id]);
     assert_eq!(
         fs::read(f.wt.join("new.bin")).unwrap(),
         [0u8, 159, 146, 150, 10]
@@ -239,17 +315,66 @@ fn restore_file_modes_cannot_escape_through_parent_paths_or_symlinks() {
         fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
         std::os::unix::fs::symlink(f.env.path(""), f.wt.join("link")).unwrap();
         wgit(&f.env, &f.wt, &["add", "link"]);
-        let removed = f.remove();
-        let record = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("backup.json");
-        let mut saved: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
-        saved["file_modes"] = json!([{"path": relative.as_bytes(), "mode": 0o777}]);
-        fs::write(&record, serde_json::to_vec(&saved).unwrap()).unwrap();
-        let output = f.agt(&f.env.repo, &["restore", removed["id"].as_str().unwrap()]);
+        let modes = json!([{"path": relative.as_bytes(), "mode": 0o777}]);
+        let (id, _) = legacy_backup(&f, modes);
+        let output = f.agt(&f.env.repo, &["restore", &id]);
         assert_eq!(output.status.code(), Some(1));
         assert_eq!(
             fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+}
+
+/// Appends an entry with exactly this name: no path check, as a hand-made archive may hold.
+fn append_raw(
+    tar: &mut tar::Builder<flate2::write::GzEncoder<fs::File>>,
+    name: &str,
+    link: Option<&Path>,
+    data: &[u8],
+) {
+    let mut header = tar::Header::new_gnu();
+    header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+    header.set_mode(0o644);
+    match link {
+        Some(target) => {
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_link_name(target).unwrap();
+            header.set_size(0);
+        }
+        None => header.set_size(data.len() as u64),
+    }
+    header.set_cksum();
+    let body = if link.is_some() { &b""[..] } else { data };
+    tar.append(&header, body).unwrap();
+}
+
+#[test]
+fn restore_refuses_archive_entries_that_leave_the_worktree() {
+    let outside = [("files/../outside", None), ("files/link/outside", None)];
+    let through_link = [
+        ("files/link", Some(Path::new("/"))),
+        ("files/link/outside", None),
+    ];
+    for entries in [&outside[..1], &through_link[..]] {
+        let f = Fixture::new();
+        let removed = f.remove();
+        let archive = Path::new(removed["backup"].as_str().unwrap());
+        let record = read_backup(archive).record;
+        let file = fs::File::create(archive).unwrap();
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            file,
+            flate2::Compression::fast(),
+        ));
+        append_raw(&mut tar, "backup.json", None, record.to_string().as_bytes());
+        for (name, link) in entries {
+            append_raw(&mut tar, name, *link, b"pwned");
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+        let output = f.agt(&f.env.repo, &["restore", removed["id"].as_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(1), "{entries:?}");
+        assert!(!f.env.path("trees/outside").exists(), "{entries:?}");
+        assert!(!Path::new("/outside").exists(), "{entries:?}");
     }
 }
 
@@ -520,14 +645,14 @@ fn backups_list_filter_by_id_and_rm() {
     f.dirty();
     let removed = f.remove();
     let id = removed["id"].as_str().unwrap();
-    let dir = removed["backup_dir"].as_str().unwrap();
+    let dir = removed["backup"].as_str().unwrap();
 
     let listed = f.json(&["backups"]);
     assert_eq!(listed["backups"][0]["id"], id);
     let filtered = f.json(&["backups", id]);
     assert_eq!(filtered["backups"].as_array().unwrap().len(), 1);
     let shown = &filtered["backups"][0];
-    assert_eq!(shown["dir"], dir);
+    assert_eq!(shown["backup"], dir);
     assert_eq!(
         shown["worktree"],
         fs::canonicalize(f.env.path("trees"))
@@ -551,27 +676,49 @@ fn backups_list_filter_by_id_and_rm() {
 fn the_backup_list_counts_file_modes_and_the_view_by_id_lists_them() {
     let f = Fixture::new();
     f.dirty();
+    let modes = json!([
+        {"path": "a.txt".as_bytes(), "mode": 0o644},
+        {"path": "b.txt".as_bytes(), "mode": 0o644},
+    ]);
+    let (id, _) = legacy_backup(&f, modes.clone());
+
+    let listed = f.json(&["backups"]);
+    let entry = listed["backups"][0].as_object().unwrap();
+    assert!(!entry.contains_key("file_modes"), "{entry:?}");
+    assert_eq!(entry["file_mode_count"], 2);
+    let shown = f.json(&["backups", &id]);
+    assert_eq!(shown["backups"][0]["file_modes"], modes);
+    for (key, value) in entry {
+        if key != "file_mode_count" && key != "deleted_count" {
+            assert_eq!(*value, shown["backups"][0][key], "{key}");
+        }
+    }
+}
+
+#[test]
+fn the_backup_list_counts_deleted_paths_and_the_view_by_id_lists_them() {
+    let f = Fixture::new();
+    f.dirty();
     let removed = f.remove();
     let id = removed["id"].as_str().unwrap();
 
     let listed = f.json(&["backups"]);
     let entry = listed["backups"][0].as_object().unwrap();
-    assert!(!entry.contains_key("file_modes"), "{entry:?}");
+    assert!(!entry.contains_key("deleted"), "{entry:?}");
+    assert_eq!(entry["deleted_count"], 1);
     let shown = f.json(&["backups", id]);
-    let modes = shown["backups"][0]["file_modes"].as_array().unwrap();
-    assert!(!modes.is_empty());
-    assert_eq!(entry["file_mode_count"], modes.len());
-    // The record on disk keeps its modes, and every other field matches the by-id view.
-    let record: Value = serde_json::from_slice(
-        &fs::read(Path::new(removed["backup_dir"].as_str().unwrap()).join("backup.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(record["file_modes"].as_array().unwrap().len(), modes.len());
-    for (key, value) in entry {
-        if key != "file_mode_count" {
-            assert_eq!(*value, shown["backups"][0][key], "{key}");
-        }
-    }
+    assert_eq!(shown["backups"][0]["deleted"], json!(["c.txt".as_bytes()]));
+}
+
+#[test]
+fn removing_a_directory_backup_deletes_its_ref_and_directory() {
+    let f = Fixture::new();
+    f.dirty();
+    let (id, dir) = legacy_backup(&f, json!([]));
+    assert_ne!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+    f.json(&["backups", "rm", &id, "--yes"]);
+    assert!(!dir.exists());
+    assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
 #[test]
@@ -648,9 +795,9 @@ fn an_ignored_nested_repository_does_not_block_removal() {
     nest(&f.env, &f.wt.join("node_modules/pkg"));
     let path = f.wt.to_string_lossy().into_owned();
     assert_eq!(f.json(&["remove", &path])["plan"], json!(true));
-    f.remove();
+    let removed = f.remove();
     assert!(!f.wt.exists());
-    assert_ne!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+    assert!(Path::new(removed["backup"].as_str().unwrap()).is_file());
 }
 
 #[test]
@@ -2000,8 +2147,8 @@ fn restore_reapplies_the_sparse_checkout_and_says_so() {
     let f = sparse_fixture();
     let removed = f.remove();
     let id = removed["id"].as_str().unwrap();
-    let saved = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("worktree-git");
-    assert!(saved.join("info/sparse-checkout").is_file());
+    let backup = read_backup(Path::new(removed["backup"].as_str().unwrap()));
+    assert!(backup.git.contains_key("info/sparse-checkout"));
     let restored = f.json(&["restore", id]);
     assert_eq!(restored["sparse_checkout"], true, "{restored}");
     assert_eq!(restored["warnings"], json!([]));
@@ -2067,12 +2214,16 @@ fn restore_of_a_full_checkout_does_not_mention_sparse_checkout() {
 fn a_sparse_checkout_that_cannot_be_reapplied_still_restores_with_a_warning() {
     let f = sparse_fixture();
     let removed = f.remove();
-    let saved = PathBuf::from(removed["backup_dir"].as_str().unwrap()).join("worktree-git");
-    fs::write(saved.join("config.worktree"), "[core\n").unwrap();
+    let archive = removed["backup"].as_str().unwrap();
+    replace_backup_entry(
+        Path::new(archive),
+        "worktree-git/config.worktree",
+        b"[core\n",
+    );
     let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
     assert_eq!(restored["sparse_checkout"], false);
     let warning = restored["warnings"][0].as_str().unwrap();
-    assert!(warning.contains("worktree-git"), "{warning}");
+    assert!(warning.contains(archive), "{warning}");
     // The worktree is usable, as a full checkout.
     assert_eq!(fs::read_to_string(f.wt.join("d3/c")).unwrap(), "c\n");
     wgit(&f.env, &f.wt, &["status", "--porcelain"]);
@@ -2472,16 +2623,15 @@ fn a_sparse_worktree_keeps_its_own_patterns_when_main_is_sparse() {
 fn an_old_backups_ignored_file_in_an_out_of_cone_directory_survives_restore() {
     let f = sparse_fixture();
     wgit(&f.env, &f.wt, &["sparse-checkout", "set", "--cone", "d1"]);
-    let removed = f.remove();
     // Backups from agt 0.20.0 and older copied ignored files under `files/`.
-    let dir = PathBuf::from(removed["backup_dir"].as_str().unwrap());
+    let (id, dir) = legacy_backup(&f, json!([]));
     fs::create_dir_all(dir.join("files/d2")).unwrap();
     fs::write(dir.join("files/d2/.env"), "SECRET=1\n").unwrap();
     let mut record: Value =
         serde_json::from_slice(&fs::read(dir.join("backup.json")).unwrap()).unwrap();
     record["copied"] = json!(["d2/.env"]);
     fs::write(dir.join("backup.json"), record.to_string()).unwrap();
-    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    let restored = f.json(&["restore", &id]);
     assert_eq!(restored["sparse_checkout"], true, "{restored}");
     assert_eq!(
         fs::read_to_string(f.wt.join("d2/.env")).unwrap(),

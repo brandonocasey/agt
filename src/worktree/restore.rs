@@ -2,15 +2,15 @@ use std::collections::HashSet;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde_json::json;
 
-use super::{backup, info, snapshot};
+use super::{archive, backup, info, snapshot};
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
-use crate::git::{GITLINK, Repo};
+use crate::git::Repo;
 
 #[derive(Args)]
 pub struct Cli {
@@ -22,7 +22,7 @@ pub struct Cli {
 }
 
 pub fn run(cli: Cli) -> Result<Output> {
-    let (record, dir) = backup::find(&cli.id)?;
+    let (record, source) = backup::find(&cli.id)?;
     // Git runs in the repository, so a relative `--path` must mean the caller's directory.
     let target = match cli.path {
         Some(path) => {
@@ -33,18 +33,106 @@ pub fn run(cli: Cli) -> Result<Output> {
     if target.exists() {
         return fail(format!("{} already exists", target.display()));
     }
+    if backup::is_archive(&source) {
+        restore_archive(&record, &source, &target)
+    } else {
+        restore_directory(&record, &source, &target)
+    }
+}
+
+fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Result<Output> {
+    let mut warnings = Vec::new();
     let repo = Repo::at(&record.repository);
-    if !repo.object_exists(&format!("{}^{{commit}}", record.snapshot))? {
+    let attached =
+        record.repository.is_dir() && repo.object_exists(&format!("{}^{{commit}}", record.head))?;
+    if attached {
+        add_worktree(&repo, record, target, &mut warnings)?;
+    } else {
+        fs::create_dir_all(target).map_err(ctx(format!("create {}", target.display())))?;
+        warnings.push(format!(
+            "HEAD {} is gone from {}; restored the files into a plain directory, not a worktree",
+            record.head,
+            record.repository.display()
+        ));
+    }
+    let target = info::real(target)?;
+    let repo = Repo::at(&target);
+    if attached && sparse_enabled(&repo) {
+        disable_inherited(&repo, &mut warnings);
+    }
+    for path in &record.deleted {
+        let file = archive::inside(&target, path)?;
+        remove_with_empty_parents(&target, &file)?;
+    }
+    let git_files = tempfile::tempdir().map_err(ctx("create a scratch directory"))?;
+    archive::unpack(archive, &target, git_files.path())?;
+    let sparse = attached && reapply_sparse(git_files.path(), archive, &target, &mut warnings);
+    if sparse {
+        restage_deletions(&repo, &record.deleted, &mut warnings);
+    }
+    Ok(Output::Json(json!({
+        "sparse_checkout": sparse,
+        "restored": target,
+        "id": record.id,
+        "branch": record.branch,
+        "head": record.head,
+        "copied_ignored": 0,
+        "warnings": warnings,
+    })))
+}
+
+fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Result<Output> {
+    let repo = Repo::at(&record.repository);
+    let snapshot = record.snapshot.as_deref().unwrap_or_default();
+    if !repo.object_exists(&format!("{snapshot}^{{commit}}"))? {
         return fail(format!(
-            "snapshot {} is gone from {}",
-            record.snapshot,
+            "snapshot {snapshot} is gone from {}",
             record.repository.display()
         ));
     }
     let mut warnings = Vec::new();
+    add_worktree(&repo, record, target, &mut warnings)?;
+
+    let target = info::real(target)?;
+    // `worktree add` copies a sparse main checkout's patterns. The snapshot goes onto a full
+    // checkout, where every file it changes or deletes is on disk; the backup's own sparse
+    // checkout comes back after it.
+    let repo = Repo::at(&target);
+    if sparse_enabled(&repo) {
+        disable_inherited(&repo, &mut warnings);
+    }
+    let deleted = apply(&target, snapshot)?;
+    // Before the ignored files come back: a cone reapply deletes an out-of-cone directory
+    // that holds only ignored files.
+    let saved = dir.join(snapshot::SAVED_GIT_DIR);
+    let sparse = reapply_sparse(&saved, &saved, &target, &mut warnings);
+    if sparse {
+        restage_deletions(&repo, &deleted, &mut warnings);
+    }
+    restore_modes(&target, &record.file_modes)?;
+    snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
+    Ok(Output::Json(json!({
+        "sparse_checkout": sparse,
+        "restored": target,
+        "id": record.id,
+        "branch": record.branch,
+        "head": record.head,
+        "copied_ignored": record.copied.len(),
+        "warnings": warnings,
+    })))
+}
+
+/// Adds the worktree at `target` on the backup's branch, or detached at its HEAD when the branch
+/// moved or is checked out elsewhere.
+fn add_worktree(
+    repo: &Repo,
+    record: &backup::Record,
+    target: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let target_text = target.to_string_lossy().into_owned();
     // Only the registration of this very path is cleared; other missing worktrees keep theirs.
-    let wanted = lexical_real(&target);
+    let wanted = lexical_real(target);
     if repo
         .worktrees()?
         .iter()
@@ -86,40 +174,34 @@ pub fn run(cli: Cli) -> Result<Output> {
             }
         }
     }
+    Ok(())
+}
 
-    let target = info::real(&target)?;
-    // `worktree add` copies a sparse main checkout's patterns. The snapshot goes onto a full
-    // checkout, where every file it changes or deletes is on disk; the backup's own sparse
-    // checkout comes back after it.
-    let repo = Repo::at(&target);
-    if sparse_enabled(&repo) {
-        disable_inherited(&repo, &mut warnings);
+/// Deletes `file`, then each directory above it that is left empty, up to but not including `root`.
+fn remove_with_empty_parents(root: &Path, file: &Path) -> Result<()> {
+    match fs::remove_file(file) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ctx(format!("remove {}", file.display()))(error)),
     }
-    let deleted = apply(&target, &record.snapshot)?;
-    // Before the ignored files come back: a cone reapply deletes an out-of-cone directory
-    // that holds only ignored files.
-    let sparse = reapply_sparse(&dir.join(snapshot::SAVED_GIT_DIR), &target, &mut warnings);
-    if sparse {
-        restage_deletions(&repo, &deleted, &mut warnings);
+    for parent in file
+        .ancestors()
+        .skip(1)
+        .take_while(|parent| *parent != root)
+    {
+        if fs::remove_dir(parent).is_err() {
+            break;
+        }
     }
-    restore_modes(&target, &record.file_modes)?;
-    snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
-    Ok(Output::Json(json!({
-        "sparse_checkout": sparse,
-        "restored": target,
-        "id": record.id,
-        "branch": record.branch,
-        "head": record.head,
-        "copied_ignored": record.copied.len(),
-        "warnings": warnings,
-    })))
+    Ok(())
 }
 
 /// Puts the saved sparse-checkout patterns and per-worktree config back into the restored
-/// worktree and reapplies them; true when it did. A failure is a warning naming the saved
-/// files, not an error: the worktree is restored, as a full checkout.
+/// worktree and reapplies them; true when it did. A failure is a warning naming `kept`, where
+/// the backup holds the saved files, not an error: the worktree is restored, as a full checkout.
 fn reapply_sparse(
     saved: &std::path::Path,
+    kept: &std::path::Path,
     target: &std::path::Path,
     warnings: &mut Vec<String>,
 ) -> bool {
@@ -176,7 +258,7 @@ fn reapply_sparse(
             warnings.push(format!(
                 "could not reapply the sparse checkout ({}); the worktree is a full checkout, the saved patterns are in {}",
                 error.0,
-                saved.display()
+                kept.display()
             ));
             false
         }
@@ -262,29 +344,20 @@ fn restage_deletions(repo: &Repo, deleted: &[Vec<u8>], warnings: &mut Vec<String
 /// Returns the paths it deleted.
 fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<Vec<Vec<u8>>> {
     let repo = Repo::at(worktree);
-    let raw = repo.checked(
-        &["diff-tree", "-r", "--no-renames", "-z", "HEAD", snapshot],
-        None,
-        &[],
-    )?;
-    let mut fields = raw.split(|byte| *byte == 0);
     let mut changed: Vec<u8> = Vec::new();
     let mut deleted: Vec<Vec<u8>> = Vec::new();
-    while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
-        let Some(path) = fields.next() else { break };
-        let header = String::from_utf8_lossy(header);
-        let parts: Vec<&str> = header.trim_start_matches(':').split(' ').collect();
+    for change in snapshot::changes(&repo, "HEAD", snapshot)? {
         // Submodule commits cannot be checked out as files; the worktree records HEAD's.
-        if parts.iter().take(2).any(|mode| *mode == GITLINK) {
+        if change.gitlink {
             continue;
         }
-        if parts.get(4).is_some_and(|status| *status == "D") {
-            let file = worktree.join(std::ffi::OsStr::from_bytes(path));
+        if change.deleted {
+            let file = worktree.join(std::ffi::OsStr::from_bytes(&change.path));
             fs::remove_file(&file).map_err(ctx(format!("remove {}", file.display())))?;
-            deleted.push(path.to_vec());
+            deleted.push(change.path);
             continue;
         }
-        changed.extend_from_slice(path);
+        changed.extend_from_slice(&change.path);
         changed.push(0);
     }
     if !changed.is_empty() {

@@ -195,8 +195,7 @@ pub(super) fn removal(
     let mut done = json!({
         "removed": path,
         "id": taken.record.id,
-        "ref": taken.record.reference,
-        "backup_dir": taken.dir,
+        "backup": taken.path,
         "snapshot_files": taken.changed,
         "ignored_lost": lost,
         "untracked_lost": info::capped(dropped),
