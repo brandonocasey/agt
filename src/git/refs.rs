@@ -35,32 +35,7 @@ impl Repo {
     /// Every ref under one of `prefixes` (all refs when empty), sorted by name.
     pub fn ref_tips(&self, prefixes: &[&str]) -> Result<Vec<RefTip>> {
         let repo = self.open_refs()?;
-        let mut tips = Vec::new();
-        for reference in repo.references()? {
-            let reference = reference?;
-            let Some(name) = reference.name().map(str::to_owned) else {
-                continue;
-            };
-            if !prefixes.is_empty() && !prefixes.iter().any(|prefix| name.starts_with(prefix)) {
-                continue;
-            }
-            let Ok(resolved) = reference.resolve() else {
-                continue;
-            };
-            let Some(object) = resolved.target() else {
-                continue;
-            };
-            tips.push(RefTip {
-                name,
-                object: object.to_string(),
-                commit: resolved
-                    .peel_to_commit()
-                    .ok()
-                    .map(|commit| commit.id().to_string()),
-            });
-        }
-        tips.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(tips)
+        ref_tips_in(&repo, prefixes)
     }
 
     /// The short names of the refs under `prefix` whose commit is, or has in its history,
@@ -69,7 +44,7 @@ impl Repo {
         let repo = self.open_refs()?;
         let wanted = commit_id(&repo, commit)?;
         let mut names = Vec::new();
-        for tip in self.ref_tips(&[prefix])? {
+        for tip in ref_tips_in(&repo, &[prefix])? {
             let Some(found) = tip.commit.as_deref() else {
                 continue;
             };
@@ -83,21 +58,15 @@ impl Repo {
 
     /// The local branches and their tips.
     pub fn branches(&self) -> Result<Vec<(String, String)>> {
-        Ok(self
-            .ref_tips(&["refs/heads/"])?
-            .into_iter()
-            .filter_map(|tip| {
-                let name = tip.name.strip_prefix("refs/heads/")?.to_owned();
-                Some((name, tip.object))
-            })
-            .collect())
+        let repo = self.open_refs()?;
+        branches_in(&repo)
     }
 
     /// The local branches `filter` picks, newest commit first.
     pub fn branch_rows(&self, filter: &BranchFilter<'_>) -> Result<Vec<BranchRow>> {
         let repo = self.open_refs()?;
         let mut rows = Vec::new();
-        for (name, tip) in self.branches()? {
+        for (name, tip) in branches_in(&repo)? {
             let id = git2::Oid::from_str(&tip)?;
             let picked = match filter {
                 BranchFilter::All => true,
@@ -204,16 +173,18 @@ impl Repo {
     /// Deletes local branch `name`: when `force` is false only if it is merged into HEAD or
     /// its upstream, as `git branch -d`.
     pub fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
-        let repo = self.open_refs()?;
-        let mut branch = repo
-            .find_branch(name, git2::BranchType::Local)
-            .map_err(|_| Error(format!("branch '{name}' not found")))?;
+        {
+            let repo = self.open_refs()?;
+            local_branch(&repo, name)?;
+        }
         if let Some(holder) = self.holders(name)?.first() {
             return fail(format!(
                 "cannot delete branch '{name}' used by worktree at '{}'",
                 holder.display()
             ));
         }
+        let repo = self.open_refs()?;
+        let mut branch = local_branch(&repo, name)?;
         if !force && !branch_is_merged(&repo, &branch)? {
             return fail(format!(
                 "the branch '{name}' is not fully merged. If you are sure you want to delete it, run 'git branch -D {name}'"
@@ -245,6 +216,50 @@ impl Repo {
     pub fn is_valid_ref_name(name: &str) -> bool {
         git2::Reference::is_valid_name(name)
     }
+}
+
+fn ref_tips_in(repo: &git2::Repository, prefixes: &[&str]) -> Result<Vec<RefTip>> {
+    let mut tips = Vec::new();
+    for reference in repo.references()? {
+        let reference = reference?;
+        let Some(name) = reference.name().map(str::to_owned) else {
+            continue;
+        };
+        if !prefixes.is_empty() && !prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        let Ok(resolved) = reference.resolve() else {
+            continue;
+        };
+        let Some(object) = resolved.target() else {
+            continue;
+        };
+        tips.push(RefTip {
+            name,
+            object: object.to_string(),
+            commit: resolved
+                .peel_to_commit()
+                .ok()
+                .map(|commit| commit.id().to_string()),
+        });
+    }
+    tips.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tips)
+}
+
+fn branches_in(repo: &git2::Repository) -> Result<Vec<(String, String)>> {
+    Ok(ref_tips_in(repo, &["refs/heads/"])?
+        .into_iter()
+        .filter_map(|tip| {
+            let name = tip.name.strip_prefix("refs/heads/")?.to_owned();
+            Some((name, tip.object))
+        })
+        .collect())
+}
+
+fn local_branch<'r>(repo: &'r git2::Repository, name: &str) -> Result<git2::Branch<'r>> {
+    repo.find_branch(name, git2::BranchType::Local)
+        .map_err(|_| Error(format!("branch '{name}' not found")))
 }
 
 /// `ref` as `git for-each-ref --format=%(refname:short)` prints it.

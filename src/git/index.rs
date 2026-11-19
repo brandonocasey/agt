@@ -76,28 +76,14 @@ impl Repo {
     /// untracked files always count.
     pub fn strict_uncommitted_count(&self) -> Result<usize> {
         let repo = self.open()?;
-        let mut paths = self.changed_path_set(&repo, UntrackedMode::Normal)?;
+        let mut paths = changed_path_set(&repo, UntrackedMode::Normal)?;
         paths.extend(dirty_submodules(&repo)?);
         Ok(paths.len())
     }
 
     fn count_changes(&self, mode: UntrackedMode) -> Result<usize> {
         let repo = self.open()?;
-        Ok(self.changed_path_set(&repo, mode)?.len())
-    }
-
-    fn changed_path_set(
-        &self,
-        repo: &git2::Repository,
-        mode: UntrackedMode,
-    ) -> Result<HashSet<String>> {
-        let mut paths: HashSet<String> = self.hidden_edits()?.into_iter().collect();
-        paths.extend(
-            listed(repo, mode, true)?
-                .into_iter()
-                .map(|entry| entry.path),
-        );
-        Ok(paths)
+        Ok(changed_path_set(&repo, mode)?.len())
     }
 
     /// The submodules the index records, limited to `pathspec` when it is not empty.
@@ -156,13 +142,7 @@ impl Repo {
         body: impl FnOnce(&git2::Repository, &mut git2::Index) -> Result<T>,
     ) -> Result<T> {
         let repo = self.open()?;
-        let mut scratch = super::sparse_index::open_index_file(&repo)?;
-        repo.set_index(&mut scratch)?;
-        let result = body(&repo, &mut scratch);
-        if self.held.is_some() {
-            repo.set_index(&mut super::sparse_index::open_index_file(&repo)?)?;
-        }
-        result
+        scratch_index(&repo, body)
     }
 
     /// Tree id of the work tree as `git add -A` would stage it, built in a copy of the index so
@@ -214,23 +194,52 @@ impl Repo {
     /// The tracked files marked skip-worktree or assume-unchanged that exist on disk and differ
     /// from the index: edits `git status` does not show.
     pub fn hidden_edits(&self) -> Result<Vec<String>> {
-        self.with_scratch_index(|repo, index| {
-            let flagged = unhide(repo, index)?;
-            if flagged.is_empty() {
-                return Ok(Vec::new());
-            }
-            let mut options = git2::DiffOptions::new();
-            let diff = repo.diff_index_to_workdir(Some(index), Some(&mut options))?;
-            Ok(diff
-                .deltas()
-                .map(|delta| {
-                    let path = delta.new_file().path_bytes().unwrap_or_default();
-                    String::from_utf8_lossy(path).into_owned()
-                })
-                .filter(|name| flagged.contains(name))
-                .collect())
-        })
+        let repo = self.open()?;
+        hidden_edits_in(&repo)
     }
+}
+
+/// Runs `body` against a copy of the index of `repo` that is never written back, and puts the
+/// index file back in place afterwards.
+fn scratch_index<T>(
+    repo: &git2::Repository,
+    body: impl FnOnce(&git2::Repository, &mut git2::Index) -> Result<T>,
+) -> Result<T> {
+    let mut scratch = super::sparse_index::open_index_file(repo)?;
+    repo.set_index(&mut scratch)?;
+    let result = body(repo, &mut scratch);
+    repo.set_index(&mut super::sparse_index::open_index_file(repo)?)?;
+    result
+}
+
+fn hidden_edits_in(repo: &git2::Repository) -> Result<Vec<String>> {
+    scratch_index(repo, |repo, index| {
+        let flagged = unhide(repo, index)?;
+        if flagged.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut options = git2::DiffOptions::new();
+        let diff = repo.diff_index_to_workdir(Some(index), Some(&mut options))?;
+        Ok(diff
+            .deltas()
+            .map(|delta| {
+                let path = delta.new_file().path_bytes().unwrap_or_default();
+                String::from_utf8_lossy(path).into_owned()
+            })
+            .filter(|name| flagged.contains(name))
+            .collect())
+    })
+}
+
+/// The paths that count as a change: the hidden edits and what `git status` lists.
+fn changed_path_set(repo: &git2::Repository, mode: UntrackedMode) -> Result<HashSet<String>> {
+    let mut paths: HashSet<String> = hidden_edits_in(repo)?.into_iter().collect();
+    paths.extend(
+        listed(repo, mode, true)?
+            .into_iter()
+            .map(|entry| entry.path),
+    );
+    Ok(paths)
 }
 
 /// The index of `repo`, reloaded when its file changed. An index expanded in memory has no file.

@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::index::{SKIP_WORKTREE, refreshed_index};
-use super::{Repo, commit_id, configured, without_trailing_slash};
+use super::{Repo, commit_id, configured, sparse, without_trailing_slash};
 use crate::core::error::{Error, Result, ctx};
 
 /// What a new worktree checks out.
@@ -63,7 +63,7 @@ impl Repo {
             }
             Checkout::Detached(commit) => add_detached(&repo, &name, path, commit)?,
         }
-        if self.sparse_checkout_enabled()? {
+        if sparse::is_enabled(&repo)? {
             let linked = Repo::at(path);
             copy_sparse_files(&repo, &git2::Repository::open(path)?)?;
             linked.sparse_reapply()?;

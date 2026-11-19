@@ -931,6 +931,8 @@ mod tests {
     use super::{Repo, branch_name, remote_key};
     use crate::core::testing::Sandbox;
 
+    type Query = fn(&Repo) -> crate::core::error::Result<()>;
+
     /// The repository of `sandbox`; the sandbox hides the developer's global git config from
     /// libgit2.
     fn sandboxed(sandbox: &Sandbox) -> Repo {
@@ -1307,6 +1309,47 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path.ends_with("gone") && entry.prunable)
         );
+    }
+
+    #[test]
+    fn a_read_only_repo_answers_the_queries_that_look_at_the_repository_twice() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo();
+        sandbox.git(&root, &["init", "-q", "-b", "main"]);
+        sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        sandbox.git(&root, &["branch", "topic"]);
+        let repo = std::sync::Arc::new(Repo::at(&root).read_only().unwrap());
+        let queries: [(&str, Query); 5] = [
+            ("uncommitted_count", |repo| {
+                repo.uncommitted_count().map(drop)
+            }),
+            ("strict_uncommitted_count", |repo| {
+                repo.strict_uncommitted_count().map(drop)
+            }),
+            ("refs_containing", |repo| {
+                assert_eq!(repo.refs_containing("main", "refs/heads/")?.len(), 2);
+                Ok(())
+            }),
+            ("branch_rows", |repo| {
+                let rows = repo.branch_rows(&super::BranchFilter::All)?;
+                assert_eq!(rows.len(), 2);
+                Ok(())
+            }),
+            ("delete_branch", |repo| {
+                repo.delete_branch("topic", false)?;
+                assert_eq!(repo.branches()?.len(), 1);
+                Ok(())
+            }),
+        ];
+        for (name, query) in queries {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let shared = std::sync::Arc::clone(&repo);
+            std::thread::spawn(move || sender.send(query(&shared)));
+            let answered = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("{name} never returned: it waits on its own lock"));
+            answered.unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
     }
 
     #[test]
