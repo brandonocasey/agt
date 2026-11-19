@@ -4,6 +4,7 @@
 
 use std::fs;
 
+use super::merge::move_branch_to;
 use super::{Repo, commit_id, hooks};
 use crate::core::error::{Error, Result};
 
@@ -37,26 +38,32 @@ impl Repo {
         }
         // The hook may have committed.
         at_tip(&repo, tip)?;
-        let committer = repo.signature()?;
         let upstream = repo.find_annotated_commit(onto_id)?;
-        let mut rebase = repo.rebase(None, Some(&upstream), None, None)?;
-        let mut rewrites = String::new();
+        let mut options = git2::RebaseOptions::new();
+        options.inmemory(true);
+        let mut rebase = repo.rebase(None, Some(&upstream), None, Some(&mut options))?;
+        let mut replaying = Replaying {
+            repo: &repo,
+            committer: repo.signature()?,
+            last: onto_id,
+            rewrites: String::new(),
+        };
         while let Some(step) = rebase.next() {
             let stopped = match step {
-                Ok(step) => replay(&repo, &mut rebase, &committer, step.id(), &mut rewrites)?,
+                Ok(step) => replaying.replay(&mut rebase, step.id())?,
                 Err(error) => Some(Rebased::Stopped {
                     conflicts: Vec::new(),
                     error: Some(error.message().to_owned()),
                 }),
             };
             if let Some(stopped) = stopped {
-                rebase.abort()?;
                 return Ok(stopped);
             }
         }
-        rebase.finish(Some(&committer))?;
+        let rebased = repo.find_commit(replaying.last)?;
+        move_branch_to(&repo, &rebased, &format!("rebase (finish): onto {onto_id}"))?;
         // A failing post-rewrite hook does not undo the rebase.
-        let _ = hooks::run(&repo, "post-rewrite", &["rebase"], &rewrites);
+        let _ = hooks::run(&repo, "post-rewrite", &["rebase"], &replaying.rewrites);
         Ok(Rebased::Done)
     }
 }
@@ -72,50 +79,60 @@ fn at_tip(repo: &git2::Repository, tip: &str) -> Result<git2::Oid> {
     Ok(at)
 }
 
-/// Commits the step the rebase just applied, which replays `picked`, and records the old and new
-/// ids in `rewrites`. `Some` when it conflicted or a hook or the commit failed; a commit that the
-/// base already has is dropped, as git does.
-fn replay(
-    repo: &git2::Repository,
-    rebase: &mut git2::Rebase<'_>,
-    committer: &git2::Signature<'_>,
-    picked: git2::Oid,
-    rewrites: &mut String,
-) -> Result<Option<Rebased>> {
-    let index = repo.index()?;
-    if index.has_conflicts() {
-        let conflicts = index
-            .conflicts()?
-            .flatten()
-            .filter_map(|conflict| {
-                let side = conflict.our.or(conflict.their).or(conflict.ancestor)?;
-                Some(String::from_utf8_lossy(&side.path).into_owned())
-            })
-            .collect();
-        return Ok(Some(Rebased::Stopped {
-            conflicts,
-            error: None,
-        }));
-    }
-    let stopped = |error: String| {
-        Some(Rebased::Stopped {
-            conflicts: Vec::new(),
-            error: Some(error),
-        })
-    };
-    let message = match edited_message(repo, picked) {
-        Ok(message) => message,
-        Err(said) => return Ok(stopped(said)),
-    };
-    match rebase.commit(None, committer, message.as_deref()) {
-        Ok(new) => {
-            rewrites.push_str(&format!("{picked} {new}\n"));
-            // git ignores the exit status of post-commit.
-            let _ = hooks::run(repo, "post-commit", &[], "");
-            Ok(None)
+/// A rebase in progress that commits each step it applies in memory.
+struct Replaying<'r> {
+    repo: &'r git2::Repository,
+    committer: git2::Signature<'static>,
+    /// The commit made by the last step, `onto` before the first.
+    last: git2::Oid,
+    /// The old and new id of each replayed commit, as `post-rewrite` reads them.
+    rewrites: String,
+}
+
+impl Replaying<'_> {
+    /// Commits the step the rebase just applied, which replays `picked`. `Some` when it conflicted
+    /// or a hook or the commit failed; a commit that the base already has is dropped, as git does.
+    fn replay(
+        &mut self,
+        rebase: &mut git2::Rebase<'_>,
+        picked: git2::Oid,
+    ) -> Result<Option<Rebased>> {
+        let index = rebase.inmemory_index()?;
+        if index.has_conflicts() {
+            let conflicts = index
+                .conflicts()?
+                .flatten()
+                .filter_map(|conflict| {
+                    let side = conflict.our.or(conflict.their).or(conflict.ancestor)?;
+                    Some(String::from_utf8_lossy(&side.path).into_owned())
+                })
+                .collect();
+            return Ok(Some(Rebased::Stopped {
+                conflicts,
+                error: None,
+            }));
         }
-        Err(error) if error.code() == git2::ErrorCode::Applied => Ok(None),
-        Err(error) => Ok(stopped(error.message().to_owned())),
+        let stopped = |error: String| {
+            Some(Rebased::Stopped {
+                conflicts: Vec::new(),
+                error: Some(error),
+            })
+        };
+        let message = match edited_message(self.repo, picked) {
+            Ok(message) => message,
+            Err(said) => return Ok(stopped(said)),
+        };
+        match rebase.commit(None, &self.committer, message.as_deref()) {
+            Ok(new) => {
+                self.last = new;
+                self.rewrites.push_str(&format!("{picked} {new}\n"));
+                // git ignores the exit status of post-commit.
+                let _ = hooks::run(self.repo, "post-commit", &[], "");
+                Ok(None)
+            }
+            Err(error) if error.code() == git2::ErrorCode::Applied => Ok(None),
+            Err(error) => Ok(stopped(error.message().to_owned())),
+        }
     }
 }
 

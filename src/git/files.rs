@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use super::index::left_out_paths;
 use super::{Repo, commit_id, peeled_commit};
 use crate::core::error::{Error, Result};
 
@@ -123,9 +124,11 @@ impl Repo {
         let repo = self.open()?;
         let head = peeled_tree(&repo, "HEAD")?;
         let diff = repo.diff_tree_to_workdir_with_index(Some(&head), None)?;
+        let left_out = left_out_paths(&repo)?;
         Ok(changes(&diff)
             .into_iter()
             .map(|change| change.path)
+            .filter(|path| !left_out.contains(path))
             .collect())
     }
 

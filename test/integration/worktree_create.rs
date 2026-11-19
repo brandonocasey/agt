@@ -131,6 +131,27 @@ fn behind_origin() -> (Env, PathBuf, String, String) {
 }
 
 #[test]
+fn the_local_default_is_fast_forwarded_in_a_sparse_checkout_over_a_change_outside_it() {
+    let (env, _) = repo_with_commit();
+    let bare = remote(&env, "origin.git", "origin");
+    fs::create_dir_all(env.repo.join("sub")).unwrap();
+    commit(&env, &env.repo.clone(), "sub/keep", "k");
+    git(&env, &env.repo, &["push", "-q", "-u", "origin", "main"]);
+    git(
+        &env,
+        &env.repo,
+        &["sparse-checkout", "set", "--no-cone", "/sub/"],
+    );
+    let tip = advance(&env, &bare, "first");
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "updated", "{value}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "HEAD"]), tip);
+    assert!(!env.repo.join("first").exists());
+    let status = git(&env, &env.repo, &["status", "--porcelain", "-uno"]);
+    assert_eq!(status, "");
+}
+
+#[test]
 fn the_local_default_is_fast_forwarded_in_the_checkout_that_has_it() {
     let (env, _, first, tip) = behind_origin();
     // A local change the merge does not touch stays as it was.

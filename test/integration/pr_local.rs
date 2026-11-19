@@ -494,6 +494,66 @@ fn a_view_of_a_branch_needs_no_readable_index() {
     assert_eq!(view["head_branch"], "feat");
 }
 
+/// A repository with `sub/keep.txt` and `other/x.txt`, whose checkout keeps only `sub/`.
+fn sparse_setup() -> Env {
+    let env = setup();
+    env.write("sub/keep.txt", "k\n");
+    env.write("other/x.txt", "x\n");
+    env.commit_all("dirs");
+    env
+}
+
+fn keep_only_sub(env: &Env) {
+    git_ok(
+        env,
+        &env.repo,
+        &["sparse-checkout", "set", "--no-cone", "/sub/"],
+    );
+}
+
+#[test]
+fn a_merge_of_a_change_outside_a_sparse_checkout_moves_the_branch() {
+    let env = sparse_setup();
+    let sha = commit_on(&env, "main", "other/x.txt", "changed\n");
+    point(&env, "feat", &sha);
+    keep_only_sub(&env);
+
+    ok(&env, &merge_args(&sha, "feat", &[]));
+    assert_eq!(tip(&env, "main"), sha);
+    assert!(!env.repo.join("other").exists());
+    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_rebase_merge_in_a_sparse_checkout_with_a_change_outside_it() {
+    let env = sparse_setup();
+    let feat = commit_on(&env, "main", "sub/y.txt", "y\n");
+    let moved = commit_on(&env, "main", "other/x.txt", "changed\n");
+    point(&env, "feat", &feat);
+    git_ok(&env, &env.repo, &["switch", "-q", "feat"]);
+    point(&env, "main", &moved);
+    keep_only_sub(&env);
+
+    ok(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
+    assert_eq!(tip(&env, "main"), tip(&env, "feat"));
+    assert_ne!(tip(&env, "main"), feat);
+    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_rebase_merge_into_a_sparse_checkout_with_a_change_outside_it() {
+    let env = sparse_setup();
+    let feat = add_branch(&env, "feat", "a.txt", "from the branch\n");
+    advance_main(&env, "other/x.txt", "changed\n");
+    keep_only_sub(&env);
+    add_worktree(&env, "work", &["feat"]);
+
+    ok(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
+    assert_eq!(tip(&env, "main"), tip(&env, "feat"));
+    assert_ne!(tip(&env, "main"), feat);
+    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
+}
+
 #[test]
 fn a_wrong_sha_a_short_sha_and_a_branch_behind_the_target_are_refused() {
     let env = setup();

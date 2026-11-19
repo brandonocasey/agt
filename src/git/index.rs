@@ -269,6 +269,15 @@ fn absent_hidden(repo: &git2::Repository, index: &git2::Index) -> Vec<git2::Inde
         .collect()
 }
 
+/// The paths of the tracked files that a sparse checkout left off disk: skip-worktree or
+/// assume-unchanged entries whose file is gone. libgit2 takes them for deleted.
+pub(super) fn left_out_paths(repo: &git2::Repository) -> Result<HashSet<Vec<u8>>> {
+    Ok(absent_hidden(repo, &repo.index()?)
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
+}
+
 /// Puts back the `entries` that the update dropped.
 fn restore_entries(index: &mut git2::Index, entries: &[git2::IndexEntry]) -> Result<()> {
     for entry in entries {

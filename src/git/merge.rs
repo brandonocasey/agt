@@ -1,9 +1,13 @@
 //! Moving the checked-out branch forward, and the branches that other worktrees hold: the
 //! parts of `git merge --ff-only` and `git fetch .` that libgit2 leaves to the caller.
 
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use super::{Repo, Worktree, commit_id};
+use super::index::{copy_entry, left_out_paths};
+use super::{Repo, Worktree, commit_id, sparse};
 use crate::core::error::{Error, Result, ctx};
 
 /// The directories that hold a rebase in progress.
@@ -100,28 +104,7 @@ impl Repo {
         if !repo.graph_descendant_of(target.id(), current)? {
             return Err(Error("Not possible to fast-forward, aborting.".into()));
         }
-        let mut blocked = Vec::new();
-        let mut options = git2::build::CheckoutBuilder::new();
-        options
-            .safe()
-            .overwrite_ignored(false)
-            .notify_on(git2::CheckoutNotificationType::CONFLICT)
-            .notify(|_, path, _, _, _| {
-                blocked.extend(path.map(Path::to_owned));
-                true
-            });
-        let checked = repo.checkout_tree(target.as_object(), Some(&mut options));
-        drop(options);
-        if checked.is_err() && !blocked.is_empty() {
-            return Err(Error(overwrite_message(&repo, &blocked)?));
-        }
-        checked?;
-        let mut branch = head.resolve()?;
-        branch.set_target(target.id(), &format!("merge {to}: Fast-forward"))?;
-        if self.sparse_checkout_enabled()? {
-            self.sparse_reapply()?;
-        }
-        Ok(())
+        move_branch_to(&repo, &target, &format!("merge {to}: Fast-forward"))
     }
 
     /// Moves `refs/heads/<name>` from `from` to `to` without a work tree, as `git fetch . to:name`
@@ -140,6 +123,101 @@ impl Repo {
             &format!("fetch . {to}: fast-forward"),
         )
     }
+}
+
+/// Moves the work tree, the index and the branch HEAD names from HEAD's commit to `target`,
+/// refusing with git's wording when a local change or an untracked or ignored file is in the way.
+/// A file that a sparse checkout left out is not a local change: its index entry takes the new
+/// content and the file stays off disk.
+pub(super) fn move_branch_to(
+    repo: &git2::Repository,
+    target: &git2::Commit<'_>,
+    reflog: &str,
+) -> Result<()> {
+    let head = repo.head()?;
+    let target_tree = target.tree()?;
+    let diff = repo.diff_tree_to_tree(Some(&head.peel_to_tree()?), Some(&target_tree), None)?;
+    let left_out = left_out_paths(repo)?;
+    let mut changed = BTreeSet::new();
+    for delta in diff.deltas() {
+        changed.extend(delta.old_file().path_bytes().map(<[u8]>::to_vec));
+        changed.extend(delta.new_file().path_bytes().map(<[u8]>::to_vec));
+    }
+    let (kept, written): (Vec<_>, Vec<_>) =
+        changed.iter().partition(|path| left_out.contains(*path));
+    if !written.is_empty() {
+        check_out_safely(repo, target, &written)?;
+    }
+    update_left_out(repo, &target_tree, &kept)?;
+    head.resolve()?.set_target(target.id(), reflog)?;
+    if sparse::is_enabled(repo)? {
+        sparse::reapply(repo)?;
+    }
+    Ok(())
+}
+
+/// Writes the `paths` of `target` into the work tree and the index, refusing, with nothing
+/// changed, when that would overwrite a local change or an untracked or ignored file.
+fn check_out_safely(
+    repo: &git2::Repository,
+    target: &git2::Commit<'_>,
+    paths: &[&Vec<u8>],
+) -> Result<()> {
+    let mut blocked = Vec::new();
+    let mut options = git2::build::CheckoutBuilder::new();
+    options
+        .safe()
+        .overwrite_ignored(false)
+        .disable_pathspec_match(true)
+        .notify_on(git2::CheckoutNotificationType::CONFLICT)
+        .notify(|_, path, _, _, _| {
+            blocked.extend(path.map(Path::to_owned));
+            true
+        });
+    for path in paths {
+        options.path(path.as_slice());
+    }
+    let checked = repo.checkout_tree(target.as_object(), Some(&mut options));
+    drop(options);
+    if checked.is_err() && !blocked.is_empty() {
+        return Err(Error(overwrite_message(repo, &blocked)?));
+    }
+    Ok(checked?)
+}
+
+/// Gives the index entries of the `paths` that a sparse checkout left out the content they have
+/// in `tree`, keeping their skip-worktree mark; a path `tree` lacks loses its entry.
+fn update_left_out(
+    repo: &git2::Repository,
+    tree: &git2::Tree<'_>,
+    paths: &[&Vec<u8>],
+) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut index = repo.index()?;
+    for path in paths {
+        let at = Path::new(OsStr::from_bytes(path));
+        let found = tree
+            .get_path(at)
+            .ok()
+            .filter(|item| item.kind() != Some(git2::ObjectType::Tree));
+        let Some(item) = found else {
+            if index.get_path(at, 0).is_some() {
+                index.remove_path(at)?;
+            }
+            continue;
+        };
+        let Some(old) = index.get_path(at, 0) else {
+            continue;
+        };
+        let mut entry = copy_entry(&old);
+        entry.id = item.id();
+        entry.mode = item.filemode() as u32;
+        index.add(&entry)?;
+    }
+    index.write()?;
+    Ok(())
 }
 
 /// Git's message for a merge that would overwrite `paths`: local changes to tracked files, or

@@ -19,21 +19,15 @@ impl Repo {
     /// Whether `core.sparseCheckout` is on.
     pub fn sparse_checkout_enabled(&self) -> Result<bool> {
         let repo = self.open_refs()?;
-        let config = repo.config()?;
-        Ok(config.get_bool("core.sparseCheckout").unwrap_or(false))
+        is_enabled(&repo)
     }
 
     /// Applies the sparse-checkout patterns again (`git sparse-checkout reapply`): files they
     /// leave out are removed and marked skip-worktree unless they have local changes, files
     /// they take in come back.
     pub fn sparse_reapply(&self) -> Result<()> {
-        if !self.sparse_checkout_enabled()? {
-            return fail("must be in a sparse-checkout to reapply sparsity patterns");
-        }
         let repo = self.open_writing()?;
-        let file = repo.path().join("info").join("sparse-checkout");
-        let patterns = Patterns::read(&file)?;
-        apply(&repo, |path| patterns.selects(path))
+        reapply(&repo)
     }
 
     /// Brings every file back and turns the sparse checkout off (`git sparse-checkout
@@ -49,6 +43,24 @@ impl Repo {
         own.set_bool("index.sparse", false)?;
         Ok(())
     }
+}
+
+/// Whether `core.sparseCheckout` is on in `repo`.
+pub(super) fn is_enabled(repo: &git2::Repository) -> Result<bool> {
+    Ok(repo
+        .config()?
+        .get_bool("core.sparseCheckout")
+        .unwrap_or(false))
+}
+
+/// [`Repo::sparse_reapply`] on an open `repo`, whose index MUST be writable.
+pub(super) fn reapply(repo: &git2::Repository) -> Result<()> {
+    if !is_enabled(repo)? {
+        return fail("must be in a sparse-checkout to reapply sparsity patterns");
+    }
+    let file = repo.path().join("info").join("sparse-checkout");
+    let patterns = Patterns::read(&file)?;
+    apply(repo, |path| patterns.selects(path))
 }
 
 /// Moves the index and the work tree to what `selected` says each path should be.
