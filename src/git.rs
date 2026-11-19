@@ -166,14 +166,13 @@ impl Repo {
     }
 
     fn open_new(&self) -> Result<git2::Repository> {
-        let repo = self.open_raw().map_err(|error| {
+        self.open_raw().map_err(|error| {
             Error(format!(
                 "open the git repository at {}: {}",
                 self.root.display(),
                 crate::core::error::libgit2_message(&error)
             ))
-        })?;
-        Ok(repo)
+        })
     }
 
     /// The repository for a call that reads or changes only refs, objects, config or remotes:

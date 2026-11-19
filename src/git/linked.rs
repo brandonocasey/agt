@@ -36,7 +36,7 @@ impl Repo {
     /// Adds a linked worktree at `path` with `what` checked out. A sparse checkout of this
     /// repository carries over to it, as `git worktree add` does.
     pub fn add_worktree(&self, path: &Path, what: &Checkout<'_>) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
         }
@@ -74,7 +74,7 @@ impl Repo {
     /// Removes the linked worktree at `path` with its files and its registration, whatever it
     /// holds (`git worktree remove --force`).
     pub fn remove_worktree(&self, path: &Path) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let wanted = comparable(path);
         for name in repo.worktrees()?.iter().flatten() {
             let linked = repo.find_worktree(name)?;
@@ -135,14 +135,14 @@ impl Repo {
 
     /// Sets the boolean config key `name` in the repository's own config file.
     pub fn set_config_bool(&self, name: &str, value: bool) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         repo.config()?.set_bool(name, value)?;
         Ok(())
     }
 
     /// Fails when a config file of the repository cannot be read.
     pub fn check_config(&self) -> Result<()> {
-        let repo = self.open()?;
+        let repo = self.open_refs()?;
         let config = repo.config()?;
         let mut entries = config.entries(None)?;
         while let Some(entry) = entries.next() {
@@ -330,4 +330,34 @@ fn is_file_transport(url: &str) -> bool {
     let colon = url.find(':');
     let slash = url.find('/');
     !url.contains("://") && (colon.is_none() || slash.is_some_and(|slash| Some(slash) < colon))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::Checkout;
+    use crate::core::testing::Sandbox;
+    use crate::git::Repo;
+    use crate::git::fixtures::commit;
+
+    #[test]
+    fn worktree_and_config_calls_leave_the_index_alone() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(&sandbox, &dir, &[("a.txt", "a\n")], "one");
+        sandbox.git(&dir, &["config", "index.sparse", "true"]);
+        fs::write(dir.join(".git/index"), b"not an index").unwrap();
+        let repo = Repo::at(&dir);
+        let linked = sandbox.path().join("linked");
+
+        repo.set_config_bool("extensions.worktreeConfig", true)
+            .unwrap();
+        repo.check_config().unwrap();
+        repo.add_worktree(&linked, &Checkout::Detached("HEAD"))
+            .unwrap();
+        assert!(linked.join("a.txt").is_file());
+        repo.remove_worktree(&linked).unwrap();
+        assert!(!linked.exists());
+    }
 }
