@@ -489,6 +489,36 @@ fn a_head_on_no_branch_refuses_removal_unless_forced() {
 }
 
 #[test]
+fn a_worktree_at_an_ignored_path_on_no_branch_is_removed_without_force() {
+    let f = Fixture::new();
+    // `build/` is in the fixture's `.gitignore`, so the checkout sits at an ignored path.
+    let review = f.env.repo.join("build").join("review");
+    let head = wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]);
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        &review.to_string_lossy(),
+        &head,
+    ]);
+    let moved = wgit(
+        &f.env,
+        &review,
+        &["commit", "-q", "--allow-empty", "-m", "review"],
+    );
+    assert_eq!(moved, "");
+    let removed = f.json(&["remove", &review.to_string_lossy(), "--yes"]);
+    assert!(
+        removed["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("on no branch")
+    );
+    assert!(!review.exists());
+}
+
+#[test]
 fn a_detached_head_held_by_a_branch_is_removed_without_force() {
     for remote in [false, true] {
         let f = Fixture::new();
