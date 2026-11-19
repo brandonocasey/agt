@@ -653,6 +653,42 @@ fn detach_checks_out_a_commit_without_making_a_branch() {
 }
 
 #[test]
+fn a_detached_worktree_in_a_directory_with_awkward_characters_is_created_and_restored() {
+    let (env, first) = repo_with_commit();
+    let tree = env.path("my wt~1: x");
+    let created = agt_json(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "review-1",
+            "--detach",
+            "HEAD",
+            "--path",
+            tree.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(created["commit"], first.as_str());
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    let restored = agt_json(
+        &env,
+        &env.repo,
+        &["restore", removed["id"].as_str().unwrap()],
+    );
+    assert_eq!(restored["warnings"], serde_json::json!([]), "{restored}");
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+    assert_eq!(
+        git(&env, &env.repo, &["branch", "--list", "agt-detach*"]),
+        ""
+    );
+}
+
+#[test]
 fn a_detached_worktree_is_reused_only_at_the_same_commit() {
     let (env, first) = repo_with_commit();
     let second = commit(&env, &env.repo.clone(), "second", "2");

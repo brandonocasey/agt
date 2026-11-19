@@ -185,11 +185,12 @@ fn add_on_branch(repo: &git2::Repository, name: &str, path: &Path, branch: &str)
 }
 
 /// libgit2 can only check out a branch, so the worktree is made on a temporary branch at
-/// `commit` that is dropped once HEAD is detached.
+/// `commit` that is dropped once HEAD is detached. A branch that cannot be dropped is replaced by
+/// the next detached worktree and does not fail this one.
 fn add_detached(repo: &git2::Repository, name: &str, path: &Path, commit: &str) -> Result<()> {
     let id = commit_id(repo, commit)?;
-    let temporary = format!("agt-detach-{name}-{}", std::process::id());
-    repo.branch(&temporary, &repo.find_commit(id)?, false)?;
+    let temporary = format!("agt-detach-{}", std::process::id());
+    repo.branch(&temporary, &repo.find_commit(id)?, true)?;
     let added = add_on_branch(repo, name, path, &temporary);
     let detached = added.and_then(|()| {
         let linked = git2::Repository::open(path)?;
@@ -197,7 +198,7 @@ fn add_detached(repo: &git2::Repository, name: &str, path: &Path, commit: &str) 
         Ok(())
     });
     if let Ok(mut branch) = repo.find_branch(&temporary, git2::BranchType::Local) {
-        branch.delete()?;
+        let _ = branch.delete();
     }
     detached
 }
