@@ -3,6 +3,7 @@
 //! Cone and non-cone pattern files are read the same way: as gitignore patterns that select
 //! the files to keep, the last matching pattern winning.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -56,12 +57,12 @@ pub(super) fn reapply(repo: &git2::Repository) -> Result<()> {
         return fail("must be in a sparse-checkout to reapply sparsity patterns");
     }
     let file = repo.path().join("info").join("sparse-checkout");
-    let patterns = Patterns::read(&file)?;
+    let mut patterns = Patterns::read(&file)?;
     apply(repo, |path| patterns.selects(path))
 }
 
 /// Moves the index and the work tree to what `selected` says each path should be.
-fn apply(repo: &git2::Repository, selected: impl Fn(&[u8]) -> bool) -> Result<()> {
+fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Result<()> {
     let workdir = repo
         .workdir()
         .ok_or_else(|| Error("this operation must be run in a work tree".into()))?;
@@ -73,12 +74,13 @@ fn apply(repo: &git2::Repository, selected: impl Fn(&[u8]) -> bool) -> Result<()
         let file = workdir.join(OsStr::from_bytes(&entry.path));
         let skipped = entry.flags_extended & SKIP_WORKTREE != 0;
         let mut changed = copy_entry(entry);
-        if selected(&entry.path) && skipped {
+        let keep = selected(&entry.path);
+        if keep && skipped {
             changed.flags_extended &= !SKIP_WORKTREE;
             if fs::symlink_metadata(&file).is_err() {
                 restore.push(file);
             }
-        } else if !selected(&entry.path) && !skipped {
+        } else if !keep && !skipped {
             if !leave_out(&file, entry)? {
                 continue;
             }
@@ -152,8 +154,11 @@ fn remove_empty_dirs(dir: &Path, workdir: &Path) {
     }
 }
 
-/// The patterns of a sparse-checkout file.
-struct Patterns(Vec<Pattern>);
+/// The patterns of a sparse-checkout file, and what they decided for each directory asked about.
+struct Patterns {
+    all: Vec<Pattern>,
+    directories: HashMap<Vec<u8>, bool>,
+}
 
 struct Pattern {
     negated: bool,
@@ -170,34 +175,54 @@ impl Patterns {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(ctx(format!("read {}", file.display()))(error)),
         };
-        Ok(Self(
-            text.split(|byte| *byte == b'\n')
+        Ok(Self {
+            all: text
+                .split(|byte| *byte == b'\n')
                 .filter_map(Pattern::parse)
                 .collect(),
-        ))
+            directories: HashMap::new(),
+        })
     }
 
     /// Whether the file at `path` is kept: the nearest directory or file that a pattern
     /// matches decides, the last matching pattern winning.
-    fn selects(&self, path: &[u8]) -> bool {
-        let components: Vec<&[u8]> = path.split(|byte| *byte == b'/').collect();
-        let mut decision = false;
-        for depth in 1..=components.len() {
-            let is_directory = depth < components.len();
-            if let Some(selected) = self.decide(&components[..depth], is_directory) {
-                decision = selected;
-            }
+    fn selects(&mut self, path: &[u8]) -> bool {
+        let inherited = self.directory(parent_of(path));
+        self.decide(&components(path), false).unwrap_or(inherited)
+    }
+
+    /// What the directory `dir` and the ones above it decide for the paths below it.
+    fn directory(&mut self, dir: &[u8]) -> bool {
+        if dir.is_empty() {
+            return false;
         }
+        if let Some(&known) = self.directories.get(dir) {
+            return known;
+        }
+        let inherited = self.directory(parent_of(dir));
+        let decision = self.decide(&components(dir), true).unwrap_or(inherited);
+        self.directories.insert(dir.to_vec(), decision);
         decision
     }
 
     fn decide(&self, path: &[&[u8]], is_directory: bool) -> Option<bool> {
-        self.0
+        self.all
             .iter()
             .rev()
             .find(|pattern| pattern.matches(path, is_directory))
             .map(|pattern| !pattern.negated)
     }
+}
+
+/// The directory that holds `path`; empty at the top.
+fn parent_of(path: &[u8]) -> &[u8] {
+    path.iter()
+        .rposition(|byte| *byte == b'/')
+        .map_or(&[], |at| &path[..at])
+}
+
+fn components(path: &[u8]) -> Vec<&[u8]> {
+    path.split(|byte| *byte == b'/').collect()
 }
 
 impl Pattern {
@@ -419,6 +444,70 @@ mod tests {
                 state(&sandbox, &ours),
                 state(&sandbox, &theirs),
                 "disable, cone={cone}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_cone_patterns_keep_the_files_git_keeps() {
+        let sandbox = Sandbox::new();
+        let origin = sandbox.path().join("origin");
+        fs::create_dir(&origin).unwrap();
+        sandbox.git(&origin, &["init", "-q", "-b", "main"]);
+        let files = [
+            "top.txt",
+            "top.md",
+            "d1/a.txt",
+            "d1/readme.md",
+            "d1/sub/s.txt",
+            "d3/readme.md",
+            "d3/x.txt",
+            "d3/sub/deep.md",
+            "d3/keep/k.txt",
+        ];
+        let contents: Vec<(&str, &str)> = files.iter().map(|path| (*path, "x\n")).collect();
+        commit(&sandbox, &origin, &contents, "tree");
+        let pattern_sets: [&[&str]; 8] = [
+            &["/*", "!/*/", "*.md"],
+            &["/d1/", "!/d1/sub/"],
+            &["/*", "!/d3/", "/d3/keep/"],
+            &["*/readme.md"],
+            &["/d3/*", "!/d3/sub/", "/d3/sub/deep.md"],
+            &["**/sub/"],
+            &["!/d1/readme.md", "/d1/"],
+            &["/d3/readme.md"],
+        ];
+        for (number, lines) in pattern_sets.iter().enumerate() {
+            let clone = |name: &str| {
+                let dir = sandbox.path().join(format!("{name}{number}"));
+                sandbox.git(
+                    sandbox.path(),
+                    &[
+                        "clone",
+                        "-q",
+                        origin.to_str().unwrap(),
+                        dir.to_str().unwrap(),
+                    ],
+                );
+                dir
+            };
+            let (ours, theirs) = (clone("ours"), clone("theirs"));
+            let listed: String = lines.iter().map(|line| format!("'{line}' ")).collect();
+            sandbox.shell_output(
+                &theirs,
+                &format!("printf '%s\\n' {listed} | git sparse-checkout set --no-cone --stdin"),
+            );
+            sandbox.git(&ours, &["config", "core.sparseCheckout", "true"]);
+            fs::write(
+                ours.join(".git/info/sparse-checkout"),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+            Repo::at(&ours).sparse_reapply().unwrap();
+            assert_eq!(
+                sandbox.git_output(&ours, &["ls-files", "-t"]),
+                sandbox.git_output(&theirs, &["ls-files", "-t"]),
+                "patterns {lines:?}"
             );
         }
     }
