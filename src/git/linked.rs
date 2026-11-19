@@ -298,7 +298,13 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
         if only.is_some_and(|wanted| wanted != relative) {
             continue;
         }
+        if !is_active(repo, &submodule)? {
+            continue;
+        }
         submodule.init(false)?;
+        if update_is_none(repo, &submodule)? {
+            continue;
+        }
         let url = clone_url(repo, &submodule)?;
         let refused = match transports {
             Transports::FileOnly => !is_file_transport(&url),
@@ -330,6 +336,42 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
         update_in(&submodule.open()?, None, transports)?;
     }
     Ok(())
+}
+
+/// Whether `git submodule update --init` takes `submodule` in. Only when `submodule.active` lists
+/// pathspecs does it leave some out: those whose `submodule.<name>.active` is false, or, where
+/// that is unset, whose path no pathspec matches.
+fn is_active(repo: &git2::Repository, submodule: &git2::Submodule<'_>) -> Result<bool> {
+    let config = repo.config()?;
+    let mut patterns = Vec::new();
+    let mut entries = config.multivar("submodule.active", None)?;
+    while let Some(entry) = entries.next() {
+        patterns.extend(entry?.value().map(str::to_owned));
+    }
+    if patterns.is_empty() {
+        return Ok(true);
+    }
+    let name = submodule.name().unwrap_or_default();
+    if let Ok(named) = config.get_bool(&format!("submodule.{name}.active")) {
+        return Ok(named);
+    }
+    let pathspec = git2::Pathspec::new(patterns.iter().map(|pattern| match pattern.as_str() {
+        "." => "*",
+        other => other,
+    }))?;
+    Ok(pathspec.matches_path(submodule.path(), git2::PathspecFlags::DEFAULT))
+}
+
+/// Whether `submodule.<name>.update` is `none`, which the config sets over `.gitmodules`. libgit2
+/// reads that key from `.gitmodules` only.
+fn update_is_none(repo: &git2::Repository, submodule: &git2::Submodule<'_>) -> Result<bool> {
+    let name = submodule.name().unwrap_or_default();
+    Ok(
+        match configured(repo, &format!("submodule.{name}.update"))? {
+            Some(update) => update == "none",
+            None => submodule.update_strategy() == git2::SubmoduleUpdate::None,
+        },
+    )
 }
 
 /// The URL an update clones `submodule` from: the one `init` wrote to the config, which resolves
