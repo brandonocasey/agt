@@ -765,6 +765,102 @@ fn submodules_are_initialized_in_the_new_worktree() {
     assert!(env.repo.join(".worktrees/with-sub/vendor/lib.txt").exists());
 }
 
+/// A repository with a submodule `vendor` that is a local path, as `git submodule add` records
+/// it, and `agt worktree create` without the test's blanket `protocol.file.allow=always`.
+fn file_submodule_create(env: &Env, name: &str, extra_env: &[(&str, &str)]) -> Output {
+    env.bin(&env.repo)
+        .args(["worktree", "create", name])
+        .envs(extra_env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+/// What `git submodule update --init` makes of the same repository in a worktree git added.
+fn git_submodule_update(env: &Env, name: &str, extra_env: &[(&str, &str)]) -> Output {
+    let tree = env.path(name);
+    git(
+        env,
+        &env.repo,
+        &["worktree", "add", "-q", tree.to_str().unwrap()],
+    );
+    env.command("git", &tree)
+        .args(["submodule", "update", "--init"])
+        .envs(extra_env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_file_path_submodule_needs_what_git_needs_to_clone_over_the_file_transport() {
+    let (env, _) = repo_with_commit();
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(&env, &library, &["init", "-q", "-b", "main"]);
+    commit(&env, &library, "lib.txt", "lib");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            library.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    git(&env, &env.repo, &["commit", "-q", "-m", "add submodule"]);
+
+    let refused = [
+        ("default", vec![]),
+        ("never", vec![("GIT_ALLOW_PROTOCOL", "https:ssh")]),
+    ];
+    for (label, extra) in &refused {
+        let agt = file_submodule_create(&env, &format!("agt-{label}"), extra);
+        let git = git_submodule_update(&env, &format!("git-{label}"), extra);
+        let stderr = String::from_utf8_lossy(&agt.stderr);
+        assert_eq!(agt.status.code(), Some(1), "{label}: {stderr}");
+        assert!(!git.status.success(), "{label}: git cloned it");
+        assert!(
+            stderr.contains("transport 'file' not allowed"),
+            "{label}: {stderr}"
+        );
+        assert!(
+            String::from_utf8_lossy(&git.stderr).contains("transport 'file' not allowed"),
+            "{label}: {}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+    }
+
+    let allowed = [
+        ("env", vec![("GIT_ALLOW_PROTOCOL", "file")]),
+        (
+            "config",
+            vec![
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
+                ("GIT_CONFIG_VALUE_0", "always"),
+            ],
+        ),
+    ];
+    for (label, extra) in &allowed {
+        let agt = file_submodule_create(&env, &format!("agt-{label}"), extra);
+        let git = git_submodule_update(&env, &format!("git-{label}"), extra);
+        assert!(
+            agt.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&agt.stderr)
+        );
+        assert!(git.status.success(), "{label}: git refused it");
+        assert!(
+            env.repo
+                .join(format!(".worktrees/agt-{label}/vendor/lib.txt"))
+                .exists()
+        );
+    }
+}
+
 #[test]
 fn prepare_runs_after_create_on_request() {
     let (env, _) = repo_with_commit();

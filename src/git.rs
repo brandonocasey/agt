@@ -380,16 +380,7 @@ impl Repo {
 
     /// The value of the config key `name`, `None` when unset or empty.
     pub fn config_value(&self, name: &str) -> Result<Option<String>> {
-        self.fact(&format!("config {name}"), |repo| {
-            if let Some(value) = env_config::value(name) {
-                return Ok(Some(value).filter(|value| !value.is_empty()));
-            }
-            let config = repo.config()?;
-            Ok(config
-                .get_string(name)
-                .ok()
-                .filter(|value| !value.is_empty()))
-        })
+        self.fact(&format!("config {name}"), |repo| configured(repo, name))
     }
 
     /// The names the default branch may have, best first: the branch `origin/HEAD` names,
@@ -746,6 +737,19 @@ fn resolved(repo: &git2::Repository, spec: &str) -> Option<git2::Oid> {
         .ok()
         .flatten()
         .map(|commit| commit.id())
+}
+
+/// The value of the config key `name` for `repo`, the environment's `GIT_CONFIG_*` first;
+/// `None` when unset or empty.
+fn configured(repo: &git2::Repository, name: &str) -> Result<Option<String>> {
+    if let Some(value) = env_config::value(name) {
+        return Ok(Some(value).filter(|value| !value.is_empty()));
+    }
+    let config = repo.config()?;
+    Ok(config
+        .get_string(name)
+        .ok()
+        .filter(|value| !value.is_empty()))
 }
 
 fn commit_id(repo: &git2::Repository, spec: &str) -> Result<git2::Oid> {

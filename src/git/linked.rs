@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::index::SKIP_WORKTREE;
-use super::{Repo, commit_id, without_trailing_slash};
+use super::{Repo, commit_id, configured, without_trailing_slash};
 use crate::core::error::{Error, Result, ctx};
 
 /// What a new worktree checks out.
@@ -259,14 +259,26 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
         }
         submodule.init(false)?;
         let url = submodule.url().unwrap_or_default().to_owned();
-        if transports == Transports::FileOnly && !is_local(&url) {
-            return Err(Error(format!(
+        let refused = match transports {
+            Transports::FileOnly => !is_file_transport(&url),
+            Transports::Any => {
+                is_file_transport(&url)
+                    && needs_transport(&submodule)
+                    && !file_transport_allowed(repo)?
+            }
+        };
+        if refused {
+            let failed = format!(
                 "clone of '{url}' into submodule path '{}' failed",
                 repo.workdir()
                     .unwrap_or(Path::new(""))
                     .join(&relative)
                     .display()
-            )));
+            );
+            return Err(Error(match transports {
+                Transports::FileOnly => failed,
+                Transports::Any => format!("transport 'file' not allowed\n{failed}"),
+            }));
         }
         let config = repo.config()?;
         let mut options = git2::SubmoduleUpdateOptions::new();
@@ -277,11 +289,38 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
     Ok(())
 }
 
-/// Whether a submodule URL names a local path or a `file` URL.
-fn is_local(url: &str) -> bool {
-    url.starts_with('/')
-        || url.starts_with("./")
-        || url.starts_with("../")
-        || url.starts_with("file://")
-        || !url.contains("://") && !url.contains('@')
+/// Whether updating `submodule` has to fetch: it is not cloned yet, or its clone lacks the
+/// commit the index records.
+fn needs_transport(submodule: &git2::Submodule<'_>) -> bool {
+    let Ok(clone) = submodule.open() else {
+        return true;
+    };
+    submodule
+        .index_id()
+        .is_some_and(|wanted| clone.find_commit(wanted).is_err())
+}
+
+/// Whether git would clone or fetch a submodule over the `file` transport. `git submodule` sets
+/// `GIT_PROTOCOL_FROM_USER=0`, so the default of `protocol.file.allow` (`user`) refuses it: only
+/// `GIT_ALLOW_PROTOCOL` naming `file`, or `protocol.file.allow` (else `protocol.allow`) set to
+/// `always`, lets it through.
+fn file_transport_allowed(repo: &git2::Repository) -> Result<bool> {
+    if let Ok(list) = std::env::var("GIT_ALLOW_PROTOCOL") {
+        return Ok(list.split(':').any(|protocol| protocol == "file"));
+    }
+    let setting = match configured(repo, "protocol.file.allow")? {
+        Some(setting) => Some(setting),
+        None => configured(repo, "protocol.allow")?,
+    };
+    Ok(setting.as_deref() == Some("always"))
+}
+
+/// Whether a submodule URL uses git's `file` transport: a local path or a `file://` URL.
+fn is_file_transport(url: &str) -> bool {
+    if url.starts_with("file://") {
+        return true;
+    }
+    let colon = url.find(':');
+    let slash = url.find('/');
+    !url.contains("://") && (colon.is_none() || slash.is_some_and(|slash| Some(slash) < colon))
 }
