@@ -1946,3 +1946,146 @@ fn offline_create_initializes_a_file_url_submodule_whose_name_has_a_space() {
     assert_eq!(value["warnings"].as_array().unwrap().len(), 0, "{value}");
     assert!(env.repo.join(".worktrees/off/vendor/lib.txt").exists());
 }
+
+/// A bare clone of `env.repo` at `name`, whose HEAD names `main`.
+fn bare_clone(env: &Env, name: &str) -> PathBuf {
+    let bare = env.path(name);
+    git(
+        env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            env.repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    bare
+}
+
+/// A project directory `name` holding a bare clone of `env.repo` in `.bare`, which a `.git` file
+/// points to.
+fn gitfile_bare_clone(env: &Env, name: &str) -> PathBuf {
+    let project = env.path(name);
+    fs::create_dir_all(&project).unwrap();
+    let bare = project.join(".bare");
+    git(
+        env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            env.repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    fs::write(project.join(".git"), "gitdir: ./.bare\n").unwrap();
+    project
+}
+
+#[test]
+fn the_branch_a_bare_repository_names_in_head_gets_a_worktree_as_it_does_in_git() {
+    let (env, first) = repo_with_commit();
+    let layouts = [
+        ("bare clone", bare_clone(&env, "bare")),
+        ("gitfile", gitfile_bare_clone(&env, "project")),
+    ];
+    for (label, repo) in layouts {
+        let by_git = env.path(&format!("git-{label}"));
+        git(
+            &env,
+            &repo,
+            &["worktree", "add", "-q", by_git.to_str().unwrap(), "main"],
+        );
+        git(
+            &env,
+            &repo,
+            &["worktree", "remove", by_git.to_str().unwrap()],
+        );
+        let target = env.path(&format!("agt-{label}"));
+        let value = agt_json(
+            &env,
+            &repo,
+            &["create", "main", "--path", target.to_str().unwrap()],
+        );
+        assert_eq!(value["branch"], "main", "{label}: {value}");
+        assert_eq!(git(&env, &target, &["rev-parse", "HEAD"]), first, "{label}");
+        assert_eq!(
+            git(&env, &target, &["symbolic-ref", "HEAD"]),
+            "refs/heads/main",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn a_backup_of_the_branch_a_bare_repository_names_in_head_is_restored_onto_it() {
+    let (env, first) = repo_with_commit();
+    let bare = bare_clone(&env, "bare");
+    let tree = env.path("main-tree");
+    git(
+        &env,
+        &bare,
+        &["worktree", "add", "-q", tree.to_str().unwrap(), "main"],
+    );
+    let removed = agt_json(&env, &bare, &["remove", tree.to_str().unwrap(), "--yes"]);
+    let restored = agt_json(&env, &bare, &["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], serde_json::json!([]), "{restored}");
+    assert_eq!(
+        git(&env, &tree, &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+}
+
+#[test]
+fn a_branch_that_a_worktree_is_rebasing_gets_no_second_worktree() {
+    let (env, _) = repo_with_commit();
+    git(&env, &env.repo, &["branch", "topic"]);
+    let rebasing = env.path("rebasing");
+    git(
+        &env,
+        &env.repo,
+        &["worktree", "add", "-q", rebasing.to_str().unwrap(), "topic"],
+    );
+    commit(&env, &rebasing, "first", "topic side");
+    commit(&env, &env.repo, "first", "main side");
+    let stopped = env
+        .command("git", &rebasing)
+        .args(["rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(
+        !stopped.status.success(),
+        "the rebase must stop on a conflict"
+    );
+    let oracle = env
+        .command("git", &env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            env.path("by-git").to_str().unwrap(),
+            "topic",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let output = agt(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "topic",
+            "--path",
+            env.path("second").to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already checked out"));
+    assert!(!env.path("second").exists());
+}

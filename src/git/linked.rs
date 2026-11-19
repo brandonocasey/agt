@@ -36,45 +36,34 @@ impl Repo {
     /// Adds a linked worktree at `path` with `what` checked out. A sparse checkout of this
     /// repository carries over to it, as `git worktree add` does.
     pub fn add_worktree(&self, path: &Path, what: &Checkout<'_>) -> Result<()> {
+        // `holders` opens the repository itself, which a read-only `Repo` locks.
+        if let Checkout::Branch(branch) = what {
+            self.ensure_not_checked_out(branch)?;
+        }
         let repo = self.open_refs()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
-        }
-        // An existing empty directory is accepted, as git does.
-        if fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()) {
-            fs::remove_dir(path).map_err(ctx(format!("prepare {}", path.display())))?;
-        }
-        let name = admin_name(&repo, path);
-        let head = match what {
-            Checkout::Branch(branch) => {
-                let found = repo.find_branch(branch, git2::BranchType::Local)?;
-                let refname = found.get().name().unwrap_or_default().to_owned();
-                ensure_not_checked_out(&repo, &refname)?;
-                Head::Branch(refname)
-            }
-            Checkout::NewBranch { name: branch, at } => {
-                let created =
-                    repo.branch(branch, &repo.find_commit(commit_id(&repo, at)?)?, false)?;
-                Head::Branch(created.get().name().unwrap_or_default().to_owned())
-            }
-            Checkout::Tracking {
-                name: branch,
-                upstream,
-            } => {
-                let start = repo.find_branch(upstream, git2::BranchType::Remote)?;
-                let commit = start.get().peel_to_commit()?;
-                let mut created = repo.branch(branch, &commit, false)?;
-                created.set_upstream(Some(upstream))?;
-                Head::Branch(created.get().name().unwrap_or_default().to_owned())
-            }
-            Checkout::Detached(commit) => Head::Detached(commit_id(&repo, commit)?),
-        };
-        let admin = repo.commondir().join("worktrees").join(&name);
+        prepare_path(path)?;
+        let head = new_head(&repo, what)?;
+        let admin = repo
+            .commondir()
+            .join("worktrees")
+            .join(admin_name(&repo, path));
         link_worktree(&repo, &admin, path, &head)?;
         fill_worktree(&repo, path).inspect_err(|_| {
             let _ = fs::remove_dir_all(&admin);
             let _ = fs::remove_dir_all(path);
         })
+    }
+
+    /// Fails when `branch` is checked out, or rebased, in a work tree, which git refuses to check
+    /// out a second time.
+    fn ensure_not_checked_out(&self, branch: &str) -> Result<()> {
+        match self.holders(branch)?.first() {
+            Some(holder) => Err(Error(format!(
+                "branch {branch} is already checked out at {}",
+                holder.display()
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Removes the linked worktree at `path` with its files and its registration, whatever it
@@ -165,6 +154,41 @@ impl Repo {
     }
 }
 
+/// Makes sure nothing is at `path` but room for a new work tree: its parent exists and an empty
+/// directory is gone, as in git.
+fn prepare_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
+    }
+    if fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()) {
+        fs::remove_dir(path).map_err(ctx(format!("prepare {}", path.display())))?;
+    }
+    Ok(())
+}
+
+/// The HEAD a new worktree gets for `what`, creating the local branch it names when it is new.
+fn new_head(repo: &git2::Repository, what: &Checkout<'_>) -> Result<Head> {
+    let branch_head = |branch: &git2::Branch<'_>| {
+        Head::Branch(branch.get().name().unwrap_or_default().to_owned())
+    };
+    Ok(match what {
+        Checkout::Branch(branch) => {
+            branch_head(&repo.find_branch(branch, git2::BranchType::Local)?)
+        }
+        Checkout::NewBranch { name, at } => {
+            let start = repo.find_commit(commit_id(repo, at)?)?;
+            branch_head(&repo.branch(name, &start, false)?)
+        }
+        Checkout::Tracking { name, upstream } => {
+            let start = repo.find_branch(upstream, git2::BranchType::Remote)?;
+            let mut created = repo.branch(name, &start.get().peel_to_commit()?, false)?;
+            created.set_upstream(Some(upstream))?;
+            branch_head(&created)
+        }
+        Checkout::Detached(commit) => Head::Detached(commit_id(repo, commit)?),
+    })
+}
+
 /// The name of the administrative directory for a worktree at `path`: its last component,
 /// made unique the way git does, with a number added.
 fn admin_name(repo: &git2::Repository, path: &Path) -> String {
@@ -187,24 +211,6 @@ enum Head {
     /// The full name of a local branch.
     Branch(String),
     Detached(git2::Oid),
-}
-
-/// Fails when `refname` is the HEAD of this work tree or of a linked one, which git refuses to
-/// check out a second time.
-fn ensure_not_checked_out(repo: &git2::Repository, refname: &str) -> Result<()> {
-    let wanted = format!("ref: {refname}");
-    let common = repo.commondir();
-    let mut heads = vec![common.join("HEAD")];
-    if let Ok(linked) = fs::read_dir(common.join("worktrees")) {
-        heads.extend(linked.flatten().map(|entry| entry.path().join("HEAD")));
-    }
-    let taken = heads
-        .iter()
-        .any(|head| fs::read_to_string(head).is_ok_and(|text| text.trim_end() == wanted));
-    if taken {
-        return Err(Error(format!("reference {refname} is already checked out")));
-    }
-    Ok(())
 }
 
 /// Registers a linked worktree: its administrative directory `admin` and its `path`, which
