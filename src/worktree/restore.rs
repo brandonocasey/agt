@@ -57,10 +57,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
         Some(branch) => {
             let tip = repo.branch_tip(branch)?;
-            let elsewhere = repo
-                .worktrees()?
-                .iter()
-                .any(|entry| entry.branch.as_deref() == Some(branch));
+            let elsewhere = !repo.holders(branch)?.is_empty();
             match tip {
                 None => {
                     let new = Checkout::NewBranch {
