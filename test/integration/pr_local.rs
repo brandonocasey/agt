@@ -868,26 +868,36 @@ fn a_branch_behind_the_target_rebases_and_fast_forwards() {
 }
 
 /// Git 2.31 has no `rebase --no-update-refs`, which Git 2.38 added.
-/// The merge turns update-refs off by a config key, which an older git ignores.
-/// A `git` that rejects the flag stands in.
+/// `rebase.updateRefs` makes git's own rebase move the branches inside the rebased range; the
+/// merge must not, so the branch between main and the tip stays where it is.
 #[test]
-fn a_rebase_merge_does_not_use_the_flag_an_older_git_lacks() {
+fn a_rebase_merge_leaves_branches_in_the_range_alone_whatever_update_refs_says() {
     let env = setup();
     let first = add_branch(&env, "feat", "b.txt", "b\n");
     let second = commit_on(&env, &first, "b2.txt", "b2\n");
     point(&env, "feat", &second);
     point(&env, "mid", &first);
+    // The same shape of range on commits of its own, so git's rebase here cannot touch `mid`.
+    let oracle_first = commit_on(&env, "main", "o1.txt", "o1\n");
+    point(&env, "oracle-mid", &oracle_first);
+    point(
+        &env,
+        "oracle",
+        &commit_on(&env, &oracle_first, "o2.txt", "o2\n"),
+    );
     advance_main(&env, "c.txt", "c\n");
     add_worktree(&env, "work", &["feat"]);
+    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
     git_ok(&env, &env.repo, &["config", "rebase.updateRefs", "true"]);
-    let path = env.git_wrapper(
-        "old-git",
-        "for arg in \"$@\"; do\n  [ \"$arg\" = --no-update-refs ] && { echo \"error: unknown option 'no-update-refs'\" >&2; exit 129; }\ndone\n",
+    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
+    assert_ne!(
+        tip(&env, "oracle-mid"),
+        oracle_first,
+        "git's rebase should move the branch in the range, or this test proves nothing"
     );
 
     let output = env
         .bin(&env.repo)
-        .env("PATH", path)
         .args(["pr", "--local"])
         .args(merge_args(&second, "feat", &["--method", "rebase"]))
         .output()

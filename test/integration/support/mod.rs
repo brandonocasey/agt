@@ -1,8 +1,10 @@
 use std::fs;
 use std::io::Write;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 
 use assert_fs::TempDir;
 use serde_json::Value;
@@ -601,6 +603,43 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+/// A TCP host on a free local port and the ssh URL that reaches it. `accepted` receives a
+/// message for each connection, which is how a test sees that agt reached a remote.
+pub struct Host {
+    pub url: String,
+    pub accepted: mpsc::Receiver<()>,
+}
+
+/// A host that accepts a connection and never answers, as an ssh server that hangs does.
+pub fn silent_host() -> Host {
+    let mut held = Vec::new();
+    host(move |stream| held.push(stream))
+}
+
+/// A host that closes each connection as soon as it is made, so a client fails at once.
+pub fn refusing_host() -> Host {
+    host(drop)
+}
+
+fn host(mut on_connect: impl FnMut(TcpStream) + Send + 'static) -> Host {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "ssh://127.0.0.1:{}/repo.git",
+        listener.local_addr().unwrap().port()
+    );
+    let (accepted, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            on_connect(stream);
+            let _ = accepted.send(());
+        }
+    });
+    Host {
+        url,
+        accepted: receiver,
+    }
 }
 
 #[cfg(test)]

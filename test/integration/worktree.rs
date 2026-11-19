@@ -7,7 +7,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env, proc_start};
+use crate::support::{BIN, Env, Host, proc_start, silent_host};
 
 mod cleanup;
 
@@ -2158,35 +2158,8 @@ fn with_unheld_tag() -> (Fixture, PathBuf) {
     (f, sub)
 }
 
-/// A host that accepts a connection and never answers, as an ssh server that hangs does, and
-/// the ssh URL that reaches it. `accepted` receives a message for each connection.
-struct SilentHost {
-    url: String,
-    accepted: std::sync::mpsc::Receiver<()>,
-}
-
-fn silent_host() -> SilentHost {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!(
-        "ssh://127.0.0.1:{}/repo.git",
-        listener.local_addr().unwrap().port()
-    );
-    let (accepted, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for stream in listener.incoming().flatten() {
-            held.push(stream);
-            let _ = accepted.send(());
-        }
-    });
-    SilentHost {
-        url,
-        accepted: receiver,
-    }
-}
-
 /// A worktree like [`with_unheld_tag`] whose submodule remote is a host that never answers.
-fn with_silent_remote() -> (Fixture, SilentHost) {
+fn with_silent_remote() -> (Fixture, Host) {
     let (f, sub) = with_unheld_tag();
     let host = silent_host();
     wgit(&f.env, &sub, &["remote", "set-url", "origin", &host.url]);
@@ -2216,8 +2189,88 @@ fn the_remote_check_gives_up_on_a_host_that_never_answers() {
     );
 }
 
+/// Points the submodule clone's `origin` at `host` through a `url.<host>.insteadOf` rewrite in
+/// the clone's own config, so only a check that reads that config reaches it.
+fn route_origin_through_rewrite(f: &Fixture, sub: &Path, host: &Host) {
+    wgit(
+        &f.env,
+        sub,
+        &["config", &format!("url.{}.insteadOf", host.url), "mirror:"],
+    );
+    wgit(&f.env, sub, &["remote", "set-url", "origin", "mirror:"]);
+}
+
+#[test]
+fn the_remote_check_reaches_the_host_the_clones_own_url_rewrite_names() {
+    let (f, sub) = with_unheld_tag();
+    let host = silent_host();
+    route_origin_through_rewrite(&f, &sub, &host);
+
+    let output = remove_command(&f, "1").output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        host.accepted.try_recv().is_ok(),
+        "the check ignored the clone's url rewrite: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_remote_check_keeps_the_url_rewrite_of_a_clone_whose_worktree_is_gone() {
+    let (f, sub) = with_unheld_tag();
+    let host = silent_host();
+    route_origin_through_rewrite(&f, &sub, &host);
+    // A clone left behind by `git rm` of a submodule: core.worktree points at a deleted directory.
+    let gitdir = wgit(&f.env, &sub, &["rev-parse", "--absolute-git-dir"]);
+    wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "drop the submodule"]);
+    let config = Path::new(&gitdir).join("config");
+    wgit(
+        &f.env,
+        &f.env.repo,
+        &[
+            "config",
+            "--file",
+            &config.to_string_lossy(),
+            "core.worktree",
+            "../gone",
+        ],
+    );
+
+    let output = remove_command(&f, "1").output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        host.accepted.try_recv().is_ok(),
+        "the check never reached the host: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn offline_removal_opens_no_connection_to_the_remote() {
+    let (f, host) = with_silent_remote();
+    let offline = f
+        .env
+        .bin(&f.env.repo)
+        .args(["--offline", "worktree", "remove", &f.wt.to_string_lossy()])
+        .output()
+        .unwrap();
+    assert_eq!(offline.status.code(), Some(1));
+    assert!(
+        host.accepted.try_recv().is_err(),
+        "the offline removal reached the remote"
+    );
+
+    // The same removal online connects, so the host would have seen an offline attempt too.
+    let online = remove_command(&f, "1").output().unwrap();
+    assert_eq!(online.status.code(), Some(1));
+    assert!(host.accepted.try_recv().is_ok());
+}
+
 /// Waits until the remote check has connected to `host`.
-fn wait_for_the_connection(host: &SilentHost) {
+fn wait_for_the_connection(host: &Host) {
     host.accepted
         .recv_timeout(std::time::Duration::from_secs(20))
         .expect("the remote check never connected");

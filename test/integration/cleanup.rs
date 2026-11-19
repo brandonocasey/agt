@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::support::{Env, Sealed, proc_start, unix_now};
+use crate::support::{Env, Sealed, proc_start, refusing_host, unix_now};
 
 const DAY: i64 = 86_400;
 /// 2027-01-01T00:00:00Z.
@@ -1720,16 +1720,6 @@ fn the_sweep_plan_skips_a_worktree_whose_submodule_holds_a_stash() {
     assert_eq!(sweep_plan(&prune, later()), Vec::<String>::new());
 }
 
-/// A `git` in front of the real one that records every command line it is given.
-fn recording_git(prune: &Prune) -> (String, PathBuf) {
-    let log = prune.env.path("git-calls");
-    let path = prune.env.git_wrapper(
-        "recording-bin",
-        &format!("echo \"$@\" >> '{}'\n", log.display()),
-    );
-    (path, log)
-}
-
 #[test]
 fn the_offline_sweep_plan_never_asks_a_remote_and_skips_a_worktree_holding_an_unheld_tag() {
     let prune = Prune::new();
@@ -1769,17 +1759,28 @@ fn the_offline_sweep_plan_never_asks_a_remote_and_skips_a_worktree_holding_an_un
     git(&sub, &["tag", "mine"]);
     git(&sub, &["checkout", "-q", "--detach", "HEAD~1"]);
 
-    let (path, log) = recording_git(&prune);
-    let output = prune
-        .env
-        .bin(&prune.env.repo)
-        .arg("cleanup")
-        .args(["--only", "worktrees", "--all-repos", "--offline"])
-        .env("AGT_NOW", later().to_string())
-        .env("PATH", path)
-        .output()
-        .unwrap();
+    // The clone's remote is a host that records each connection.
+    let host = refusing_host();
+    git(&sub, &["remote", "set-url", "origin", &host.url]);
+
+    let sweep = |flags: &[&str]| {
+        prune
+            .env
+            .bin(&prune.env.repo)
+            .arg("cleanup")
+            .args(["--only", "worktrees", "--all-repos"])
+            .args(flags)
+            .env("AGT_NOW", later().to_string())
+            .env("AGT_LS_REMOTE_TIMEOUT", "5")
+            .output()
+            .unwrap()
+    };
+    let output = sweep(&["--offline"]);
     assert!(output.status.success());
+    assert!(
+        host.accepted.try_recv().is_err(),
+        "the offline sweep reached the remote"
+    );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     let planned = report["worktrees"]["repositories"]
         .as_array()
@@ -1787,8 +1788,10 @@ fn the_offline_sweep_plan_never_asks_a_remote_and_skips_a_worktree_holding_an_un
         .iter()
         .all(|repository| repository["remove"] == json!([]));
     assert!(planned, "{report}");
-    let calls = fs::read_to_string(&log).unwrap_or_default();
-    assert!(!calls.contains("ls-remote"), "{calls}");
+
+    // Online, the same sweep asks the remote, so the host does record a connection.
+    sweep(&[]);
+    assert!(host.accepted.try_recv().is_ok());
 }
 
 #[test]
