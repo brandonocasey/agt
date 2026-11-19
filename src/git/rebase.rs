@@ -1,6 +1,6 @@
-//! Rebasing the checked-out branch onto a commit, through libgit2's rebase, with the hooks git
-//! runs for a rebase: `pre-rebase`, `prepare-commit-msg` and `post-commit` for each commit, and
-//! `post-rewrite`.
+//! Rebasing the checked-out branch onto a commit by cherry-picking its commits in memory, with the
+//! hooks git runs for a rebase: `pre-rebase`, `prepare-commit-msg` and `post-commit` for each
+//! commit, and `post-rewrite`.
 
 use std::fs;
 
@@ -38,25 +38,20 @@ impl Repo {
         }
         // The hook may have committed.
         at_tip(&repo, tip)?;
-        let upstream = repo.find_annotated_commit(onto_id)?;
-        let mut options = git2::RebaseOptions::new();
-        options.inmemory(true);
-        let mut rebase = repo.rebase(None, Some(&upstream), None, Some(&mut options))?;
         let mut replaying = Replaying {
             repo: &repo,
             committer: identity::committer_in(&repo)?,
             last: onto_id,
             rewrites: String::new(),
         };
-        while let Some(step) = rebase.next() {
-            let stopped = match step {
-                Ok(step) => replaying.replay(&mut rebase, step.id())?,
-                Err(error) => Some(Rebased::Stopped {
-                    conflicts: Vec::new(),
-                    error: Some(error.message().to_owned()),
-                }),
-            };
-            if let Some(stopped) = stopped {
+        for pick in self.cherry(&onto_id.to_string(), &at.to_string())? {
+            let picked = repo.find_commit(git2::Oid::from_str(&pick.sha)?)?;
+            // Like `git rebase`, leave out a commit the base has by patch-id, but keep one that
+            // changes nothing, which has no patch-id to match.
+            if pick.in_upstream && !changes_nothing(&picked)? {
+                continue;
+            }
+            if let Some(stopped) = replaying.replay(&picked)? {
                 return Ok(stopped);
             }
         }
@@ -79,25 +74,27 @@ fn at_tip(repo: &git2::Repository, tip: &str) -> Result<git2::Oid> {
     Ok(at)
 }
 
-/// A rebase in progress that commits each step it applies in memory.
+/// Whether `commit` has the tree of its parent.
+fn changes_nothing(commit: &git2::Commit<'_>) -> Result<bool> {
+    Ok(commit.parent_count() == 1 && commit.parent(0)?.tree_id() == commit.tree_id())
+}
+
+/// A rebase in progress that commits each commit it replays on top of the last one.
 struct Replaying<'r> {
     repo: &'r git2::Repository,
     committer: git2::Signature<'static>,
-    /// The commit made by the last step, `onto` before the first.
+    /// The commit made by the last replay, `onto` before the first.
     last: git2::Oid,
     /// The old and new id of each replayed commit, as `post-rewrite` reads them.
     rewrites: String,
 }
 
 impl Replaying<'_> {
-    /// Commits the step the rebase just applied, which replays `picked`. `Some` when it conflicted
-    /// or a hook or the commit failed; a commit that the base already has is dropped, as git does.
-    fn replay(
-        &mut self,
-        rebase: &mut git2::Rebase<'_>,
-        picked: git2::Oid,
-    ) -> Result<Option<Rebased>> {
-        let index = rebase.inmemory_index()?;
+    /// Replays `picked` on top of the last commit. `Some` when it conflicted or a hook or the
+    /// commit failed; a commit that becomes empty is dropped, as git does.
+    fn replay(&mut self, picked: &git2::Commit<'_>) -> Result<Option<Rebased>> {
+        let parent = self.repo.find_commit(self.last)?;
+        let mut index = self.repo.cherrypick_commit(picked, &parent, 0, None)?;
         if index.has_conflicts() {
             let conflicts = index
                 .conflicts()?
@@ -112,26 +109,46 @@ impl Replaying<'_> {
                 error: None,
             }));
         }
+        let tree_id = index.write_tree_to(self.repo)?;
+        if tree_id == parent.tree_id() && !changes_nothing(picked)? {
+            return Ok(None);
+        }
         let stopped = |error: String| {
             Some(Rebased::Stopped {
                 conflicts: Vec::new(),
                 error: Some(error),
             })
         };
-        let message = match edited_message(self.repo, picked) {
-            Ok(message) => message,
+        let message = match edited_message(self.repo, picked.id()) {
+            Ok(Some(edited)) => edited,
+            Ok(None) => match picked.message() {
+                Some(original) => original.to_owned(),
+                None => {
+                    return Ok(stopped(format!(
+                        "the message of {} is not UTF-8",
+                        picked.id()
+                    )));
+                }
+            },
             Err(said) => return Ok(stopped(said)),
         };
-        match rebase.commit(None, &self.committer, message.as_deref()) {
+        let tree = self.repo.find_tree(tree_id)?;
+        match self.repo.commit(
+            None,
+            &picked.author(),
+            &self.committer,
+            &message,
+            &tree,
+            &[&parent],
+        ) {
             Ok(new) => {
                 self.last = new;
-                self.rewrites.push_str(&format!("{picked} {new}\n"));
+                self.rewrites.push_str(&format!("{} {new}\n", picked.id()));
                 // git ignores the exit status of post-commit. The rebase is in memory, so the hook
                 // sees HEAD at the pre-rebase tip.
                 let _ = hooks::run(self.repo, "post-commit", &[], "");
                 Ok(None)
             }
-            Err(error) if error.code() == git2::ErrorCode::Applied => Ok(None),
             Err(error) => Ok(stopped(error.message().to_owned())),
         }
     }

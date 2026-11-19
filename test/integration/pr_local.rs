@@ -1041,6 +1041,110 @@ fn a_rebase_merge_leaves_branches_in_the_range_alone_whatever_update_refs_says()
     assert_eq!(tip(&env, "mid"), first, "update-refs stays off");
 }
 
+/// A commit on top of `parent` with the tree of `parent`. It moves no branch or checkout.
+fn empty_commit_on(env: &Env, parent: &str, message: &str) -> String {
+    let tree = format!("{parent}^{{tree}}");
+    git_ok(
+        env,
+        &env.repo,
+        &["commit-tree", &tree, "-p", parent, "-m", message],
+    )
+}
+
+/// The subjects of the commits of `from..to`, newest first.
+fn subjects(env: &Env, from: &str, to: &str) -> Vec<String> {
+    let range = format!("{from}..{to}");
+    git_ok(env, &env.repo, &["log", "--format=%s", &range])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_rebase_keeps_a_commit_that_was_empty_from_the_start_as_git_does() {
+    let env = setup();
+    let empty = empty_commit_on(&env, "main", "empty");
+    let change = commit_on(&env, &empty, "b.txt", "b\n");
+    point(&env, "feat", &change);
+    let oracle_empty = empty_commit_on(&env, "main", "oracle empty");
+    let oracle_change = commit_on(&env, &oracle_empty, "ob.txt", "b\n");
+    point(&env, "oracle", &oracle_change);
+    let old_main = advance_main(&env, "c.txt", "c\n");
+    add_worktree(&env, "work", &["feat"]);
+    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
+    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
+
+    ok(&env, &merge_args(&change, "feat", &["--method", "rebase"]));
+
+    assert_eq!(
+        subjects(&env, &old_main, "oracle"),
+        ["add ob.txt", "oracle empty"]
+    );
+    assert_eq!(subjects(&env, &old_main, "main"), ["add b.txt", "empty"]);
+}
+
+/// `main` holds a copy of the branch's first commit and then edits the same line again, so
+/// replaying that commit conflicts; git drops it as already upstream and replays the second.
+#[test]
+fn a_rebase_skips_a_commit_the_target_already_has_by_patch_id_as_git_does() {
+    let env = setup();
+    let lines = |first: &str, last: &str| {
+        let middle: String = (2..20).map(|number| format!("line {number}\n")).collect();
+        format!("{first}\n{middle}{last}\n")
+    };
+    let base = advance_main(&env, "f.txt", &lines("line 1", "line 20"));
+    let picked = commit_on(&env, &base, "f.txt", &lines("one", "line 20"));
+    let both = commit_on(&env, &picked, "f.txt", &lines("one", "twenty"));
+    point(&env, "feat", &both);
+    let oracle_picked = commit_on(&env, &base, "f.txt", &lines("one", "line 20"));
+    point(
+        &env,
+        "oracle",
+        &commit_on(&env, &oracle_picked, "f.txt", &lines("one", "twenty")),
+    );
+    advance_main(&env, "f.txt", &lines("one", "line 20"));
+    let old_main = advance_main(&env, "f.txt", &lines("uno", "line 20"));
+    add_worktree(&env, "work", &["feat"]);
+    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
+    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
+    assert_eq!(subjects(&env, &old_main, "oracle").len(), 1);
+
+    ok(&env, &merge_args(&both, "feat", &["--method", "rebase"]));
+
+    assert_eq!(subjects(&env, &old_main, "main").len(), 1);
+    assert_eq!(tip(&env, "main^{tree}"), tip(&env, "oracle^{tree}"));
+}
+
+/// The branch's one commit changes two lines that `main` changed in two commits, so no commit
+/// of `main` has its patch-id but replaying it changes nothing.
+#[test]
+fn a_rebase_drops_a_commit_that_becomes_empty_as_git_does() {
+    let env = setup();
+    let lines = |first: &str, last: &str| {
+        let middle: String = (2..20).map(|number| format!("line {number}\n")).collect();
+        format!("{first}\n{middle}{last}\n")
+    };
+    let base = advance_main(&env, "f.txt", &lines("line 1", "line 20"));
+    let both = commit_on(&env, &base, "f.txt", &lines("one", "twenty"));
+    point(&env, "feat", &both);
+    point(
+        &env,
+        "oracle",
+        &commit_on(&env, &base, "f.txt", &lines("one", "twenty")),
+    );
+    advance_main(&env, "f.txt", &lines("one", "line 20"));
+    let new_main = advance_main(&env, "f.txt", &lines("one", "twenty"));
+    add_worktree(&env, "work", &["feat"]);
+    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
+    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
+    assert_eq!(tip(&env, "oracle"), new_main);
+
+    ok(&env, &merge_args(&both, "feat", &["--method", "rebase"]));
+
+    assert_eq!(tip(&env, "main"), new_main);
+    assert_eq!(tip(&env, "feat"), new_main);
+}
+
 #[test]
 fn a_rebase_that_conflicts_leaves_the_branch_at_its_old_tip() {
     let env = setup();
