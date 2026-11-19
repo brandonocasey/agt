@@ -126,7 +126,8 @@ impl Replaying<'_> {
             Ok(new) => {
                 self.last = new;
                 self.rewrites.push_str(&format!("{picked} {new}\n"));
-                // git ignores the exit status of post-commit.
+                // git ignores the exit status of post-commit. The rebase is in memory, so the hook
+                // sees HEAD at the pre-rebase tip.
                 let _ = hooks::run(self.repo, "post-commit", &[], "");
                 Ok(None)
             }

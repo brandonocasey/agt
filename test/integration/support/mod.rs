@@ -19,6 +19,22 @@ pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures
 pub const FAKE_TEA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-tea.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
 
+/// A shell command that prints `GIT_TERMINAL_PROMPT` and `GCM_INTERACTIVE`, `absent` for one that
+/// is not set.
+pub const PROMPT_PROBE: &str =
+    r#"printf '%s %s' "${GIT_TERMINAL_PROMPT-absent}" "${GCM_INTERACTIVE-absent}""#;
+
+/// The prompt variables a user may have set when starting agt, and what a program agt starts
+/// has to print for [`PROMPT_PROBE`] then.
+pub const PROMPT_CASES: [(&[(&str, &str)], &str); 3] = [
+    (&[], "absent absent"),
+    (&[("GIT_TERMINAL_PROMPT", "1")], "1 absent"),
+    (
+        &[("GIT_TERMINAL_PROMPT", "1"), ("GCM_INTERACTIVE", "always")],
+        "1 always",
+    ),
+];
+
 /// Non-Git variables that can change a test. Tests that need one set it after `Env::command`.
 const SCRUBBED_ENV: &[&str] = &[
     "GH_HOST",

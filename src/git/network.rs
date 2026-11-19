@@ -1,6 +1,6 @@
 //! Talking to remotes through libgit2: listing, fetching, and the credentials both use.
 //! Credentials come from ssh-agent, keys in `~/.ssh`, and a configured git credential helper,
-//! which [`disable_credential_prompts`] keeps from asking the user.
+//! which `core::process::disable_credential_prompts` keeps from asking the user.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -32,17 +32,6 @@ struct Offered {
     agent: bool,
     keys: usize,
     helper: bool,
-}
-
-/// Tells credential helpers, which libgit2 starts with this process's environment, not to prompt
-/// (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`). Programs agt starts afterwards inherit
-/// both. MUST be called before the process starts a thread.
-pub fn disable_credential_prompts() {
-    for (name, value) in [("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")] {
-        // SAFETY: the process has one thread when `main` starts, so nothing reads the
-        // environment while it changes.
-        unsafe { std::env::set_var(name, value) };
-    }
 }
 
 impl Repo {

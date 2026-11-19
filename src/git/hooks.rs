@@ -4,6 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use crate::core::process;
+
 /// The executable hook file `name`: in `core.hooksPath` when it is set (a relative path is
 /// relative to the work tree), else in the `hooks` directory of the common git directory.
 fn find(repo: &git2::Repository, name: &str) -> Option<PathBuf> {
@@ -44,6 +46,7 @@ pub(super) fn run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    process::keep_user_prompts(&mut command);
     if let Some(workdir) = repo.workdir() {
         command.current_dir(workdir);
     }

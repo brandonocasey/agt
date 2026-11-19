@@ -24,7 +24,7 @@ use clap::Parser;
 use crate::core::output::Output;
 
 fn main() -> ExitCode {
-    git::disable_credential_prompts();
+    core::process::disable_credential_prompts();
     match cli::run(cli::Cli::parse()) {
         Ok(Output::Exit(code)) => ExitCode::from(code),
         Ok(Output::Failure(error, code)) => failed(&error, code),

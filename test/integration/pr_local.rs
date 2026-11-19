@@ -8,7 +8,7 @@ use std::process::Output;
 
 use serde_json::Value;
 
-use crate::support::Env;
+use crate::support::{Env, PROMPT_CASES, PROMPT_PROBE};
 
 /// A repository with `main` at one commit and `main` checked out.
 fn setup() -> Env {
@@ -1378,6 +1378,33 @@ fn a_hook_that_refuses_the_rebase_leaves_everything_as_it_was() {
     let message = refused(&env, &merge_args(&sha, "feat", &["--method", "rebase"]));
     assert!(message.contains("no rebases today"), "{message}");
     assert!(!message.trim_end().contains('\n'), "{message:?}");
+}
+
+#[test]
+fn a_rebase_hook_gets_the_prompt_settings_the_user_started_agt_with() {
+    for (user, expected) in PROMPT_CASES {
+        let env = setup();
+        let sha = add_branch(&env, "feat", "b.txt", "b\n");
+        advance_main(&env, "c.txt", "c\n");
+        add_worktree(&env, "work", &["feat"]);
+        let seen = env.path("seen");
+        let hook = env.repo.join(".git/hooks/pre-rebase");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        crate::support::executable(
+            &hook,
+            format!("#!/bin/sh\n{PROMPT_PROBE} > '{}'\n", seen.display()),
+        );
+
+        let output = env
+            .bin(&env.repo)
+            .envs(user.iter().copied())
+            .args(["pr", "--local"])
+            .args(merge_args(&sha, "feat", &["--method", "rebase"]))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(fs::read_to_string(seen).unwrap(), expected, "{user:?}");
+    }
 }
 
 /// A commit made after the head was checked is not merged unseen.

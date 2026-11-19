@@ -1,8 +1,47 @@
+use std::ffi::OsString;
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
+
+/// The variables that keep a credential helper from asking the user, with the values agt gives
+/// them for itself.
+const PROMPT_SWITCHES: [(&str, &str); 2] =
+    [("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+
+/// What [`PROMPT_SWITCHES`] held, or did not hold, before [`disable_credential_prompts`].
+static USER_PROMPT_SWITCHES: OnceLock<[Option<OsString>; PROMPT_SWITCHES.len()]> = OnceLock::new();
+
+/// Sets [`PROMPT_SWITCHES`] for this process, so that a credential helper libgit2 starts does
+/// not prompt. Programs agt starts get the original values back through [`keep_user_prompts`].
+/// MUST be called before the process starts a thread.
+pub fn disable_credential_prompts() {
+    USER_PROMPT_SWITCHES.get_or_init(|| PROMPT_SWITCHES.map(|(name, _)| std::env::var_os(name)));
+    for (name, value) in PROMPT_SWITCHES {
+        // SAFETY: the process has one thread when `main` starts, so nothing reads the
+        // environment while it changes.
+        unsafe { std::env::set_var(name, value) };
+    }
+}
+
+/// Gives a program agt starts the value, or the absence, that [`PROMPT_SWITCHES`] had when agt
+/// started, unless the caller already set the variable on `command`.
+pub fn keep_user_prompts(command: &mut Command) {
+    let Some(originals) = USER_PROMPT_SWITCHES.get() else {
+        return;
+    };
+    for ((name, _), original) in PROMPT_SWITCHES.iter().zip(originals) {
+        if command.get_envs().any(|(set, _)| set == *name) {
+            continue;
+        }
+        match original {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+}
 
 pub struct Captured {
     pub output: Output,
@@ -20,6 +59,7 @@ pub fn output(
     if deadline.is_some_and(|end| Instant::now() >= end) {
         return Err(timeout());
     }
+    keep_user_prompts(command);
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -63,6 +103,7 @@ fn finish<T>(child: &mut Child, result: io::Result<T>, group: bool) -> io::Resul
 /// caller sets the output streams and everything else; stdin is null, or a pipe that receives
 /// `input` when there is some (a command that exits without reading it is not an error).
 pub fn status(command: &mut Command, input: Option<&[u8]>) -> io::Result<ExitStatus> {
+    keep_user_prompts(command);
     command.stdin(if input.is_some() {
         Stdio::piped()
     } else {
@@ -82,6 +123,7 @@ pub fn status_until(command: &mut Command, deadline: Instant) -> io::Result<Exit
     if Instant::now() >= deadline {
         return Err(timeout());
     }
+    keep_user_prompts(command);
     command.stdin(Stdio::null()).process_group(0);
     let mut child = command.spawn()?;
     let _watch = super::group::Watch::new(child.id());
