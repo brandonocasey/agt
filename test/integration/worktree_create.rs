@@ -2089,3 +2089,40 @@ fn a_branch_that_a_worktree_is_rebasing_gets_no_second_worktree() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("already checked out"));
     assert!(!env.path("second").exists());
 }
+
+#[test]
+fn a_linked_worktree_is_repaired_by_git_after_the_repository_moves() {
+    let (env, _) = repo_with_commit();
+    agt_json(&env, &env.repo, &["create", "by-agt"]);
+    let by_git = env.path("by-git");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "by-git",
+            by_git.to_str().unwrap(),
+        ],
+    );
+    let moved = env.path("moved");
+    fs::rename(&env.repo, &moved).unwrap();
+    // `Env::git` runs in the directory that is gone.
+    let git_in = |dir: &Path, args: &[&str]| {
+        let output = env.command("git", dir).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let by_agt = moved.join(".worktrees/by-agt");
+    git_in(&moved, &["worktree", "repair", by_agt.to_str().unwrap()]);
+
+    let listed = git_in(&moved, &["worktree", "list", "--porcelain"]);
+    for tree in [&by_agt, &by_git] {
+        let line = format!("worktree {}", tree.canonicalize().unwrap().display());
+        assert!(listed.lines().any(|listed| listed == line), "{listed}");
+        git_in(tree, &["status", "-s"]);
+    }
+}

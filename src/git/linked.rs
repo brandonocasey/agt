@@ -47,7 +47,7 @@ impl Repo {
             .commondir()
             .join("worktrees")
             .join(admin_name(&repo, path));
-        link_worktree(&repo, &admin, path, &head)?;
+        link_worktree(&admin, path, &head)?;
         fill_worktree(&repo, path).inspect_err(|_| {
             let _ = fs::remove_dir_all(&admin);
             let _ = fs::remove_dir_all(path);
@@ -206,6 +206,10 @@ fn admin_name(repo: &git2::Repository, path: &Path) -> String {
     name
 }
 
+/// The `commondir` file of a linked worktree: its administrative directory is two levels below
+/// the common git directory, and a relative link survives a move of the repository.
+const COMMONDIR: &str = "../..\n";
+
 /// What the HEAD of a new worktree holds.
 enum Head {
     /// The full name of a local branch.
@@ -215,7 +219,7 @@ enum Head {
 
 /// Registers a linked worktree: its administrative directory `admin` and its `path`, which
 /// hold only the links between them and a HEAD, so that no file is checked out yet.
-fn link_worktree(repo: &git2::Repository, admin: &Path, path: &Path, head: &Head) -> Result<()> {
+fn link_worktree(admin: &Path, path: &Path, head: &Head) -> Result<()> {
     let create = |dir: &Path| fs::create_dir(dir).map_err(ctx(format!("create {}", dir.display())));
     if let Some(worktrees) = admin.parent() {
         fs::create_dir_all(worktrees).map_err(ctx(format!("create {}", worktrees.display())))?;
@@ -224,13 +228,13 @@ fn link_worktree(repo: &git2::Repository, admin: &Path, path: &Path, head: &Head
     create(path)?;
     let real =
         |dir: &Path| fs::canonicalize(dir).map_err(ctx(format!("resolve {}", dir.display())));
-    let (admin, work, common) = (real(admin)?, real(path)?, real(repo.commondir())?);
+    let (admin, work) = (real(admin)?, real(path)?);
     let head_text = match head {
         Head::Branch(refname) => format!("ref: {refname}\n"),
         Head::Detached(id) => format!("{id}\n"),
     };
     let files = [
-        (admin.join("commondir"), format!("{}\n", common.display())),
+        (admin.join("commondir"), COMMONDIR.to_owned()),
         (
             admin.join("gitdir"),
             format!("{}\n", work.join(".git").display()),
