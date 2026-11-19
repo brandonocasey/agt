@@ -21,8 +21,8 @@ pub struct Cli {
     /// Skip the `[worktree.hooks] remove` commands.
     #[arg(long)]
     no_hooks: bool,
-    /// Remove although untracked files exist, or HEAD is on no branch at a path the repository does
-    /// not ignore; the backup keeps neither.
+    /// Remove despite untracked files, or a HEAD on no branch outside an ignored path. The backup
+    /// keeps neither.
     #[arg(long)]
     force: bool,
 }
@@ -124,9 +124,8 @@ fn refuse_untracked(path: &Path, paths: &[String]) -> Result<()> {
     ))
 }
 
-/// A backup keeps files, not commits. A HEAD on no branch fails unless `--force` lets it go, or
-/// the worktree sits at a path the repository ignores, as a review checkout does. Both give the
-/// warning to report.
+/// A backup keeps files, not commits. A HEAD on no branch needs `--force` unless its path is
+/// ignored; both warn.
 fn unpinned_head(
     main: &Path,
     path: &Path,
