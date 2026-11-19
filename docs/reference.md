@@ -1720,7 +1720,7 @@ agt worktree trust [PATH] [--remove]        # trust (or forget) the repository's
 agt worktree trust --list                   # trusted files and whether each still matches
 agt worktree restore ID [--path P]          # recreate the worktree and its uncommitted files
 agt worktree backups [ID]                   # list backups, or only the one with this id
-agt worktree backups rm ID [--yes]          # delete the backup's file (an older backup: its ref and directory)
+agt worktree backups rm ID [--yes]          # delete the backup's file, even if unreadable (an older backup: its ref and directory)
 ```
 
 Hooks run shell commands around a worktree's life. Set them globally in `$XDG_CONFIG_HOME/agt/config.toml`; the main checkout's `.config/agt.toml` overrides each key (`create`, `remove`) as a whole:

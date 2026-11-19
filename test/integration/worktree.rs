@@ -409,6 +409,23 @@ fn a_renamed_archive_is_its_own_backup() {
 }
 
 #[test]
+fn an_unreadable_archive_cannot_restore_but_can_be_deleted() {
+    let f = Fixture::new();
+    let removed = f.remove();
+    let archive = PathBuf::from(removed["backup"].as_str().unwrap());
+    let broken = archive.with_file_name("broken.tar.gz");
+    fs::write(&broken, "not a gzip file").unwrap();
+    f.refuses(&f.env.repo, &["restore", "broken"], "cannot be read");
+    let plan = f.json(&["backups", "rm", "broken"]);
+    assert_eq!(plan["plan"], true);
+    assert!(broken.exists());
+    let done = f.json(&["backups", "rm", "broken", "--yes"]);
+    assert_eq!(done["removed"], "broken");
+    assert!(!broken.exists());
+    assert!(archive.exists());
+}
+
+#[test]
 fn a_backup_restores_after_a_submodule_was_removed_from_the_worktree() {
     let f = Fixture::new();
     add_submodule(&f, "mod", "mod");

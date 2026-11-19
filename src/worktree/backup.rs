@@ -119,10 +119,26 @@ pub fn run(cli: Cli) -> Result<Output> {
             Ok(Output::Json(json!({ "backups": backups })))
         }
         Some(Command::Rm { id, yes }) => {
-            let (record, path) = find(&id)?;
-            let mut done = location(&record, &path);
+            let mut done = match find(&id) {
+                Ok((record, path)) => {
+                    if yes {
+                        delete(&record, &path)?;
+                    }
+                    location(&record, &path)
+                }
+                // An archive that cannot be read is no backup to restore, but its file can go.
+                Err(error) => {
+                    let Some(path) = unreadable_archive(&id) else {
+                        return Err(error);
+                    };
+                    if yes {
+                        fs::remove_file(&path)
+                            .map_err(ctx(format!("remove {}", path.display())))?;
+                    }
+                    json!({ "backup": path })
+                }
+            };
             if yes {
-                delete(&record, &path)?;
                 done["removed"] = json!(id);
             } else {
                 done["plan"] = json!(true);
@@ -226,13 +242,28 @@ fn read(entry: &fs::DirEntry) -> Option<Record> {
     Some(record)
 }
 
+/// The archive file named `id` in any repository's backups, whether or not it can be read.
+fn unreadable_archive(id: &str) -> Option<PathBuf> {
+    fs::read_dir(root().ok()?)
+        .ok()?
+        .flatten()
+        .map(|repo| repo.path().join(format!("{id}{}", archive::EXT)))
+        .find(|path| path.is_file())
+}
+
 pub fn find(id: &str) -> Result<(Record, PathBuf)> {
     let mut matches: Vec<_> = all()?
         .into_iter()
         .filter(|(record, _)| record.id == id)
         .collect();
     match matches.len() {
-        0 => fail(format!("no worktree backup {id}")),
+        0 => match unreadable_archive(id) {
+            Some(path) => fail(format!(
+                "{} cannot be read; `agt worktree backups rm {id} --yes` deletes it",
+                path.display()
+            )),
+            None => fail(format!("no worktree backup {id}")),
+        },
         1 => Ok(matches.remove(0)),
         _ => Err(Error(format!("several worktree backups are named {id}"))),
     }
