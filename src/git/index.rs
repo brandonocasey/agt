@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use super::files::is_nested_repo;
+use super::files::{is_nested_repo, nested_repos};
 use super::{Gitlink, Repo, StatusEntry};
 use crate::core::error::{Error, Result};
 
@@ -167,6 +167,11 @@ impl Repo {
             let absent = absent_hidden(repo, index);
             let mut refused = None;
             let mut check = |path: &Path, _: &[u8]| {
+                // libgit2 lists a nested repo with a trailing slash and then cannot add it;
+                // it is added below as the gitlink `git add` makes.
+                if path.as_os_str().as_bytes().ends_with(b"/") {
+                    return 1;
+                }
                 refused = required_filter(repo, path);
                 if refused.is_some() { -1 } else { 0 }
             };
@@ -175,6 +180,12 @@ impl Repo {
                 return Err(Error(message));
             }
             added?;
+            for dir in nested_repos(repo)? {
+                let path = Path::new(OsStr::from_bytes(&dir[..dir.len() - 1]));
+                index
+                    .add_path(path)
+                    .map_err(|error| Error(format!("{}: {error}", path.display())))?;
+            }
             index.update_all(["*"], None)?;
             restore_entries(index, &absent)?;
             Ok(index.write_tree_to(repo)?.to_string())
@@ -510,5 +521,61 @@ mod tests {
         );
         assert_eq!(ours, expected);
         assert_eq!(repo.uncommitted_count().unwrap(), expected.len());
+    }
+
+    #[test]
+    fn the_work_tree_tree_holds_nested_repos_and_linked_worktrees_as_git_add_does() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(&sandbox, &dir, &[("a.txt", "a\n")], "one");
+        // One nested repo holds a file, so libgit2 lists its directory as untracked; the other
+        // holds only its .git, which libgit2 reports as ignored.
+        for nested in ["nested", "deep/er/inner"] {
+            std::fs::create_dir_all(dir.join(nested)).unwrap();
+            sandbox.git(&dir, &["init", "-q", nested]);
+        }
+        commit(&sandbox, &dir.join("nested"), &[("x.txt", "x\n")], "x");
+        sandbox.git(
+            &dir.join("deep/er/inner"),
+            &["commit", "-q", "--allow-empty", "-m", "x"],
+        );
+        std::fs::write(dir.join(".gitignore"), "ignored-repo/\n").unwrap();
+        sandbox.git(&dir, &["init", "-q", "ignored-repo"]);
+        commit(
+            &sandbox,
+            &dir.join("ignored-repo"),
+            &[("y.txt", "y\n")],
+            "y",
+        );
+        sandbox.git(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                ".worktrees/det",
+                "HEAD",
+            ],
+        );
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let repo = Repo::at(&dir);
+
+        let ours = repo.worktree_tree().unwrap();
+
+        sandbox.git(&dir, &["add", "-A"]);
+        let expected = sandbox.git_output(&dir, &["write-tree"]);
+        assert_eq!(ours, expected.trim());
+        let listing = sandbox.git_output(&dir, &["ls-files", "-s"]);
+        assert!(!listing.contains("ignored-repo"), "{listing}");
+        for gitlink in ["nested", "deep/er/inner", ".worktrees/det"] {
+            assert!(
+                listing
+                    .lines()
+                    .any(|line| line.starts_with("160000") && line.ends_with(gitlink)),
+                "{listing}"
+            );
+        }
     }
 }

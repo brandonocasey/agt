@@ -292,6 +292,15 @@ fn untracked_in(repo: &git2::Repository) -> Result<Vec<Vec<u8>>> {
         .collect())
 }
 
+/// The untracked directories (with their trailing slash) that hold a repository of their own,
+/// which `git add` stages as gitlinks.
+pub(super) fn nested_repos(repo: &git2::Repository) -> Result<Vec<Vec<u8>>> {
+    Ok(untracked_in(repo)?
+        .into_iter()
+        .filter(|path| is_nested_repo(repo, path))
+        .collect())
+}
+
 /// The directories above `path`, each with its trailing slash, from the outermost down.
 fn ancestor_dirs(path: &[u8]) -> Vec<Vec<u8>> {
     path.iter()
