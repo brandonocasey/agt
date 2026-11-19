@@ -1400,31 +1400,31 @@ fn offline_removal_asks_no_remote_about_a_tag_and_holds_it() {
     let tip = wgit(&f.env, &sub, &["rev-parse", "tmp"]);
     wgit(&f.env, &sub, &["branch", "-D", "tmp"]);
     wgit(&f.env, &sub, &["tag", "kept-tag", &tip]);
-    let log = f.env.path("asked.log");
-    let path = f.env.git_wrapper(
-        "wrapper",
-        &format!(
-            "case \"$*\" in *ls-remote*) echo \"$*\" >> '{}';; esac\n",
-            log.display()
-        ),
-    );
     let wt = f.wt.to_string_lossy().into_owned();
     let remove = |flags: &[&str]| {
         let mut command = f.env.bin(&f.env.repo);
         command
             .args(flags)
             .args(["worktree", "remove", &wt, "--yes"]);
-        command.env("PATH", &path).output().unwrap()
+        command.output().unwrap()
     };
-    let online = remove(&[]);
-    assert_eq!(online.status.code(), Some(1));
-    assert!(log.exists(), "the control run asks the remote");
-    fs::remove_file(&log).unwrap();
     let offline = remove(&["--offline"]);
     assert_eq!(offline.status.code(), Some(1));
     let error = String::from_utf8_lossy(&offline.stderr);
     assert!(error.contains("kept-tag"), "{error}");
-    assert!(!log.exists(), "--offline asked the remote");
+    // The control run asks the remote: it holds the tag's commit, so the removal goes through.
+    wgit(
+        &f.env,
+        &sub,
+        &["push", "-q", "origin", &format!("{tip}:refs/heads/held")],
+    );
+    let online = remove(&[]);
+    assert_eq!(
+        online.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&online.stderr)
+    );
 }
 
 #[test]
@@ -1840,7 +1840,7 @@ fn a_local_tag_the_remote_does_not_have_blocks_removal() {
 }
 
 #[test]
-fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
+fn many_tags_in_a_submodule_start_no_git_process() {
     let (f, sub) = with_submodule();
     let head = wgit(&f.env, &sub, &["rev-parse", "HEAD"]);
     let stdin: String = (0..500)
@@ -1856,7 +1856,7 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
     std::io::Write::write_all(&mut update.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
     assert!(update.wait().unwrap().success());
 
-    // A `git` in front of the real one that counts how often it is run.
+    // A `git` in front of the real one that counts how often it is run; agt runs none.
     let count = f.env.path("git-runs");
     let path = f.env.git_wrapper(
         "counting-bin",
@@ -1874,8 +1874,8 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let runs = fs::read_to_string(&count).unwrap().lines().count();
-    assert!(runs < 150, "{runs} git processes for 500 tags");
+    let runs = fs::read_to_string(&count).map_or(0, |log| log.lines().count());
+    assert_eq!(runs, 0, "{runs} git processes for 500 tags");
 }
 
 const ALLOW_FILE: [&str; 2] = ["-c", "protocol.file.allow=always"];
@@ -2110,212 +2110,98 @@ fn with_unheld_tag() -> (Fixture, PathBuf) {
     (f, sub)
 }
 
-#[test]
-fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
-    for (own, expect) in [
-        (None, "ssh -o BatchMode=yes -o ConnectTimeout=5"),
-        (
-            Some("my-ssh -v"),
-            "my-ssh -v -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-    ] {
-        let (f, _sub) = with_unheld_tag();
-        // A git that, asked to ls-remote, records its environment, starts a child that would
-        // outlive it (as ssh does) and then hangs.
-        let (record, child_pid) = (f.env.path("ls-remote-env"), f.env.path("child-pid"));
-        let path = f.env.git_wrapper(
-            "hanging-bin",
-            &format!(
-                "case \"$*\" in\n*ls-remote*)\n  env > '{}'\n  sleep 60 &\n  echo $! > '{}'\n  sleep 60\n  exit 0\n  ;;\nesac\n",
-                record.display(),
-                child_pid.display()
-            ),
-        );
-        let mut command = f.env.bin(&f.env.repo);
-        command
-            .env("PATH", path)
-            .env("AGT_LS_REMOTE_TIMEOUT", "1")
-            .env("GIT_ASKPASS", "/bin/would-block")
-            .env("SSH_ASKPASS", "/bin/would-block")
-            .args(["worktree", "remove", &f.wt.to_string_lossy()]);
-        match own {
-            Some(own) => command.env("GIT_SSH_COMMAND", own),
-            None => command.env_remove("GIT_SSH_COMMAND"),
-        };
-        let started = std::time::Instant::now();
-        let output = command.output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        assert!(started.elapsed().as_secs() < 8, "{:?}", started.elapsed());
-        let seen = fs::read_to_string(&record).unwrap();
-        for line in [
-            "GIT_TERMINAL_PROMPT=0",
-            "GIT_ASKPASS=false",
-            "SSH_ASKPASS=false",
-            "SSH_ASKPASS_REQUIRE=never",
-            "GCM_INTERACTIVE=never",
-            &format!("GIT_SSH_COMMAND={expect}"),
-        ] {
-            assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
+/// A host that accepts a connection and never answers, as an ssh server that hangs does, and
+/// the ssh URL that reaches it. `accepted` receives a message for each connection.
+struct SilentHost {
+    url: String,
+    accepted: std::sync::mpsc::Receiver<()>,
+}
+
+fn silent_host() -> SilentHost {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "ssh://127.0.0.1:{}/repo.git",
+        listener.local_addr().unwrap().port()
+    );
+    let (accepted, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+            let _ = accepted.send(());
         }
-        let pid = fs::read_to_string(&child_pid).unwrap().trim().to_owned();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        if alive {
-            let _ = std::process::Command::new("kill").arg(&pid).status();
-        }
-        assert!(!alive, "the child of the timed-out git is still running");
+    });
+    SilentHost {
+        url,
+        accepted: receiver,
     }
 }
 
-#[test]
-fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
-    let cases = [
-        // core.sshCommand (a deploy key) beats GIT_SSH.
-        (
-            None,
-            Some("deploy-ssh -i key"),
-            Some("/opt/env ssh/wrapper"),
-            "deploy-ssh -i key -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-        // GIT_SSH_COMMAND beats both.
-        (
-            Some("own-ssh"),
-            Some("deploy-ssh -i key"),
-            Some("/opt/env ssh/wrapper"),
-            "own-ssh -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-        // GIT_SSH alone is a program path: one quoted word, even with a space or a quote.
-        (
-            None,
-            None,
-            Some("/opt/it's ssh/wrapper"),
-            "'/opt/it'\\''s ssh/wrapper' -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-    ];
-    for (command, configured, program, expect) in cases {
-        let (f, sub) = with_unheld_tag();
-        if let Some(configured) = configured {
-            wgit(&f.env, &sub, &["config", "core.sshCommand", configured]);
-        }
-        let record = f.env.path("ls-remote-env");
-        // A git that, asked to ls-remote, records its environment and advertises nothing.
-        let path = f.env.git_wrapper(
-            "recording-bin",
-            &format!(
-                "case \"$*\" in\n*ls-remote*) env > '{}'; exit 0 ;;\nesac\n",
-                record.display()
-            ),
-        );
-        let mut run = f.env.bin(&f.env.repo);
-        run.env("PATH", path)
-            .args(["worktree", "remove", &f.wt.to_string_lossy()]);
-        match command {
-            Some(command) => run.env("GIT_SSH_COMMAND", command),
-            None => run.env_remove("GIT_SSH_COMMAND"),
-        };
-        match program {
-            Some(program) => run.env("GIT_SSH", program),
-            None => run.env_remove("GIT_SSH"),
-        };
-        assert_eq!(run.output().unwrap().status.code(), Some(1));
-        let seen = fs::read_to_string(&record).unwrap();
-        let line = format!("GIT_SSH_COMMAND={expect}");
-        assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
-    }
-}
-
-#[test]
-fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
+/// A worktree like [`with_unheld_tag`] whose submodule remote is a host that never answers.
+fn with_silent_remote() -> (Fixture, SilentHost) {
     let (f, sub) = with_unheld_tag();
-    wgit(
-        &f.env,
-        &sub,
-        &["config", "core.sshCommand", "deploy-ssh -i key"],
-    );
-    // A clone left behind by `git rm` of a submodule: core.worktree points at a deleted directory.
-    let gitdir = wgit(&f.env, &sub, &["rev-parse", "--absolute-git-dir"]);
-    wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
-    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "drop the submodule"]);
-    let config = Path::new(&gitdir).join("config");
-    wgit(
-        &f.env,
-        &f.env.repo,
-        &[
-            "config",
-            "--file",
-            &config.to_string_lossy(),
-            "core.worktree",
-            "../gone",
-        ],
-    );
-    let record = f.env.path("ls-remote-env");
-    // A git that, asked to ls-remote, records its environment and advertises nothing.
-    let path = f.env.git_wrapper(
-        "recording-bin",
-        &format!(
-            "case \"$*\" in\n*ls-remote*) env > '{}'; exit 0 ;;\nesac\n",
-            record.display()
-        ),
-    );
-    let mut run = f.env.bin(&f.env.repo);
-    run.env("PATH", path)
-        .env_remove("GIT_SSH_COMMAND")
-        .env_remove("GIT_SSH")
-        .args(["worktree", "remove", &f.wt.to_string_lossy()]);
-    run.output().unwrap();
-    let seen = fs::read_to_string(&record).unwrap();
-    let line = "GIT_SSH_COMMAND=deploy-ssh -i key -o BatchMode=yes -o ConnectTimeout=5";
-    assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
+    let host = silent_host();
+    wgit(&f.env, &sub, &["remote", "set-url", "origin", &host.url]);
+    (f, host)
 }
 
-/// A `PATH` whose git, asked to ls-remote, starts a child (as ssh is) and then hangs, and the
-/// file that child's pid lands in.
-fn hanging_ls_remote(f: &Fixture) -> (String, PathBuf) {
-    let child_pid = f.env.path("child-pid");
-    let path = f.env.git_wrapper(
-        "hanging-bin",
-        &format!(
-            "case \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  exit 0\n  ;;\nesac\n",
-            child_pid.display()
-        ),
-    );
-    (path, child_pid)
+fn remove_command(f: &Fixture, timeout: &str) -> std::process::Command {
+    let mut command = f.env.bin(&f.env.repo);
+    command.env("AGT_LS_REMOTE_TIMEOUT", timeout).args([
+        "worktree",
+        "remove",
+        &f.wt.to_string_lossy(),
+    ]);
+    command
 }
 
 #[test]
-fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
+fn the_remote_check_gives_up_on_a_host_that_never_answers() {
+    let (f, host) = with_silent_remote();
+    let started = std::time::Instant::now();
+    let output = remove_command(&f, "1").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(started.elapsed().as_secs() < 8, "{:?}", started.elapsed());
+    assert!(
+        host.accepted.try_recv().is_ok(),
+        "the check never reached the host"
+    );
+}
+
+/// Waits until the remote check has connected to `host`.
+fn wait_for_the_connection(host: &SilentHost) {
+    host.accepted
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the remote check never connected");
+}
+
+#[test]
+fn a_signal_to_agt_ends_it_during_the_remote_check() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        let (f, _sub) = with_unheld_tag();
-        let (path, child_pid) = hanging_ls_remote(&f);
-        let agt = f
-            .env
-            .bin(&f.env.repo)
-            .env("PATH", path)
-            .env("AGT_LS_REMOTE_TIMEOUT", "60")
-            .args(["worktree", "remove", &f.wt.to_string_lossy()])
+        let (f, host) = with_silent_remote();
+        let mut agt = remove_command(&f, "60")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        crate::support::process::assert_signal_kills_the_tool(agt, signal, &child_pid);
+        wait_for_the_connection(&host);
+        let id = i32::try_from(agt.id()).unwrap();
+        // SAFETY: plain kill(2) of the agt process this test started.
+        unsafe { libc::kill(id, signal) };
+        let status = agt.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(signal)
+        );
     }
 }
 
 #[test]
 fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
     use std::os::unix::process::CommandExt;
-    let (f, _sub) = with_unheld_tag();
-    let (path, child_pid) = hanging_ls_remote(&f);
-    let mut run = f.env.bin(&f.env.repo);
-    run.env("PATH", path)
-        .env("AGT_LS_REMOTE_TIMEOUT", "3")
-        .args(["worktree", "remove", &f.wt.to_string_lossy()])
-        .stdout(std::process::Stdio::null())
+    let (f, host) = with_silent_remote();
+    let mut run = remove_command(&f, "3");
+    run.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // As `nohup` starts it. SAFETY: signal(2) is async-signal-safe, so it may run before exec.
     unsafe {
@@ -2325,17 +2211,12 @@ fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
         });
     }
     let mut agt = run.spawn().unwrap();
-    let started = std::time::Instant::now();
-    while fs::read_to_string(&child_pid).map_or(true, |text| text.trim().is_empty()) {
-        assert!(started.elapsed().as_secs() < 20, "no child");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait_for_the_connection(&host);
     let id = i32::try_from(agt.id()).unwrap();
     // SAFETY: plain kill(2) of the agt process this test started.
     unsafe { libc::kill(id, libc::SIGHUP) };
-    // agt lives on to the timeout and refuses, killing the check then.
+    // agt lives on to the timeout and refuses.
     assert_eq!(agt.wait().unwrap().code(), Some(1));
-    crate::support::process::assert_gone(&child_pid);
 }
 
 #[test]

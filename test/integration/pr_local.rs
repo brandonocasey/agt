@@ -353,9 +353,9 @@ fn list_shows_each_branch_with_its_state_mergeability_author_and_title() {
     }
 }
 
-/// `list` asks git for its rows in a few calls, not several per branch.
+/// `list` reads its rows in process: it starts no git program, however many branches there are.
 #[test]
-fn list_runs_a_few_git_calls_however_many_branches_there_are() {
+fn list_starts_no_git_process_however_many_branches_there_are() {
     let env = list_fixture();
     for count in 0..6 {
         add_branch(&env, &format!("extra{count}"), "x.txt", "x\n");
@@ -374,11 +374,8 @@ fn list_runs_a_few_git_calls_however_many_branches_there_are() {
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", stderr(&output));
-        let spawned = fs::read_to_string(&calls).unwrap().lines().count();
-        assert!(
-            spawned <= 12,
-            "{state}: {spawned} git calls for 10 branches"
-        );
+        let spawned = fs::read_to_string(&calls).map_or(0, |log| log.lines().count());
+        assert_eq!(spawned, 0, "{state}: {spawned} git calls for 10 branches");
     }
 }
 
@@ -1241,29 +1238,24 @@ fn a_hook_that_refuses_the_rebase_leaves_everything_as_it_was() {
 
 /// A commit made after the head was checked is not merged unseen.
 /// A rebase would start from a tip the caller never named.
-/// A `core.fsmonitor` hook makes the commit. The status check of the work tree runs it, after the
-/// tip was read.
+/// A `pre-rebase` hook makes the commit, after the tip was read.
 #[test]
 fn a_commit_made_while_the_merge_runs_stops_the_merge_before_it_lands() {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");
     advance_main(&env, "c.txt", "c\n");
     let work = add_worktree(&env, "work", &["feat"]);
-    let hook = env.path("fsmonitor");
+    let hook = env.repo.join(".git/hooks/pre-rebase");
     let once = env.path("committed");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
     crate::support::executable(
         &hook,
         format!(
-            "#!/bin/sh\n[ -e '{once}' ] && exit 1\ntouch '{once}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE\n\
-             git -C '{work}' commit -q --allow-empty -m sneaked\nexit 1\n",
+            "#!/bin/sh\n[ -e '{once}' ] && exit 0\ntouch '{once}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE\n\
+             git -C '{work}' commit -q --allow-empty -m sneaked\n",
             once = once.display(),
             work = work.display()
         ),
-    );
-    git_ok(
-        &env,
-        &env.repo,
-        &["config", "core.fsmonitor", hook.to_str().unwrap()],
     );
     let main = tip(&env, "main");
 

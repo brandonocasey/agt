@@ -93,19 +93,40 @@ impl Site {
     }
 }
 
+/// A fetch happens in process, where the `git` wrapper cannot see it, so the control run looks at
+/// the result: a commit only the remote has arrives in the repository.
 #[test]
-fn the_network_log_sees_a_fetch_without_the_flag() {
+fn a_run_without_the_flag_fetches() {
     let site = Site::new();
     site.env.git(&["checkout", "-q", "-b", "topic"]);
-    let output = site
-        .env
+    let other = site.env.path("other");
+    let bare = site.env.path("origin.git");
+    site.env.git(&[
+        "clone",
+        "-q",
+        bare.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]);
+    let in_other = |args: &[&str]| {
+        let output = site.env.command("git", &other).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    in_other(&["commit", "-q", "--allow-empty", "-m", "remote only"]);
+    in_other(&["push", "-q", "origin", "main"]);
+    let pushed = in_other(&["rev-parse", "HEAD"]);
+    assert!(!site.env.git_status(&["cat-file", "-e", &pushed]));
+
+    site.env
         .bin(&site.env.repo)
         .args(["branch", "check", "--checks", "landable"])
         .env("PATH", &site.path)
         .output()
         .unwrap();
-    assert_ne!(output.status.code(), Some(0));
-    assert!(!site.network().is_empty());
+    assert!(
+        site.env.git_status(&["cat-file", "-e", &pushed]),
+        "the remote's commit was not fetched"
+    );
 }
 
 #[test]

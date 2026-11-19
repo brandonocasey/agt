@@ -1787,7 +1787,7 @@ fn the_offline_sweep_plan_never_asks_a_remote_and_skips_a_worktree_holding_an_un
         .iter()
         .all(|repository| repository["remove"] == json!([]));
     assert!(planned, "{report}");
-    let calls = fs::read_to_string(&log).unwrap();
+    let calls = fs::read_to_string(&log).unwrap_or_default();
     assert!(!calls.contains("ls-remote"), "{calls}");
 }
 
