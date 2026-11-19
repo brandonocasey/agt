@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use super::info::parents;
 use crate::core::error::{Error, Result, ctx};
 use crate::core::local;
-use crate::git::Repo;
+use crate::git::{Repo, Worktree};
 
 /// A directory with a `.git` of its own somewhere under a worktree.
 pub struct Found {
@@ -43,22 +43,48 @@ pub fn reason(found: &[String]) -> String {
     )
 }
 
-/// The repositories of `found` that git does not ignore. `ignored` holds the worktree's ignored
-/// paths, a directory ending in `/`: removal deletes a repository inside one with the worktree,
-/// and a backup never holds anything ignored.
+/// The repositories of `found`, sorted by path, that git does not ignore and that do not lie
+/// inside one it ignores. `ignored` holds the worktree's ignored paths, a directory ending in
+/// `/`: removal deletes a repository inside one with the worktree, and a backup never holds
+/// anything ignored. A registered submodule stays, as `.gitmodules` may list one the index
+/// no longer holds.
 pub fn without_ignored(found: Vec<Found>, ignored: &[String]) -> Vec<Found> {
     let dirs: HashSet<&str> = ignored
         .iter()
         .filter(|path| path.ends_with('/'))
         .map(String::as_str)
         .collect();
+    let is_ignored = |repo: &Found, dir: &str| {
+        !repo.registered
+            // A name that is not valid UTF-8 was read lossily and can equal another name.
+            && !repo.rel.contains(char::REPLACEMENT_CHARACTER)
+            && (dirs.contains(dir) || parents(dir).any(|above| dirs.contains(above)))
+    };
+    let mut dropped: Vec<String> = Vec::new();
     found
         .into_iter()
         .filter(|repo| {
             let dir = format!("{}/", repo.rel);
-            !dirs.contains(dir.as_str()) && !parents(&dir).any(|above| dirs.contains(above))
+            let drop = dropped.iter().any(|above| dir.starts_with(above.as_str()))
+                || is_ignored(repo, &dir);
+            if drop {
+                dropped.push(dir);
+            }
+            !drop
         })
         .collect()
+}
+
+/// The linked worktrees below `path`, deepest first. Only an ignored folder may hold one:
+/// removing `path` deletes it, so git deregisters each first.
+pub fn linked_inside(main: &Path, path: &Path) -> Result<Vec<Worktree>> {
+    let mut inner: Vec<Worktree> = Repo::at(main)
+        .worktrees()?
+        .into_iter()
+        .filter(|other| !other.prunable && other.path != path && other.path.starts_with(path))
+        .collect();
+    inner.sort_by_key(|other| std::cmp::Reverse(other.path.components().count()));
+    Ok(inner)
 }
 
 pub fn submodule_paths(root: &Path) -> Result<Vec<String>> {

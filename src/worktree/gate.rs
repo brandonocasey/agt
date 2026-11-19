@@ -31,6 +31,15 @@ pub fn check_offline(worktree: &Path, main: &Path) -> Result<()> {
 
 fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     worktree_state(worktree)?;
+    if let Some(locked) = nested::linked_inside(main, worktree)?
+        .into_iter()
+        .find(|other| other.locked)
+    {
+        return fail(format!(
+            "it holds the locked worktree {}; unlock it first",
+            locked.path.display()
+        ));
+    }
     let mut found = nested::repositories(worktree)?;
     if !found.is_empty() {
         found = nested::without_ignored(found, &info::ignored(worktree)?);

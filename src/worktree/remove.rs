@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::idle::Cwds;
 use super::info;
-use super::{gate, hooks, snapshot};
+use super::{gate, hooks, nested, snapshot};
 use crate::core::cwd;
 use crate::core::error::{Result, fail};
 use crate::core::output::Output;
@@ -132,6 +132,7 @@ pub(super) fn removal(
     untracked: Untracked,
 ) -> Result<Value> {
     gate::check(path, main)?;
+    let inner = nested::linked_inside(main, path)?;
     let mut hooks_report = None;
     if run_hooks {
         let (report, ok) = hooks::run(path, hooks::Kind::Remove)?;
@@ -170,6 +171,14 @@ pub(super) fn removal(
     };
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
+    for other in &inner {
+        shared.git(&[
+            "worktree",
+            "remove",
+            "--force",
+            &other.path.to_string_lossy(),
+        ])?;
+    }
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
     let branches = |pattern: &str| -> Result<Vec<String>> {
         let found = shared.git(&[

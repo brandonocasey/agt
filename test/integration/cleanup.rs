@@ -1572,6 +1572,39 @@ fn the_sweep_plan_offers_a_worktree_holding_only_ignored_nested_repositories() {
 }
 
 #[test]
+fn the_sweep_plan_lists_a_worktree_inside_an_ignored_folder_only_with_its_outer_one() {
+    let prune = Prune::new();
+    let repo = prune.env.path("home/projects/owner/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let status = prune
+            .env
+            .command("git", &repo)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+    fs::write(repo.join(".git/info/exclude"), "build/\n").unwrap();
+    git(&["worktree", "add", "-q", ".worktrees/done", "-b", "done"]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        ".worktrees/done/build/inner",
+        "-b",
+        "inner",
+    ]);
+
+    let planned = sweep_plan(&prune, later());
+    assert_eq!(planned.len(), 1, "{planned:?}");
+    assert!(planned[0].ends_with("/.worktrees/done"), "{planned:?}");
+}
+
+#[test]
 fn the_sweep_plan_skips_a_worktree_with_a_process_running_in_it() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
