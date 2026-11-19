@@ -1,6 +1,6 @@
-//! A worktree backup as one gzip-compressed tar file: `backup.json` first, so listing reads a
-//! single entry, then the per-worktree git files under `worktree-git/`, then each saved file
-//! under `files/`. Tar keeps modes, symlinks and byte-exact names.
+//! A worktree backup is one gzip-compressed tar file. `backup.json` comes first, so listing
+//! reads a single entry. Then come the per-worktree git files in `worktree-git/` and the saved
+//! files in `files/`. Tar keeps modes, symlinks and byte-exact names.
 
 use std::ffi::OsStr;
 use std::fmt::Display;
@@ -35,22 +35,21 @@ pub struct Writer {
 impl Writer {
     /// Starts the archive at `path` with `record` as its first entry.
     pub fn create(path: &Path, record: &Record) -> Result<Self> {
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let partial = path.with_file_name(format!(".{name}.partial"));
+        let json = serde_json::to_vec_pretty(record).map_err(ctx("encode backup record"))?;
+        let partial = Self::partial_name(path);
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&partial)
             .map_err(ctx(format!("create {}", partial.display())))?;
-        let mut tar = Builder::new(GzEncoder::new(BufWriter::new(file), Compression::best()));
+        let mut tar = Builder::new(GzEncoder::new(BufWriter::new(file), Compression::default()));
         tar.follow_symlinks(false);
         let mut writer = Self {
             tar,
             partial,
             path: path.to_owned(),
         };
-        let json = serde_json::to_vec_pretty(record).map_err(ctx("encode backup record"))?;
         let mut header = Header::new_gnu();
         header.set_size(json.len() as u64);
         header.set_mode(0o600);
@@ -59,6 +58,12 @@ impl Writer {
             return Err(ctx(format!("write {}", path.display()))(error));
         }
         Ok(writer)
+    }
+
+    /// The hidden name an archive at `path` is written under until it is complete.
+    pub fn partial_name(path: &Path) -> PathBuf {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        path.with_file_name(format!(".{name}.partial"))
     }
 
     /// Adds the per-worktree git file `name` (one of `SAVED_GIT_FILES`) from `source`.
@@ -70,27 +75,43 @@ impl Writer {
 
     /// Adds the file or symlink at `source` as the worktree path `relative`.
     pub fn file(&mut self, relative: &[u8], source: &Path) -> Result<()> {
-        self.tar
-            .append_path_with_name(source, entry_name(relative))
-            .map_err(ctx(format!("archive {}", source.display())))
+        let metadata =
+            fs::symlink_metadata(source).map_err(ctx(format!("stat {}", source.display())))?;
+        if !metadata.file_type().is_symlink() {
+            return self
+                .tar
+                .append_path_with_name(source, entry_name(relative))
+                .map_err(ctx(format!("archive {}", source.display())));
+        }
+        let target = fs::read_link(source).map_err(ctx(format!("read {}", source.display())))?;
+        self.symlink(
+            relative,
+            metadata.permissions().mode() & 0o7777,
+            target.as_os_str().as_bytes(),
+        )
     }
 
-    /// Adds a file the worktree does not hold on disk: `contents` with `mode`, or a symlink to
-    /// `contents` when `link`.
-    pub fn blob(&mut self, relative: &[u8], mode: u32, link: bool, contents: &[u8]) -> Result<()> {
+    /// Adds a file the worktree does not hold on disk, with `mode` and `contents`.
+    pub fn blob(&mut self, relative: &[u8], mode: u32, contents: &[u8]) -> Result<()> {
         let mut header = Header::new_gnu();
         header.set_mode(mode);
+        header.set_size(contents.len() as u64);
         let name = entry_name(relative);
-        let added = if link {
-            header.set_entry_type(EntryType::Symlink);
-            header.set_size(0);
-            self.tar
-                .append_link(&mut header, &name, Path::new(OsStr::from_bytes(contents)))
-        } else {
-            header.set_size(contents.len() as u64);
-            self.tar.append_data(&mut header, &name, contents)
-        };
-        added.map_err(ctx(format!("archive {}", name.display())))
+        self.tar
+            .append_data(&mut header, &name, contents)
+            .map_err(ctx(format!("archive {}", name.display())))
+    }
+
+    /// Adds a symlink to `target`.
+    pub fn symlink(&mut self, relative: &[u8], mode: u32, target: &[u8]) -> Result<()> {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_mode(mode);
+        header.set_size(0);
+        let name = entry_name(relative);
+        self.tar
+            .append_link(&mut header, &name, Path::new(OsStr::from_bytes(target)))
+            .map_err(ctx(format!("archive {}", name.display())))
     }
 
     /// Completes the archive and moves it to its name.
@@ -164,8 +185,8 @@ pub fn unpack(path: &Path, target: &Path, git_to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes `entry` at `relative` below `root`, creating missing parent directories and replacing
-/// a file or symlink already there.
+/// Writes `entry` at `relative` below `root`. It creates missing parent directories and replaces
+/// any file or symlink there.
 fn place<R: Read>(entry: &mut Entry<R>, root: &Path, relative: &[u8]) -> Result<()> {
     let path = inside(root, relative)?;
     let kind = entry.header().entry_type();
@@ -183,7 +204,11 @@ fn place<R: Read>(entry: &mut Entry<R>, root: &Path, relative: &[u8]) -> Result<
         fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
     }
     match fs::symlink_metadata(&path) {
-        Ok(found) if found.is_dir() => return fail(format!("{} is a directory", path.display())),
+        // `worktree add` leaves an empty directory where HEAD has a submodule; a file may take its place.
+        Ok(found) if found.is_dir() => fs::remove_dir(&path).map_err(ctx(format!(
+            "cannot replace the directory {}",
+            path.display()
+        )))?,
         Ok(_) => fs::remove_file(&path).map_err(ctx(format!("replace {}", path.display())))?,
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(ctx(format!("stat {}", path.display()))(error)),
@@ -200,8 +225,8 @@ fn place<R: Read>(entry: &mut Entry<R>, root: &Path, relative: &[u8]) -> Result<
     Ok(())
 }
 
-/// `relative` below `root`, when it names something inside it and no existing parent is a
-/// symlink or file.
+/// Returns `relative` below `root`. It fails when the path leaves `root`, is empty, or runs
+/// through a symlink or file.
 pub fn inside(root: &Path, relative: &[u8]) -> Result<PathBuf> {
     let relative = Path::new(OsStr::from_bytes(relative));
     let mut path = root.to_owned();

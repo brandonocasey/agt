@@ -1,5 +1,5 @@
-//! Backing a worktree up: an archive of its tracked files, working-tree edits included, and
-//! its sparse-checkout files. Ignored and untracked files stay out of it.
+//! Archives a worktree's tracked files, with working-tree edits, and its sparse-checkout files.
+//! Ignored and untracked files stay out of it.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -96,7 +96,9 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
             let path = base.join(format!("{id}{}", archive::EXT));
             (id, path)
         })
-        .find(|(id, path)| !path.exists() && !backup::id_taken(id))
+        .find(|(id, path)| {
+            !path.exists() && !Writer::partial_name(path).exists() && !backup::id_taken(id)
+        })
         .unwrap_or_default();
     create_dirs(&base, 0o700)?;
     build(main, entry, &path, id, created)
@@ -120,12 +122,20 @@ fn build(main: &Path, entry: &Worktree, path: &Path, id: String, created: i64) -
         file_modes: Vec::new(),
         deleted: changes
             .iter()
-            .filter(|change| change.deleted)
+            .filter(|change| change.deleted && !change.gitlink)
             .map(|change| change.path.clone())
             .collect(),
     };
     let mut writer = Writer::create(path, &record)?;
-    if let Err(error) = fill(&mut writer, shared, entry, &tree, &changes) {
+    let contents = Contents {
+        shared,
+        root: &entry.path,
+        tree: &tree,
+        changes: &changes,
+    };
+    if let Err(error) =
+        save_git_files(&entry.path, &mut writer).and_then(|()| fill(&mut writer, &contents))
+    {
         writer.discard();
         return Err(error);
     }
@@ -137,25 +147,30 @@ fn build(main: &Path, entry: &Worktree, path: &Path, id: String, created: i64) -
     })
 }
 
-/// Adds the files of `tree` to `writer`. A file of `tree` the worktree does not hold, as in a
-/// sparse checkout, is added from its object when it differs from HEAD, and left to HEAD when
-/// it does not.
-fn fill(
-    writer: &mut Writer,
-    shared: &Repo,
-    entry: &Worktree,
-    tree: &str,
-    changes: &[Change],
-) -> Result<()> {
-    save_git_files(&entry.path, writer)?;
-    let edited: HashMap<&[u8], &Change> = changes
+/// What `fill` saves: the files of `tree` under `root`, which differs from HEAD by `changes`.
+struct Contents<'a> {
+    shared: &'a Repo,
+    root: &'a Path,
+    tree: &'a str,
+    changes: &'a [Change],
+}
+
+/// Adds the files of the tree to `writer`. A file the worktree lacks (a sparse checkout) comes
+/// from its object when changed. Otherwise HEAD keeps it.
+fn fill(writer: &mut Writer, contents: &Contents) -> Result<()> {
+    let edited: HashMap<&[u8], &Change> = contents
+        .changes
         .iter()
         .filter(|change| !change.deleted && !change.gitlink)
         .map(|change| (change.path.as_slice(), change))
         .collect();
-    let paths = shared.checked(&["ls-tree", "-r", "--name-only", "-z", tree], None, &[])?;
+    let paths = contents.shared.checked(
+        &["ls-tree", "-r", "--name-only", "-z", contents.tree],
+        None,
+        &[],
+    )?;
     for path in nul_fields(&paths) {
-        let source = entry.path.join(OsStr::from_bytes(path));
+        let source = contents.root.join(OsStr::from_bytes(path));
         match fs::symlink_metadata(&source) {
             Ok(found) if found.is_file() || found.file_type().is_symlink() => {
                 writer.file(path, &source)?;
@@ -163,7 +178,7 @@ fn fill(
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 if let Some(change) = edited.get(path) {
-                    add_object(writer, shared, change)?;
+                    add_object(writer, contents.shared, change)?;
                 }
             }
             Err(error) => return Err(ctx(format!("stat {}", source.display()))(error)),
@@ -174,12 +189,11 @@ fn fill(
 
 fn add_object(writer: &mut Writer, shared: &Repo, change: &Change) -> Result<()> {
     let contents = shared.checked(&["cat-file", "blob", &change.oid], None, &[])?;
-    let mode = if change.mode == "100755" {
-        0o755
-    } else {
-        0o644
-    };
-    writer.blob(&change.path, mode, change.mode == "120000", &contents)
+    match change.mode.as_str() {
+        "120000" => writer.symlink(&change.path, 0o777, &contents),
+        "100755" => writer.blob(&change.path, 0o755, &contents),
+        _ => writer.blob(&change.path, 0o644, &contents),
+    }
 }
 
 /// Where a directory backup keeps the per-worktree git files that `git worktree remove` deletes.
@@ -189,8 +203,7 @@ pub const SAVED_GIT_DIR: &str = "worktree-git";
 /// its own config (which holds the sparse-checkout settings).
 pub const SAVED_GIT_FILES: [&str; 2] = ["info/sparse-checkout", "config.worktree"];
 
-/// Adds the per-worktree git files that exist in the git directory of the worktree at
-/// `worktree` to `writer`.
+/// Adds the per-worktree git files found in the worktree's git directory to `writer`.
 fn save_git_files(worktree: &Path, writer: &mut Writer) -> Result<()> {
     let git_dir = Repo::at(worktree).git_dir()?;
     for name in SAVED_GIT_FILES {

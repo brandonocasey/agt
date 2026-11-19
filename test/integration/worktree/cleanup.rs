@@ -271,6 +271,10 @@ fn an_ancestor_merged_branch_loses_its_clean_worktree_and_branch() {
     assert_eq!(report["removed"][0]["branch"], "done");
     let id = report["removed"][0]["id"].as_str().unwrap();
     assert!(!wt.exists());
+    assert_eq!(
+        report["removed"][0]["backup"],
+        backup_path(&site.env, id).to_str().unwrap()
+    );
     // The backup records the tip even though the branch is gone.
     assert_eq!(
         read_backup(&backup_path(&site.env, id)).record["head"],

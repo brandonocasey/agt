@@ -1,6 +1,6 @@
-//! Worktree backups: one `agents/backups/<repo>/<id>.tar.gz` each (see `archive`). A backup an
-//! older agt made is the directory `<id>/backup.json` plus the ref `refs/agt/backups/<id>`
-//! that keeps its snapshot commit alive. Backups are never pruned automatically.
+//! Worktree backups: one `agents/backups/<repo>/<id>.tar.gz` each (see `archive`). An older
+//! agt made directory backups: `<id>/backup.json` plus the ref `refs/agt/backups/<id>`. That
+//! ref keeps the snapshot commit alive. Backups are never pruned automatically.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,8 +39,8 @@ pub struct Record {
     /// Modes of a directory backup's regular files; an archive keeps them itself.
     #[serde(default)]
     pub file_modes: Vec<FileMode>,
-    /// The tracked paths the worktree had deleted. Paths MUST remain byte-exact.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The tracked paths the worktree had deleted.
+    #[serde(default, with = "paths", skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<Vec<u8>>,
 }
 
@@ -49,6 +49,39 @@ pub struct FileMode {
     /// Paths MUST remain byte-exact because Git filenames need not be UTF-8.
     pub path: Vec<u8>,
     pub mode: u32,
+}
+
+/// Paths as text when they are UTF-8 and as bytes when not: they MUST remain byte-exact.
+mod paths {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Path {
+        Text(String),
+        Bytes(Vec<u8>),
+    }
+
+    pub fn serialize<S: Serializer>(paths: &[Vec<u8>], out: S) -> Result<S::Ok, S::Error> {
+        out.collect_seq(
+            paths
+                .iter()
+                .map(|path| match String::from_utf8(path.clone()) {
+                    Ok(text) => Path::Text(text),
+                    Err(error) => Path::Bytes(error.into_bytes()),
+                }),
+        )
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<Vec<Vec<u8>>, D::Error> {
+        Ok(Vec::<Path>::deserialize(input)?
+            .into_iter()
+            .map(|path| match path {
+                Path::Text(text) => text.into_bytes(),
+                Path::Bytes(bytes) => bytes,
+            })
+            .collect())
+    }
 }
 
 #[derive(Args)]
@@ -119,9 +152,9 @@ fn delete(record: &Record, path: &Path) -> Result<()> {
     fs::remove_dir_all(path).map_err(ctx(format!("remove {}", path.display())))
 }
 
-/// One backup's record plus where it lives. In the list view `file_mode_count` and
-/// `deleted_count` replace `file_modes` and `deleted`, which can run to megabytes across many
-/// backups.
+/// One backup's record plus where it lives. In the list view, `file_mode_count` and
+/// `deleted_count` replace `file_modes` and `deleted`. Those two can run to megabytes across
+/// many backups.
 fn summary(record: &Record, path: &Path, listing: bool) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
     if let (Some(fields), Some(place)) = (value.as_object_mut(), location(record, path).as_object())
@@ -187,7 +220,10 @@ fn read(entry: &fs::DirEntry) -> Option<Record> {
     if name.starts_with('.') || !name.ends_with(archive::EXT) {
         return None;
     }
-    archive::read_record(&path).ok()
+    let mut record = archive::read_record(&path).ok()?;
+    // The file name is the id, so a renamed or copied archive is its own backup.
+    record.id = name.strip_suffix(archive::EXT)?.to_owned();
+    Some(record)
 }
 
 pub fn find(id: &str) -> Result<(Record, PathBuf)> {

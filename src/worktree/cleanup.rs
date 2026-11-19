@@ -422,7 +422,7 @@ fn remove_worktree(
                 "path": real,
                 "branch": subject.branch,
                 "id": done["id"],
-                "ref": done["ref"],
+                "backup": done["backup"],
                 "verdict": subject.finding.verdict.as_str(),
                 "evidence": subject.finding.evidence,
                 "ignored_lost": done["ignored_lost"],

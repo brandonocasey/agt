@@ -40,6 +40,13 @@ pub fn run(cli: Cli) -> Result<Output> {
     }
 }
 
+/// Where a restore puts the files: `path`, as a worktree of the repository when `attached`, or a
+/// plain directory.
+struct Placed {
+    path: PathBuf,
+    attached: bool,
+}
+
 fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Result<Output> {
     let mut warnings = Vec::new();
     let repo = Repo::at(&record.repository);
@@ -55,10 +62,36 @@ fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Re
             record.repository.display()
         ));
     }
-    let target = info::real(target)?;
+    let placed = Placed {
+        path: target.to_owned(),
+        attached,
+    };
+    match unpack_backup(record, archive, &placed, &mut warnings) {
+        Ok((target, sparse)) => Ok(report(record, &target, sparse, warnings)),
+        Err(error) => {
+            // A restore that stops half way removes the worktree or directory it made, so a retry can start clean.
+            if attached {
+                let _ = repo.git(&["worktree", "remove", "--force", &target.to_string_lossy()]);
+            } else {
+                let _ = fs::remove_dir_all(target);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Puts the archive's files into the placed worktree; returns its real path and whether its
+/// sparse checkout came back.
+fn unpack_backup(
+    record: &backup::Record,
+    archive: &Path,
+    placed: &Placed,
+    warnings: &mut Vec<String>,
+) -> Result<(PathBuf, bool)> {
+    let target = info::real(&placed.path)?;
     let repo = Repo::at(&target);
-    if attached && sparse_enabled(&repo) {
-        disable_inherited(&repo, &mut warnings);
+    if placed.attached && sparse_enabled(&repo) {
+        disable_inherited(&repo, warnings);
     }
     for path in &record.deleted {
         let file = archive::inside(&target, path)?;
@@ -66,19 +99,24 @@ fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Re
     }
     let git_files = tempfile::tempdir().map_err(ctx("create a scratch directory"))?;
     archive::unpack(archive, &target, git_files.path())?;
-    let sparse = attached && reapply_sparse(git_files.path(), archive, &target, &mut warnings);
+    let sparse = placed.attached && reapply_sparse(git_files.path(), archive, &target, warnings);
     if sparse {
-        restage_deletions(&repo, &record.deleted, &mut warnings);
+        restage_deletions(&repo, &record.deleted, warnings);
     }
-    Ok(Output::Json(json!({
+    Ok((target, sparse))
+}
+
+/// The restore result: where the worktree is and what came back.
+fn report(record: &backup::Record, target: &Path, sparse: bool, warnings: Vec<String>) -> Output {
+    Output::Json(json!({
         "sparse_checkout": sparse,
         "restored": target,
         "id": record.id,
         "branch": record.branch,
         "head": record.head,
-        "copied_ignored": 0,
+        "copied_ignored": record.copied.len(),
         "warnings": warnings,
-    })))
+    }))
 }
 
 fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Result<Output> {
@@ -95,8 +133,8 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
 
     let target = info::real(target)?;
     // `worktree add` copies a sparse main checkout's patterns. The snapshot goes onto a full
-    // checkout, where every file it changes or deletes is on disk; the backup's own sparse
-    // checkout comes back after it.
+    // checkout. Every file it changes or deletes is on disk. The backup's own sparse checkout
+    // comes back after it.
     let repo = Repo::at(&target);
     if sparse_enabled(&repo) {
         disable_inherited(&repo, &mut warnings);
@@ -111,19 +149,11 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
     }
     restore_modes(&target, &record.file_modes)?;
     snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
-    Ok(Output::Json(json!({
-        "sparse_checkout": sparse,
-        "restored": target,
-        "id": record.id,
-        "branch": record.branch,
-        "head": record.head,
-        "copied_ignored": record.copied.len(),
-        "warnings": warnings,
-    })))
+    Ok(report(record, &target, sparse, warnings))
 }
 
-/// Adds the worktree at `target` on the backup's branch, or detached at its HEAD when the branch
-/// moved or is checked out elsewhere.
+/// Adds the worktree at `target` on the backup's branch. It detaches at the backup's HEAD if the
+/// branch moved or is checked out elsewhere.
 fn add_worktree(
     repo: &Repo,
     record: &backup::Record,
@@ -196,9 +226,9 @@ fn remove_with_empty_parents(root: &Path, file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Puts the saved sparse-checkout patterns and per-worktree config back into the restored
-/// worktree and reapplies them; true when it did. A failure is a warning naming `kept`, where
-/// the backup holds the saved files, not an error: the worktree is restored, as a full checkout.
+/// Restores the saved sparse-checkout patterns and config, then reapplies them. Returns true
+/// when it did. A failure is a warning, not an error. It names `kept`, where the backup holds
+/// the saved files. The worktree is then a full checkout.
 fn reapply_sparse(
     saved: &std::path::Path,
     kept: &std::path::Path,
@@ -378,30 +408,10 @@ fn apply(worktree: &std::path::Path, snapshot: &str) -> Result<Vec<Vec<u8>>> {
 
 fn restore_modes(target: &std::path::Path, modes: &[backup::FileMode]) -> Result<()> {
     for saved in modes {
-        let relative = std::path::Path::new(std::ffi::OsStr::from_bytes(&saved.path));
-        if relative
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        {
-            return fail("backup file mode has an invalid relative path");
-        }
-        let mut path = target.to_owned();
-        let mut components = relative.components().peekable();
-        while let Some(part) = components.next() {
-            path.push(part);
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                Err(error) => return Err(ctx(format!("stat {}", path.display()))(error)),
-            };
-            if components.peek().is_some() {
-                if !metadata.is_dir() {
-                    return fail(format!("cannot restore mode through {}", path.display()));
-                }
-            } else if metadata.is_file() {
-                fs::set_permissions(&path, fs::Permissions::from_mode(saved.mode & 0o7777))
-                    .map_err(ctx(format!("restore mode of {}", path.display())))?;
-            }
+        let path = archive::inside(target, &saved.path)?;
+        if fs::symlink_metadata(&path).is_ok_and(|found| found.is_file()) {
+            fs::set_permissions(&path, fs::Permissions::from_mode(saved.mode & 0o7777))
+                .map_err(ctx(format!("restore mode of {}", path.display())))?;
         }
     }
     Ok(())

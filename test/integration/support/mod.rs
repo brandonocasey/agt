@@ -604,8 +604,7 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     found
 }
 
-/// A worktree backup archive read back: its record and the entries under `files/` (with each
-/// file's mode) and `worktree-git/`.
+/// A backup archive read back: its record, the `files/` entries with modes, and `worktree-git/`.
 pub struct BackupArchive {
     pub record: Value,
     pub files: BTreeMap<String, Vec<u8>>,

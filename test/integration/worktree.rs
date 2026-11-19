@@ -157,7 +157,7 @@ fn assert_backup(f: &Fixture, removed: &Value, feature: &str) {
     );
     assert_eq!(record["branch"], "feat");
     assert_eq!(record["head"], feature);
-    assert_eq!(record["deleted"], json!(["c.txt".as_bytes()]));
+    assert_eq!(record["deleted"], json!(["c.txt"]));
     assert_eq!(record.get("snapshot"), None);
     // Every tracked file is saved with its edits; ignored files, secrets included, stay out.
     assert_eq!(backup.files["a.txt"], b"a changed\n");
@@ -246,8 +246,8 @@ fn restore_preserves_regular_file_modes_across_umasks() {
     }
 }
 
-/// A backup in the directory format older agt versions wrote: `backup.json` with file modes, a
-/// snapshot commit pinned by a ref, and the per-worktree git files. The worktree is removed.
+/// Writes a backup in the older directory format. It has `backup.json` with file modes. It also
+/// pins a snapshot commit with a ref, and keeps the per-worktree git files. The worktree is removed.
 fn legacy_backup(f: &Fixture, file_modes: Value) -> (String, PathBuf) {
     let id = "20260101-0000-worktree-feat".to_owned();
     let head = wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]);
@@ -351,31 +351,129 @@ fn append_raw(
 
 #[test]
 fn restore_refuses_archive_entries_that_leave_the_worktree() {
-    let outside = [("files/../outside", None), ("files/link/outside", None)];
-    let through_link = [
-        ("files/link", Some(Path::new("/"))),
-        ("files/link/outside", None),
-    ];
-    for entries in [&outside[..1], &through_link[..]] {
+    for through_link in [false, true] {
         let f = Fixture::new();
         let removed = f.remove();
         let archive = Path::new(removed["backup"].as_str().unwrap());
         let record = read_backup(archive).record;
+        let root = f.env.path("");
+        let entries = if through_link {
+            vec![
+                ("files/link", Some(root.as_path())),
+                ("files/link/outside", None),
+            ]
+        } else {
+            vec![("files/../outside", None)]
+        };
         let file = fs::File::create(archive).unwrap();
         let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
             file,
             flate2::Compression::fast(),
         ));
         append_raw(&mut tar, "backup.json", None, record.to_string().as_bytes());
-        for (name, link) in entries {
+        for (name, link) in &entries {
             append_raw(&mut tar, name, *link, b"pwned");
         }
         tar.into_inner().unwrap().finish().unwrap();
         let output = f.agt(&f.env.repo, &["restore", removed["id"].as_str().unwrap()]);
         assert_eq!(output.status.code(), Some(1), "{entries:?}");
         assert!(!f.env.path("trees/outside").exists(), "{entries:?}");
-        assert!(!Path::new("/outside").exists(), "{entries:?}");
+        assert!(!root.join("outside").exists(), "{entries:?}");
+        // The refused restore leaves no half-built worktree to block a retry.
+        assert!(!f.wt.exists(), "{entries:?}");
+        assert!(!f.env.git(&["worktree", "list"]).contains("trees/feat"));
     }
+}
+
+#[test]
+fn a_renamed_archive_is_its_own_backup() {
+    let f = Fixture::new();
+    let removed = f.remove();
+    let archive = PathBuf::from(removed["backup"].as_str().unwrap());
+    fs::copy(&archive, archive.with_file_name("copy.tar.gz")).unwrap();
+    let listed = f.json(&["backups"]);
+    let mut ids: Vec<&str> = listed["backups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|backup| backup["id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    let mut expected = [removed["id"].as_str().unwrap(), "copy"];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+}
+
+#[test]
+fn a_backup_restores_after_a_submodule_was_removed_from_the_worktree() {
+    let f = Fixture::new();
+    add_submodule(&f, "mod", "mod");
+    wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
+    let removed = f.remove();
+    assert_eq!(
+        read_backup(Path::new(removed["backup"].as_str().unwrap()))
+            .record
+            .get("deleted"),
+        None
+    );
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], json!([]));
+    assert!(f.wt.join("a.txt").exists());
+}
+
+#[test]
+fn a_backup_restores_a_submodule_path_that_became_a_file() {
+    let f = Fixture::new();
+    add_submodule(&f, "mod", "mod");
+    fs::remove_dir_all(f.wt.join("mod")).unwrap();
+    fs::write(f.wt.join("mod"), "now a file\n").unwrap();
+    let removed = f.remove();
+    f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(
+        fs::read_to_string(f.wt.join("mod")).unwrap(),
+        "now a file\n"
+    );
+}
+
+#[test]
+fn restore_keeps_symlink_targets_exactly() {
+    let long = format!("{}/", "d".repeat(120));
+    for target in ["d/", "d//e/./f", long.as_str()] {
+        let f = Fixture::new();
+        std::os::unix::fs::symlink(target, f.wt.join("lnk")).unwrap();
+        wgit(&f.env, &f.wt, &["add", "lnk"]);
+        let removed = f.remove();
+        f.json(&["restore", removed["id"].as_str().unwrap()]);
+        assert_eq!(
+            fs::read_link(f.wt.join("lnk")).unwrap(),
+            Path::new(target),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn an_unfinished_archive_does_not_block_the_next_backup_of_the_same_minute() {
+    let f = Fixture::new();
+    let backups = f.env.path("state/agents/backups/repo");
+    fs::create_dir_all(&backups).unwrap();
+    let stale = backups.join(".20260921-1413-worktree-feat.tar.gz.partial");
+    fs::write(&stale, "interrupted").unwrap();
+    let output = f
+        .env
+        .bin(&f.env.repo)
+        .env("AGT_NOW", "1790000000")
+        .args(["worktree", "remove", &f.wt.to_string_lossy(), "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let removed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(removed["id"], "20260921-1413-worktree-feat-2");
+    assert!(stale.exists());
 }
 
 #[test]
@@ -707,7 +805,7 @@ fn the_backup_list_counts_deleted_paths_and_the_view_by_id_lists_them() {
     assert!(!entry.contains_key("deleted"), "{entry:?}");
     assert_eq!(entry["deleted_count"], 1);
     let shown = f.json(&["backups", id]);
-    assert_eq!(shown["backups"][0]["deleted"], json!(["c.txt".as_bytes()]));
+    assert_eq!(shown["backups"][0]["deleted"], json!(["c.txt"]));
 }
 
 #[test]
