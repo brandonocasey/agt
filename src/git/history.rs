@@ -5,9 +5,9 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use super::index::copy_entry;
+use super::index::{STAGE_MASK, copy_entry};
 use super::patch_id;
-use super::{CommitInfo, LogEntry, Repo, commit_id, peeled_commit, peeled_object, subject_of};
+use super::{CommitInfo, LogEntry, Repo, commit_id, peeled_commit, peeled_tree, subject_of};
 use crate::core::error::{Error, Result, fail};
 
 /// A commit of the branch that `git cherry` lists.
@@ -213,8 +213,8 @@ impl Repo {
     /// Patch-id of the whole change from `from` (empty tree when `None`) to a commit or tree.
     pub fn range_patch_id(&self, from: Option<&str>, to: &str) -> Result<Option<String>> {
         let repo = self.open_refs()?;
-        let old = from.map(|from| tree_of(&repo, from)).transpose()?;
-        patch_id(&repo, old.as_ref(), &tree_of(&repo, to)?)
+        let old = from.map(|from| peeled_tree(&repo, from)).transpose()?;
+        patch_id(&repo, old.as_ref(), &peeled_tree(&repo, to)?)
     }
 
     /// `git diff -U3 -M`, the context forges show around review comments.
@@ -228,19 +228,11 @@ impl Repo {
 
     fn diff(&self, context: u32, from: &str, to: &str) -> Result<String> {
         let repo = self.open_refs()?;
-        let (old, new) = (tree_of(&repo, from)?, tree_of(&repo, to)?);
+        let (old, new) = (peeled_tree(&repo, from)?, peeled_tree(&repo, to)?);
         let mut diff =
             repo.diff_tree_to_tree(Some(&old), Some(&new), Some(&mut diff_options(context)))?;
         diff.find_similar(Some(git2::DiffFindOptions::new().renames(true)))?;
-        let mut text = Vec::new();
-        diff.print(git2::DiffFormat::Patch, |_, _, line| {
-            if matches!(line.origin(), '+' | '-' | ' ') {
-                text.push(line.origin() as u8);
-            }
-            text.extend_from_slice(line.content());
-            true
-        })?;
-        Ok(String::from_utf8_lossy(&text).into_owned())
+        Ok(String::from_utf8_lossy(&patch_id::patch_text(&diff)?).into_owned())
     }
 }
 
@@ -265,15 +257,6 @@ fn diff_options(context: u32) -> git2::DiffOptions {
         .old_prefix("a/")
         .new_prefix("b/");
     options
-}
-
-/// The tree of a commit or tree.
-fn tree_of<'r>(repo: &'r git2::Repository, spec: &str) -> Result<git2::Tree<'r>> {
-    let found = peeled_object(repo, spec, git2::ObjectType::Tree)?
-        .ok_or_else(|| Error(format!("unknown tree: {spec}")))?;
-    found
-        .into_tree()
-        .map_err(|_| Error(format!("{spec} names no tree")))
 }
 
 /// The patch-id of the change from `old` (the empty tree when `None`) to `new`, `None` when
@@ -333,9 +316,6 @@ fn side_entry(conflict: &git2::IndexConflict) -> Option<git2::IndexEntry> {
     entry.flags &= !STAGE_MASK;
     Some(entry)
 }
-
-/// The stage bits of an index entry's flags.
-const STAGE_MASK: u16 = 0x3000;
 
 #[cfg(test)]
 mod tests {

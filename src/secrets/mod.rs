@@ -14,15 +14,14 @@ use serde_json::json;
 
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
-use crate::git::Repo;
+use crate::git::{GITLINK_MODE, Repo};
 
 use rules::RULES;
 
 /// The distinct findings of a scan: file, line and the rule that matched.
 type Findings = BTreeSet<(String, usize, &'static str)>;
 
-/// The index modes of a submodule and of a symlink.
-const GITLINK_MODE: u32 = 0o160000;
+/// The index mode of a symlink.
 const SYMLINK_MODE: u32 = 0o120000;
 
 const ALLOW: &str = "agt-secrets: allow";

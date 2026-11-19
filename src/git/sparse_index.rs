@@ -5,6 +5,7 @@
 
 use sha1_smol::Sha1;
 
+use super::index::{SKIP_WORKTREE, STAGE_MASK};
 use crate::core::error::{Error, Result, ctx};
 
 /// The index entry mode of a collapsed directory.
@@ -13,7 +14,6 @@ const TREE_MODE: u32 = 0o040_000;
 /// flags.
 const ENTRY_FIXED: usize = 62;
 const EXTENDED: u16 = 0x4000;
-const SKIP_WORKTREE: u16 = 1 << 14;
 const NAME_MASK: u16 = 0x0fff;
 const CHECKSUM: usize = 20;
 
@@ -229,7 +229,7 @@ fn serialize(entries: &[Entry]) -> Vec<u8> {
         out.extend_from_slice(&entry.id);
         let extended = entry.extended != 0;
         let name = entry.flags & NAME_MASK;
-        let stage = entry.flags & 0x3000;
+        let stage = entry.flags & STAGE_MASK;
         let flags = name | stage | if extended { EXTENDED } else { 0 };
         out.extend_from_slice(&flags.to_be_bytes());
         if extended {

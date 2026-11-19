@@ -8,11 +8,9 @@ use serde_json::json;
 
 use super::{backup, info, snapshot};
 
-/// The mode of a submodule entry.
-const GITLINK_MODE: u32 = 0o160000;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::output::Output;
-use crate::git::{Checkout, Repo};
+use crate::git::{Checkout, GITLINK_MODE, Repo};
 
 #[derive(Args)]
 pub struct Cli {

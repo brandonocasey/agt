@@ -8,15 +8,15 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::files::{is_nested_repo, nested_repos};
-use super::{Gitlink, Repo, StatusEntry};
+use super::{GITLINK_MODE, Gitlink, Repo, StatusEntry};
 use crate::core::error::{Error, Result};
 
-/// The mode of a submodule entry.
-const GITLINK_MODE: u32 = 0o160000;
 /// `GIT_INDEX_ENTRY_VALID`: the file is assumed unchanged.
 const ASSUME_UNCHANGED: u16 = 0x8000;
 /// `GIT_INDEX_ENTRY_SKIP_WORKTREE`, in the extended flags.
 pub(super) const SKIP_WORKTREE: u16 = 1 << 14;
+/// The stage bits of an index entry's flags.
+pub(super) const STAGE_MASK: u16 = 0x3000;
 
 /// What `git status --ignore-submodules=dirty` still shows of a submodule: a staged change or a
 /// commit other than the recorded one.

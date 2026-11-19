@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use super::{Repo, error_line};
+use super::{GITLINK_MODE, Repo, error_line};
 use crate::core::error::Result;
 use crate::core::shell::quote;
 
@@ -151,9 +151,6 @@ pub fn moves_submodule(repo: &Repo, from: &str, to: &str) -> Result<bool> {
         .iter()
         .any(|change| change.old_mode == GITLINK_MODE || change.new_mode == GITLINK_MODE))
 }
-
-/// The mode of a submodule entry.
-const GITLINK_MODE: u32 = 0o160000;
 
 /// The outcome of the update. Git may refuse over local changes a merge would overwrite. The
 /// reason is git's message, and `retry` the command to run once that is resolved.

@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::index::left_out_paths;
-use super::{Repo, commit_id, folded, peeled_commit};
+use super::{Repo, folded, peeled_commit, peeled_tree};
 use crate::core::error::{Error, Result};
 
 /// One file that differs between two trees, or between a tree and the index.
@@ -231,22 +231,6 @@ fn staged_anything(repo: &git2::Repository, wanted: &impl Fn(&[u8]) -> bool) -> 
             .filter_map(|file| file.path_bytes())
             .any(wanted)
     }))
-}
-
-/// The tree of a commit or tree.
-fn peeled_tree<'r>(repo: &'r git2::Repository, spec: &str) -> Result<git2::Tree<'r>> {
-    let id = commit_or_tree(repo, spec)?;
-    Ok(repo.find_object(id, None)?.peel_to_tree()?)
-}
-
-fn commit_or_tree(repo: &git2::Repository, spec: &str) -> Result<git2::Oid> {
-    match commit_id(repo, spec) {
-        Ok(id) => Ok(id),
-        Err(_) => repo
-            .revparse_single(spec)
-            .map(|found| found.id())
-            .map_err(|_| Error(format!("unknown tree: {spec}"))),
-    }
 }
 
 fn changes(diff: &git2::Diff<'_>) -> Vec<TreeChange> {

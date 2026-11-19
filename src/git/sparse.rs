@@ -8,12 +8,9 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::Repo;
-use super::index::{SKIP_WORKTREE, copy_entry, refreshed_index};
+use super::index::{SKIP_WORKTREE, STAGE_MASK, copy_entry, refreshed_index};
+use super::{GITLINK_MODE, Repo};
 use crate::core::error::{Error, Result, ctx, fail};
-
-/// The stage bits of an index entry's flags.
-const STAGE_MASK: u16 = 0x3000;
 
 impl Repo {
     /// Whether `core.sparseCheckout` is on.
@@ -121,9 +118,6 @@ fn leave_out(file: &Path, entry: &git2::IndexEntry) -> Result<bool> {
     fs::remove_file(file).map_err(ctx(format!("remove {}", file.display())))?;
     Ok(true)
 }
-
-/// The mode of a submodule entry.
-const GITLINK_MODE: u32 = 0o160000;
 
 fn check_out(
     repo: &git2::Repository,

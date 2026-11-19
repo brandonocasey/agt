@@ -744,6 +744,13 @@ fn peeled_object<'r>(
     Ok(found.peel(kind).ok())
 }
 
+/// The tree of the commit or tree `spec` names.
+fn peeled_tree<'r>(repo: &'r git2::Repository, spec: &str) -> Result<git2::Tree<'r>> {
+    peeled_object(repo, spec, git2::ObjectType::Tree)?
+        .and_then(|found| found.into_tree().ok())
+        .ok_or_else(|| Error(format!("unknown tree: {spec}")))
+}
+
 /// The commit `spec` names, peeled through tags; `None` when it names none.
 fn peeled_commit(repo: &git2::Repository, spec: &str) -> Result<Option<String>> {
     Ok(peeled_object(repo, spec, git2::ObjectType::Commit)?.map(|commit| commit.id().to_string()))
@@ -781,6 +788,9 @@ fn symbolic_target(repo: &git2::Repository, name: &str) -> Result<Option<String>
         .ok()
         .and_then(|found| found.symbolic_target().map(str::to_owned)))
 }
+
+/// The index and tree mode of a submodule.
+pub const GITLINK_MODE: u32 = 0o160000;
 
 /// `path` with `.` and `..` folded away and no symbolic links followed.
 fn folded(path: &Path) -> PathBuf {
