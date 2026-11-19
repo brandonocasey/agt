@@ -515,6 +515,54 @@ fn list_reports_counts_ahead_and_merged_for_this_repo_and_all_roots() {
 }
 
 #[test]
+fn the_backup_commit_takes_its_identity_from_the_git_environment() {
+    let ident = "%an <%ae> %ai|%cn <%ce> %ci";
+    let default = Fixture::new();
+    default.dirty();
+    let removed = default.remove();
+    let identity = default.env.git(&[
+        "log",
+        "-1",
+        &format!("--format={ident}"),
+        removed["ref"].as_str().unwrap(),
+    ]);
+    let (author, committer) = identity.split_once('|').unwrap();
+    assert!(author.starts_with("agt <agt@localhost> "), "{identity}");
+    assert!(committer.starts_with("agt <agt@localhost> "), "{identity}");
+
+    let named = Fixture::new();
+    named.dirty();
+    let output = named
+        .env
+        .bin(&named.env.repo)
+        .args(["worktree", "remove", &named.wt.to_string_lossy(), "--yes"])
+        .env("GIT_AUTHOR_NAME", "Ann Author")
+        .env("GIT_AUTHOR_EMAIL", "ann@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-02T03:04:05+01:00")
+        .env("GIT_COMMITTER_NAME", "Cy Committer")
+        .env("GIT_COMMITTER_EMAIL", "cy@example.com")
+        .env("GIT_COMMITTER_DATE", "1700000000 +0200")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let removed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let identity = named.env.git(&[
+        "log",
+        "-1",
+        &format!("--format={ident}"),
+        removed["ref"].as_str().unwrap(),
+    ]);
+    assert_eq!(
+        identity,
+        "Ann Author <ann@example.com> 2026-01-02 03:04:05 +0100|Cy Committer <cy@example.com> 2023-11-15 00:13:20 +0200"
+    );
+}
+
+#[test]
 fn backups_list_filter_by_id_and_rm() {
     let f = Fixture::new();
     f.dirty();

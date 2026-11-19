@@ -1,5 +1,6 @@
 //! Refs and the commits they name: listing, filtering, moving and deleting, through libgit2.
 
+use super::identity::{Role, signature};
 use super::{Repo, commit_id, peeled_commit, subject_of};
 use crate::core::error::{Error, Result, fail};
 
@@ -222,15 +223,16 @@ impl Repo {
         Ok(())
     }
 
-    /// A commit of `tree` on top of `parent`, written by `agt <agt@localhost>`, and its id. No
-    /// ref moves.
+    /// A commit of `tree` on top of `parent`, and its id, written by `agt <agt@localhost>` unless
+    /// `GIT_AUTHOR_*` or `GIT_COMMITTER_*` name another. No ref moves.
     pub fn commit_tree(&self, tree: &str, parent: &str, message: &str) -> Result<String> {
         let repo = self.open()?;
         let tree = repo.find_tree(git2::Oid::from_str(tree)?)?;
         let parent = repo.find_commit(commit_id(&repo, parent)?)?;
-        let signature = git2::Signature::now("agt", "agt@localhost")?;
+        let author = signature(Role::Author)?;
+        let committer = signature(Role::Committer)?;
         let message = format!("{}\n", message.trim_end_matches('\n'));
-        let id = repo.commit(None, &signature, &signature, &message, &tree, &[&parent])?;
+        let id = repo.commit(None, &author, &committer, &message, &tree, &[&parent])?;
         Ok(id.to_string())
     }
 

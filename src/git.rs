@@ -14,6 +14,7 @@ mod files;
 mod fixtures;
 mod history;
 mod hooks;
+mod identity;
 mod index;
 mod linked;
 mod merge;
