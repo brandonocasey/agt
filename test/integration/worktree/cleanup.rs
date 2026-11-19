@@ -249,11 +249,18 @@ fn the_manual_list_names_the_command_that_deletes_a_worktree_backup() {
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         report["manual"]["backups"].clone()
     };
-    // Listed only once the backup is 30 days old.
-    assert_eq!(backups(29), json!([]));
+    let archive = backup_path(&site.env, id);
+    let partial = archive.with_file_name(".20260101-0000-worktree-old.tar.gz.partial");
+    fs::write(&partial, "interrupted").unwrap();
+    let leftover = format!("0.0 MiB {}", partial.display());
+    // The leftover's age is its file time, in the real clock: fresh now, old after the sweep's
+    // clock jump.
+    assert_eq!(backups(-site.days_on), json!([]));
+    // A backup is listed only once it is 30 days old.
+    assert_eq!(backups(29), json!([leftover]));
     assert_eq!(
         backups(30),
-        json!([format!("agt worktree backups rm {id} --yes")])
+        json!([format!("agt worktree backups rm {id} --yes"), leftover])
     );
 }
 

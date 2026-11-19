@@ -59,8 +59,6 @@ pub(super) fn changes(repo: &Repo, from: &str, to: &str) -> Result<Vec<Change>> 
     Ok(found)
 }
 
-/// Snapshots `entry`, whose repository's main checkout is `main`. Nothing in the worktree
-/// changes; its index is not touched.
 /// Fails when `entry` has no commit, which a backup needs to restore on.
 pub(super) fn require_commit(entry: &Worktree) -> Result<()> {
     if entry.unborn() {
@@ -72,6 +70,8 @@ pub(super) fn require_commit(entry: &Worktree) -> Result<()> {
     Ok(())
 }
 
+/// Snapshots `entry`, whose repository's main checkout is `main`. Nothing in the worktree
+/// changes; its index is not touched.
 pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
     let created = clock::now_secs()?;
     let stamp = clock::format(created);

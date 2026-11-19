@@ -84,17 +84,25 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     Ok(())
 }
 
-/// Whether a local or remote branch contains the commit `head`.
-pub(super) fn held_by_a_branch(shared: &Repo, head: &str) -> Result<bool> {
-    let found = shared.git(&[
+/// The short names of the refs under `patterns` that contain the commit `head`.
+pub(super) fn branches_holding(
+    shared: &Repo,
+    head: &str,
+    patterns: &[&str],
+) -> Result<Vec<String>> {
+    let mut args = vec![
         "for-each-ref",
         "--contains",
         head,
-        "--format=%(refname)",
-        "refs/heads",
-        "refs/remotes",
-    ])?;
-    Ok(!found.is_empty())
+        "--format=%(refname:short)",
+    ];
+    args.extend_from_slice(patterns);
+    Ok(shared.git(&args)?.lines().map(str::to_owned).collect())
+}
+
+/// Whether a local or remote branch contains the commit `head`.
+pub(super) fn held_by_a_branch(shared: &Repo, head: &str) -> Result<bool> {
+    Ok(!branches_holding(shared, head, &["refs/heads", "refs/remotes"])?.is_empty())
 }
 
 /// Removal deletes a linked worktree below `worktree` without a backup, so refuses one that

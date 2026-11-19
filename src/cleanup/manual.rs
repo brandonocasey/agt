@@ -112,6 +112,7 @@ fn backups(now: i64, found: &mut Vec<Candidate>) -> Result<()> {
             old(newest, now).then_some((bytes, path))
         })
         .collect();
+    sized.extend(unfinished_archives(&worktree_backups, now));
     sized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     for (bytes, path) in sized {
         found.push(Candidate {
@@ -120,6 +121,32 @@ fn backups(now: i64, found: &mut Vec<Candidate>) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// The hidden `.partial` archives an interrupted worktree backup left beside the finished ones,
+/// once old, with their sizes.
+fn unfinished_archives(backups: &[prune::Backup], now: i64) -> Vec<(u64, PathBuf)> {
+    let mut repos: Vec<&Path> = backups
+        .iter()
+        .filter_map(|backup| backup.dir.parent())
+        .collect();
+    repos.sort();
+    repos.dedup();
+    let mut found = Vec::new();
+    for repo in repos {
+        for entry in fs::read_dir(repo).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !(name.starts_with('.') && name.ends_with(".partial")) {
+                continue;
+            }
+            if let Ok((newest, bytes)) = measure(&entry.path())
+                && old(newest, now)
+            {
+                found.push((bytes, entry.path()));
+            }
+        }
+    }
+    found
 }
 
 /// Splits a name into text and number runs, so `1.10` sorts after `1.9` as `sort -V` does.

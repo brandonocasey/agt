@@ -51,7 +51,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         Untracked::Refuse
     };
-    let unpinned = unpinned_head(&main, &path, entry, mode)?;
+    let unpinned = unpinned_head(&main, &path, entry, cli.force)?;
     if mode == Untracked::Refuse {
         refuse_untracked(&path, &unbacked)?;
     }
@@ -129,12 +129,12 @@ fn unpinned_head(
     main: &Path,
     path: &Path,
     entry: &Worktree,
-    mode: Untracked,
+    force: bool,
 ) -> Result<Option<String>> {
     if gate::held_by_a_branch(&Repo::at(main), &entry.head)? {
         return Ok(None);
     }
-    if mode == Untracked::Refuse {
+    if !force {
         return fail(format!(
             "{} has HEAD {} on no branch, and a backup keeps files, not commits; create a branch there, or pass --force to remove without them; nothing was backed up or removed",
             path.display(),
@@ -145,18 +145,6 @@ fn unpinned_head(
         "HEAD {} is on no branch; its commits are not backed up",
         entry.head
     )))
-}
-
-/// The short names of the refs under `pattern` that contain `head`.
-fn branches_holding(shared: &Repo, head: &str, pattern: &str) -> Result<Vec<String>> {
-    let found = shared.git(&[
-        "for-each-ref",
-        "--contains",
-        head,
-        "--format=%(refname:short)",
-        pattern,
-    ])?;
-    Ok(found.lines().map(str::to_owned).collect())
 }
 
 /// Runs the remove hooks when `run_hooks`, backs `entry` up, then removes its worktree; the
@@ -219,8 +207,8 @@ pub(super) fn removal(
         ])?;
     }
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
-    let local = branches_holding(&shared, &entry.head, "refs/heads")?;
-    let remote = branches_holding(&shared, &entry.head, "refs/remotes")?;
+    let local = gate::branches_holding(&shared, &entry.head, &["refs/heads"])?;
+    let remote = gate::branches_holding(&shared, &entry.head, &["refs/remotes"])?;
     let mut done = json!({
         "removed": path,
         "id": taken.record.id,

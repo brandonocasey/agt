@@ -15,7 +15,7 @@ use crate::core::local;
 use crate::core::output::Output;
 use crate::git::Repo;
 
-const FILE: &str = "backup.json";
+pub(super) const FILE: &str = "backup.json";
 
 #[derive(Serialize, Deserialize)]
 pub struct Record {

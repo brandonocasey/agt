@@ -5,7 +5,7 @@
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
+use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -15,14 +15,14 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use tar::{Archive, Builder, Entry, EntryType, Header};
 
-use super::backup::Record;
-use super::snapshot::SAVED_GIT_FILES;
+use super::backup::{FILE as RECORD, Record};
+use super::snapshot::{SAVED_GIT_DIR as GIT, SAVED_GIT_FILES};
 use crate::core::error::{Error, Result, ctx, fail};
 
 pub const EXT: &str = ".tar.gz";
-const RECORD: &str = "backup.json";
 const FILES: &str = "files";
-const GIT: &str = "worktree-git";
+/// Bytes the link-name field of a tar header holds.
+const LINK_FIELD_BYTES: usize = 100;
 
 /// An archive being written under a hidden `.partial` name, which [`Writer::finish`] renames
 /// into place.
@@ -109,9 +109,17 @@ impl Writer {
         header.set_mode(mode);
         header.set_size(0);
         let name = entry_name(relative);
-        self.tar
-            .append_link(&mut header, &name, Path::new(OsStr::from_bytes(target)))
-            .map_err(ctx(format!("archive {}", name.display())))
+        // `append_link` rebuilds a short target from its components, which drops `//` and `.`;
+        // the header field keeps the bytes as they are.
+        let added = if target.len() < LINK_FIELD_BYTES {
+            header
+                .set_link_name_literal(target)
+                .and_then(|()| self.tar.append_data(&mut header, &name, io::empty()))
+        } else {
+            self.tar
+                .append_link(&mut header, &name, Path::new(OsStr::from_bytes(target)))
+        };
+        added.map_err(ctx(format!("archive {}", name.display())))
     }
 
     /// Completes the archive and moves it to its name.

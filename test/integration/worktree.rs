@@ -1,6 +1,7 @@
 //! `agt worktree`: list, remove with a backup, restore.
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -354,6 +355,8 @@ fn restore_refuses_archive_entries_that_leave_the_worktree() {
     for through_link in [false, true] {
         let f = Fixture::new();
         let removed = f.remove();
+        // With the branch gone, a restore creates it again; a refused one must not keep it.
+        f.env.git(&["branch", "-D", "feat"]);
         let archive = Path::new(removed["backup"].as_str().unwrap());
         let record = read_backup(archive).record;
         let root = f.env.path("");
@@ -382,6 +385,7 @@ fn restore_refuses_archive_entries_that_leave_the_worktree() {
         // The refused restore leaves no half-built worktree to block a retry.
         assert!(!f.wt.exists(), "{entries:?}");
         assert!(!f.env.git(&["worktree", "list"]).contains("trees/feat"));
+        assert_eq!(f.env.git(&["branch", "--list", "feat"]), "", "{entries:?}");
     }
 }
 
@@ -497,9 +501,13 @@ fn restore_keeps_symlink_targets_exactly() {
         wgit(&f.env, &f.wt, &["add", "lnk"]);
         let removed = f.remove();
         f.json(&["restore", removed["id"].as_str().unwrap()]);
+        // `Path` equality ignores repeated slashes and `.`, so compare the bytes.
         assert_eq!(
-            fs::read_link(f.wt.join("lnk")).unwrap(),
-            Path::new(target),
+            fs::read_link(f.wt.join("lnk"))
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            target.as_bytes(),
             "{target}"
         );
     }

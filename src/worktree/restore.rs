@@ -52,8 +52,9 @@ fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Re
     let repo = Repo::at(&record.repository);
     let attached =
         record.repository.is_dir() && repo.object_exists(&format!("{}^{{commit}}", record.head))?;
+    let mut made_branch = None;
     if attached {
-        add_worktree(&repo, record, target, &mut warnings)?;
+        made_branch = add_worktree(&repo, record, target, &mut warnings)?;
     } else {
         fs::create_dir_all(target).map_err(ctx(format!("create {}", target.display())))?;
         warnings.push(format!(
@@ -72,6 +73,9 @@ fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Re
             // A restore that stops half way removes the worktree or directory it made, so a retry can start clean.
             if attached {
                 let _ = repo.git(&["worktree", "remove", "--force", &target.to_string_lossy()]);
+                if let Some(branch) = made_branch {
+                    let _ = repo.git(&["branch", "-D", &branch]);
+                }
             } else {
                 let _ = fs::remove_dir_all(target);
             }
@@ -153,13 +157,14 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
 }
 
 /// Adds the worktree at `target` on the backup's branch. It detaches at the backup's HEAD if the
-/// branch moved or is checked out elsewhere.
+/// branch moved or is checked out elsewhere. Returns the branch it had to create.
 fn add_worktree(
     repo: &Repo,
     record: &backup::Record,
     target: &Path,
     warnings: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<Option<String>> {
+    let mut made_branch = None;
     let target_text = target.to_string_lossy().into_owned();
     // Only the registration of this very path is cleared; other missing worktrees keep theirs.
     let wanted = lexical_real(target);
@@ -183,6 +188,7 @@ fn add_worktree(
             match tip {
                 None => {
                     repo.git(&["worktree", "add", "-b", branch, &target_text, &record.head])?;
+                    made_branch = Some(branch.clone());
                 }
                 Some(_) if elsewhere => {
                     warnings.push(format!(
@@ -204,7 +210,7 @@ fn add_worktree(
             }
         }
     }
-    Ok(())
+    Ok(made_branch)
 }
 
 /// Deletes `file`, then each directory above it that is left empty, up to but not including `root`.
