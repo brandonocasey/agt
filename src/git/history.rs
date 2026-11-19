@@ -172,10 +172,13 @@ impl Repo {
         self.merged(ours, theirs, |_, tree, _| Ok(tree))
     }
 
-    /// The paths git cannot merge when it merges `theirs` into `ours`; empty for a clean merge.
+    /// The paths git cannot merge when it merges `theirs` into `ours`; empty for a clean merge. An
+    /// error when the two share no history.
     pub fn merge_conflicts(&self, ours: &str, theirs: &str) -> Result<Vec<String>> {
-        let conflicts = self.merged(ours, theirs, |_, _, paths| Ok(paths))?;
-        Ok(conflicts.unwrap_or_default())
+        self.merged(ours, theirs, |_, _, paths| Ok(paths))?
+            .ok_or_else(|| {
+                Error("git merge-tree failed: fatal: refusing to merge unrelated histories".into())
+            })
     }
 
     fn merged<T>(
