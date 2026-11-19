@@ -136,9 +136,8 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
     add_worktree(&repo, record, target, &mut warnings)?;
 
     let target = info::real(target)?;
-    // `worktree add` copies a sparse main checkout's patterns. The snapshot goes onto a full
-    // checkout. Every file it changes or deletes is on disk. The backup's own sparse checkout
-    // comes back after it.
+    // `worktree add` copies a sparse main checkout's patterns. Restore works on a full checkout,
+    // where every changed or deleted file is on disk. Then the backup's sparse checkout comes back.
     let repo = Repo::at(&target);
     if sparse_enabled(&repo) {
         disable_inherited(&repo, &mut warnings);
@@ -156,8 +155,8 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
     Ok(report(record, &target, sparse, warnings))
 }
 
-/// Adds the worktree at `target` on the backup's branch. It detaches at the backup's HEAD if the
-/// branch moved or is checked out elsewhere. Returns the branch it had to create.
+/// Adds the worktree at `target` on the backup's branch, or detached at its HEAD if the branch
+/// moved or is checked out elsewhere. Returns the branch it created.
 fn add_worktree(
     repo: &Repo,
     record: &backup::Record,
@@ -233,8 +232,8 @@ fn remove_with_empty_parents(root: &Path, file: &Path) -> Result<()> {
 }
 
 /// Restores the saved sparse-checkout patterns and config, then reapplies them. Returns true
-/// when it did. A failure is a warning, not an error. It names `kept`, where the backup holds
-/// the saved files. The worktree is then a full checkout.
+/// when it did; a failure warns, names `kept` (where the backup holds the saved files), and
+/// leaves a full checkout.
 fn reapply_sparse(
     saved: &std::path::Path,
     kept: &std::path::Path,

@@ -1,6 +1,5 @@
-//! A worktree backup is one gzip-compressed tar file. `backup.json` comes first, so listing
-//! reads a single entry. Then come the per-worktree git files in `worktree-git/` and the saved
-//! files in `files/`. Tar keeps modes, symlinks and byte-exact names.
+//! A worktree backup is one gzip-compressed tar file: `backup.json` first, then `worktree-git/`
+//! and `files/`. Tar keeps modes, symlinks and byte-exact names.
 
 use std::ffi::OsStr;
 use std::fmt::Display;

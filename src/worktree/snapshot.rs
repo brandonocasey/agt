@@ -155,8 +155,8 @@ struct Contents<'a> {
     changes: &'a [Change],
 }
 
-/// Adds the files of the tree to `writer`. A file the worktree lacks (a sparse checkout) comes
-/// from its object when changed. Otherwise HEAD keeps it.
+/// Adds the tree's files to `writer`. A file the worktree lacks (a sparse checkout) comes from
+/// its object when changed, else HEAD keeps it.
 fn fill(writer: &mut Writer, contents: &Contents) -> Result<()> {
     let edited: HashMap<&[u8], &Change> = contents
         .changes

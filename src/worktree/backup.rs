@@ -1,6 +1,5 @@
-//! Worktree backups: one `agents/backups/<repo>/<id>.tar.gz` each (see `archive`). An older
-//! agt made directory backups: `<id>/backup.json` plus the ref `refs/agt/backups/<id>`. That
-//! ref keeps the snapshot commit alive. Backups are never pruned automatically.
+//! Worktree backups are one `agents/backups/<repo>/<id>.tar.gz` each (see `archive`). Older
+//! directory backups, `<id>/backup.json` with the ref `refs/agt/backups/<id>`, are still read.
 
 use std::fs;
 use std::path::{Path, PathBuf};

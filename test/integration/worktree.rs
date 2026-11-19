@@ -247,8 +247,8 @@ fn restore_preserves_regular_file_modes_across_umasks() {
     }
 }
 
-/// Writes a backup in the older directory format. It has `backup.json` with file modes. It also
-/// pins a snapshot commit with a ref, and keeps the per-worktree git files. The worktree is removed.
+/// Writes a backup in the older directory format: `backup.json` with file modes, a pinned
+/// snapshot commit and ref, and the per-worktree git files. Removes the worktree.
 fn legacy_backup(f: &Fixture, file_modes: Value) -> (String, PathBuf) {
     let id = "20260101-0000-worktree-feat".to_owned();
     let head = wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]);
