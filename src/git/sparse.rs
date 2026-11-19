@@ -3,7 +3,7 @@
 //! Cone and non-cone pattern files are read the same way: as gitignore patterns that select
 //! the files to keep, the last matching pattern winning.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -91,6 +91,7 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
         .ok_or_else(|| Error("this operation must be run in a work tree".into()))?;
     let mut index = refreshed_index(repo)?;
     let entries: Vec<git2::IndexEntry> = index.iter().collect();
+    let mut changed_files: Option<HashSet<Vec<u8>>> = None;
     let mut restore = Vec::new();
     let mut emptied = Vec::new();
     for entry in entries.iter().filter(|entry| entry.flags & STAGE_MASK == 0) {
@@ -104,7 +105,13 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
                 restore.push(file);
             }
         } else if !keep && !skipped {
-            if !leave_out(&file, entry)? {
+            if changed_files.is_none() {
+                changed_files = Some(changed_in_work_tree(repo)?);
+            }
+            let differs = changed_files
+                .as_ref()
+                .is_some_and(|paths| paths.contains(&entry.path));
+            if !leave_out(&file, entry, differs)? {
                 continue;
             }
             changed.flags_extended |= SKIP_WORKTREE;
@@ -122,22 +129,34 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
     Ok(())
 }
 
-/// Removes `file`, which the patterns leave out, unless it differs from the index; returns
+/// The tracked paths whose file differs from the index once the checkout filters (line endings,
+/// attributes) are applied to it. Reads only; nothing is written to the index or the object
+/// database.
+fn changed_in_work_tree(repo: &git2::Repository) -> Result<HashSet<Vec<u8>>> {
+    let mut options = git2::StatusOptions::new();
+    options
+        .show(git2::StatusShow::Workdir)
+        .include_untracked(false)
+        .include_ignored(false)
+        .exclude_submodules(true);
+    let statuses = repo.statuses(Some(&mut options))?;
+    Ok(statuses
+        .iter()
+        .filter(|entry| !entry.status().is_empty())
+        .map(|entry| entry.path_bytes().to_vec())
+        .collect())
+}
+
+/// Removes `file`, which the patterns leave out, unless it `differs` from the index; returns
 /// whether the entry may now be marked skip-worktree.
-fn leave_out(file: &Path, entry: &git2::IndexEntry) -> Result<bool> {
+fn leave_out(file: &Path, entry: &git2::IndexEntry, differs: bool) -> Result<bool> {
     let Ok(meta) = fs::symlink_metadata(file) else {
         return Ok(true);
     };
     if meta.is_dir() || entry.mode == GITLINK_MODE {
         return Ok(true);
     }
-    let on_disk = if meta.is_symlink() {
-        let target = fs::read_link(file).map_err(ctx(format!("read {}", file.display())))?;
-        git2::Oid::hash_object(git2::ObjectType::Blob, target.as_os_str().as_bytes())?
-    } else {
-        git2::Oid::hash_file(git2::ObjectType::Blob, file)?
-    };
-    if on_disk != entry.id {
+    if differs {
         return Ok(false);
     }
     fs::remove_file(file).map_err(ctx(format!("remove {}", file.display())))?;
@@ -469,6 +488,47 @@ mod tests {
                 "disable, cone={cone}"
             );
         }
+    }
+
+    #[test]
+    fn files_that_checkout_converts_are_not_local_changes_to_a_reapply() {
+        let sandbox = Sandbox::new();
+        let origin = sandbox.path().join("origin");
+        fs::create_dir(&origin).unwrap();
+        sandbox.git(&origin, &["init", "-q", "-b", "main"]);
+        let files = [
+            (".gitattributes", "*.cmd text eol=crlf\n"),
+            ("keep/a.txt", "a\n"),
+            ("out/run.cmd", "echo one\necho two\n"),
+            ("out/edited.cmd", "echo three\n"),
+        ];
+        commit(&sandbox, &origin, &files, "tree");
+        let mut clones = Vec::new();
+        for name in ["ours", "theirs"] {
+            let dir = sandbox.path().join(name);
+            sandbox.git(
+                sandbox.path(),
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    dir.to_str().unwrap(),
+                ],
+            );
+            assert!(fs::read(dir.join("out/run.cmd")).unwrap().contains(&b'\r'));
+            fs::write(dir.join("out/edited.cmd"), "echo changed\r\n").unwrap();
+            sandbox.git(&dir, &["config", "core.sparseCheckout", "true"]);
+            sandbox.git(&dir, &["config", "core.sparseCheckoutCone", "true"]);
+            fs::write(dir.join(".git/info/sparse-checkout"), "/*\n!/*/\n/keep/\n").unwrap();
+            clones.push(dir);
+        }
+        Repo::at(&clones[0]).sparse_reapply().unwrap();
+        sandbox.git(&clones[1], &["sparse-checkout", "reapply"]);
+
+        let theirs = state(&sandbox, &clones[1]);
+        assert!(theirs.contains("./out/edited.cmd"), "{theirs}");
+        assert!(!theirs.contains("./out/run.cmd"), "{theirs}");
+        assert_eq!(state(&sandbox, &clones[0]), theirs);
     }
 
     #[test]
