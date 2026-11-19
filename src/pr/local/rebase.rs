@@ -2,16 +2,12 @@
 //! It runs only where nothing a rebase could damage is in the way.
 //! A rebase that stops on conflicts is aborted, so the branch is as it was.
 
-use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::Local;
-use crate::core::error::{Result, ctx, fail};
+use crate::core::error::{Result, fail};
 use crate::git::fast_forward::{check, moves_submodule};
-use crate::git::{Repo, Worktree, error_line, nul_fields, unfinished_markers};
-
-/// The directories that hold a rebase in progress.
-const REBASE_DIRS: [&str; 2] = ["rebase-merge", "rebase-apply"];
+use crate::git::{Busy, Rebased, Repo, unfinished_markers};
 
 impl Local<'_> {
     /// The work tree where `branch` can be rebased onto `target`, or what stops it.
@@ -31,7 +27,7 @@ impl Local<'_> {
         let in_use = self.target_in_use(target)?;
         let target_busy = !in_use.is_empty();
         blockers.extend(in_use);
-        let holders = self.holders(branch)?;
+        let holders = self.repo.holders(branch)?;
         let [holder] = holders.as_slice() else {
             blockers.push(if holders.is_empty() {
                 format!("{branch} is not checked out in any work tree, and a rebase needs one")
@@ -85,74 +81,33 @@ impl Local<'_> {
     /// Git will not move a branch that such a work tree uses. The rebase MUST NOT start while one
     /// exists.
     fn target_in_use(&self, target: &str) -> Result<Vec<String>> {
-        let mut found = Vec::new();
-        for entry in self.repo.worktrees()? {
-            let Some(git_dir) = self.git_dir_of(&entry)? else {
-                continue;
-            };
-            let operation = if rebases(&git_dir, target) {
-                "rebasing"
-            } else if bisects(&git_dir, target) {
-                "bisecting"
-            } else {
-                continue;
-            };
-            let stale = if entry.path.exists() {
-                ""
-            } else {
-                "; it no longer exists, and `git worktree prune` drops that entry"
-            };
-            found.push(format!(
-                "{} is {operation} {target}, and git will not move {target} meanwhile{stale}",
-                entry.path.display()
-            ));
-        }
-        Ok(found)
-    }
-
-    /// The git directory of the work tree `entry`.
-    /// A deleted work tree has an entry under `worktrees` in the common git directory.
-    /// `None` for a bare repository or a missing entry.
-    fn git_dir_of(&self, entry: &Worktree) -> Result<Option<PathBuf>> {
-        if entry.bare {
-            return Ok(None);
-        }
-        if entry.path.exists() {
-            return Repo::at(&entry.path).git_dir().map(Some);
-        }
-        let admin = Path::new(&self.repo.common_dir()?).join("worktrees");
-        let listed = match std::fs::read_dir(&admin) {
-            Ok(listed) => listed,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ctx(format!("read {}", admin.display()))(error)),
-        };
-        let wanted = entry.path.join(".git");
-        Ok(listed
-            .flatten()
-            .map(|dir| dir.path())
-            .find(|dir| gitdir_of(dir).is_some_and(|recorded| recorded == wanted)))
-    }
-
-    /// The work trees that have `branch` checked out.
-    /// A rebase detaches HEAD, so one rebasing `branch` counts too.
-    fn holders(&self, branch: &str) -> Result<Vec<PathBuf>> {
-        let mut found = Vec::new();
-        for entry in self.repo.worktrees()? {
-            let rebasing = self
-                .git_dir_of(&entry)?
-                .is_some_and(|git_dir| rebases(&git_dir, branch));
-            if rebasing || entry.branch.as_deref() == Some(branch) {
-                found.push(entry.path);
-            }
-        }
-        Ok(found)
+        Ok(self
+            .repo
+            .busy_on(target)?
+            .into_iter()
+            .map(|busy| {
+                let operation = match busy.busy {
+                    Busy::Rebasing => "rebasing",
+                    Busy::Bisecting => "bisecting",
+                };
+                let stale = if busy.stale {
+                    "; it no longer exists, and `git worktree prune` drops that entry"
+                } else {
+                    ""
+                };
+                format!(
+                    "{} is {operation} {target}, and git will not move {target} meanwhile{stale}",
+                    busy.path.display()
+                )
+            })
+            .collect())
     }
 
     /// Fails when `branch` is checked out in several work trees. A fast-forward would leave the
     /// others behind.
     /// It also fails when one has a rebase, merge, cherry-pick, revert or bisect in progress.
     pub(super) fn check_holders(&self, branch: &str) -> Result<()> {
-        let holders = self.holders(branch)?;
+        let holders = self.repo.holders(branch)?;
         if holders.len() > 1 {
             let paths: Vec<String> = holders
                 .iter()
@@ -191,62 +146,40 @@ impl Local<'_> {
             }
         };
         let work = Repo::at(path);
-        // The `-c` form works on Git 2.31; `--no-update-refs` needs 2.38.
-        let (code, error) = work.probe(&[
-            "-c",
-            "rebase.updateRefs=false",
-            "rebase",
-            "--no-autostash",
-            target_tip,
-        ])?;
-        if code == Some(0) {
-            let from = work.git(&["rev-parse", "ORIG_HEAD"])?;
-            let now = self.tip(branch)?;
-            if from != tip {
+        let rebased = match work.rebase_onto(target_tip, tip) {
+            Ok(rebased) => rebased,
+            Err(error) => {
+                let now = self.tip(branch)?;
                 return fail(format!(
-                    "{branch} was at {from}, not {tip}, when the rebase started; it is at {now} and was not merged"
+                    "git rebase refused: {}; {branch} is at {now}",
+                    error.0
                 ));
             }
-            return Ok(now);
-        }
-        let error = error_line(&error);
-        if !started_here(&work.git_dir()?, branch, target_tip, tip) {
-            let now = self.tip(branch)?;
-            return fail(format!("git rebase refused: {error}; {branch} is at {now}"));
-        }
-        let conflicts = work.git(&["diff", "--name-only", "--diff-filter=U", "-z"]);
-        work.git(&["rebase", "--abort"])?;
-        let paths = names(&conflicts?);
-        let cause = if paths.is_empty() {
-            format!("stops: {error}")
-        } else {
-            format!("stops on conflicts in {}", paths.join(", "))
         };
-        fail(format!(
-            "rebasing {branch} onto {target} {cause}; the rebase was aborted and {branch} is still at {tip}"
-        ))
+        match rebased {
+            Rebased::Done => self.tip(branch),
+            Rebased::Stopped { conflicts, error } => {
+                let cause = if conflicts.is_empty() {
+                    format!("stops: {}", error.unwrap_or_default())
+                } else {
+                    format!("stops on conflicts in {}", conflicts.join(", "))
+                };
+                fail(format!(
+                    "rebasing {branch} onto {target} {cause}; the rebase was aborted and {branch} is still at {tip}"
+                ))
+            }
+        }
     }
 
     /// The paths each commit from `base` to `tip` touches.
     /// A rebase writes each commit in turn, so a path added then removed still counts.
     fn replayed_paths(&self, base: &str, tip: &str) -> Result<Vec<String>> {
-        let range = format!("{base}..{tip}");
-        let listed = self.repo.git(&[
-            "log",
-            "--no-renames",
-            "--name-only",
-            "--format=",
-            "-z",
-            "--end-of-options",
-            &range,
-        ])?;
-        Ok(names(&listed))
+        Ok(names(self.repo.touched_paths(base, tip)?))
     }
 
     /// The paths that differ between the commits `from` and `to`.
     fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let listed = self.repo.git(&["diff", "--name-only", "-z", from, to])?;
-        Ok(names(&listed))
+        Ok(names(self.repo.changed_paths(from, to)?))
     }
 
     /// One line for each reason the target's work tree would refuse the fast-forward.
@@ -265,14 +198,8 @@ impl Local<'_> {
         let work = Repo::at(&holder.path);
         let mut found = operations_in_progress(&holder.path)?;
         let kinds = [
-            (
-                "a local change",
-                names(&work.git(&["diff", "--name-only", "-z", "HEAD"])?),
-            ),
-            (
-                "an untracked file",
-                names(&work.git(&["ls-files", "--others", "--exclude-standard", "-z"])?),
-            ),
+            ("a local change", names(work.changed_since_head()?)),
+            ("an untracked file", names(work.untracked_files()?)),
             ("an ignored file", ignored_paths(&work)?),
         ];
         for (kind, paths) in kinds {
@@ -296,60 +223,16 @@ fn operations_in_progress(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// What the rebase in `dir` of `git_dir` records under `name`.
-fn rebase_record(git_dir: &Path, dir: &str, name: &str) -> Option<String> {
-    std::fs::read_to_string(git_dir.join(dir).join(name))
-        .ok()
-        .map(|text| text.trim().to_owned())
-}
-
-/// The `.git` file path an entry under `worktrees` records as its work tree's. With
-/// `worktree.useRelativePaths` (Git 2.48) it is relative to `admin`, so it is joined and folded.
-fn gitdir_of(admin: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(admin.join("gitdir")).ok()?;
-    let mut folded = PathBuf::new();
-    for part in admin.join(text.trim_end()).components() {
-        match part {
-            Component::ParentDir => {
-                folded.pop();
-            }
-            Component::CurDir => {}
-            other => folded.push(other),
-        }
-    }
-    Some(folded)
-}
-
-/// Whether the rebase in progress in `git_dir` is of `branch`.
-fn rebases(git_dir: &Path, branch: &str) -> bool {
-    let head = format!("refs/heads/{branch}");
-    REBASE_DIRS
-        .iter()
-        .any(|dir| rebase_record(git_dir, dir, "head-name").is_some_and(|name| name == head))
-}
-
-/// Whether the bisect in progress in `git_dir` was started from `branch`.
-fn bisects(git_dir: &Path, branch: &str) -> bool {
-    std::fs::read_to_string(git_dir.join("BISECT_START")).is_ok_and(|start| start.trim() == branch)
-}
-
 /// The ignored paths no commit tracks in `work`. A whole ignored directory is one entry ending in a
 /// slash.
 fn ignored_paths(work: &Repo) -> Result<Vec<String>> {
-    let listed = work.git(&[
-        "ls-files",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "--directory",
-        "-z",
-    ])?;
-    Ok(names(&listed))
+    Ok(names(work.ignored_entries()?))
 }
 
-/// The paths in NUL-separated git output.
-fn names(listed: &str) -> Vec<String> {
-    nul_fields(listed.as_bytes())
+/// The paths as text.
+fn names(paths: Vec<Vec<u8>>) -> Vec<String> {
+    paths
+        .iter()
         .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect()
 }
@@ -367,17 +250,4 @@ fn in_the_way(path: &str, ignored: &[String]) -> bool {
 fn within(path: &str, directory: &str) -> bool {
     path.strip_prefix(directory)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
-
-/// Whether the rebase in `git_dir` is of `branch` onto `target_tip` from `tip`.
-/// That is the one this call started, not one a user began.
-fn started_here(git_dir: &Path, branch: &str, target_tip: &str, tip: &str) -> bool {
-    REBASE_DIRS.iter().any(|dir| {
-        let same = |name: &str, want: &str| {
-            rebase_record(git_dir, dir, name).is_some_and(|text| text == want)
-        };
-        same("head-name", &format!("refs/heads/{branch}"))
-            && same("onto", target_tip)
-            && same("orig-head", tip)
-    })
 }

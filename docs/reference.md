@@ -19,9 +19,9 @@ For installation and a local example, follow [Getting started](getting-started.m
 
 ## Compatibility
 
-Git 2.31 or newer must be on `PATH`. Git 2.38 or newer supports the full
-review coverage checks; older versions count every merge commit as unreviewed.
-Repositories with SHA-1 or SHA-256 object IDs both work.
+agt reads and writes git repositories with the libgit2 it is built with, so no `git` program is
+needed on `PATH`; a configured git credential helper still runs as its own program.
+Repositories with SHA-1 object IDs work; SHA-256 repositories are not supported.
 
 Up to 0.4.0, the binary was `agent-review`; its commands lacked the `review` prefix.
 Its stores remain readable. Posted comment markers retain the `agent-review` name.
@@ -91,7 +91,7 @@ Environment variables agt reads, or sets for programs it runs:
 | `AGT_SYNC_CAP_MS` | `review`, `issue` | Milliseconds replacing the 15-second auto-sync limit | test only |
 | `AGT_ROLLUP_GRACE_SECS` | `ci wait` | Seconds replacing the 120-second grace for an empty rollup and for a required check that is missing while nothing runs | test only |
 | `AGT_GH_BIN`, `AGT_GLAB_BIN`, `AGT_TEA_BIN` | everything that calls a forge | Program to run instead of `gh`, `glab` or `tea` | test only |
-| `AGT_GIT_BIN`, `AGT_MISE_BIN` | `doctor` | Program to run instead of `git` or `mise` for its version checks; other commands still run `git` | test only |
+| `AGT_MISE_BIN` | `doctor` | Program to run instead of `mise` for its version checks | test only |
 | `AGT_CLEANUP_TMP` | `cleanup` | Directory standing in for `/tmp` when looking for session scratch files and browser temp profiles | test only |
 | `AGT_CLEANUP_PID` | `cleanup` | Limits the orphan-process sweep to this pid; `0` looks at none | test only |
 
@@ -1885,7 +1885,7 @@ are terminated; a check finishing after the deadline cannot report success.
 check (name, `ok`/`warn`/`fail`, detail, fix hint), as a table or, with `--json`,
 `{"status", "checks": [...]}`. It is read-only: it writes nothing, reads no credentials (a forge
 login is only the exit status and account name of `gh auth status` / `glab auth status`, or the account `tea logins list` names) and
-makes no forge write. Checks: `git` (>= 2.38), `gh`, `glab`, `tea` (>= 0.13.0, the first with `tea api -d`, which agt needs for request bodies; older is a warning), `mise` and their versions; the
+makes no forge write. Checks: `libgit2` (the version agt is built with), `gh`, `glab`, `tea` (>= 0.13.0, the first with `tea api -d`, which agt needs for request bodies; older is a warning), `mise` and their versions; the
 login for the origin forge (a fail when missing) and for the other installed forge CLIs (a
 warning); the running agt version against the one `mise ls --current` pins for
 `github:brandonocasey/agt` (older: warn, `mise install`; when `mise ls` fails, the detail is its first stderr line containing `ERROR`, else its last line and the fix is

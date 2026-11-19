@@ -172,26 +172,11 @@ pub(super) fn removal(
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     for other in &inner {
-        shared.git(&[
-            "worktree",
-            "remove",
-            "--force",
-            &other.path.to_string_lossy(),
-        ])?;
+        shared.remove_worktree(&other.path)?;
     }
-    shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
-    let branches = |pattern: &str| -> Result<Vec<String>> {
-        let found = shared.git(&[
-            "for-each-ref",
-            "--contains",
-            &entry.head,
-            "--format=%(refname:short)",
-            pattern,
-        ])?;
-        Ok(found.lines().map(str::to_owned).collect())
-    };
-    let local = branches("refs/heads")?;
-    let remote = branches("refs/remotes")?;
+    shared.remove_worktree(path)?;
+    let local = shared.refs_containing(&entry.head, "refs/heads/")?;
+    let remote = shared.refs_containing(&entry.head, "refs/remotes/")?;
     let mut done = json!({
         "removed": path,
         "id": taken.record.id,

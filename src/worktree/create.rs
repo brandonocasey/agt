@@ -11,6 +11,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::info::main_checkout;
+use super::nested;
 use super::setup::{self, Step};
 use super::{emit, fast_forward, hooks};
 use crate::core::error::{Result, ctx, fail};
@@ -18,7 +19,7 @@ use crate::core::output::Output;
 use crate::core::shell::quote;
 use crate::forge::auto::Offline;
 use crate::git::base::{Candidate, candidates, choose};
-use crate::git::{Repo, Worktree};
+use crate::git::{Checkout, Repo, Transports, Worktree};
 
 #[derive(Args)]
 pub struct Cli {
@@ -51,7 +52,7 @@ pub fn run(cli: Cli) -> Result<Output> {
     let current = std::env::current_dir().map_err(ctx("read the current directory"))?;
     let repo = Repo::at(&current);
     let full = format!("refs/heads/{branch}");
-    if branch.starts_with('-') || !repo.succeeds(&["check-ref-format", &full])? {
+    if branch.starts_with('-') || !Repo::is_valid_ref_name(&full) {
         return fail(format!("{branch} is not a valid branch name"));
     }
     let detach = cli
@@ -86,25 +87,28 @@ pub fn run(cli: Cli) -> Result<Output> {
         .is_some_and(|resolved| !resolved.is_empty(hooks::Kind::Create));
     let mut value = match checked_out {
         Some(entry) => {
-            let commit = Repo::at(&entry.path).git(&["rev-parse", "HEAD"])?;
+            let commit = Repo::at(&entry.path).head()?;
             json!({"path": entry.path, "branch": named, "commit": commit, "reused": true})
         }
         None => {
             let dir = target(&repo, &cli)?;
-            let dir_arg = dir.to_string_lossy();
             let mut value = json!({"reused": false});
             if let Some(commit) = &detach {
-                repo.git(&["worktree", "add", "--detach", &dir_arg, commit])?;
+                repo.add_worktree(&dir, &Checkout::Detached(commit))?;
             } else if exists {
-                repo.git(&["worktree", "add", &dir_arg, branch])?;
+                repo.add_worktree(&dir, &Checkout::Branch(branch))?;
             } else if cli.base.is_none() && on_origin(&repo, branch)? {
                 let upstream = format!("origin/{branch}");
-                repo.git(&[
-                    "worktree", "add", "--track", "-b", branch, &dir_arg, &upstream,
-                ])?;
+                repo.add_worktree(
+                    &dir,
+                    &Checkout::Tracking {
+                        name: branch,
+                        upstream: &upstream,
+                    },
+                )?;
                 value["tracking"] = json!(upstream);
             } else {
-                let (base, found) = add_new(&repo, branch, &dir_arg, cli.base.as_deref())?;
+                let (base, found) = add_new(&repo, branch, &dir, cli.base.as_deref())?;
                 value["base"] = base;
                 fetched = found;
             }
@@ -179,7 +183,7 @@ fn on_origin(repo: &Repo, branch: &str) -> Result<bool> {
         return Ok(false);
     }
     let spec = format!("+{heads}:{tracking}");
-    repo.git(&["fetch", "--quiet", "--no-tags", "origin", &spec])?;
+    repo.fetch("origin", &[&spec])?;
     known()
 }
 
@@ -230,7 +234,7 @@ fn target(repo: &Repo, cli: &Cli) -> Result<PathBuf> {
 fn add_new(
     repo: &Repo,
     branch: &str,
-    dir: &str,
+    dir: &Path,
     base: Option<&str>,
 ) -> Result<(Value, Vec<Candidate>)> {
     let (commit, mut info, found) = match base {
@@ -249,7 +253,13 @@ fn add_new(
             )
         }
     };
-    repo.git(&["worktree", "add", "--no-track", "-b", branch, dir, &commit])?;
+    repo.add_worktree(
+        dir,
+        &Checkout::NewBranch {
+            name: branch,
+            at: &commit,
+        },
+    )?;
     info["commit"] = json!(commit);
     Ok((info, found))
 }
@@ -263,37 +273,11 @@ fn finish(dir: &Path, branch: Option<&str>, mut value: Value) -> Result<Value> {
         // Git takes a submodule's URL from the shared config when the main checkout has
         // registered it, else from `.gitmodules`; offline only `file` URLs can be cloned, so
         // the others are skipped with a warning and the worktree and its hooks carry on.
-        // `-z` ends each record with NUL and splits key from value at a newline, so a name or
-        // path with spaces survives. No match exits 1 (an empty `.gitmodules`), which means no
-        // submodules rather than a failure that would stop `finish` and the create hooks.
-        let listed = inside
-            .git_opt(&[
-                "config",
-                "-f",
-                ".gitmodules",
-                "-z",
-                "--get-regexp",
-                r"^submodule\..*\.path$",
-            ])
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        for path in listed
-            .split('\0')
-            .filter_map(|record| record.split_once('\n').map(|(_, path)| path))
-        {
-            if let Err(error) = inside.git(&[
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "update",
-                "--init",
-                "--recursive",
-                "--",
-                path,
-            ]) {
+        // An empty or unreadable `.gitmodules` means no submodules rather than a failure that
+        // would stop `finish` and the create hooks.
+        let listed = nested::submodule_paths(dir).unwrap_or_default();
+        for path in &listed {
+            if let Err(error) = inside.update_submodules(Some(path), Transports::FileOnly) {
                 warnings.push(format!(
                     "submodule {path} not initialized offline; run `git submodule update --init` online: {}",
                     error.0.lines().last().unwrap_or_default()
@@ -301,12 +285,12 @@ fn finish(dir: &Path, branch: Option<&str>, mut value: Value) -> Result<Value> {
             }
         }
     } else if submodules {
-        inside.git(&["submodule", "update", "--init", "--recursive"])?;
+        inside.update_submodules(None, Transports::Any)?;
     }
     value["warnings"] = json!(warnings);
     value["path"] = json!(dir);
     value["branch"] = json!(branch);
-    value["commit"] = json!(inside.git(&["rev-parse", "HEAD"])?);
+    value["commit"] = json!(inside.head()?);
     value["submodules"] = json!(submodules);
     Ok(value)
 }

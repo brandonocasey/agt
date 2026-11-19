@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde_json::json;
@@ -20,6 +20,10 @@ use rules::RULES;
 
 /// The distinct findings of a scan: file, line and the rule that matched.
 type Findings = BTreeSet<(String, usize, &'static str)>;
+
+/// The index modes of a submodule and of a symlink.
+const GITLINK_MODE: u32 = 0o160000;
+const SYMLINK_MODE: u32 = 0o120000;
 
 const ALLOW: &str = "agt-secrets: allow";
 const FOUND: u8 = 1;
@@ -69,69 +73,32 @@ fn scan(args: &Cli) -> Result<Findings> {
     // staged scan also accepts a path in the index or in the staged diff, such as a staged
     // file since deleted from disk or a staged deletion that hooks pass along.
     for (path, full) in args.paths.iter().zip(&paths) {
-        let found = full.symlink_metadata().is_ok()
-            || (args.staged
-                && (!repo
-                    .checked_paths(
-                        &["ls-files", "-z", "--"],
-                        std::slice::from_ref(full),
-                        None,
-                        &[],
-                    )?
-                    .is_empty()
-                    || !repo
-                        .checked_paths(
-                            &["diff", "--cached", "--name-only", "-z", "--"],
-                            std::slice::from_ref(full),
-                            None,
-                            &[],
-                        )?
-                        .is_empty()));
+        let found =
+            full.symlink_metadata().is_ok() || (args.staged && repo.has_staged_path(full)?);
         if !found {
             return fail(format!("no such path: {}", path.display()));
         }
     }
-    let mut git: Vec<&str> = if args.staged {
-        vec![
-            "diff",
-            "--cached",
-            "--raw",
-            "--no-abbrev",
-            "--no-renames",
-            "-z",
-            // `T` keeps a symlink replaced by a regular file; the mode check skips the reverse.
-            "--diff-filter=ACMRT",
-        ]
-    } else {
-        vec!["ls-files", "-co", "--exclude-standard", "-z"]
-    };
-    git.push("--");
-    let listing = repo.checked_paths(&git, &paths, None, &[])?;
-    let mut fields = listing
-        .split(|&byte| byte == 0)
-        .filter(|field| !field.is_empty());
+    let wanted: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let mut rows = BTreeSet::new();
-    while let Some(field) = fields.next() {
-        let (name, object) = if args.staged {
-            // `:<old mode> <new mode> <old id> <new id> <status>`, then the path.
-            let meta = String::from_utf8_lossy(field).into_owned();
-            let Some(name) = fields.next() else { break };
-            let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
-            let [_, mode, _, id, _] = parts[..] else {
-                continue;
-            };
+    let files: Vec<(Vec<u8>, Option<String>)> = if args.staged {
+        repo.staged_changes(&wanted)?
+            .into_iter()
             // Submodules and symlinks are not file content.
-            if mode == "160000" || mode == "120000" {
-                continue;
-            }
-            (name, Some(id.to_owned()))
-        } else {
-            (field, None)
-        };
-        let Some(content) = read(&repo, name, object.as_deref())? else {
+            .filter(|change| change.new_mode != GITLINK_MODE && change.new_mode != SYMLINK_MODE)
+            .map(|change| (change.path, Some(change.new_id)))
+            .collect()
+    } else {
+        repo.tracked_and_untracked(&wanted)?
+            .into_iter()
+            .map(|name| (name, None))
+            .collect()
+    };
+    for (name, object) in files {
+        let Some(content) = read(&repo, &name, object.as_deref())? else {
             continue;
         };
-        scan_text(&String::from_utf8_lossy(name), &content, &mut rows);
+        scan_text(&String::from_utf8_lossy(&name), &content, &mut rows);
     }
     Ok(rows)
 }
@@ -140,7 +107,7 @@ fn scan(args: &Cli) -> Result<Findings> {
 /// file that is gone, binary or not a regular file (symlinks are never followed).
 fn read(repo: &Repo, name: &[u8], object: Option<&str>) -> Result<Option<Vec<u8>>> {
     let content = if let Some(id) = object {
-        repo.checked(&["cat-file", "blob", id], None, &[])?
+        repo.blob_content(id)?
     } else {
         let path = repo.root().join(OsStr::from_bytes(name));
         match std::fs::symlink_metadata(&path) {

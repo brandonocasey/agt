@@ -85,7 +85,7 @@ pub fn run(cli: Cli) -> Result<Output> {
                 ));
             }
             if record.repository.is_dir() {
-                Repo::at(&record.repository).git(&["update-ref", "-d", &record.reference])?;
+                Repo::at(&record.repository).delete_ref(&record.reference)?;
             }
             fs::remove_dir_all(&dir).map_err(ctx(format!("remove {}", dir.display())))?;
             Ok(Output::Json(

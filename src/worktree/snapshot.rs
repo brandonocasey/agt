@@ -11,7 +11,7 @@ use super::info;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::create_dirs;
-use crate::git::{Repo, Worktree, nul_fields};
+use crate::git::{Repo, Worktree};
 
 pub struct Taken {
     pub record: Record,
@@ -72,7 +72,7 @@ pub fn take(main: &Path, entry: &Worktree) -> Result<Taken> {
     let made = build(main, entry, &dir, id, &reference, created);
     if made.is_err() {
         // A failed backup leaves neither the ref nor the directory behind.
-        let _ = shared.git(&["update-ref", "-d", &reference]);
+        let _ = shared.delete_ref(&reference);
         let _ = fs::remove_dir_all(&dir);
     }
     made
@@ -89,39 +89,15 @@ fn build(
     let shared = &Repo::at(main);
     let tree = Repo::at(&entry.path).worktree_tree_with_hidden_edits()?;
     let message = format!("agt worktree backup {id}");
-    let snapshot = shared.git(&[
-        "-c",
-        "user.name=agt",
-        "-c",
-        "user.email=agt@localhost",
-        "commit-tree",
-        &tree,
-        "-p",
-        &entry.head,
-        "-m",
-        &message,
-    ])?;
-    shared.git(&["update-ref", reference, &snapshot])?;
-    let changed = shared.checked(
-        &[
-            "diff-tree",
-            "-r",
-            "--no-renames",
-            "--name-only",
-            "-z",
-            &entry.head,
-            &snapshot,
-        ],
-        None,
-        &[],
-    )?;
-    let changed = nul_fields(&changed).count();
+    let snapshot = shared.commit_tree(&tree, &entry.head, &message)?;
+    shared.set_ref(reference, &snapshot, &message)?;
+    let changed = shared.tree_changes(&entry.head, &snapshot)?.len();
 
     let ignored = info::ignored(&entry.path)?;
     save_git_files(&entry.path, &dir.join(SAVED_GIT_DIR))?;
-    let paths = shared.checked(&["ls-tree", "-r", "--name-only", "-z", &tree], None, &[])?;
+    let paths = shared.tree_files(&tree)?;
     let mut file_modes = Vec::new();
-    for path in nul_fields(&paths) {
+    for path in &paths {
         let source = entry.path.join(std::ffi::OsStr::from_bytes(path));
         let metadata = match fs::symlink_metadata(&source) {
             Ok(metadata) => metadata,

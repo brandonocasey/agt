@@ -10,7 +10,7 @@ use super::backup;
 use super::info;
 use super::landed::Scene;
 use super::roots;
-use crate::core::error::{Result, ctx};
+use crate::core::error::Result;
 use crate::git::Repo;
 
 /// A merged branch that `agt cleanup --only worktrees` would delete and no worktree holds.
@@ -78,8 +78,8 @@ pub fn untracked_checkouts(path: &str) -> Result<Vec<PathBuf>> {
     found.dedup();
     found.retain(|checkout| {
         Repo::at(checkout)
-            .git(&["ls-files", "-z", "--", path])
-            .is_ok_and(|tracked| tracked.is_empty())
+            .tracks(path)
+            .is_ok_and(|tracked| !tracked)
     });
     Ok(found)
 }
@@ -96,11 +96,7 @@ fn of(repo: &Repo) -> Result<Vec<Found>> {
         }
         if let Some(branch) = local.branch {
             let tip = format!("refs/heads/{branch}");
-            let committed = repo.git(&["log", "-1", "--format=%ct", &tip])?;
-            let committed = committed
-                .trim()
-                .parse()
-                .map_err(ctx(format!("read the commit time of {tip}")))?;
+            let committed = repo.commit_time(&tip)?;
             found.push(Found {
                 repo: main.clone(),
                 branch,
