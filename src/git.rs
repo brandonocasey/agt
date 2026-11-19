@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 pub mod base;
@@ -779,6 +779,21 @@ fn symbolic_target(repo: &git2::Repository, name: &str) -> Result<Option<String>
         .find_reference(name)
         .ok()
         .and_then(|found| found.symbolic_target().map(str::to_owned)))
+}
+
+/// `path` with `.` and `..` folded away and no symbolic links followed.
+fn folded(path: &Path) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                folded.pop();
+            }
+            Component::CurDir => {}
+            other => folded.push(other),
+        }
+    }
+    folded
 }
 
 /// `path` as libgit2 prints a directory, with no trailing slash.

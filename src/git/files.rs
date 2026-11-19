@@ -4,10 +4,10 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::index::left_out_paths;
-use super::{Repo, commit_id, peeled_commit};
+use super::{Repo, commit_id, folded, peeled_commit};
 use crate::core::error::{Error, Result};
 
 /// One file that differs between two trees, or between a tree and the index.
@@ -56,53 +56,27 @@ impl Repo {
         };
         let mut options = git2::DiffOptions::new();
         options.include_typechange(true);
-        for path in paths {
-            options.pathspec(self.within_repository(&repo, path)?);
-        }
+        let wanted = self.under_any(&repo, paths)?;
         let diff = repo.diff_tree_to_index(head.as_ref(), None, Some(&mut options))?;
         Ok(changes(&diff)
             .into_iter()
-            .filter(|change| matches!(change.status, 'A' | 'M' | 'T'))
+            .filter(|change| matches!(change.status, 'A' | 'M' | 'T') && wanted(&change.path))
             .collect())
     }
 
     /// Whether the index, or what is staged against HEAD, has anything under `path`.
     pub fn has_staged_path(&self, path: &Path) -> Result<bool> {
         let repo = self.open()?;
-        let relative = self.within_repository(&repo, path)?;
+        let wanted = self.under_any(&repo, &[path])?;
         let index = repo.index()?;
-        let spec = git2::Pathspec::new([relative.as_os_str()])?;
-        let tracked = index.iter().any(|entry| {
-            spec.matches_path(
-                Path::new(OsStr::from_bytes(&entry.path)),
-                git2::PathspecFlags::DEFAULT,
-            )
-        });
-        Ok(tracked || staged_anything(&repo, &relative)?)
+        let tracked = index.iter().any(|entry| wanted(&entry.path));
+        Ok(tracked || staged_anything(&repo, &wanted)?)
     }
 
     /// The tracked files under `paths` and the untracked ones git does not ignore, sorted.
     pub fn tracked_and_untracked(&self, paths: &[&Path]) -> Result<Vec<Vec<u8>>> {
         let repo = self.open()?;
-        let specs: Vec<_> = paths
-            .iter()
-            .map(|path| self.within_repository(&repo, path))
-            .collect::<Result<_>>()?;
-        let spec = if specs.is_empty() {
-            None
-        } else {
-            Some(git2::Pathspec::new(
-                specs.iter().map(|path| path.as_os_str()),
-            )?)
-        };
-        let wanted = |path: &[u8]| {
-            spec.as_ref().is_none_or(|spec| {
-                spec.matches_path(
-                    Path::new(OsStr::from_bytes(path)),
-                    git2::PathspecFlags::DEFAULT,
-                )
-            })
-        };
+        let wanted = self.under_any(&repo, paths)?;
         let index = repo.index()?;
         let mut found: BTreeSet<Vec<u8>> = index
             .iter()
@@ -205,7 +179,24 @@ impl Repo {
         Ok(paths)
     }
 
-    /// `path` relative to the work tree, which libgit2 pathspecs require; an absolute path
+    /// A test for the files named by `paths`, or below them (every file when there are none).
+    /// A path is taken literally: `[`, `*` and `?` in it match themselves.
+    fn under_any(
+        &self,
+        repo: &git2::Repository,
+        paths: &[&Path],
+    ) -> Result<impl Fn(&[u8]) -> bool + use<>> {
+        let roots: Vec<PathBuf> = paths
+            .iter()
+            .map(|path| self.within_repository(repo, path))
+            .collect::<Result<_>>()?;
+        Ok(move |file: &[u8]| {
+            let file = Path::new(OsStr::from_bytes(file));
+            roots.is_empty() || roots.iter().any(|root| file.starts_with(root))
+        })
+    }
+
+    /// `path` relative to the work tree, with `.` and `..` folded away; an absolute path
     /// outside it is an error.
     fn within_repository(
         &self,
@@ -215,6 +206,7 @@ impl Repo {
         if !path.is_absolute() {
             return Ok(path.to_owned());
         }
+        let path = &folded(path);
         let workdir = repo
             .workdir()
             .ok_or_else(|| Error("this operation must be run in a work tree".into()))?;
@@ -226,16 +218,19 @@ impl Repo {
     }
 }
 
-/// Whether anything under `relative` is staged against HEAD, a deletion included.
-fn staged_anything(repo: &git2::Repository, relative: &Path) -> Result<bool> {
+/// Whether anything `wanted` is staged against HEAD, a deletion included.
+fn staged_anything(repo: &git2::Repository, wanted: &impl Fn(&[u8]) -> bool) -> Result<bool> {
     let Some(head) = peeled_commit(repo, "HEAD")? else {
         return Ok(false);
     };
     let tree = peeled_tree(repo, &head)?;
-    let mut options = git2::DiffOptions::new();
-    options.pathspec(relative);
-    let diff = repo.diff_tree_to_index(Some(&tree), None, Some(&mut options))?;
-    Ok(diff.deltas().len() > 0)
+    let diff = repo.diff_tree_to_index(Some(&tree), None, None)?;
+    Ok(diff.deltas().any(|delta| {
+        [delta.old_file(), delta.new_file()]
+            .iter()
+            .filter_map(|file| file.path_bytes())
+            .any(wanted)
+    }))
 }
 
 /// The tree of a commit or tree.

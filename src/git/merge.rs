@@ -4,10 +4,10 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::index::{copy_entry, left_out_paths};
-use super::{Repo, Worktree, commit_id, sparse};
+use super::{Repo, Worktree, commit_id, folded, sparse};
 use crate::core::error::{Error, Result, ctx};
 
 /// The directories that hold a rebase in progress.
@@ -253,17 +253,7 @@ fn overwrite_message(repo: &git2::Repository, paths: &[PathBuf]) -> Result<Strin
 /// `worktree.useRelativePaths` (Git 2.48) it is relative to `admin`, so it is joined and folded.
 fn gitdir_of(admin: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(admin.join("gitdir")).ok()?;
-    let mut folded = PathBuf::new();
-    for part in admin.join(text.trim_end()).components() {
-        match part {
-            Component::ParentDir => {
-                folded.pop();
-            }
-            Component::CurDir => {}
-            other => folded.push(other),
-        }
-    }
-    Some(folded)
+    Some(folded(&admin.join(text.trim_end())))
 }
 
 /// What the rebase in `dir` of `git_dir` records under `name`.
