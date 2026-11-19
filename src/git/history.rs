@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::index::copy_entry;
+use super::patch_id;
 use super::{CommitInfo, LogEntry, Repo, commit_id, peeled_commit, peeled_object, subject_of};
 use crate::core::error::{Error, Result, fail};
 
@@ -283,7 +284,7 @@ fn patch_id(
     if diff.deltas().len() == 0 {
         return Ok(None);
     }
-    Ok(Some(diff.patchid(None)?.to_string()))
+    Ok(Some(patch_id::stable(&diff)?))
 }
 
 /// Puts the conflicted path into the merged index as git's `merge-tree --write-tree` writes
@@ -428,6 +429,56 @@ mod tests {
         );
         assert_eq!(
             repo.range_patch_id(Some("HEAD~4"), "HEAD~2")
+                .unwrap()
+                .as_deref(),
+            whole.split_whitespace().next()
+        );
+    }
+
+    #[test]
+    fn patch_ids_match_git_for_a_mode_only_file_next_to_others_and_for_odd_files() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(
+            &sandbox,
+            &dir,
+            &[
+                ("a.txt", "1\n2\n"),
+                ("m.sh", "echo m\n"),
+                ("z.txt", "z\n"),
+                ("no-newline.txt", "end"),
+            ],
+            "root",
+        );
+        std::fs::write(dir.join("bin.dat"), [0u8, 1, 2, 3, 0]).unwrap();
+        std::fs::write(dir.join("a.txt"), "1\n2 changed\n").unwrap();
+        std::fs::write(dir.join("z.txt"), "z changed\n").unwrap();
+        std::fs::write(dir.join("no-newline.txt"), "end changed").unwrap();
+        sandbox.git(&dir, &["add", "-A"]);
+        sandbox.git(&dir, &["update-index", "--chmod=+x", "m.sh"]);
+        sandbox.git(&dir, &["commit", "-q", "-m", "mode next to edits"]);
+        sandbox.git(&dir, &["update-index", "--chmod=-x", "m.sh"]);
+        sandbox.git(&dir, &["update-index", "--chmod=+x", "z.txt"]);
+        sandbox.git(&dir, &["commit", "-q", "-m", "two modes"]);
+        sandbox.git(&dir, &["update-index", "--chmod=-x", "z.txt"]);
+        commit(&sandbox, &dir, &[("a.txt", "again\n")], "mode then edit");
+        std::fs::write(dir.join("bin.dat"), [9u8, 1, 2, 3, 0]).unwrap();
+        commit(&sandbox, &dir, &[], "binary edit");
+        let repo = Repo::at(&dir);
+
+        for step in ["HEAD~3", "HEAD~2", "HEAD~1", "HEAD"] {
+            assert_eq!(
+                repo.commit_patch_id(step).unwrap(),
+                cli_patch_id(&sandbox, step),
+                "{step}"
+            );
+        }
+        let whole = sandbox.shell_output(
+            &dir,
+            "git diff --no-renames HEAD~3 HEAD | git patch-id --stable",
+        );
+        assert_eq!(
+            repo.range_patch_id(Some("HEAD~3"), "HEAD")
                 .unwrap()
                 .as_deref(),
             whole.split_whitespace().next()

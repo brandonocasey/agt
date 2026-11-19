@@ -20,6 +20,7 @@ mod known_hosts;
 mod linked;
 mod merge;
 mod network;
+mod patch_id;
 mod rebase;
 mod refs;
 mod remotes;
