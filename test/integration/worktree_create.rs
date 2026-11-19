@@ -861,19 +861,28 @@ fn file_submodule_create(env: &Env, name: &str, extra_env: &[(&str, &str)]) -> O
         .unwrap()
 }
 
-/// What `git submodule update --init` makes of the same repository in a worktree git added.
-fn git_submodule_update(env: &Env, name: &str, extra_env: &[(&str, &str)]) -> Output {
+/// What `git submodule update --init`, for the submodule `only` when it is given, makes of the
+/// same repository in a worktree git added.
+fn git_submodule_update(
+    env: &Env,
+    name: &str,
+    extra_env: &[(&str, &str)],
+    only: Option<&str>,
+) -> Output {
     let tree = env.path(name);
     git(
         env,
         &env.repo,
         &["worktree", "add", "-q", tree.to_str().unwrap()],
     );
-    env.command("git", &tree)
+    let mut update = env.command("git", &tree);
+    update
         .args(["submodule", "update", "--init"])
-        .envs(extra_env.iter().copied())
-        .output()
-        .unwrap()
+        .envs(extra_env.iter().copied());
+    if let Some(path) = only {
+        update.args(["--", path]);
+    }
+    update.output().unwrap()
 }
 
 #[test]
@@ -904,7 +913,7 @@ fn a_file_path_submodule_needs_what_git_needs_to_clone_over_the_file_transport()
     ];
     for (label, extra) in &refused {
         let agt = file_submodule_create(&env, &format!("agt-{label}"), extra);
-        let git = git_submodule_update(&env, &format!("git-{label}"), extra);
+        let git = git_submodule_update(&env, &format!("git-{label}"), extra, None);
         let stderr = String::from_utf8_lossy(&agt.stderr);
         assert_eq!(agt.status.code(), Some(1), "{label}: {stderr}");
         assert!(!git.status.success(), "{label}: git cloned it");
@@ -932,7 +941,7 @@ fn a_file_path_submodule_needs_what_git_needs_to_clone_over_the_file_transport()
     ];
     for (label, extra) in &allowed {
         let agt = file_submodule_create(&env, &format!("agt-{label}"), extra);
-        let git = git_submodule_update(&env, &format!("git-{label}"), extra);
+        let git = git_submodule_update(&env, &format!("git-{label}"), extra, None);
         assert!(
             agt.status.success(),
             "{label}: {}",
@@ -1092,13 +1101,19 @@ fn a_submodule_is_updated_when_git_updates_it_and_skipped_when_git_skips_it() {
     } in cases
     {
         for offline in [false, true] {
-            let env = submodule_policy_repo(reachable, update_none, settings);
+            // Offline, agt names each submodule path, which git updates whatever
+            // `submodule.active` says.
+            let by_path = offline
+                && !update_none
+                && settings.iter().any(|(key, _)| *key == "submodule.active");
+            let env = submodule_policy_repo(reachable || by_path, update_none, settings);
+            let cloned = cloned || by_path;
             let mut extra = allow.to_vec();
             if offline {
                 extra.push(("AGT_OFFLINE", "1"));
             }
             let agt = file_submodule_create(&env, "agt", &extra);
-            let git = git_submodule_update(&env, "git", &allow);
+            let git = git_submodule_update(&env, "git", &allow, by_path.then_some("vendor"));
             let stderr = String::from_utf8_lossy(&agt.stderr);
             assert!(git.status.success(), "{label}: git failed");
             assert!(

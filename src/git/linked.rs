@@ -309,7 +309,11 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
     for mut submodule in repo.submodules()? {
         let relative =
             String::from_utf8_lossy(submodule.path().as_os_str().as_bytes()).into_owned();
-        if only.is_some_and(|wanted| wanted != relative) || !is_active(repo, &submodule)? {
+        let wanted = match only {
+            Some(only) => only == relative,
+            None => is_active(repo, &submodule)?,
+        };
+        if !wanted {
             continue;
         }
         update_submodule(repo, &mut submodule, &relative, transports)?;
