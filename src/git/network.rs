@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use super::known_hosts::{self, Verdict};
 use super::{Kind, Repo};
 use crate::core::error::{Error, Result};
 
@@ -35,11 +36,12 @@ impl Repo {
         let repo = self.open()?;
         let mut remote = remote_named(&repo, remote)?;
         let config = repo.config()?;
+        let url = remote.url().unwrap_or_default().to_owned();
         let mut proxy = git2::ProxyOptions::new();
         proxy.auto();
         let connection = remote.connect_auth(
             git2::Direction::Fetch,
-            Some(callbacks(&config)),
+            Some(callbacks(&config, &url)),
             Some(proxy),
         )?;
         let refs = connection
@@ -111,15 +113,17 @@ fn fetch_from(
     refspecs: &[&str],
 ) -> Result<()> {
     let config = repo.config()?;
-    remote.fetch(refspecs, Some(&mut fetch_options(&config)), None)?;
+    let url = remote.url().unwrap_or_default().to_owned();
+    remote.fetch(refspecs, Some(&mut fetch_options(&config, &url)), None)?;
     Ok(())
 }
 
-/// Fetch options with the credential chain, the proxy settings of the config and no tags.
-pub(super) fn fetch_options(config: &git2::Config) -> git2::FetchOptions<'_> {
+/// Fetch options for `url` with the credential chain, the proxy settings of the config and no
+/// tags.
+pub(super) fn fetch_options<'a>(config: &'a git2::Config, url: &str) -> git2::FetchOptions<'a> {
     let mut options = git2::FetchOptions::new();
     options
-        .remote_callbacks(callbacks(config))
+        .remote_callbacks(callbacks(config, url))
         .download_tags(git2::AutotagOption::None);
     let mut proxy = git2::ProxyOptions::new();
     proxy.auto();
@@ -143,9 +147,11 @@ fn remote_url(repo: &git2::Repository, name: &str) -> Result<String> {
         .ok_or_else(|| Error(format!("remote {name} has no URL")))
 }
 
-fn callbacks<'a>(config: &'a git2::Config) -> git2::RemoteCallbacks<'a> {
+fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'a> {
     let mut offered = Offered::default();
     let mut callbacks = git2::RemoteCallbacks::new();
+    let port = known_hosts::port_of(url);
+    callbacks.certificate_check(move |cert, host| check_host_key(cert, host, port));
     callbacks.credentials(move |url, username_from_url, allowed| {
         let user = username_from_url.unwrap_or("git");
         if allowed.contains(git2::CredentialType::SSH_KEY) {
@@ -172,6 +178,34 @@ fn callbacks<'a>(config: &'a git2::Config) -> git2::RemoteCallbacks<'a> {
         ))
     });
     callbacks
+}
+
+/// Accepts an ssh host key only when a `known_hosts` file lists it; a key of any other
+/// certificate (https) is left to libgit2.
+fn check_host_key(
+    cert: &git2::cert::Cert<'_>,
+    host: &str,
+    port: u16,
+) -> std::result::Result<git2::CertificateCheckStatus, git2::Error> {
+    let Some(hostkey) = cert.as_hostkey() else {
+        return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
+    };
+    let Some(key) = hostkey.hostkey() else {
+        return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
+    };
+    let verdict = known_hosts::check(&known_hosts::default_files(), host, port, key)
+        .map_err(|error| git2::Error::from_str(&error.0))?;
+    match verdict {
+        Verdict::Known => Ok(git2::CertificateCheckStatus::CertificateOk),
+        Verdict::Revoked => Err(git2::Error::from_str(&format!(
+            "the ssh host key of {host} is marked @revoked in a known_hosts file"
+        ))),
+        Verdict::Unknown => Err(git2::Error::from_str(&known_hosts::unknown_host_message(
+            host,
+            port,
+            hostkey.hash_sha256().map(known_hosts::fingerprint),
+        ))),
+    }
 }
 
 /// The `index`th key file of `~/.ssh`, or `None` after the last.

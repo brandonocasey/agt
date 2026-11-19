@@ -22,6 +22,9 @@ For installation and a local example, follow [Getting started](getting-started.m
 agt reads and writes git repositories with the libgit2 it is built with, so no `git` program is
 needed on `PATH`; a configured git credential helper still runs as its own program.
 Repositories with SHA-1 object IDs work; SHA-256 repositories are not supported.
+Over ssh, agt accepts a host key only when `/etc/ssh/ssh_known_hosts`, `~/.ssh/known_hosts` or a
+`known_hosts2` file lists it (plain, wildcard, `[host]:port` and hashed entries); an unknown host
+fails with an error naming the host and the `ssh` or `ssh-keyscan` command that adds its key.
 
 Up to 0.4.0, the binary was `agent-review`; its commands lacked the `review` prefix.
 Its stores remain readable. Posted comment markers retain the `agent-review` name.

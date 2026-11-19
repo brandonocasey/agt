@@ -16,6 +16,7 @@ mod history;
 mod hooks;
 mod identity;
 mod index;
+mod known_hosts;
 mod linked;
 mod merge;
 mod network;

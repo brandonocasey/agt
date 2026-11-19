@@ -270,7 +270,7 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
         }
         let config = repo.config()?;
         let mut options = git2::SubmoduleUpdateOptions::new();
-        options.fetch(super::network::fetch_options(&config));
+        options.fetch(super::network::fetch_options(&config, &url));
         submodule.update(true, Some(&mut options))?;
         update_in(&submodule.open()?, None, transports)?;
     }
