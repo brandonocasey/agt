@@ -602,11 +602,7 @@ impl Repo {
 
     pub fn user_name(&self) -> Result<Option<String>> {
         let repo = self.open_refs()?;
-        let config = repo.config()?;
-        Ok(config
-            .get_string("user.name")
-            .ok()
-            .filter(|name| !name.is_empty()))
+        configured(&repo, "user.name")
     }
 
     /// The absolute git common dir, which names a `local/` repository.

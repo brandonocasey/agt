@@ -1,6 +1,7 @@
 //! The author and committer of the commits agt writes: `agt <agt@localhost>` now, unless the
 //! `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables name another, as they do for `git commit-tree`.
 
+use super::configured;
 use crate::core::clock;
 use crate::core::error::{Error, Result};
 
@@ -24,12 +25,39 @@ impl Role {
     }
 }
 
-/// The signature for `role`. A date is `<epoch> <±hhmm>` (a leading `@` is allowed) or RFC 3339;
-/// git's other date forms are refused.
+/// The signature for `role`, `agt` unless the environment names another. A date is
+/// `<epoch> <±hhmm>` (a leading `@` is allowed) or RFC 3339; git's other date forms are refused.
 pub(super) fn signature(role: Role) -> Result<git2::Signature<'static>> {
+    build(
+        role,
+        Some(DEFAULT_NAME.to_owned()),
+        Some(DEFAULT_EMAIL.to_owned()),
+    )
+}
+
+/// The committer of a commit that replays others, as `git rebase` makes it: the environment
+/// first, else `user.name` and `user.email` of `repo`, `GIT_CONFIG_COUNT` included.
+pub(super) fn committer_in(repo: &git2::Repository) -> Result<git2::Signature<'static>> {
+    build(
+        Role::Committer,
+        configured(repo, "user.name")?,
+        configured(repo, "user.email")?,
+    )
+}
+
+fn build(
+    role: Role,
+    fallback_name: Option<String>,
+    fallback_email: Option<String>,
+) -> Result<git2::Signature<'static>> {
     let read = |field: &str| std::env::var(role.variable(field)).ok();
-    let name = read("NAME").unwrap_or_else(|| DEFAULT_NAME.to_owned());
-    let email = read("EMAIL").unwrap_or_else(|| DEFAULT_EMAIL.to_owned());
+    let unknown = |what: &str| Error(format!("committer identity unknown: {what} is not set"));
+    let name = read("NAME")
+        .or(fallback_name)
+        .ok_or_else(|| unknown("user.name"))?;
+    let email = read("EMAIL")
+        .or(fallback_email)
+        .ok_or_else(|| unknown("user.email"))?;
     Ok(match read("DATE") {
         Some(date) => git2::Signature::new(&name, &email, &parse_date(&date)?)?,
         None => git2::Signature::now(&name, &email)?,

@@ -555,6 +555,44 @@ fn a_rebase_merge_into_a_sparse_checkout_with_a_change_outside_it() {
 }
 
 #[test]
+fn a_rebase_merge_commits_as_the_environment_names_the_committer() {
+    let by_variable = [
+        ("GIT_COMMITTER_NAME", "Env Person"),
+        ("GIT_COMMITTER_EMAIL", "env@example.org"),
+    ];
+    let by_config = [
+        ("GIT_CONFIG_COUNT", "2"),
+        ("GIT_CONFIG_KEY_0", "user.name"),
+        ("GIT_CONFIG_VALUE_0", "Env Person"),
+        ("GIT_CONFIG_KEY_1", "user.email"),
+        ("GIT_CONFIG_VALUE_1", "env@example.org"),
+    ];
+    for (label, variables) in [("committer", &by_variable[..]), ("config", &by_config[..])] {
+        let env = setup();
+        let feat = add_branch(&env, "feat", "b.txt", "b\n");
+        advance_main(&env, "c.txt", "c\n");
+        git_ok(&env, &env.repo, &["switch", "-q", "feat"]);
+        fs::write(env.path("gitconfig"), "[init]\n\tdefaultBranch = main\n").unwrap();
+
+        let output = env
+            .bin(&env.repo)
+            .args(["pr", "--local"])
+            .args(merge_args(&feat, "feat", &["--method", "rebase"]))
+            .envs(variables.iter().copied())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{label}: {stderr}");
+        let made = git_ok(
+            &env,
+            &env.repo,
+            &["log", "-1", "--format=%cn <%ce>", "feat"],
+        );
+        assert_eq!(made, "Env Person <env@example.org>", "{label}");
+    }
+}
+
+#[test]
 fn a_wrong_sha_a_short_sha_and_a_branch_behind_the_target_are_refused() {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");

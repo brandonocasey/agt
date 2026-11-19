@@ -5,7 +5,7 @@
 use std::fs;
 
 use super::merge::move_branch_to;
-use super::{Repo, commit_id, hooks};
+use super::{Repo, commit_id, hooks, identity};
 use crate::core::error::{Error, Result};
 
 /// How a rebase ended.
@@ -44,7 +44,7 @@ impl Repo {
         let mut rebase = repo.rebase(None, Some(&upstream), None, Some(&mut options))?;
         let mut replaying = Replaying {
             repo: &repo,
-            committer: repo.signature()?,
+            committer: identity::committer_in(&repo)?,
             last: onto_id,
             rewrites: String::new(),
         };
