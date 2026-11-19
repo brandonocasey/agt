@@ -59,14 +59,17 @@ Tests must opt in when checking automatic behavior and isolate HOME/XDG/git/forg
 Bump `version` in `Cargo.toml`, land it on `main`, then push a `v<version>` tag;
 the release workflow builds `agt-<tag>-<target>.tar.gz`, one `agt` file each. Hosts install the version pinned in
 the dotfiles mise config (`home/dot_config/mise/config.toml` in the chezmoi
-source), so bump that pin, and the minimum version in the review skill's
-`references/store.md` when its rules need the release, in one dotfiles commit.
+source), so bump that pin, and the minimum version in the skill file `shared/agt.md`
+(`home/dot_config/exact_agents/exact_skills/exact_shared/agt.md` in the chezmoi source) when
+the skills' rules need the release, in one dotfiles commit. That file holds the one minimum:
+it names the number in its first paragraph and again in each install step, so change every
+occurrence. No other skill keeps its own.
 
 What these mean for agt: the pin decides which agt version every host runs, so a change on
-`main` reaches hosts only after a release and a pin bump. The review skill's minimum version
-is the oldest agt whose commands, flags and store schema (`VERSION` in `src/store/model.rs`)
-the skill's instructions rely on; raise it in the same release that adds or changes what a
-skill uses, and never to a version that is not yet tagged.
+`main` reaches hosts only after a release and a pin bump. The minimum version in
+`shared/agt.md` is the oldest agt whose commands, flags and store schema (`VERSION` in
+`src/store/model.rs`) the skills' instructions rely on; raise it in the same release that adds
+or changes what a skill uses, and never to a version that is not yet tagged.
 
 ## Conventions
 
