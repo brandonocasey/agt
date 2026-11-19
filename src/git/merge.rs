@@ -67,6 +67,19 @@ impl Repo {
         Ok(found)
     }
 
+    /// The work tree that stops git from checking `branch` out a second time: one that has it
+    /// checked out, or is rebasing or bisecting it.
+    pub fn checkout_blocker(&self, branch: &str) -> Result<Option<PathBuf>> {
+        if let Some(holder) = self.holders(branch)?.into_iter().next() {
+            return Ok(Some(holder));
+        }
+        Ok(self
+            .busy_on(branch)?
+            .into_iter()
+            .next()
+            .map(|busy| busy.path))
+    }
+
     /// The git directory of the work tree `entry`. A deleted work tree has an entry under
     /// `worktrees` in the common git directory. `None` for a bare repository or a missing
     /// entry.

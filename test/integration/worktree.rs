@@ -1187,6 +1187,43 @@ fn restore_detaches_when_the_branch_is_being_rebased_in_another_worktree() {
 }
 
 #[test]
+fn restore_detaches_when_the_branch_is_being_bisected_in_another_worktree() {
+    let f = Fixture::new();
+    for name in ["second.txt", "third.txt"] {
+        fs::write(f.wt.join(name), name).unwrap();
+        wgit(&f.env, &f.wt, &["add", "-A"]);
+        wgit(&f.env, &f.wt, &["commit", "-q", "-m", name]);
+    }
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let feature = f.env.git(&["rev-parse", "feat"]);
+    f.env.git(&["switch", "-q", "feat"]);
+    f.env.git(&["bisect", "start", "feat", "feat~3"]);
+    assert_eq!(f.env.git(&["branch", "--show-current"]), "");
+    let oracle = f
+        .env
+        .command("git", &f.env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            &f.env.path("by-git").to_string_lossy(),
+            "feat",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let restored = f.json(&["restore", &id]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("checked out in another worktree"),
+        "{warning}"
+    );
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
+}
+
+#[test]
 fn a_relative_restore_path_means_the_callers_directory() {
     let f = Fixture::new();
     let id = f.remove()["id"].as_str().unwrap().to_owned();

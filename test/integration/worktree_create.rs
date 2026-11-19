@@ -2106,6 +2106,56 @@ fn a_branch_that_a_worktree_is_rebasing_gets_no_second_worktree() {
 }
 
 #[test]
+fn a_branch_that_a_worktree_is_bisecting_gets_no_second_worktree() {
+    let (env, _) = repo_with_commit();
+    for name in ["second", "third", "fourth"] {
+        commit(&env, &env.repo, name, name);
+    }
+    git(&env, &env.repo, &["branch", "topic"]);
+    let bisecting = env.path("bisecting");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            bisecting.to_str().unwrap(),
+            "topic",
+        ],
+    );
+    git(&env, &bisecting, &["bisect", "start", "topic", "topic~3"]);
+    assert_eq!(git(&env, &bisecting, &["branch", "--show-current"]), "");
+    let oracle = env
+        .command("git", &env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            env.path("by-git").to_str().unwrap(),
+            "topic",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let output = agt(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "topic",
+            "--path",
+            env.path("second").to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already checked out"));
+    assert!(!env.path("second").exists());
+}
+
+#[test]
 fn a_linked_worktree_is_repaired_by_git_after_the_repository_moves() {
     let (env, _) = repo_with_commit();
     agt_json(&env, &env.repo, &["create", "by-agt"]);

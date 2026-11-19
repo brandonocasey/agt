@@ -57,7 +57,7 @@ pub fn run(cli: Cli) -> Result<Output> {
         }
         Some(branch) => {
             let tip = repo.branch_tip(branch)?;
-            let elsewhere = !repo.holders(branch)?.is_empty();
+            let elsewhere = repo.checkout_blocker(branch)?.is_some();
             match tip {
                 None => {
                     let new = Checkout::NewBranch {

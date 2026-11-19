@@ -36,7 +36,7 @@ impl Repo {
     /// Adds a linked worktree at `path` with `what` checked out. A sparse checkout of this
     /// repository carries over to it, as `git worktree add` does.
     pub fn add_worktree(&self, path: &Path, what: &Checkout<'_>) -> Result<()> {
-        // `holders` opens the repository itself, which a read-only `Repo` locks.
+        // `checkout_blocker` opens the repository itself, which a read-only `Repo` locks.
         if let Checkout::Branch(branch) = what {
             self.ensure_not_checked_out(branch)?;
         }
@@ -51,13 +51,13 @@ impl Repo {
         fill_worktree(&repo, path).inspect_err(|_| discard_worktree(&admin, path))
     }
 
-    /// Fails when `branch` is checked out, or rebased, in a work tree, which git refuses to check
-    /// out a second time.
+    /// Fails when a work tree has `branch` checked out, or is rebasing or bisecting it, which
+    /// git refuses to check out a second time.
     fn ensure_not_checked_out(&self, branch: &str) -> Result<()> {
-        match self.holders(branch)?.first() {
-            Some(holder) => Err(Error(format!(
+        match self.checkout_blocker(branch)? {
+            Some(blocker) => Err(Error(format!(
                 "branch {branch} is already checked out at {}",
-                holder.display()
+                blocker.display()
             ))),
             None => Ok(()),
         }
