@@ -1,6 +1,6 @@
 //! Talking to remotes through libgit2: listing, fetching, and the credentials both use.
-//! Credentials come from ssh-agent, keys in `~/.ssh`, and a configured git credential helper;
-//! nothing here prompts.
+//! Credentials come from ssh-agent, keys in `~/.ssh`, and a configured git credential helper,
+//! which [`disable_credential_prompts`] keeps from asking the user.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -28,6 +28,17 @@ struct Offered {
     agent: bool,
     keys: usize,
     helper: bool,
+}
+
+/// Tells credential helpers, which libgit2 starts with this process's environment, not to prompt
+/// (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`). Programs agt starts afterwards inherit
+/// both. MUST be called before the process starts a thread.
+pub fn disable_credential_prompts() {
+    for (name, value) in [("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")] {
+        // SAFETY: the process has one thread when `main` starts, so nothing reads the
+        // environment while it changes.
+        unsafe { std::env::set_var(name, value) };
+    }
 }
 
 impl Repo {
@@ -153,6 +164,9 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
     let port = known_hosts::port_of(url);
     callbacks.certificate_check(move |cert, host| check_host_key(cert, host, port));
     callbacks.credentials(move |url, username_from_url, allowed| {
+        if allowed.contains(git2::CredentialType::USERNAME) {
+            return user_name_credential(username_from_url, login_name());
+        }
         let user = username_from_url.unwrap_or("git");
         if allowed.contains(git2::CredentialType::SSH_KEY) {
             if !offered.agent {
@@ -178,6 +192,26 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
         ))
     });
     callbacks
+}
+
+/// The answer to libgit2's request for a user name, which it makes for an ssh URL without one:
+/// the name the URL gives, else the login name.
+fn user_name_credential(
+    url_user: Option<&str>,
+    login: Option<String>,
+) -> std::result::Result<git2::Cred, git2::Error> {
+    let name = url_user
+        .map(str::to_owned)
+        .or(login)
+        .ok_or_else(|| git2::Error::from_str("no user name: put one in the URL (user@host)"))?;
+    git2::Cred::username(&name)
+}
+
+/// The login name of the current user.
+fn login_name() -> Option<String> {
+    ["USER", "LOGNAME"]
+        .iter()
+        .find_map(|variable| std::env::var(variable).ok().filter(|name| !name.is_empty()))
 }
 
 /// Accepts an ssh host key only when a `known_hosts` file lists it; a key of any other
@@ -234,6 +268,8 @@ fn has_credential_helper(config: &git2::Config) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use super::user_name_credential;
+
     use super::super::fixtures::{commit, rev};
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
@@ -267,6 +303,16 @@ mod tests {
         sandbox.git(&other, &["tag", "v2"]);
         sandbox.git(&other, &["push", "-q", "origin", "main", "v2"]);
         rev(sandbox, &other, "HEAD")
+    }
+
+    #[test]
+    fn a_user_name_request_is_answered_from_the_url_or_the_login() {
+        let from_url = user_name_credential(Some("alice"), Some("bob".to_owned())).unwrap();
+        let from_login = user_name_credential(None, Some("bob".to_owned())).unwrap();
+        let username = git2::CredentialType::USERNAME.bits();
+        assert_eq!(from_url.credtype(), username);
+        assert_eq!(from_login.credtype(), username);
+        assert!(user_name_credential(None, None).is_err());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -615,18 +615,36 @@ pub struct Host {
 /// A host that accepts a connection and never answers, as an ssh server that hangs does.
 pub fn silent_host() -> Host {
     let mut held = Vec::new();
-    host(move |stream| held.push(stream))
+    host("ssh", move |stream| held.push(stream))
 }
 
 /// A host that closes each connection as soon as it is made, so a client fails at once.
 pub fn refusing_host() -> Host {
-    host(drop)
+    host("ssh", drop)
 }
 
-fn host(mut on_connect: impl FnMut(TcpStream) + Send + 'static) -> Host {
+/// An HTTP host that answers every request with `401` and a Basic challenge, which makes a git
+/// client ask for credentials. `Host::url` is an `http` URL.
+pub fn challenging_host() -> Host {
+    host("http", |mut stream| {
+        let mut seen = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !seen.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(count) => seen.extend_from_slice(&chunk[..count]),
+            }
+        }
+        let _ = stream.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"agt\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    })
+}
+
+fn host(scheme: &str, mut on_connect: impl FnMut(TcpStream) + Send + 'static) -> Host {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!(
-        "ssh://127.0.0.1:{}/repo.git",
+        "{scheme}://127.0.0.1:{}/repo.git",
         listener.local_addr().unwrap().port()
     );
     let (accepted, receiver) = mpsc::channel();

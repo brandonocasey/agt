@@ -955,6 +955,34 @@ fn relative_submodule_repo(env: &Env, origin: &str) {
 }
 
 #[test]
+fn a_credential_helper_runs_without_a_way_to_prompt() {
+    let (env, _) = repo_with_commit();
+    let host = crate::support::challenging_host();
+    git(&env, &env.repo, &["remote", "add", "origin", &host.url]);
+    let seen = env.path("helper-env");
+    let helper = format!(
+        "!f() {{ env > '{}'; echo username=u; echo password=p; }}; f",
+        seen.display()
+    );
+    git(&env, &env.repo, &["config", "credential.helper", &helper]);
+    let output = env
+        .bin(&env.repo)
+        .args(["worktree", "create", "work"])
+        .env_remove("GCM_INTERACTIVE")
+        .env_remove("GIT_TERMINAL_PROMPT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let recorded = fs::read_to_string(&seen).unwrap();
+    for line in ["GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never"] {
+        assert!(
+            recorded.lines().any(|seen| seen == line),
+            "{line}\n{recorded}"
+        );
+    }
+}
+
+#[test]
 fn an_online_create_takes_a_relative_submodule_url_for_a_network_url_when_the_origin_is() {
     let (env, _) = repo_with_commit();
     let host = crate::support::refusing_host();

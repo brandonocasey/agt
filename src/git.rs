@@ -20,6 +20,7 @@ mod known_hosts;
 mod linked;
 mod merge;
 mod network;
+pub use network::disable_credential_prompts;
 mod patch_id;
 mod rebase;
 mod refs;
