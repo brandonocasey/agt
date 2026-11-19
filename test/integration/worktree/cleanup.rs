@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::support::forge::argv::tea_get;
 use crate::support::forge::forgejo;
-use crate::support::{Env, Sealed, proc_start, strs, unix_now};
+use crate::support::{Env, Sealed, backup_path, proc_start, read_backup, strs, unix_now};
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -249,11 +249,18 @@ fn the_manual_list_names_the_command_that_deletes_a_worktree_backup() {
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         report["manual"]["backups"].clone()
     };
-    // Listed only once the backup is 30 days old.
-    assert_eq!(backups(29), json!([]));
+    let archive = backup_path(&site.env, id);
+    let partial = archive.with_file_name(".20260101-0000-worktree-old.tar.gz.partial");
+    fs::write(&partial, "interrupted").unwrap();
+    let leftover = format!("0.0 MiB {}", partial.display());
+    // The leftover's age is its file time, in the real clock: fresh now, old after the sweep's
+    // clock jump.
+    assert_eq!(backups(-site.days_on), json!([]));
+    // A backup is listed only once it is 30 days old.
+    assert_eq!(backups(29), json!([leftover]));
     assert_eq!(
         backups(30),
-        json!([format!("agt worktree backups rm {id} --yes")])
+        json!([format!("agt worktree backups rm {id} --yes"), leftover])
     );
 }
 
@@ -271,11 +278,14 @@ fn an_ancestor_merged_branch_loses_its_clean_worktree_and_branch() {
     assert_eq!(report["removed"][0]["branch"], "done");
     let id = report["removed"][0]["id"].as_str().unwrap();
     assert!(!wt.exists());
-    // The backup ref pins the tip even though the branch is gone.
     assert_eq!(
-        site.env
-            .git(&["rev-parse", &format!("refs/agt/backups/{id}^")]),
-        tip
+        report["removed"][0]["backup"],
+        backup_path(&site.env, id).to_str().unwrap()
+    );
+    // The backup records the tip even though the branch is gone.
+    assert_eq!(
+        read_backup(&backup_path(&site.env, id)).record["head"],
+        tip.as_str()
     );
     let deleted = &report["deleted"][0];
     assert_eq!(deleted["branch"], "done");
@@ -908,19 +918,12 @@ fn a_dirty_worktree_stays_unless_dirty_is_passed() {
     let report = site.run(&["--yes", "--dirty"]);
     assert!(!wt.exists());
     let id = report["removed"][0]["id"].as_str().unwrap();
-    // The snapshot holds the uncommitted change.
-    assert_eq!(
-        site.env
-            .git(&["show", &format!("refs/agt/backups/{id}:wip")]),
-        "changed"
-    );
+    let backup = read_backup(&backup_path(&site.env, id));
+    // The backup holds the uncommitted change.
+    assert_eq!(backup.files["wip"], b"changed");
     // `--dirty` drops untracked files, as `worktree remove --force` does: no snapshot keeps them.
     assert_eq!(report["removed"][0]["untracked_lost"], json!(["fresh.txt"]));
-    assert!(!site.env.git_status(&[
-        "cat-file",
-        "-e",
-        &format!("refs/agt/backups/{id}:fresh.txt")
-    ]));
+    assert!(!backup.files.contains_key("fresh.txt"));
     assert_eq!(site.branches(), ["main"]);
 }
 
@@ -973,11 +976,11 @@ fn an_untracked_file_keeps_the_worktree_unless_dirty_is_passed_and_is_then_delet
         json!(["debug.log", "vendor/dep.go"])
     );
     let id = report["removed"][0]["id"].as_str().unwrap();
-    assert!(!site.env.git_status(&[
-        "cat-file",
-        "-e",
-        &format!("refs/agt/backups/{id}:vendor/dep.go")
-    ]));
+    assert!(
+        !read_backup(&backup_path(&site.env, id))
+            .files
+            .contains_key("vendor/dep.go")
+    );
 }
 
 #[test]
