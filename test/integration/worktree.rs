@@ -676,6 +676,31 @@ fn a_linked_worktree_in_an_ignored_folder_is_deregistered_and_a_locked_one_block
 }
 
 #[test]
+fn a_linked_worktree_in_an_ignored_folder_with_work_nothing_else_holds_blocks_removal() {
+    let f = Fixture::new();
+    wgit(
+        &f.env,
+        &f.wt,
+        &["worktree", "add", "-q", "-b", "inner", "build/inner"],
+    );
+    let inner = f.wt.join("build/inner");
+    fs::write(inner.join("a.txt"), "changed\n").unwrap();
+    let path = f.wt.to_string_lossy().into_owned();
+    f.refuses(&f.env.repo, &["remove", &path], "uncommitted changes");
+    wgit(&f.env, &inner, &["checkout", "-q", "--", "a.txt"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &["worktree", "add", "-q", "--detach", "build/loose"],
+    );
+    let loose = f.wt.join("build/loose");
+    fs::write(loose.join("n.txt"), "n\n").unwrap();
+    wgit(&f.env, &loose, &["add", "n.txt"]);
+    wgit(&f.env, &loose, &["commit", "-q", "-m", "only here"]);
+    f.refuses(&f.env.repo, &["remove", &path, "--yes"], "no branch holds");
+}
+
+#[test]
 fn a_registered_clone_in_an_ignored_folder_is_still_checked() {
     let f = Fixture::new();
     nest(&f.env, &f.wt.join("legacy"));
@@ -691,6 +716,7 @@ fn a_registered_clone_in_an_ignored_folder_is_still_checked() {
     f.refuses(&f.env.repo, &["remove", &path], "submodule legacy");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_directory_name_that_is_not_utf8_cannot_hide_an_unignored_nested_repository() {
     use std::os::unix::ffi::OsStrExt;

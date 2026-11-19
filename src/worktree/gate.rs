@@ -31,15 +31,7 @@ pub fn check_offline(worktree: &Path, main: &Path) -> Result<()> {
 
 fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     worktree_state(worktree)?;
-    if let Some(locked) = nested::linked_inside(main, worktree)?
-        .into_iter()
-        .find(|other| other.locked)
-    {
-        return fail(format!(
-            "it holds the locked worktree {}; unlock it first",
-            locked.path.display()
-        ));
-    }
+    inner_worktrees_may_go(main, worktree)?;
     let mut found = nested::repositories(worktree)?;
     if !found.is_empty() {
         found = nested::without_ignored(found, &info::ignored(worktree)?);
@@ -88,6 +80,43 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
         }
         let workdir = workdir_of(&clone);
         holds_nothing_unique(&name, &clone, workdir.as_deref(), &elsewhere, online)?;
+    }
+    Ok(())
+}
+
+/// Removal deletes a linked worktree below `worktree` without a backup, so refuses one that
+/// is locked, has uncommitted changes, or sits on a commit that no branch holds.
+fn inner_worktrees_may_go(main: &Path, worktree: &Path) -> Result<()> {
+    let shared = Repo::at(main);
+    for inner in nested::linked_inside(main, worktree)? {
+        let path = inner.path.display();
+        if inner.locked {
+            return fail(format!(
+                "it holds the locked worktree {path}; unlock it first"
+            ));
+        }
+        if info::dirty(&inner.path)?.0 > 0 {
+            return fail(format!(
+                "it holds the worktree {path} with uncommitted changes; commit or discard them first"
+            ));
+        }
+        let held = inner.branch.is_some()
+            || inner.unborn()
+            || !shared
+                .git(&[
+                    "for-each-ref",
+                    "--contains",
+                    &inner.head,
+                    "--format=%(refname)",
+                    "refs/heads",
+                    "refs/remotes",
+                ])?
+                .is_empty();
+        if !held {
+            return fail(format!(
+                "it holds the worktree {path} on a commit that no branch holds; branch it or push it first"
+            ));
+        }
     }
     Ok(())
 }
