@@ -508,6 +508,33 @@ fn a_worktree_at_an_ignored_path_on_no_branch_is_removed_without_force() {
         &["commit", "-q", "--allow-empty", "-m", "review"],
     );
     assert_eq!(moved, "");
+    // A path that only starts like an ignored one is still refused.
+    let plain = f.env.repo.join("build-plain");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        &plain.to_string_lossy(),
+        &head,
+    ]);
+    wgit(
+        &f.env,
+        &plain,
+        &["commit", "-q", "--allow-empty", "-m", "plain"],
+    );
+    f.refuses(
+        &f.env.repo,
+        &["remove", &plain.to_string_lossy()],
+        "on no branch",
+    );
+    let plan = f.json(&["remove", &review.to_string_lossy()]);
+    assert!(
+        plan["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("on no branch")
+    );
     let removed = f.json(&["remove", &review.to_string_lossy(), "--yes"]);
     assert!(
         removed["warnings"][0]
@@ -516,6 +543,7 @@ fn a_worktree_at_an_ignored_path_on_no_branch_is_removed_without_force() {
             .contains("on no branch")
     );
     assert!(!review.exists());
+    assert!(plain.exists());
 }
 
 #[test]
