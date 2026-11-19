@@ -20,7 +20,9 @@ For installation and a local example, follow [Getting started](getting-started.m
 ## Compatibility
 
 agt reads and writes git repositories with the libgit2 it is built with, so no `git` program is
-needed on `PATH`; a configured git credential helper still runs as its own program.
+needed on `PATH`. A configured git credential helper runs as its own program, which may need
+`git` on `PATH`: for a short helper name such as `osxkeychain`, libgit2 runs
+`sh -c "git credential-osxkeychain get"`.
 Repositories with SHA-1 object IDs work; SHA-256 repositories are not supported.
 Over ssh, agt accepts a host key only when `/etc/ssh/ssh_known_hosts`, `~/.ssh/known_hosts` or a
 `known_hosts2` file lists it (plain, wildcard, `[host]:port` and hashed entries); an unknown host
@@ -41,6 +43,16 @@ libgit2 leaves some of what the `git` program does out:
   used.
 - `commit.gpgSign` is ignored for the commits that a rebase and a backup make.
 - `GIT_CONFIG_PARAMETERS` is not read.
+- A repository with `core.splitIndex=true` fails every index read (status counts, the removal
+  gate, backups, review of uncommitted changes, secrets scans) with `unsupported mandatory
+  extension: 'link'`. `git update-index --no-split-index` makes it readable again.
+- The patch-id of a binary change hashes the abbreviated object ids of the diff, which libgit2
+  prints with 7 characters; git's abbreviation grows with the object count. In a repository with
+  16,384 or more objects such a patch-id can differ from git's, and from the value an older agt
+  stored for the same change. Patch-ids of text changes are not affected.
+- `submodule.active` is matched with libgit2 pathspecs: `.`, paths and globs work, pathspec
+  magic such as `:(exclude)` does not.
+- A rebase merge stops for a commit whose message is not valid UTF-8 instead of re-encoding it.
 
 Up to 0.4.0, the binary was `agent-review`; its commands lacked the `review` prefix.
 Its stores remain readable. Posted comment markers retain the `agent-review` name.
