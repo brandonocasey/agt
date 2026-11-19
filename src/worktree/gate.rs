@@ -1,15 +1,16 @@
 //! What removing a worktree would delete besides its files. `git worktree remove --force`
 //! deletes the worktree's git directory with every submodule clone kept under it, and the
 //! snapshot holds neither. Removal is refused unless everything it would delete is held
-//! elsewhere: no repository under the worktree and no submodule clone may hold anything that
-//! neither a remote-tracking branch nor the main checkout's clone has. Commits that only a
-//! reflog holds are not protected.
+//! elsewhere: no repository under the worktree that git does not ignore and no submodule
+//! clone may hold anything that neither a remote-tracking branch nor the main checkout's
+//! clone has. Commits that only a reflog holds are not protected.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::disposable::is_os_junk;
+use super::info;
 use super::nested;
 use crate::core::env;
 use crate::core::error::{Result, fail};
@@ -30,7 +31,10 @@ pub fn check_offline(worktree: &Path, main: &Path) -> Result<()> {
 
 fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     worktree_state(worktree)?;
-    let found = nested::repositories(worktree)?;
+    let mut found = nested::repositories(worktree)?;
+    if !found.is_empty() {
+        found = nested::without_ignored(found, &info::ignored(worktree)?);
+    }
     let strays: Vec<String> = found
         .iter()
         .filter(|found| !found.registered)

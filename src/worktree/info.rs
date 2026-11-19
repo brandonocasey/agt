@@ -185,7 +185,7 @@ fn is_cache(dir: &Path) -> bool {
 }
 
 /// The directories above `path`, each ending in `/`.
-fn parents(path: &str) -> impl Iterator<Item = &str> {
+pub(super) fn parents(path: &str) -> impl Iterator<Item = &str> {
     path.trim_end_matches('/')
         .match_indices('/')
         .map(move |(at, _)| &path[..=at])

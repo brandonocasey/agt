@@ -1,13 +1,14 @@
 //! Nested repositories: a directory with a `.git` of its own that the worktree's repository
 //! does not track as a submodule. A snapshot stores one only as a gitlink and removing the
-//! worktree deletes its history, so none may be removed. The same walk finds directories git
-//! could not empty.
+//! worktree deletes its history, so none may be removed, unless git ignores it: a backup holds
+//! nothing ignored. The same walk finds directories git could not empty.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use super::info::parents;
 use crate::core::error::{Error, Result, ctx};
 use crate::core::local;
 use crate::git::Repo;
@@ -40,6 +41,24 @@ pub fn reason(found: &[String]) -> String {
         "it contains nested git repositories that a backup cannot hold: {}; move or push them first",
         found.join(", ")
     )
+}
+
+/// The repositories of `found` that git does not ignore. `ignored` holds the worktree's ignored
+/// paths, a directory ending in `/`: removal deletes a repository inside one with the worktree,
+/// and a backup never holds anything ignored.
+pub fn without_ignored(found: Vec<Found>, ignored: &[String]) -> Vec<Found> {
+    let dirs: HashSet<&str> = ignored
+        .iter()
+        .filter(|path| path.ends_with('/'))
+        .map(String::as_str)
+        .collect();
+    found
+        .into_iter()
+        .filter(|repo| {
+            let dir = format!("{}/", repo.rel);
+            !dirs.contains(dir.as_str()) && !parents(&dir).any(|above| dirs.contains(above))
+        })
+        .collect()
 }
 
 pub fn submodule_paths(root: &Path) -> Result<Vec<String>> {

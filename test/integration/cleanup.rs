@@ -1532,7 +1532,7 @@ fn the_sweep_plan_skips_a_worktree_changed_in_the_last_3_days() {
 }
 
 #[test]
-fn the_sweep_plan_skips_a_worktree_holding_an_ignored_nested_repository() {
+fn the_sweep_plan_offers_a_worktree_holding_only_ignored_nested_repositories() {
     let prune = Prune::new();
     let repo = prune.env.path("home/projects/owner/app");
     fs::create_dir_all(&repo).unwrap();
@@ -1556,11 +1556,18 @@ fn the_sweep_plan_skips_a_worktree_holding_an_ignored_nested_repository() {
 
     assert_eq!(sweep_plan(&prune, later()).len(), 1);
 
-    // An ignored clone has history that a backup cannot hold, so the worktree is not offered.
-    let nested = repo.join(".worktrees/done/vendor/lib");
-    fs::create_dir_all(&nested).unwrap();
-    git(&nested, &["init", "-q"]);
-    git(&nested, &["commit", "-q", "--allow-empty", "-m", "lib"]);
+    // A backup holds nothing ignored, so an ignored clone does not stop the worktree.
+    let nest = |path: &str| {
+        let nested = repo.join(".worktrees/done").join(path);
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        git(&nested, &["commit", "-q", "--allow-empty", "-m", "lib"]);
+    };
+    nest("vendor/lib");
+    assert_eq!(sweep_plan(&prune, later()).len(), 1);
+
+    // A clone that git does not ignore has history that a backup cannot hold.
+    nest("tools/lib");
     assert_eq!(sweep_plan(&prune, later()), Vec::<String>::new());
 }
 

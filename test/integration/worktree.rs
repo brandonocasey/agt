@@ -631,13 +631,26 @@ fn a_nested_repository_blocks_removal_in_plan_and_yes_alike() {
         let output = f.agt(&f.env.repo, &args);
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         let error = String::from_utf8_lossy(&output.stderr);
-        for nested in ["vendor/lib", "tools/deep/clone", "node_modules/pkg"] {
+        for nested in ["vendor/lib", "tools/deep/clone"] {
             assert!(error.contains(nested), "{nested}: {error}");
         }
+        assert!(!error.contains("node_modules/pkg"), "ignored: {error}");
     }
     assert!(f.wt.join("vendor/lib/.git").exists());
     assert!(f.wt.join("node_modules/pkg/.git").exists());
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
+}
+
+#[test]
+fn an_ignored_nested_repository_does_not_block_removal() {
+    let f = Fixture::new();
+    nest(&f.env, &f.wt.join("build/scratch/repo"));
+    nest(&f.env, &f.wt.join("node_modules/pkg"));
+    let path = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &path])["plan"], json!(true));
+    f.remove();
+    assert!(!f.wt.exists());
+    assert_ne!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
 /// Registers a submodule `name` at `path` in the worktree and commits it.
@@ -1281,12 +1294,14 @@ fn a_clone_left_behind_by_deinit_or_rm_in_the_worktree_still_blocks_removal() {
 }
 
 #[test]
-fn a_nested_repository_inside_a_submodule_disposable_directory_blocks_removal() {
+fn a_nested_repository_inside_a_submodule_blocks_removal_unless_the_submodule_ignores_it() {
     let (f, sub) = with_submodule();
     ignore_in(&f, &sub, "node_modules/");
-    let nested = sub.join("node_modules/pkg");
-    nest(&f.env, &nested);
-    refuses_both_ways(&f, "mod/node_modules/pkg");
+    nest(&f.env, &sub.join("node_modules/pkg"));
+    let path = f.wt.to_string_lossy().into_owned();
+    assert_eq!(f.json(&["remove", &path])["plan"], json!(true));
+    nest(&f.env, &sub.join("tools/clone"));
+    refuses_both_ways(&f, "mod/tools/clone");
 }
 
 #[test]
