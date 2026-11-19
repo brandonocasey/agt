@@ -24,6 +24,10 @@ impl From<git2::Error> for Error {
 /// An unparsable config gets git's text: `bad config line N in file PATH`.
 pub fn libgit2_message(error: &git2::Error) -> String {
     let message = error.message();
+    // libgit2 is built without SHA-256 object IDs and names only the format.
+    if message.contains("unknown object format") {
+        return "SHA-256 repositories are not supported".to_owned();
+    }
     let located = (error.class() == git2::ErrorClass::Config)
         .then(|| config_location(message))
         .flatten();
