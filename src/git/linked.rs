@@ -47,12 +47,8 @@ impl Repo {
             .commondir()
             .join("worktrees")
             .join(admin_name(&repo, path));
-        link_worktree(&admin, path, &head)
-            .and_then(|()| fill_worktree(&repo, path))
-            .inspect_err(|_| {
-                let _ = fs::remove_dir_all(&admin);
-                let _ = fs::remove_dir_all(path);
-            })
+        link_worktree(&admin, path, &head)?;
+        fill_worktree(&repo, path).inspect_err(|_| discard_worktree(&admin, path))
     }
 
     /// Fails when `branch` is checked out, or rebased, in a work tree, which git refuses to check
@@ -222,14 +218,29 @@ enum Head {
 }
 
 /// Registers a linked worktree: its administrative directory `admin` and its `path`, which
-/// hold only the links between them and a HEAD, so that no file is checked out yet.
+/// hold only the links between them and a HEAD, so that no file is checked out yet. A failure
+/// removes only the directories this call created.
 fn link_worktree(admin: &Path, path: &Path, head: &Head) -> Result<()> {
     let create = |dir: &Path| fs::create_dir(dir).map_err(ctx(format!("create {}", dir.display())));
     if let Some(worktrees) = admin.parent() {
         fs::create_dir_all(worktrees).map_err(ctx(format!("create {}", worktrees.display())))?;
     }
     create(admin)?;
-    create(path)?;
+    if let Err(error) = create(path) {
+        let _ = fs::remove_dir_all(admin);
+        return Err(error);
+    }
+    write_links(admin, path, head).inspect_err(|_| discard_worktree(admin, path))
+}
+
+/// Removes the directories of a linked worktree that was never completed.
+fn discard_worktree(admin: &Path, path: &Path) {
+    let _ = fs::remove_dir_all(admin);
+    let _ = fs::remove_dir_all(path);
+}
+
+/// Writes the links between `admin` and `path`, and the HEAD of the worktree.
+fn write_links(admin: &Path, path: &Path, head: &Head) -> Result<()> {
     let real =
         |dir: &Path| fs::canonicalize(dir).map_err(ctx(format!("resolve {}", dir.display())));
     let (admin, work) = (real(admin)?, real(path)?);
@@ -449,7 +460,7 @@ fn is_file_transport(url: &str) -> bool {
 mod tests {
     use std::fs;
 
-    use super::Checkout;
+    use super::{Checkout, Head, link_worktree};
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
     use crate::git::fixtures::commit;
@@ -500,5 +511,39 @@ mod tests {
             .unwrap();
         assert!(!oracle.status.success());
         assert_eq!(repo.worktrees().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_failed_link_removes_only_the_directories_it_created() {
+        let sandbox = Sandbox::with_repo();
+        let admin = sandbox.path().join("repo/.git/worktrees/feat");
+        let taken = sandbox.path().join("taken");
+        let head = Head::Branch("refs/heads/feat".to_owned());
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(taken.join("work.txt"), "winner\n").unwrap();
+
+        let error = link_worktree(&admin, &taken, &head).unwrap_err();
+
+        assert!(error.0.contains("create"), "{error}");
+        assert_eq!(
+            fs::read_to_string(taken.join("work.txt")).unwrap(),
+            "winner\n"
+        );
+        assert!(
+            !admin.exists(),
+            "this call's admin directory was left behind"
+        );
+
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/winner\n").unwrap();
+        let fresh = sandbox.path().join("fresh");
+
+        link_worktree(&admin, &fresh, &head).unwrap_err();
+
+        assert!(
+            admin.join("HEAD").is_file(),
+            "another call's admin directory was removed"
+        );
+        assert!(!fresh.exists());
     }
 }
