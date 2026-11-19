@@ -295,47 +295,53 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
     for mut submodule in repo.submodules()? {
         let relative =
             String::from_utf8_lossy(submodule.path().as_os_str().as_bytes()).into_owned();
-        if only.is_some_and(|wanted| wanted != relative) {
+        if only.is_some_and(|wanted| wanted != relative) || !is_active(repo, &submodule)? {
             continue;
         }
-        if !is_active(repo, &submodule)? {
-            continue;
-        }
-        submodule.init(false)?;
-        if update_is_none(repo, &submodule)? {
-            continue;
-        }
-        let url = clone_url(repo, &submodule)?;
-        let refused = match transports {
-            Transports::FileOnly => !is_file_transport(&url),
-            Transports::Any => {
-                is_file_transport(&url)
-                    && needs_transport(&submodule)
-                    && !file_transport_allowed(repo)?
-            }
-        };
-        if refused {
-            let failed = format!(
-                "clone of '{url}' into submodule path '{}' failed",
-                repo.workdir()
-                    .unwrap_or(Path::new(""))
-                    .join(&relative)
-                    .display()
-            );
-            return Err(Error(match transports {
-                Transports::FileOnly => failed,
-                Transports::Any => format!("transport 'file' not allowed\n{failed}"),
-            }));
-        }
-        let config = repo.config()?;
-        let mut options = git2::SubmoduleUpdateOptions::new();
-        options.fetch(super::network::fetch_options(&config, &url));
-        submodule
-            .update(true, Some(&mut options))
-            .map_err(super::network::explain)?;
-        update_in(&submodule.open()?, None, transports)?;
+        update_submodule(repo, &mut submodule, &relative, transports)?;
     }
     Ok(())
+}
+
+/// Registers `submodule` at `relative`, then clones or checks it out and updates its own
+/// submodules, unless its update setting is `none`.
+fn update_submodule(
+    repo: &git2::Repository,
+    submodule: &mut git2::Submodule<'_>,
+    relative: &str,
+    transports: Transports,
+) -> Result<()> {
+    submodule.init(false)?;
+    if update_is_none(repo, submodule)? {
+        return Ok(());
+    }
+    let url = clone_url(repo, submodule)?;
+    let refused = match transports {
+        Transports::FileOnly => !is_file_transport(&url),
+        Transports::Any => {
+            is_file_transport(&url) && needs_transport(submodule) && !file_transport_allowed(repo)?
+        }
+    };
+    if refused {
+        let failed = format!(
+            "clone of '{url}' into submodule path '{}' failed",
+            repo.workdir()
+                .unwrap_or(Path::new(""))
+                .join(relative)
+                .display()
+        );
+        return Err(Error(match transports {
+            Transports::FileOnly => failed,
+            Transports::Any => format!("transport 'file' not allowed\n{failed}"),
+        }));
+    }
+    let config = repo.config()?;
+    let mut options = git2::SubmoduleUpdateOptions::new();
+    options.fetch(super::network::fetch_options(&config, &url));
+    submodule
+        .update(true, Some(&mut options))
+        .map_err(super::network::explain)?;
+    update_in(&submodule.open()?, None, transports)
 }
 
 /// Whether `git submodule update --init` takes `submodule` in. Only when `submodule.active` lists

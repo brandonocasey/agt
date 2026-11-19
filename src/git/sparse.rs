@@ -91,7 +91,7 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
         .ok_or_else(|| Error("this operation must be run in a work tree".into()))?;
     let mut index = refreshed_index(repo)?;
     let entries: Vec<git2::IndexEntry> = index.iter().collect();
-    let mut changed_files: Option<HashSet<Vec<u8>>> = None;
+    let mut changes = WorkTreeChanges { repo, paths: None };
     let mut restore = Vec::new();
     let mut emptied = Vec::new();
     for entry in entries.iter().filter(|entry| entry.flags & STAGE_MASK == 0) {
@@ -105,13 +105,7 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
                 restore.push(file);
             }
         } else if !keep && !skipped {
-            if changed_files.is_none() {
-                changed_files = Some(changed_in_work_tree(repo)?);
-            }
-            let differs = changed_files
-                .as_ref()
-                .is_some_and(|paths| paths.contains(&entry.path));
-            if !leave_out(&file, entry, differs)? {
+            if !leave_out(&file, entry, &mut changes)? {
                 continue;
             }
             changed.flags_extended |= SKIP_WORKTREE;
@@ -129,34 +123,53 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
     Ok(())
 }
 
-/// The tracked paths whose file differs from the index once the checkout filters (line endings,
-/// attributes) are applied to it. Reads only; nothing is written to the index or the object
-/// database.
-fn changed_in_work_tree(repo: &git2::Repository) -> Result<HashSet<Vec<u8>>> {
-    let mut options = git2::StatusOptions::new();
-    options
-        .show(git2::StatusShow::Workdir)
-        .include_untracked(false)
-        .include_ignored(false)
-        .exclude_submodules(true);
-    let statuses = repo.statuses(Some(&mut options))?;
-    Ok(statuses
-        .iter()
-        .filter(|entry| !entry.status().is_empty())
-        .map(|entry| entry.path_bytes().to_vec())
-        .collect())
+/// The tracked files that differ from the index once the checkout filters (line endings,
+/// attributes) are applied to them, looked up on first use. Reads only; nothing is written to
+/// the index or the object database.
+struct WorkTreeChanges<'r> {
+    repo: &'r git2::Repository,
+    paths: Option<HashSet<Vec<u8>>>,
 }
 
-/// Removes `file`, which the patterns leave out, unless it `differs` from the index; returns
+impl WorkTreeChanges<'_> {
+    fn contains(&mut self, path: &[u8]) -> Result<bool> {
+        if self.paths.is_none() {
+            let mut options = git2::StatusOptions::new();
+            options
+                .show(git2::StatusShow::Workdir)
+                .include_untracked(false)
+                .include_ignored(false)
+                .exclude_submodules(true);
+            let statuses = self.repo.statuses(Some(&mut options))?;
+            self.paths = Some(
+                statuses
+                    .iter()
+                    .filter(|entry| !entry.status().is_empty())
+                    .map(|entry| entry.path_bytes().to_vec())
+                    .collect(),
+            );
+        }
+        Ok(self
+            .paths
+            .as_ref()
+            .is_some_and(|paths| paths.contains(path)))
+    }
+}
+
+/// Removes `file`, which the patterns leave out, unless it differs from the index; returns
 /// whether the entry may now be marked skip-worktree.
-fn leave_out(file: &Path, entry: &git2::IndexEntry, differs: bool) -> Result<bool> {
+fn leave_out(
+    file: &Path,
+    entry: &git2::IndexEntry,
+    changes: &mut WorkTreeChanges<'_>,
+) -> Result<bool> {
     let Ok(meta) = fs::symlink_metadata(file) else {
         return Ok(true);
     };
     if meta.is_dir() || entry.mode == GITLINK_MODE {
         return Ok(true);
     }
-    if differs {
+    if changes.contains(&entry.path)? {
         return Ok(false);
     }
     fs::remove_file(file).map_err(ctx(format!("remove {}", file.display())))?;
