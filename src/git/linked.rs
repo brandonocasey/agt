@@ -40,16 +40,22 @@ impl Repo {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(ctx(format!("create {}", parent.display())))?;
         }
-        // git accepts an existing empty directory, libgit2 does not.
+        // An existing empty directory is accepted, as git does.
         if fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()) {
             fs::remove_dir(path).map_err(ctx(format!("prepare {}", path.display())))?;
         }
         let name = admin_name(&repo, path);
-        match what {
-            Checkout::Branch(branch) => add_on_branch(&repo, &name, path, branch)?,
+        let head = match what {
+            Checkout::Branch(branch) => {
+                let found = repo.find_branch(branch, git2::BranchType::Local)?;
+                let refname = found.get().name().unwrap_or_default().to_owned();
+                ensure_not_checked_out(&repo, &refname)?;
+                Head::Branch(refname)
+            }
             Checkout::NewBranch { name: branch, at } => {
-                repo.branch(branch, &repo.find_commit(commit_id(&repo, at)?)?, false)?;
-                add_on_branch(&repo, &name, path, branch)?;
+                let created =
+                    repo.branch(branch, &repo.find_commit(commit_id(&repo, at)?)?, false)?;
+                Head::Branch(created.get().name().unwrap_or_default().to_owned())
             }
             Checkout::Tracking {
                 name: branch,
@@ -59,16 +65,16 @@ impl Repo {
                 let commit = start.get().peel_to_commit()?;
                 let mut created = repo.branch(branch, &commit, false)?;
                 created.set_upstream(Some(upstream))?;
-                add_on_branch(&repo, &name, path, branch)?;
+                Head::Branch(created.get().name().unwrap_or_default().to_owned())
             }
-            Checkout::Detached(commit) => add_detached(&repo, &name, path, commit)?,
-        }
-        if sparse::is_enabled(&repo)? {
-            let linked = Repo::at(path);
-            copy_sparse_files(&repo, &git2::Repository::open(path)?)?;
-            linked.sparse_reapply()?;
-        }
-        Ok(())
+            Checkout::Detached(commit) => Head::Detached(commit_id(&repo, commit)?),
+        };
+        let admin = repo.commondir().join("worktrees").join(&name);
+        link_worktree(&repo, &admin, path, &head)?;
+        fill_worktree(&repo, path).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&admin);
+            let _ = fs::remove_dir_all(path);
+        })
     }
 
     /// Removes the linked worktree at `path` with its files and its registration, whatever it
@@ -176,31 +182,72 @@ fn admin_name(repo: &git2::Repository, path: &Path) -> String {
     name
 }
 
-fn add_on_branch(repo: &git2::Repository, name: &str, path: &Path, branch: &str) -> Result<()> {
-    let found = repo.find_branch(branch, git2::BranchType::Local)?;
-    let mut options = git2::WorktreeAddOptions::new();
-    options.reference(Some(found.get()));
-    repo.worktree(name, path, Some(&options))?;
+/// What the HEAD of a new worktree holds.
+enum Head {
+    /// The full name of a local branch.
+    Branch(String),
+    Detached(git2::Oid),
+}
+
+/// Fails when `refname` is the HEAD of this work tree or of a linked one, which git refuses to
+/// check out a second time.
+fn ensure_not_checked_out(repo: &git2::Repository, refname: &str) -> Result<()> {
+    let wanted = format!("ref: {refname}");
+    let common = repo.commondir();
+    let mut heads = vec![common.join("HEAD")];
+    if let Ok(linked) = fs::read_dir(common.join("worktrees")) {
+        heads.extend(linked.flatten().map(|entry| entry.path().join("HEAD")));
+    }
+    let taken = heads
+        .iter()
+        .any(|head| fs::read_to_string(head).is_ok_and(|text| text.trim_end() == wanted));
+    if taken {
+        return Err(Error(format!("reference {refname} is already checked out")));
+    }
     Ok(())
 }
 
-/// libgit2 can only check out a branch, so the worktree is made on a temporary branch at
-/// `commit` that is dropped once HEAD is detached. A branch that cannot be dropped is replaced by
-/// the next detached worktree and does not fail this one.
-fn add_detached(repo: &git2::Repository, name: &str, path: &Path, commit: &str) -> Result<()> {
-    let id = commit_id(repo, commit)?;
-    let temporary = format!("agt-detach-{}", std::process::id());
-    repo.branch(&temporary, &repo.find_commit(id)?, true)?;
-    let added = add_on_branch(repo, name, path, &temporary);
-    let detached = added.and_then(|()| {
-        let linked = git2::Repository::open(path)?;
-        linked.set_head_detached(id)?;
-        Ok(())
-    });
-    if let Ok(mut branch) = repo.find_branch(&temporary, git2::BranchType::Local) {
-        let _ = branch.delete();
+/// Registers a linked worktree: its administrative directory `admin` and its `path`, which
+/// hold only the links between them and a HEAD, so that no file is checked out yet.
+fn link_worktree(repo: &git2::Repository, admin: &Path, path: &Path, head: &Head) -> Result<()> {
+    let create = |dir: &Path| fs::create_dir(dir).map_err(ctx(format!("create {}", dir.display())));
+    if let Some(worktrees) = admin.parent() {
+        fs::create_dir_all(worktrees).map_err(ctx(format!("create {}", worktrees.display())))?;
     }
-    detached
+    create(admin)?;
+    create(path)?;
+    let real =
+        |dir: &Path| fs::canonicalize(dir).map_err(ctx(format!("resolve {}", dir.display())));
+    let (admin, work, common) = (real(admin)?, real(path)?, real(repo.commondir())?);
+    let head_text = match head {
+        Head::Branch(refname) => format!("ref: {refname}\n"),
+        Head::Detached(id) => format!("{id}\n"),
+    };
+    let files = [
+        (admin.join("commondir"), format!("{}\n", common.display())),
+        (
+            admin.join("gitdir"),
+            format!("{}\n", work.join(".git").display()),
+        ),
+        (admin.join("HEAD"), head_text),
+        (work.join(".git"), format!("gitdir: {}\n", admin.display())),
+    ];
+    for (file, text) in files {
+        fs::write(&file, text).map_err(ctx(format!("write {}", file.display())))?;
+    }
+    Ok(())
+}
+
+/// Checks out HEAD in the worktree at `path`, only the files the sparse-checkout patterns of
+/// `main` select when it has any.
+fn fill_worktree(main: &git2::Repository, path: &Path) -> Result<()> {
+    let linked = git2::Repository::open(path)?;
+    if sparse::is_enabled(main)? {
+        copy_sparse_files(main, &linked)?;
+        return Repo::at(path).sparse_check_out_head();
+    }
+    linked.checkout_head(None)?;
+    Ok(())
 }
 
 /// Gives the new worktree the sparse-checkout patterns and per-worktree config of `from`,
@@ -359,5 +406,33 @@ mod tests {
         assert!(linked.join("a.txt").is_file());
         repo.remove_worktree(&linked).unwrap();
         assert!(!linked.exists());
+    }
+
+    #[test]
+    fn a_branch_that_a_checkout_holds_is_refused_and_leaves_nothing_behind() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(&sandbox, &dir, &[("a.txt", "a\n")], "one");
+        let first = sandbox.path().join("first");
+        let second = sandbox.path().join("second");
+        sandbox.git(&dir, &["branch", "topic"]);
+        let repo = Repo::at(&dir);
+
+        repo.add_worktree(&first, &Checkout::Branch("topic"))
+            .unwrap();
+        let refused = repo.add_worktree(&second, &Checkout::Branch("topic"));
+
+        assert!(refused.unwrap_err().0.contains("already checked out"));
+        assert!(!second.exists());
+        let oracle = sandbox
+            .command("git")
+            .current_dir(&dir)
+            .args(["worktree", "add", "-q"])
+            .arg(&second)
+            .arg("topic")
+            .output()
+            .unwrap();
+        assert!(!oracle.status.success());
+        assert_eq!(repo.worktrees().unwrap().len(), 2);
     }
 }

@@ -151,6 +151,35 @@ fn the_local_default_is_fast_forwarded_in_a_sparse_checkout_over_a_change_outsid
     assert_eq!(status, "");
 }
 
+/// A cone checkout of `keep` whose left-out `out/b` blob is deleted from the object database: a
+/// checkout that wrote or read the left-out files would fail on it, as a partial clone's would.
+fn sparse_repo_missing_a_left_out_blob() -> Env {
+    let (env, _) = repo_with_commit();
+    let repo = env.repo.clone();
+    fs::create_dir_all(repo.join("keep")).unwrap();
+    fs::create_dir_all(repo.join("out")).unwrap();
+    fs::write(repo.join("keep/a"), "a").unwrap();
+    fs::write(repo.join("out/b"), "b").unwrap();
+    git(&env, &repo, &["add", "-A"]);
+    git(&env, &repo, &["commit", "-q", "-m", "dirs"]);
+    git(&env, &repo, &["sparse-checkout", "set", "keep"]);
+    let blob = git(&env, &repo, &["rev-parse", "HEAD:out/b"]);
+    fs::remove_file(repo.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+    env
+}
+
+#[test]
+fn a_worktree_of_a_sparse_checkout_never_writes_the_files_left_out() {
+    let env = sparse_repo_missing_a_left_out_blob();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    let work = PathBuf::from(value["path"].as_str().unwrap());
+    assert!(work.join("keep/a").is_file());
+    assert!(!work.join("out").exists());
+    let status = git(&env, &work, &["status", "--porcelain"]);
+    assert_eq!(status, "");
+    assert_eq!(git(&env, &work, &["sparse-checkout", "list"]), "keep");
+}
+
 #[test]
 fn the_local_default_is_fast_forwarded_in_the_checkout_that_has_it() {
     let (env, _, first, tip) = behind_origin();

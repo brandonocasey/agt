@@ -28,6 +28,29 @@ impl Repo {
         reapply(&repo)
     }
 
+    /// Fills a worktree that has a HEAD but no files and no index with the files of HEAD that
+    /// the patterns select, and writes nothing for the others.
+    pub(super) fn sparse_check_out_head(&self) -> Result<()> {
+        let repo = self.open_writing()?;
+        let file = repo
+            .index()?
+            .path()
+            .map(Path::to_owned)
+            .ok_or_else(|| Error("this operation must be run in a work tree".into()))?;
+        // An index with no repository does not look up the objects it is given, so the files
+        // left out are never read.
+        let mut index = git2::Index::open(&file)?;
+        index.read_tree(&repo.head()?.peel_to_tree()?)?;
+        let entries: Vec<git2::IndexEntry> = index.iter().collect();
+        for entry in entries.iter().filter(|entry| entry.flags & STAGE_MASK == 0) {
+            let mut skipped = copy_entry(entry);
+            skipped.flags_extended |= SKIP_WORKTREE;
+            index.add(&skipped)?;
+        }
+        index.write()?;
+        reapply(&repo)
+    }
+
     /// Brings every file back and turns the sparse checkout off (`git sparse-checkout
     /// disable`). The patterns file stays, and the setting is written to the worktree's own
     /// config, as git writes it.
