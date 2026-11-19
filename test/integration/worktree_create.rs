@@ -861,6 +861,75 @@ fn a_file_path_submodule_needs_what_git_needs_to_clone_over_the_file_transport()
     }
 }
 
+/// A repository whose origin is a network URL and whose submodule `vendor` is recorded as the
+/// relative URL `../lib.git`, which git resolves against the origin.
+fn relative_submodule_repo(env: &Env, origin: &str) {
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(env, &library, &["init", "-q", "-b", "main"]);
+    commit(env, &library, "lib.txt", "lib");
+    git(
+        env,
+        &env.repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            library.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    let modules = fs::read_to_string(env.repo.join(".gitmodules")).unwrap();
+    fs::write(
+        env.repo.join(".gitmodules"),
+        modules.replace(library.to_str().unwrap(), "../lib.git"),
+    )
+    .unwrap();
+    git(env, &env.repo, &["add", "-A"]);
+    git(env, &env.repo, &["commit", "-q", "-m", "add submodule"]);
+    git(
+        env,
+        &env.repo,
+        &["config", "--remove-section", "submodule.vendor"],
+    );
+    git(env, &env.repo, &["remote", "add", "origin", origin]);
+}
+
+#[test]
+fn an_online_create_takes_a_relative_submodule_url_for_a_network_url_when_the_origin_is() {
+    let (env, _) = repo_with_commit();
+    let host = crate::support::refusing_host();
+    relative_submodule_repo(&env, &host.url);
+    let output = env
+        .bin(&env.repo)
+        .args(["worktree", "create", "on", "--base", "main"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("transport 'file' not allowed"), "{stderr}");
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(host.accepted.try_recv().is_ok(), "never connected");
+}
+
+#[test]
+fn an_offline_create_skips_a_relative_submodule_url_when_the_origin_is_a_network_url() {
+    let (env, _) = repo_with_commit();
+    let host = crate::support::refusing_host();
+    relative_submodule_repo(&env, &host.url);
+    let output = env
+        .bin(&env.repo)
+        .args(["--offline", "worktree", "create", "off", "--base", "main"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warning = value["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("submodule vendor"), "{value}");
+    assert!(host.accepted.try_recv().is_err(), "connected");
+}
+
 #[test]
 fn prepare_runs_after_create_on_request() {
     let (env, _) = repo_with_commit();

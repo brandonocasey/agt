@@ -258,7 +258,7 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
             continue;
         }
         submodule.init(false)?;
-        let url = submodule.url().unwrap_or_default().to_owned();
+        let url = clone_url(repo, &submodule)?;
         let refused = match transports {
             Transports::FileOnly => !is_file_transport(&url),
             Transports::Any => {
@@ -287,6 +287,17 @@ fn update_in(repo: &git2::Repository, only: Option<&str>, transports: Transports
         update_in(&submodule.open()?, None, transports)?;
     }
     Ok(())
+}
+
+/// The URL an update clones `submodule` from: the one `init` wrote to the config, which resolves
+/// a relative `.gitmodules` URL against the remote.
+fn clone_url(repo: &git2::Repository, submodule: &git2::Submodule<'_>) -> Result<String> {
+    let name = submodule.name().unwrap_or_default();
+    let configured = repo.config()?.get_string(&format!("submodule.{name}.url"));
+    Ok(configured
+        .ok()
+        .or_else(|| submodule.url().map(str::to_owned))
+        .unwrap_or_default())
 }
 
 /// Whether updating `submodule` has to fetch: it is not cloned yet, or its clone lacks the
