@@ -21,7 +21,7 @@ pub struct Cli {
     /// Skip the `[worktree.hooks] remove` commands.
     #[arg(long)]
     no_hooks: bool,
-    /// Remove although untracked files exist; the backup does not keep them.
+    /// Remove although untracked files exist, or HEAD is on no branch; the backup keeps neither.
     #[arg(long)]
     force: bool,
 }
@@ -51,9 +51,12 @@ pub fn run(cli: Cli) -> Result<Output> {
     } else {
         Untracked::Refuse
     };
+    let unpinned = unpinned_head(&main, &path, entry, mode)?;
     if mode == Untracked::Refuse {
         refuse_untracked(&path, &unbacked)?;
     }
+    let mut warnings = warnings;
+    warnings.extend(unpinned);
     if !cli.yes {
         let (planned, untrusted) = if cli.no_hooks {
             (Vec::new(), None)
@@ -120,6 +123,42 @@ fn refuse_untracked(path: &Path, paths: &[String]) -> Result<()> {
     ))
 }
 
+/// A backup keeps files, not commits. A HEAD on no branch fails unless `--force` lets it go,
+/// and then gives the warning to report.
+fn unpinned_head(
+    main: &Path,
+    path: &Path,
+    entry: &Worktree,
+    mode: Untracked,
+) -> Result<Option<String>> {
+    if gate::held_by_a_branch(&Repo::at(main), &entry.head)? {
+        return Ok(None);
+    }
+    if mode == Untracked::Refuse {
+        return fail(format!(
+            "{} has HEAD {} on no branch, and a backup keeps files, not commits; create a branch there, or pass --force to remove without them; nothing was backed up or removed",
+            path.display(),
+            entry.head
+        ));
+    }
+    Ok(Some(format!(
+        "HEAD {} is on no branch; its commits are not backed up",
+        entry.head
+    )))
+}
+
+/// The short names of the refs under `pattern` that contain `head`.
+fn branches_holding(shared: &Repo, head: &str, pattern: &str) -> Result<Vec<String>> {
+    let found = shared.git(&[
+        "for-each-ref",
+        "--contains",
+        head,
+        "--format=%(refname:short)",
+        pattern,
+    ])?;
+    Ok(found.lines().map(str::to_owned).collect())
+}
+
 /// Runs the remove hooks when `run_hooks`, backs `entry` up, then removes its worktree; the
 /// caller has checked that it may go. A failing hook is an error before anything is touched,
 /// and so, unless `allow_lost`, is an ignored file no backup keeps.
@@ -180,18 +219,8 @@ pub(super) fn removal(
         ])?;
     }
     shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
-    let branches = |pattern: &str| -> Result<Vec<String>> {
-        let found = shared.git(&[
-            "for-each-ref",
-            "--contains",
-            &entry.head,
-            "--format=%(refname:short)",
-            pattern,
-        ])?;
-        Ok(found.lines().map(str::to_owned).collect())
-    };
-    let local = branches("refs/heads")?;
-    let remote = branches("refs/remotes")?;
+    let local = branches_holding(&shared, &entry.head, "refs/heads")?;
+    let remote = branches_holding(&shared, &entry.head, "refs/remotes")?;
     let mut done = json!({
         "removed": path,
         "id": taken.record.id,

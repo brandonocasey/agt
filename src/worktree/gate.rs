@@ -84,6 +84,19 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether a local or remote branch contains the commit `head`.
+pub(super) fn held_by_a_branch(shared: &Repo, head: &str) -> Result<bool> {
+    let found = shared.git(&[
+        "for-each-ref",
+        "--contains",
+        head,
+        "--format=%(refname)",
+        "refs/heads",
+        "refs/remotes",
+    ])?;
+    Ok(!found.is_empty())
+}
+
 /// Removal deletes a linked worktree below `worktree` without a backup, so refuses one that
 /// is locked, has uncommitted changes, or sits on a commit that no branch holds.
 fn inner_worktrees_may_go(main: &Path, worktree: &Path) -> Result<()> {
@@ -100,18 +113,8 @@ fn inner_worktrees_may_go(main: &Path, worktree: &Path) -> Result<()> {
                 "it holds the worktree {path} with uncommitted changes; commit or discard them first"
             ));
         }
-        let held = inner.branch.is_some()
-            || inner.unborn()
-            || !shared
-                .git(&[
-                    "for-each-ref",
-                    "--contains",
-                    &inner.head,
-                    "--format=%(refname)",
-                    "refs/heads",
-                    "refs/remotes",
-                ])?
-                .is_empty();
+        let held =
+            inner.branch.is_some() || inner.unborn() || held_by_a_branch(&shared, &inner.head)?;
         if !held {
             return fail(format!(
                 "it holds the worktree {path} on a commit that no branch holds; branch it or push it first"

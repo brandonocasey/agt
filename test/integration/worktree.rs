@@ -436,6 +436,59 @@ fn a_backup_restores_a_submodule_path_that_became_a_file() {
 }
 
 #[test]
+fn a_head_on_no_branch_refuses_removal_unless_forced() {
+    let f = Fixture::new();
+    wgit(&f.env, &f.wt, &["checkout", "-q", "--detach"]);
+    fs::write(f.wt.join("lonely.txt"), "lonely\n").unwrap();
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "on no branch"]);
+    let path = f.wt.to_string_lossy().into_owned();
+    for args in [vec!["remove", &path], vec!["remove", &path, "--yes"]] {
+        f.refuses(&f.env.repo, &args, "on no branch");
+    }
+    assert!(f.wt.exists());
+    assert_eq!(f.json(&["backups"])["backups"], json!([]));
+
+    let plan = f.json(&["remove", &path, "--force"]);
+    assert!(
+        plan["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("on no branch")
+    );
+    let removed = f.json(&["remove", &path, "--yes", "--force"]);
+    assert_eq!(removed["head_on_local_branch"], false);
+    assert!(
+        removed["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("on no branch")
+    );
+    assert!(!f.wt.exists());
+}
+
+#[test]
+fn a_detached_head_held_by_a_branch_is_removed_without_force() {
+    for remote in [false, true] {
+        let f = Fixture::new();
+        wgit(&f.env, &f.wt, &["checkout", "-q", "--detach"]);
+        fs::write(f.wt.join("held.txt"), "held\n").unwrap();
+        wgit(&f.env, &f.wt, &["add", "-A"]);
+        wgit(&f.env, &f.wt, &["commit", "-q", "-m", "held elsewhere"]);
+        let head = wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]);
+        let holder = if remote {
+            "refs/remotes/origin/held"
+        } else {
+            "refs/heads/held"
+        };
+        f.env.git(&["update-ref", holder, &head]);
+        let removed = f.json(&["remove", &f.wt.to_string_lossy(), "--yes"]);
+        assert_eq!(removed["warnings"], json!([]), "{remote}");
+        assert!(!f.wt.exists(), "{remote}");
+    }
+}
+
+#[test]
 fn restore_keeps_symlink_targets_exactly() {
     let long = format!("{}/", "d".repeat(120));
     for target in ["d/", "d//e/./f", long.as_str()] {
