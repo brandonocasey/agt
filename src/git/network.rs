@@ -814,6 +814,7 @@ mod tests {
                 .local_addr()
                 .unwrap()
                 .port();
+            let log = dir.join("s_server.log");
             let child = sandbox
                 .command("openssl")
                 .args(["s_server", "-quiet", "-www", "-accept", &port.to_string()])
@@ -823,15 +824,27 @@ mod tests {
                 .arg(&key)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(fs::File::create(&log).unwrap())
                 .spawn()
                 .unwrap();
-            let server = Self {
+            let mut server = Self {
                 child,
                 port,
                 certificate,
             };
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
             while TcpStream::connect(("127.0.0.1", port)).is_err() {
+                let exited = server.child.try_wait().unwrap();
+                assert!(
+                    exited.is_none(),
+                    "openssl s_server exited with {exited:?}: {}",
+                    fs::read_to_string(&log).unwrap_or_default()
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "openssl s_server did not listen within 10s: {}",
+                    fs::read_to_string(&log).unwrap_or_default()
+                );
                 std::thread::sleep(Duration::from_millis(20));
             }
             server
