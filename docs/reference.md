@@ -27,7 +27,8 @@ Repositories with SHA-1 object IDs work; SHA-256 repositories are not supported.
 The system git config is the first `gitconfig` that exists in `/etc`, `/opt/homebrew/etc`,
 `/usr/local/etc`, `/Library/Developer/CommandLineTools/usr/share/git-core` and
 `/Applications/Xcode.app/Contents/Developer/usr/share/git-core`, searched in that order;
-`GIT_CONFIG_NOSYSTEM` and `GIT_CONFIG_SYSTEM` apply.
+`GIT_CONFIG_NOSYSTEM` and `GIT_CONFIG_SYSTEM` apply only to work-tree repositories, not to the
+git-dir repository of a submodule's listing, which reads the added directories.
 Over ssh, agt accepts a host key only when a known-hosts file lists it.
 The files are `/etc/ssh/ssh_known_hosts`, `/etc/ssh/ssh_known_hosts2`, `~/.ssh/known_hosts` and
 `~/.ssh/known_hosts2`, in that order. A line with a byte that is not UTF-8 matches nothing, and the rest of its file is still read.
