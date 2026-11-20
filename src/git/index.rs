@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::deep::{is_too_deep, walk};
 use super::files::{is_nested_repo, nested_repos};
-use super::filter::refusal_for_staging;
+use super::filter::Guard;
 use super::{GITLINK_MODE, Gitlink, Repo, StatusEntry};
 use crate::core::error::{Error, Result};
 
@@ -172,13 +172,14 @@ impl Repo {
         self.with_scratch_index(|repo, index| {
             let absent = absent_hidden(repo, index);
             let mut refused = None;
+            let guard = Guard::new(repo);
             let mut check = |path: &Path, _: &[u8]| {
                 // libgit2 lists a nested repo with a trailing slash and then cannot add it;
                 // it is added below as the gitlink `git add` makes.
                 if path.as_os_str().as_bytes().ends_with(b"/") {
                     return 1;
                 }
-                refused = refusal_for_staging(repo, path);
+                refused = guard.refusal_for_staging(path);
                 if refused.is_some() { -1 } else { 0 }
             };
             let added = index.add_all(["*"], git2::IndexAddOption::DEFAULT, Some(&mut check));
@@ -329,6 +330,7 @@ fn stage_walked(
         renames: false,
         submodules: true,
     };
+    let guard = Guard::new(repo);
     for item in walk(repo, scope)? {
         if item.path.ends_with(b"/") || item.status.is_conflicted() {
             continue;
@@ -338,7 +340,7 @@ fn stage_walked(
             index.remove_path(path)?;
             continue;
         }
-        if let Some(message) = refusal_for_staging(repo, path) {
+        if let Some(message) = guard.refusal_for_staging(path) {
             return Err(Error(message));
         }
         index

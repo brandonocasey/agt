@@ -29,23 +29,61 @@ pub(super) type Refusal = RefCell<Option<String>>;
 const FILE_TYPE: u32 = 0o170_000;
 const REGULAR_FILE: u32 = 0o100_000;
 
-/// Why `path` cannot be read as git would stage it: its `filter` attribute names a driver the
-/// config marks required. A symlink is staged as its target, which no filter sees.
-pub(super) fn refusal_for_staging(repo: &git2::Repository, path: &Path) -> Option<String> {
-    let on_disk = repo.workdir()?.join(path);
-    let is_file = fs::symlink_metadata(on_disk).is_ok_and(|meta| meta.is_file());
-    is_file.then(|| required_filter(repo, path, Use::Stage))?
+/// The question "may this path be staged or written?" for one operation on `repo`. When no
+/// filter is required it answers yes at once: it reads the config once, where an attribute
+/// lookup for each path would cost more than the operation itself on a large tree.
+pub(super) struct Guard<'r> {
+    repo: &'r git2::Repository,
+    any_required: bool,
 }
 
-/// Why the entry `path` of mode `mode` cannot be written as git would check it out. Git runs a
-/// filter on a regular file only, never on a symlink or a gitlink.
-pub(super) fn refusal_for_writing(
-    repo: &git2::Repository,
-    path: &Path,
-    mode: u32,
-) -> Option<String> {
-    let regular = mode & FILE_TYPE == REGULAR_FILE;
-    regular.then(|| required_filter(repo, path, Use::CheckOut))?
+impl<'r> Guard<'r> {
+    pub(super) fn new(repo: &'r git2::Repository) -> Self {
+        Self {
+            repo,
+            any_required: any_required(repo),
+        }
+    }
+
+    /// Why `path` cannot be read as git would stage it: its `filter` attribute names a driver the
+    /// config marks required. A symlink is staged as its target, which no filter sees.
+    pub(super) fn refusal_for_staging(&self, path: &Path) -> Option<String> {
+        if !self.any_required {
+            return None;
+        }
+        let on_disk = self.repo.workdir()?.join(path);
+        let is_file = fs::symlink_metadata(on_disk).is_ok_and(|meta| meta.is_file());
+        is_file.then(|| required_filter(self.repo, path, Use::Stage))?
+    }
+
+    /// Why the entry `path` of mode `mode` cannot be written as git would check it out. Git runs a
+    /// filter on a regular file only, never on a symlink or a gitlink.
+    pub(super) fn refusal_for_writing(&self, path: &Path, mode: u32) -> Option<String> {
+        if !self.any_required {
+            return None;
+        }
+        let regular = mode & FILE_TYPE == REGULAR_FILE;
+        regular.then(|| required_filter(self.repo, path, Use::CheckOut))?
+    }
+}
+
+/// Whether any `filter.<name>.required` is true in the config of `repo`.
+fn any_required(repo: &git2::Repository) -> bool {
+    let Ok(config) = repo.config() else {
+        return false;
+    };
+    let Ok(mut entries) = config.entries(Some(r"^filter\..*\.required$")) else {
+        return false;
+    };
+    while let Some(Ok(entry)) = entries.next() {
+        if entry
+            .name()
+            .is_some_and(|name| config.get_bool(name) == Ok(true))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Why `path` cannot be used as `purpose` says: its `filter` attribute names a driver the config
@@ -82,9 +120,10 @@ pub(super) fn ensure_writable<'a>(
     repo: &git2::Repository,
     entries: impl IntoIterator<Item = (&'a Path, u32)>,
 ) -> Result<()> {
+    let guard = Guard::new(repo);
     match entries
         .into_iter()
-        .find_map(|(path, mode)| refusal_for_writing(repo, path, mode))
+        .find_map(|(path, mode)| guard.refusal_for_writing(path, mode))
     {
         Some(message) => Err(Error(message)),
         None => Ok(()),
@@ -95,7 +134,7 @@ pub(super) fn ensure_writable<'a>(
 /// applies, `refusal` takes the reason and the checkout MUST be aborted: this is for a notify
 /// callback that returns the result.
 pub(super) fn may_write(
-    repo: &git2::Repository,
+    guard: &Guard<'_>,
     refusal: &Refusal,
     path: Option<&Path>,
     target: Option<&DiffFile<'_>>,
@@ -104,7 +143,7 @@ pub(super) fn may_write(
         return true;
     };
     let mode = target.map_or(REGULAR_FILE, |target| i32::from(target.mode()) as u32);
-    let Some(message) = refusal_for_writing(repo, path, mode) else {
+    let Some(message) = guard.refusal_for_writing(path, mode) else {
         return true;
     };
     refusal.replace(Some(message));
@@ -118,9 +157,13 @@ pub(super) fn refuse_required_filters<'cb>(
     repo: &'cb git2::Repository,
     refusal: &'cb Refusal,
 ) {
+    let guard = Guard::new(repo);
+    if !guard.any_required {
+        return;
+    }
     options
         .notify_on(CheckoutNotificationType::UPDATED)
-        .notify(move |_, path, _, target, _| may_write(repo, refusal, path, target.as_ref()));
+        .notify(move |_, path, _, target, _| may_write(&guard, refusal, path, target.as_ref()));
 }
 
 /// The result of a checkout built with [`refuse_required_filters`]: the refusal when it made the
@@ -132,5 +175,43 @@ pub(super) fn finished<T>(
     match refusal.take() {
         Some(message) => Err(Error(message)),
         None => Ok(checked?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    use super::any_required;
+    use crate::core::testing::Sandbox;
+
+    #[test]
+    fn a_required_filter_is_found_however_the_config_spells_it() {
+        let filter = |name: &str, lines: &str| format!("[filter \"{name}\"]\n{lines}");
+        for (config, expected) in [
+            (String::new(), false),
+            (filter("lfs", "\tclean = cat\n"), false),
+            (filter("lfs", "\trequired = false\n"), false),
+            (filter("lfs", "\trequired = true\n"), true),
+            (filter("lfs", "\trequired\n"), true),
+            (filter("LFS", "\trequired = yes\n"), true),
+            (
+                filter("a", "\trequired = true\n") + &filter("a", "\trequired = false\n"),
+                false,
+            ),
+        ] {
+            let sandbox = Sandbox::with_repo();
+            let dir = sandbox.repo();
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(dir.join(".git/config"))
+                .unwrap();
+            file.write_all(config.as_bytes()).unwrap();
+
+            let repo = git2::Repository::open(&dir).unwrap();
+
+            assert_eq!(any_required(&repo), expected, "{config}");
+        }
     }
 }

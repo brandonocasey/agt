@@ -132,6 +132,7 @@ impl Repo {
         let tree = repo.find_commit(commit_id(&repo, source)?)?.tree()?;
         let left_out = left_out_paths(&repo)?;
         let mut outside_patterns = sparse::leaves_out(&repo)?;
+        let guard = filter::Guard::new(&repo);
         for path in paths {
             let at = Path::new(OsStr::from_bytes(path));
             let Ok(entry) = tree.get_path(at) else {
@@ -141,7 +142,7 @@ impl Repo {
                 continue;
             }
             let mode = entry.filemode() as u32;
-            if let Some(message) = filter::refusal_for_writing(&repo, at, mode) {
+            if let Some(message) = guard.refusal_for_writing(at, mode) {
                 return Ok(Some(message));
             }
         }
@@ -207,6 +208,7 @@ fn check_out_safely(
     let mut blocked = Vec::new();
     let refusal = Refusal::default();
     let mut outside_patterns = sparse::leaves_out(repo)?;
+    let guard = filter::Guard::new(repo);
     let mut options = git2::build::CheckoutBuilder::new();
     options
         .safe()
@@ -220,7 +222,7 @@ fn check_out_safely(
                 // The patterns leave this path out: it ends skip-worktree, so no filter applies.
                 let skipped =
                     path.is_some_and(|path| outside_patterns(path.as_os_str().as_bytes()));
-                return skipped || filter::may_write(repo, &refusal, path, target.as_ref());
+                return skipped || filter::may_write(&guard, &refusal, path, target.as_ref());
             }
             blocked.extend(path.map(Path::to_owned));
             true
