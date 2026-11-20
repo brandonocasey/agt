@@ -232,11 +232,13 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str, verify: bool) -> git2::Rem
 /// The answer to libgit2's user name request for an ssh URL that lacks one.
 /// It is the name the URL gives, else the login name.
 fn user_name_credential(url_user: Option<&str>) -> std::result::Result<git2::Cred, git2::Error> {
-    let name = url_user
-        .map(str::to_owned)
-        .or_else(login_name)
+    let name = chosen_user_name(url_user, login_name())
         .ok_or_else(|| git2::Error::from_str("no user name: put one in the URL (user@host)"))?;
     git2::Cred::username(&name)
+}
+
+fn chosen_user_name(url_user: Option<&str>, login: Option<String>) -> Option<String> {
+    url_user.map(str::to_owned).or(login)
 }
 
 /// The login name of the current user.
@@ -396,7 +398,7 @@ mod tests {
     use std::time::Duration;
 
     use super::super::fixtures::{commit, rev};
-    use super::needs_passphrase;
+    use super::{chosen_user_name, explain, needs_passphrase, passwd_name, refuse_host_key};
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
     use crate::git::http_config;
@@ -430,6 +432,46 @@ mod tests {
         sandbox.git(&other, &["tag", "v2"]);
         sandbox.git(&other, &["push", "-q", "origin", "main", "v2"]);
         rev(sandbox, &other, "HEAD")
+    }
+
+    #[test]
+    fn a_refused_host_key_is_explained_once_and_only_for_an_ssh_failure() {
+        let failure = |class| {
+            git2::Error::new(
+                git2::ErrorCode::GenericError,
+                class,
+                "invalid or unknown remote ssh hostkey",
+            )
+        };
+        let own = "the ssh host key of example.org is not in a known_hosts file";
+        refuse_host_key(own.to_owned());
+        assert_eq!(explain(failure(git2::ErrorClass::Ssh)).0, own);
+        assert_eq!(
+            explain(failure(git2::ErrorClass::Ssh)).0,
+            "invalid or unknown remote ssh hostkey",
+            "a refusal explains one failure"
+        );
+        refuse_host_key(own.to_owned());
+        assert_eq!(
+            explain(failure(git2::ErrorClass::Net)).0,
+            "invalid or unknown remote ssh hostkey",
+            "only an ssh failure carries the refusal"
+        );
+    }
+
+    #[test]
+    fn a_user_name_request_prefers_the_url_over_the_login() {
+        let login = || Some("bob".to_owned());
+        assert_eq!(chosen_user_name(Some("alice"), login()).unwrap(), "alice");
+        assert_eq!(chosen_user_name(None, login()).unwrap(), "bob");
+        assert_eq!(chosen_user_name(None, None), None);
+    }
+
+    #[test]
+    fn the_password_database_names_the_user_as_id_does() {
+        let sandbox = Sandbox::new();
+        let expected = sandbox.shell_output(sandbox.path(), "id -un");
+        assert_eq!(passwd_name().as_deref(), Some(expected.trim()));
     }
 
     #[test]

@@ -490,7 +490,7 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
 
-    use super::Checkout;
+    use super::{Checkout, Head, link_worktree};
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
     use crate::git::fixtures::commit;
@@ -667,5 +667,39 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_failed_link_removes_only_the_directories_it_created() {
+        let sandbox = Sandbox::with_repo();
+        let admin = sandbox.path().join("repo/.git/worktrees/feat");
+        let taken = sandbox.path().join("taken");
+        let head = Head::Branch("refs/heads/feat".to_owned());
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(taken.join("work.txt"), "winner\n").unwrap();
+
+        let error = link_worktree(&admin, &taken, &head).unwrap_err();
+
+        assert!(error.0.contains("create"), "{error}");
+        assert_eq!(
+            fs::read_to_string(taken.join("work.txt")).unwrap(),
+            "winner\n"
+        );
+        assert!(
+            !admin.exists(),
+            "this call's admin directory was left behind"
+        );
+
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/winner\n").unwrap();
+        let fresh = sandbox.path().join("fresh");
+
+        link_worktree(&admin, &fresh, &head).unwrap_err();
+
+        assert!(
+            admin.join("HEAD").is_file(),
+            "another call's admin directory was removed"
+        );
+        assert!(!fresh.exists());
     }
 }
