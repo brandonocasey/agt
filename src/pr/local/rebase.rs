@@ -59,7 +59,14 @@ impl Local<'_> {
             );
         }
         let ignored = ignored_paths(&work)?;
-        let changed = self.changed_paths(&base, tip)?;
+        let changed = self.repo.changed_paths(&base, tip)?;
+        let incoming = self.repo.changed_paths(&base, target_tip)?;
+        if let Some(reason) = work.required_filter_refusal(target_tip, &incoming)? {
+            blockers.push(format!(
+                "{} would refuse the rebase: {reason}",
+                holder.display()
+            ));
+        }
         let mut written = self.changed_paths(tip, target_tip)?;
         written.extend(self.replayed_paths(&base, tip)?);
         if let Some(path) = written.iter().find(|path| in_the_way(path, &ignored)) {
@@ -68,7 +75,7 @@ impl Local<'_> {
             ));
         }
         if !target_busy {
-            blockers.extend(self.target_checkout(target, &changed)?);
+            blockers.extend(self.target_checkout(target, tip, &changed)?);
         }
         if blockers.is_empty() {
             Ok(Ok(holder.clone()))
@@ -182,11 +189,12 @@ impl Local<'_> {
         Ok(names(self.repo.changed_paths(from, to)?))
     }
 
-    /// One line for each reason the target's work tree would refuse the fast-forward.
-    /// It looks for an operation in progress. A local change, untracked file or ignored file at a
-    /// `changed` path counts too.
+    /// One line for each reason the target's work tree would refuse the fast-forward to the
+    /// rebased `tip`. It looks for an operation in progress. A local change, untracked file or
+    /// ignored file at a `changed` path counts too, and so does a `changed` path that a required
+    /// filter applies to.
     /// Empty when no work tree has `target`.
-    fn target_checkout(&self, target: &str, changed: &[String]) -> Result<Vec<String>> {
+    fn target_checkout(&self, target: &str, tip: &str, changed: &[Vec<u8>]) -> Result<Vec<String>> {
         let holder = self
             .repo
             .worktrees()?
@@ -197,6 +205,13 @@ impl Local<'_> {
         };
         let work = Repo::at(&holder.path);
         let mut found = operations_in_progress(&holder.path)?;
+        if let Some(reason) = work.required_filter_refusal(tip, changed)? {
+            found.push(format!(
+                "{} would refuse the merge: {reason}",
+                holder.path.display()
+            ));
+        }
+        let changed = names(changed.to_vec());
         let kinds = [
             ("a local change", names(work.changed_since_head()?)),
             ("an untracked file", names(work.untracked_files()?)),

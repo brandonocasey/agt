@@ -1597,7 +1597,7 @@ The `number` and `url` fields are `null`. `state` is `open` until the branch is 
 
   It rebases in process and runs the `pre-rebase`, `prepare-commit-msg`, `post-commit` and `post-rewrite` hooks. The user configuration applies as it is. The committer comes from `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, else `user.name` and `user.email`. `GIT_COMMITTER_DATE` sets the commit date as an epoch and zone (`1767225600 +0000`, also with a leading `@`), as RFC 3339 (`2026-01-01T00:00:00Z`) or as `YYYY-MM-DD HH:MM:SS +hhmm`; other forms are refused. Only autostash and `rebase.updateRefs` are forced off. The branch, the index and the work tree move once, after the last commit. A `post-commit` hook therefore sees `HEAD` at the commit the branch had before the rebase. Git shows that hook the commit just replayed. A conflict is final: the rebase is aborted and the branch stays as it was. A rebase that stops without conflicts reports git's error and is aborted the same way.
 
-  With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes. Otherwise the merge is refused before the rebase starts.
+  With `rebase`, the default branch's work tree must allow the fast-forward too. No rebase, merge, cherry-pick, revert or bisect may be under way there. No local change, untracked or ignored file may sit at a path the branch changes, and no path the rebase writes into either work tree may be one a required filter applies to. Otherwise the merge is refused before the rebase starts.
 
   With `rebase`, a commit made on the branch during the merge stops it before landing.
 

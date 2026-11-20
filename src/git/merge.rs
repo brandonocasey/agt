@@ -120,6 +120,34 @@ impl Repo {
         move_branch_to(&repo, &target, &format!("merge {to}: Fast-forward"))
     }
 
+    /// Why checking the `paths` out of commit `source` into this work tree would be refused over
+    /// a required filter, as [`Repo::fast_forward_checkout`] refuses; `None` when nothing stops
+    /// it. A path `source` lacks is removed, and one a sparse checkout leaves out is not written.
+    pub fn required_filter_refusal(
+        &self,
+        source: &str,
+        paths: &[Vec<u8>],
+    ) -> Result<Option<String>> {
+        let repo = self.open()?;
+        let tree = repo.find_commit(commit_id(&repo, source)?)?.tree()?;
+        let left_out = left_out_paths(&repo)?;
+        let mut outside_patterns = sparse::leaves_out(&repo)?;
+        for path in paths {
+            let at = Path::new(OsStr::from_bytes(path));
+            let Ok(entry) = tree.get_path(at) else {
+                continue;
+            };
+            if left_out.contains(path) || outside_patterns(path) {
+                continue;
+            }
+            let mode = entry.filemode() as u32;
+            if let Some(message) = filter::refusal_for_writing(&repo, at, mode) {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
+    }
+
     /// Moves `refs/heads/<name>` from `from` to `to` without a work tree, as `git fetch . to:name`
     /// does: refused for a branch that a work tree is rebasing or bisecting.
     pub fn fast_forward_ref(&self, name: &str, from: &str, to: &str) -> Result<()> {

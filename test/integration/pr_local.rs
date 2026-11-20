@@ -2224,6 +2224,7 @@ fn a_rebase_merge_that_writes_a_required_filter_path_is_refused_and_leaves_the_t
     assert!(message.contains("data.bin"), "{message}");
     assert!(message.contains("required filter 'lfs'"), "{message}");
     assert_eq!(tip(&env, "main"), main);
+    assert_eq!(tip(&env, "feat"), feat);
     assert_eq!(
         fs::read_to_string(env.repo.join("data.bin")).unwrap(),
         "real content"
@@ -2283,6 +2284,43 @@ fn a_merge_into_a_sparse_checkout_refuses_a_required_filter_path_inside_the_patt
     assert!(message.contains("sub/y.bin"), "{message}");
     assert!(message.contains("required filter 'lfs'"), "{message}");
     assert!(!env.repo.join("sub/y.bin").exists());
+}
+
+#[test]
+fn a_rebase_that_would_write_a_required_filter_path_into_the_branch_is_refused_before_it_starts() {
+    let env = lfs_setup(true);
+    let feat = add_branch(&env, "feat", "b.txt", "b\n");
+    advance_main(&env, "new.bin", "fresh");
+    let work = add_worktree(&env, "work", &["feat"]);
+
+    let message = refused(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
+
+    assert!(
+        message.contains("cannot rebase feat onto main"),
+        "{message}"
+    );
+    assert!(message.contains("new.bin"), "{message}");
+    assert!(message.contains("required filter 'lfs'"), "{message}");
+    assert_eq!(tip(&env, "feat"), feat);
+    assert!(!work.join("new.bin").exists());
+}
+
+#[test]
+fn the_branch_lands_gate_waits_while_a_rebase_merge_would_write_a_required_filter_path() {
+    let env = lfs_setup(true);
+    let sha = add_branch(&env, "feat", "data.bin", "rewritten");
+    record_gates(&env, "feat", &[]);
+    advance_main(&env, "c.txt", "c\n");
+    add_worktree(&env, "work", &["feat"]);
+
+    let rebase = merge_args(&sha, "feat", &["--auto", "--method", "rebase"]);
+    let output = waiting(&env, &rebase);
+
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let message = stderr(&output);
+    assert!(message.contains("lands:"), "{message}");
+    assert!(message.contains("required filter 'lfs'"), "{message}");
+    assert_eq!(tip(&env, "feat"), sha);
 }
 
 #[test]
