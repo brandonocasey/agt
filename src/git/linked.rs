@@ -89,13 +89,7 @@ impl Repo {
             // resolve to, so git refuses and leaves the files. A missing directory is only pruned.
             // `remove_dir_all` replaces libgit2's prune, which stops 100 directory levels down.
             if fs::symlink_metadata(work_tree).is_ok() {
-                let git_file = work_tree.join(".git");
-                if fs::symlink_metadata(&git_file).is_err() {
-                    return Err(Error(format!(
-                        "validation failed, cannot remove working tree: '{}' does not exist",
-                        git_file.display()
-                    )));
-                }
+                Self::require_git_file(work_tree)?;
                 fs::remove_dir_all(work_tree)
                     .map_err(ctx(format!("remove {}", work_tree.display())))?;
             }
@@ -105,6 +99,20 @@ impl Repo {
             return Ok(());
         }
         Err(Error(format!("'{}' is not a working tree", path.display())))
+    }
+
+    /// Fails when the worktree directory `work_tree` has lost its `.git` file, as `git worktree
+    /// remove` does. `Repo::at` resolves such a directory to the checkout above it, so a check or
+    /// backup made through it would read that checkout and not the worktree.
+    pub fn require_git_file(work_tree: &Path) -> Result<()> {
+        let git_file = work_tree.join(".git");
+        if fs::symlink_metadata(&git_file).is_err() {
+            return Err(Error(format!(
+                "validation failed, cannot remove working tree: '{}' does not exist",
+                git_file.display()
+            )));
+        }
+        Ok(())
     }
 
     /// Makes the index match HEAD and leaves the files alone (`git reset -q`).

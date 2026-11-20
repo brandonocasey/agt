@@ -672,6 +672,31 @@ fn a_worktree_that_lost_its_git_file_is_refused_before_a_backup_is_taken() {
 }
 
 #[test]
+fn a_nested_worktree_that_lost_its_git_file_is_refused_before_a_backup_is_taken() {
+    let f = Fixture::new();
+    f.env.write(".git/info/exclude", "inner/\n");
+    let inner = f.wt.join("inner");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "inner",
+        &inner.to_string_lossy(),
+    ]);
+    fs::remove_file(inner.join(".git")).unwrap();
+
+    f.refuses(
+        &f.env.repo,
+        &["remove", &f.wt.to_string_lossy(), "--yes"],
+        "validation failed, cannot remove working tree",
+    );
+
+    assert!(f.wt.exists());
+    assert_eq!(f.json(&["backups"])["backups"], json!([]));
+}
+
+#[test]
 fn refuses_what_it_must_not_remove() {
     let f = Fixture::new();
     let wt = f.wt.to_string_lossy().into_owned();
