@@ -63,9 +63,10 @@ libgit2 leaves some of what the `git` program does out:
   (`worktree create`, `worktree restore`, a fast-forward or rebase merge, the file restore of a
   sparse-checkout change), is refused with the path and the filter named when `filter.<name>.required`
   is true for a filter the path's attributes select, and leaves the work tree and the index as they
-  were. A path that a sparse checkout leaves out is never written, so it is not refused. A symlink
-  and a gitlink are never filtered, as in git, so they are not refused. A filter that is not
-  required is skipped, and no `post-checkout` or `post-merge` hook runs.
+  were. A refused `worktree create` or `worktree restore` also removes the branch it made; a
+  branch that already existed stays. A path that a sparse checkout leaves out is never written, so
+  it is not refused. A symlink and a gitlink are never filtered, as in git, so they are not
+  refused. A filter that is not required is skipped, and no `post-checkout` or `post-merge` hook runs.
   A checkout reads the attributes from the work tree, the index and `HEAD`, so a `.gitattributes`
   that the checkout itself adds does not count; staging reads them from the work tree and the
   index. A submodule's own checkout is not checked.

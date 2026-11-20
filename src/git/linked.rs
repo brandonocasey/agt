@@ -50,8 +50,11 @@ impl Repo {
             .commondir()
             .join("worktrees")
             .join(admin_name(&repo, path));
-        link_worktree(&admin, path, &head)?;
-        fill_worktree(&repo, path).inspect_err(|_| discard_worktree(&admin, path))
+        link_worktree(&admin, path, &head)
+            .and_then(|()| {
+                fill_worktree(&repo, path).inspect_err(|_| discard_worktree(&admin, path))
+            })
+            .inspect_err(|_| discard_new_branch(&repo, what))
     }
 
     /// Fails when a work tree has `branch` checked out, or is rebasing or bisecting it, which
@@ -223,11 +226,25 @@ fn new_head(repo: &git2::Repository, what: &Checkout<'_>) -> Result<Head> {
         Checkout::Tracking { name, upstream } => {
             let start = repo.find_branch(upstream, git2::BranchType::Remote)?;
             let mut created = repo.branch(name, &start.get().peel_to_commit()?, false)?;
-            created.set_upstream(Some(upstream))?;
+            if let Err(error) = created.set_upstream(Some(upstream)) {
+                let _ = created.delete();
+                return Err(error.into());
+            }
             branch_head(&created)
         }
         Checkout::Detached(commit) => Head::Detached(commit_id(repo, commit)?),
     })
+}
+
+/// Deletes the branch that [`new_head`] made for `what`, when it made one: `branch` refuses a name
+/// that exists, so a `NewBranch` or `Tracking` branch is always this call's own.
+fn discard_new_branch(repo: &git2::Repository, what: &Checkout<'_>) {
+    let (Checkout::NewBranch { name, .. } | Checkout::Tracking { name, .. }) = what else {
+        return;
+    };
+    let _ = repo
+        .find_branch(name, git2::BranchType::Local)
+        .and_then(|mut branch| branch.delete());
 }
 
 /// The name of the administrative directory for a worktree at `path`: its last component,

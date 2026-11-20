@@ -2253,6 +2253,70 @@ fn a_worktree_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves
     only_main_worktree_is_left(&env);
 }
 
+fn local_branches(env: &Env) -> Vec<String> {
+    git(
+        env,
+        &env.repo,
+        &["branch", "--list", "--format=%(refname:short)"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// A refused create of `work`, then the same command again: the filter error both times.
+fn refused_twice(env: &Env) {
+    for _ in 0..2 {
+        let output = agt(env, &env.repo, &["create", "work"]);
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+        assert!(!stderr.contains("exists"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_refused_create_of_a_new_branch_leaves_no_branch() {
+    let (env, _) = lfs_repo();
+    require_lfs(&env);
+
+    refused_twice(&env);
+
+    assert_eq!(local_branches(&env), ["main"]);
+}
+
+#[test]
+fn a_refused_create_keeps_a_branch_that_already_existed() {
+    let (env, _) = lfs_repo();
+    git(&env, &env.repo, &["branch", "work", "main"]);
+    require_lfs(&env);
+
+    for _ in 0..2 {
+        let output = agt(&env, &env.repo, &["create", "work"]);
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    }
+
+    assert_eq!(local_branches(&env), ["main", "work"]);
+}
+
+#[test]
+fn a_refused_create_of_a_branch_that_only_origin_has_leaves_no_local_branch() {
+    let (env, _) = lfs_repo();
+    remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "origin", "main:work"]);
+    git(&env, &env.repo, &["fetch", "-q", "origin"]);
+    require_lfs(&env);
+
+    refused_twice(&env);
+
+    assert_eq!(local_branches(&env), ["main"]);
+    git(&env, &env.repo, &["rev-parse", "--verify", "origin/work"]);
+}
+
 #[test]
 fn a_worktree_refuses_a_filter_that_only_the_global_config_requires() {
     let (env, _) = repo_with_commit();
@@ -2301,6 +2365,39 @@ fn a_restore_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_
     assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
     assert!(!tree.exists());
     only_main_worktree_is_left(&env);
+}
+
+#[test]
+fn a_refused_restore_leaves_no_branch_it_made() {
+    let (env, _) = lfs_repo();
+    let tree = env.path("tree");
+    agt_json(
+        &env,
+        &env.repo,
+        &["create", "old", "--path", tree.to_str().unwrap()],
+    );
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    git(&env, &env.repo, &["branch", "-D", "old"]);
+    require_lfs(&env);
+
+    for _ in 0..2 {
+        let output = agt(
+            &env,
+            &env.repo,
+            &["restore", removed["id"].as_str().unwrap()],
+        );
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+        assert!(!stderr.contains("exists"), "{stderr}");
+    }
+
+    assert_eq!(local_branches(&env), ["main"]);
 }
 
 #[test]
