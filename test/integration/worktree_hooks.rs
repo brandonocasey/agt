@@ -202,7 +202,7 @@ fn a_failing_remove_hook_blocks_the_removal_and_no_hooks_skips_it() {
 /// A create hook command that runs until `gate` exists, and for one minute at most.
 fn hold_until(gate: &Path) -> String {
     format!(
-        "i=0; while [ ! -e {} ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done",
+        "i=0; while [ ! -e '{}' ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done",
         gate.display()
     )
 }
@@ -305,7 +305,11 @@ fn an_invalid_config_fails_before_the_worktree_is_created() {
 #[test]
 fn a_second_background_create_reports_the_running_setup() {
     let env = repo();
-    repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 3\"]\n");
+    let gate = env.path("gate");
+    repo_config(
+        &env,
+        &format!("[worktree.hooks]\ncreate = [\"{}\"]\n", hold_until(&gate)),
+    );
     let first = json(&agt(&env, &env.repo, &["create", "twice", "--background"]));
     let again = json(&agt(
         &env,
@@ -315,16 +319,34 @@ fn a_second_background_create_reports_the_running_setup() {
     assert_eq!(again["background"]["already_running"], true);
     assert_eq!(again["background"]["log"], first["background"]["log"]);
     assert_eq!(again["background"]["status"], first["background"]["status"]);
+    fs::write(&gate, "").unwrap();
+    let tree = first["path"].as_str().unwrap();
+    assert!(
+        agt(&env, &env.repo, &["prepare", "--wait", tree])
+            .status
+            .success()
+    );
 }
 
 #[test]
 fn a_second_background_create_with_nothing_new_still_reports_the_running_setup() {
     let env = repo();
-    repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 3\"]\n");
+    let gate = env.path("gate");
+    repo_config(
+        &env,
+        &format!("[worktree.hooks]\ncreate = [\"{}\"]\n", hold_until(&gate)),
+    );
     let first = json(&agt(&env, &env.repo, &["create", "twice", "--background"]));
     let again = json(&agt(&env, &env.repo, &["create", "twice", "--background"]));
     assert_eq!(again["background"]["already_running"], true);
     assert_eq!(again["background"]["pid"], first["background"]["pid"]);
+    fs::write(&gate, "").unwrap();
+    let tree = first["path"].as_str().unwrap();
+    assert!(
+        agt(&env, &env.repo, &["prepare", "--wait", tree])
+            .status
+            .success()
+    );
 }
 
 #[test]
