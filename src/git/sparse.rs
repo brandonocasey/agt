@@ -87,6 +87,23 @@ pub(super) fn reapply(repo: &git2::Repository) -> Result<()> {
     apply(repo, |path| patterns.selects(path))
 }
 
+/// A test for whether the sparse-checkout patterns of `repo` leave a path out, which is never so
+/// when the checkout is not sparse.
+pub(super) fn leaves_out(repo: &git2::Repository) -> Result<impl FnMut(&[u8]) -> bool> {
+    let mut patterns = if is_enabled(repo)? {
+        Some(Patterns::read(
+            &repo.path().join("info").join("sparse-checkout"),
+        )?)
+    } else {
+        None
+    };
+    Ok(move |path: &[u8]| {
+        patterns
+            .as_mut()
+            .is_some_and(|patterns| !patterns.selects(path))
+    })
+}
+
 /// Moves the index and the work tree to what `selected` says each path should be.
 fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Result<()> {
     let workdir = repo

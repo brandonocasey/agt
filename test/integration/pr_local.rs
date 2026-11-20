@@ -2232,6 +2232,60 @@ fn a_rebase_merge_that_writes_a_required_filter_path_is_refused_and_leaves_the_t
 }
 
 #[test]
+fn a_merge_into_a_sparse_checkout_ignores_a_required_filter_path_outside_the_patterns() {
+    for (extra, main_moves) in [(vec![], false), (vec!["--method", "rebase"], true)] {
+        let env = lfs_setup(true);
+        env.write("sub/keep.txt", "k\n");
+        env.commit_all("sub");
+        let first = commit_on(&env, "main", "other/x.bin", "x\n");
+        let feat = commit_on(&env, &first, "sub/y.txt", "y\n");
+        point(&env, "feat", &feat);
+        if main_moves {
+            advance_main(&env, "b.txt", "b\n");
+            add_worktree(&env, "work", &["feat"]);
+        }
+        git_ok(
+            &env,
+            &env.repo,
+            &["sparse-checkout", "set", "--no-cone", "/sub/"],
+        );
+
+        ok(&env, &merge_args(&feat, "feat", &extra));
+
+        assert_eq!(
+            fs::read_to_string(env.repo.join("sub/y.txt")).unwrap(),
+            "y\n",
+            "{extra:?}"
+        );
+        assert!(!env.repo.join("other").exists(), "{extra:?}");
+        assert_eq!(
+            git_ok(&env, &env.repo, &["ls-files", "-t", "other/x.bin"]),
+            "S other/x.bin",
+            "{extra:?}"
+        );
+    }
+}
+
+#[test]
+fn a_merge_into_a_sparse_checkout_refuses_a_required_filter_path_inside_the_patterns() {
+    let env = lfs_setup(true);
+    env.write("sub/keep.txt", "k\n");
+    env.commit_all("sub");
+    let feat = add_branch(&env, "feat", "sub/y.bin", "y\n");
+    git_ok(
+        &env,
+        &env.repo,
+        &["sparse-checkout", "set", "--no-cone", "/sub/"],
+    );
+
+    let message = refused(&env, &merge_args(&feat, "feat", &[]));
+
+    assert!(message.contains("sub/y.bin"), "{message}");
+    assert!(message.contains("required filter 'lfs'"), "{message}");
+    assert!(!env.repo.join("sub/y.bin").exists());
+}
+
+#[test]
 fn merges_over_filtered_paths_work_when_the_filter_is_not_required() {
     for (extra, main_moves) in [(vec![], false), (vec!["--method", "rebase"], true)] {
         let env = lfs_setup(false);

@@ -178,6 +178,7 @@ fn check_out_safely(
 ) -> Result<()> {
     let mut blocked = Vec::new();
     let refusal = Refusal::default();
+    let mut outside_patterns = sparse::leaves_out(repo)?;
     let mut options = git2::build::CheckoutBuilder::new();
     options
         .safe()
@@ -188,7 +189,10 @@ fn check_out_safely(
         )
         .notify(|kind, path, _, _, _| {
             if kind.contains(git2::CheckoutNotificationType::UPDATED) {
-                return filter::may_write(repo, &refusal, path);
+                // The patterns leave this path out: it ends skip-worktree, so no filter applies.
+                let skipped =
+                    path.is_some_and(|path| outside_patterns(path.as_os_str().as_bytes()));
+                return skipped || filter::may_write(repo, &refusal, path);
             }
             blocked.extend(path.map(Path::to_owned));
             true
