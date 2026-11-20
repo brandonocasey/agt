@@ -59,8 +59,13 @@ libgit2 leaves some of what the `git` program does out:
   `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH` and every other `http.*` key are ignored.
 - A partial clone (`extensions.partialclone`) and a repository with the reftable ref format fail
   to open.
-- A checkout runs no filter drivers (such as git-lfs and git-crypt), and no `post-checkout` or
-  `post-merge` hook.
+- libgit2 runs no filter drivers (such as git-lfs and git-crypt). Staging a path, and any checkout
+  (`worktree create`, `worktree restore`, a fast-forward or rebase merge, the file restore of a
+  sparse-checkout change), is refused with the path and the filter named when `filter.<name>.required`
+  is true for a filter the path's attributes select, and leaves the work tree and the index as they
+  were. A filter that is not required is skipped, and no `post-checkout` or `post-merge` hook runs.
+  The attributes are read from the work tree, the index and `HEAD`, so a `.gitattributes` that the
+  checkout itself adds does not count, and a submodule's own checkout is not checked.
 - Listing the refs of a remote downloads its full ref advertisement; protocol version 2 is not
   used.
 - `commit.gpgSign` is ignored for the commits that a rebase makes.
