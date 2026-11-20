@@ -199,12 +199,24 @@ fn a_failing_remove_hook_blocks_the_removal_and_no_hooks_skips_it() {
     assert!(!tree.exists());
 }
 
+/// A create hook command that runs until `gate` exists, and for one minute at most.
+fn hold_until(gate: &Path) -> String {
+    format!(
+        "i=0; while [ ! -e {} ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done",
+        gate.display()
+    )
+}
+
 #[test]
 fn background_returns_before_a_slow_hook_and_wait_reports_it() {
     let env = repo();
+    let gate = env.path("gate");
     repo_config(
         &env,
-        "[worktree.hooks]\ncreate = [\"sleep 2; touch done\"]\n",
+        &format!(
+            "[worktree.hooks]\ncreate = [\"{}; touch done\"]\n",
+            hold_until(&gate)
+        ),
     );
     let started = std::time::Instant::now();
     let output = agt(&env, &env.repo, &["create", "bg", "--background"]);
@@ -216,6 +228,7 @@ fn background_returns_before_a_slow_hook_and_wait_reports_it() {
     assert!(!tree.join("done").exists());
     let status = value["background"]["status"].as_str().unwrap();
     assert!(Path::new(status).starts_with(env.repo.join(".git")));
+    fs::write(&gate, "").unwrap();
     let waited = agt(&env, &tree, &["prepare", "--wait"]);
     assert!(
         waited.status.success(),
@@ -317,7 +330,11 @@ fn a_second_background_create_with_nothing_new_still_reports_the_running_setup()
 #[test]
 fn prepare_refuses_while_a_background_setup_runs() {
     let env = repo();
-    repo_config(&env, "[worktree.hooks]\ncreate = [\"sleep 3\"]\n");
+    let gate = env.path("gate");
+    repo_config(
+        &env,
+        &format!("[worktree.hooks]\ncreate = [\"{}\"]\n", hold_until(&gate)),
+    );
     let first = json(&agt(&env, &env.repo, &["create", "busy", "--background"]));
     let tree = first["path"].as_str().unwrap();
     for args in [
@@ -330,6 +347,7 @@ fn prepare_refuses_while_a_background_setup_runs() {
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("prepare --wait"), "{args:?}: {error}");
     }
+    fs::write(&gate, "").unwrap();
     let waited = agt(&env, &env.repo, &["prepare", "--wait", tree]);
     assert!(waited.status.success());
     assert!(
