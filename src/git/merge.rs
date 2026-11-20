@@ -129,10 +129,13 @@ impl Repo {
         paths: &[Vec<u8>],
     ) -> Result<Option<String>> {
         let repo = self.open()?;
+        let guard = filter::Guard::new(&repo);
+        if !guard.any_required {
+            return Ok(None);
+        }
         let tree = repo.find_commit(commit_id(&repo, source)?)?.tree()?;
         let left_out = left_out_paths(&repo)?;
         let mut outside_patterns = sparse::leaves_out(&repo)?;
-        let guard = filter::Guard::new(&repo);
         for path in paths {
             let at = Path::new(OsStr::from_bytes(path));
             let Ok(entry) = tree.get_path(at) else {

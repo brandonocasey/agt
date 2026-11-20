@@ -31,7 +31,7 @@ pub(super) type Refusal = RefCell<Option<String>>;
 /// lookup for each path would cost more than the operation itself on a large tree.
 pub(super) struct Guard<'r> {
     repo: &'r git2::Repository,
-    any_required: bool,
+    pub(super) any_required: bool,
 }
 
 impl<'r> Guard<'r> {
