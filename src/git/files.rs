@@ -346,6 +346,7 @@ mod tests {
             ("100755", 0o100_755),
             ("100664", 0o100_644),
             ("100600", 0o100_644),
+            ("120755", 0o120_000),
         ] {
             let sandbox = Sandbox::new();
             let root = sandbox.repo();
