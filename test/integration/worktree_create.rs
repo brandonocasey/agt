@@ -2211,7 +2211,11 @@ fn a_path_that_holds_files_is_refused_and_leaves_no_registration() {
 /// `main` holds `first`, then `.gitattributes` and `data.bin`. The returned commit is the first.
 fn lfs_repo() -> (Env, String) {
     let (env, first) = repo_with_commit();
-    for (key, value) in [("filter.lfs.clean", "cat"), ("filter.lfs.smudge", "cat")] {
+    for (key, value) in [
+        ("filter.lfs.clean", "cat"),
+        ("filter.lfs.smudge", "cat"),
+        ("filter.lfs.required", "false"),
+    ] {
         git(&env, &env.repo, &["config", key, value]);
     }
     fs::write(env.repo.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();

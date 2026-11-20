@@ -2184,9 +2184,12 @@ fn lfs_setup(required: bool) -> Env {
     env.write(".gitattributes", "*.bin filter=lfs\n");
     env.write("data.bin", "real content");
     env.commit_all("track bins");
-    if required {
-        git_ok(&env, &env.repo, &["config", "filter.lfs.required", "true"]);
-    }
+    let required = if required { "true" } else { "false" };
+    git_ok(
+        &env,
+        &env.repo,
+        &["config", "filter.lfs.required", required],
+    );
     env
 }
 

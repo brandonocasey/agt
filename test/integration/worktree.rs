@@ -321,9 +321,8 @@ fn a_restore_of_a_legacy_backup_writes_a_required_filter_path_only_when_it_is_no
         .unwrap();
         f.dirty();
         let (id, _) = legacy_backup(&f, json!([]));
-        if required {
-            f.env.git(&["config", "filter.lfs.required", "true"]);
-        }
+        f.env
+            .git(&["config", "filter.lfs.required", &required.to_string()]);
 
         let output = f.agt(&f.env.repo, &["restore", &id]);
 
