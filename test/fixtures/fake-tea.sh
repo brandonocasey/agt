@@ -13,4 +13,4 @@ if [ "$*" = "logins list --output json" ]; then
   fi
   exit 0
 fi
-FAKE_FORGE_TEA=1 exec "$(dirname "$0")/fake-forge.sh" "$@"
+FAKE_FORGE_TEA=1 exec "${0%/*}/fake-forge.sh" "$@"
