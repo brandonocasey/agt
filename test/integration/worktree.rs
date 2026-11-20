@@ -331,7 +331,14 @@ fn a_restore_of_a_legacy_backup_writes_a_required_filter_path_only_when_it_is_no
             assert_eq!(output.status.code(), Some(1), "{stderr}");
             assert!(stderr.contains("new.bin"), "{stderr}");
             assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
-            assert!(!f.wt.join("new.bin").exists());
+            assert!(!f.wt.exists());
+            let registered = f.env.git(&["worktree", "list", "--porcelain"]);
+            assert!(!registered.contains("feat"), "{registered}");
+            let retried = f.agt(&f.env.repo, &["restore", &id]);
+            let again = String::from_utf8_lossy(&retried.stderr);
+            assert_eq!(retried.status.code(), Some(1), "{again}");
+            assert!(again.contains("required filter 'lfs'"), "{again}");
+            assert!(!again.contains("already exists"), "{again}");
         } else {
             assert!(output.status.success(), "{stderr}");
             assert!(f.wt.join("new.bin").exists());

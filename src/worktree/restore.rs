@@ -71,10 +71,7 @@ fn restore_archive(record: &backup::Record, archive: &Path, target: &Path) -> Re
         Err(error) => {
             // A restore that stops half way removes the worktree or directory it made, so a retry can start clean.
             if attached {
-                let _ = repo.remove_worktree(target);
-                if let Some(branch) = made_branch {
-                    let _ = repo.delete_branch(&branch, true);
-                }
+                discard_worktree(&repo, target, made_branch);
             } else {
                 let _ = fs::remove_dir_all(target);
             }
@@ -132,8 +129,21 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
         ));
     }
     let mut warnings = Vec::new();
-    add_worktree(&repo, record, target, &mut warnings)?;
+    let made_branch = add_worktree(&repo, record, target, &mut warnings)?;
+    unpack_snapshot(record, dir, target, warnings).inspect_err(|_| {
+        discard_worktree(&repo, target, made_branch);
+    })
+}
 
+/// Fills the worktree added at `target` with the files of the snapshot and the ignored files that
+/// were copied.
+fn unpack_snapshot(
+    record: &backup::Record,
+    dir: &Path,
+    target: &Path,
+    mut warnings: Vec<String>,
+) -> Result<Output> {
+    let snapshot = record.snapshot.as_deref().unwrap_or_default();
     let target = info::real(target)?;
     // `worktree add` copies a sparse main checkout's patterns. Restore works on a full checkout,
     // where every changed or deleted file is on disk. Then the backup's sparse checkout comes back.
@@ -152,6 +162,15 @@ fn restore_directory(record: &backup::Record, dir: &Path, target: &Path) -> Resu
     restore_modes(&target, &record.file_modes)?;
     snapshot::copy_files(&dir.join("files"), &target, &record.copied, 0o755)?;
     Ok(report(record, &target, sparse, warnings))
+}
+
+/// Removes the worktree a restore added at `target`, and the branch it created, so a retry can
+/// start clean. A failure to remove one leaves it for the user: the restore's own error stands.
+fn discard_worktree(repo: &Repo, target: &Path, made_branch: Option<String>) {
+    let _ = repo.remove_worktree(target);
+    if let Some(branch) = made_branch {
+        let _ = repo.delete_branch(&branch, true);
+    }
 }
 
 /// Adds the worktree at `target` on the backup's branch, or detached at its HEAD if the branch
