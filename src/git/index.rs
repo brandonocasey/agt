@@ -797,6 +797,86 @@ mod tests {
         }
     }
 
+    /// A symlink staged as another target and put back is the same as HEAD, whatever its
+    /// executable bits say. Only the walk of a tree below libgit2's limit is under test: for a
+    /// shallow tree libgit2's own diff lists the link.
+    #[test]
+    fn a_symlink_that_matches_head_is_unchanged_below_the_iterator_limit() {
+        let sandbox = Sandbox::with_repo();
+        let dir = (1..=100)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let script = format!(
+            "set -e
+mkdir -p {dir} && cd {dir}
+echo clean > clean.txt
+ln -s clean.txt same-link
+git add -A && git commit -q -m base
+ln -sf other same-link && git add same-link && ln -sf clean.txt same-link"
+        );
+        sandbox.shell_output(&sandbox.repo(), &script);
+
+        assert_eq!(
+            sorted(Repo::at(sandbox.repo()).changed_since_head().unwrap()),
+            git_sorted(&sandbox, "git diff HEAD --name-only --no-renames")
+        );
+    }
+
+    /// A file below a directory that replaced a tracked file is untracked, and a path the index
+    /// holds at stages 1 to 3 is a conflict and not an untracked file.
+    #[test]
+    fn a_replaced_file_and_an_unmerged_path_list_untracked_files_as_git_does() {
+        for levels in [1, 100] {
+            let sandbox = Sandbox::with_repo();
+            sandbox.git(
+                &sandbox.repo(),
+                &["commit", "-q", "--allow-empty", "-m", "root"],
+            );
+            let dir = (1..=levels)
+                .map(|level| format!("d{level}"))
+                .collect::<Vec<_>>()
+                .join("/");
+            let script = format!(
+                "set -e
+mkdir -p {dir} && cd {dir}
+echo note > notes.md && git add notes.md && git commit -q -m notes
+rm notes.md && mkdir notes.md && echo draft > notes.md/draft.txt
+prefix=$(git rev-parse --show-prefix)
+for stage in 1 2 3; do
+  printf '100644 %s %s\t%sconflict.txt\n' $(echo side$stage | git hash-object -w --stdin) $stage $prefix
+done | git update-index --index-info
+echo side2 > conflict.txt
+echo new > new.txt"
+            );
+            sandbox.shell_output(&sandbox.repo(), &script);
+            let repo = Repo::at(sandbox.repo());
+
+            assert_eq!(
+                sorted(repo.untracked_files().unwrap()),
+                git_sorted(&sandbox, "git ls-files -o --exclude-standard"),
+                "untracked at {levels}"
+            );
+            let mut status: Vec<String> = repo
+                .status(true, SubmoduleDirt::Report)
+                .unwrap()
+                .into_iter()
+                .map(|entry| {
+                    format!(
+                        "{}{} {}",
+                        entry.staged as char, entry.unstaged as char, entry.path
+                    )
+                })
+                .collect();
+            status.sort();
+            assert_eq!(
+                status,
+                git_sorted(&sandbox, "git status --porcelain=v1 -uall --no-renames"),
+                "status at {levels}"
+            );
+        }
+    }
+
     /// Builds every kind of change in the directory `levels` deep and returns that directory.
     fn mixed_changes(sandbox: &Sandbox, levels: usize) -> String {
         let dir = (1..=levels)

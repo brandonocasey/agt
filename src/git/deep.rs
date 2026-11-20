@@ -32,6 +32,7 @@ pub(super) fn walk(repo: &git2::Repository, scope: Scope) -> Result<Vec<StatusIt
         root: work_tree(repo)?.to_owned(),
         scope,
         tracked: HashSet::new(),
+        gitlinks: HashSet::new(),
         tracked_dirs: HashSet::new(),
         found: BTreeMap::new(),
     };
@@ -72,7 +73,9 @@ pub(super) fn changed_since(
             {
                 meta.is_symlink() != (entry.filemode() == 0o120_000)
                     || blob_id(&full, meta)? != entry.id()
-                    || (filemode && is_executable(meta) != (entry.filemode() & 0o111 != 0))
+                    || (filemode
+                        && !meta.is_symlink()
+                        && is_executable(meta) != (entry.filemode() & 0o111 != 0))
             }
             (None, None) => false,
             _ => true,
@@ -169,8 +172,10 @@ struct Walk<'r> {
     repo: &'r git2::Repository,
     root: PathBuf,
     scope: Scope,
-    /// The paths the index holds at stage 0, submodules included.
+    /// The paths the index holds at any stage, submodules included.
     tracked: HashSet<Vec<u8>>,
+    /// The submodule paths the index holds at stage 0.
+    gitlinks: HashSet<Vec<u8>>,
     /// The directories (with their trailing slash) above any index entry.
     tracked_dirs: HashSet<Vec<u8>>,
     found: BTreeMap<Vec<u8>, StatusItem>,
@@ -197,11 +202,14 @@ impl Walk<'_> {
             fs::metadata(self.repo.path().join("index")).map_or(i64::MIN, |meta| meta.mtime());
         for entry in index.iter() {
             self.tracked_dirs.extend(ancestor_dirs(&entry.path));
+            self.tracked.insert(entry.path.clone());
             if entry.flags & STAGE_MASK != 0 {
                 self.note(&entry.path, git2::Status::CONFLICTED);
                 continue;
             }
-            self.tracked.insert(entry.path.clone());
+            if entry.mode == GITLINK_MODE {
+                self.gitlinks.insert(entry.path.clone());
+            }
             let status = self.compare(&entry, filemode, index_seconds)?;
             if !status.is_empty() {
                 self.note(&entry.path, status);
@@ -342,10 +350,11 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// A nested repository, or a directory that is ignored and holds nothing tracked, is one
-    /// entry; any other directory is read.
+    /// A tracked submodule is left to its own repository. A nested repository, or a directory
+    /// that is ignored and holds nothing tracked, is one entry; any other directory is read,
+    /// whatever tracked file it replaced.
     fn visit_dir(&mut self, mut path: Vec<u8>) -> Result<()> {
-        if self.tracked.contains(&path) {
+        if self.gitlinks.contains(&path) {
             return Ok(());
         }
         let nested = self
