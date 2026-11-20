@@ -1,0 +1,12 @@
+name: Cargo cache
+description: >-
+  Restore the cargo registry and target directory on every ref, and save them
+  only from main so branches and tags never fill the cache.
+
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        save-if: ${{ github.ref == 'refs/heads/main' }}
