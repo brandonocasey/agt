@@ -703,4 +703,54 @@ mod tests {
         );
         assert_eq!(sandbox.git_output(&dir, &["status", "--porcelain"]), "");
     }
+
+    #[test]
+    fn a_refused_reapply_leaves_the_index_and_the_files_as_they_were() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(
+            &sandbox,
+            &dir,
+            &[
+                (".gitattributes", "*.bin filter=lfs\n"),
+                ("keep/a.txt", "a\n"),
+                ("out/big.bin", "real\n"),
+            ],
+            "one",
+        );
+        for (key, value) in [
+            ("filter.lfs.clean", "cat"),
+            ("filter.lfs.smudge", "cat"),
+            ("filter.lfs.required", "true"),
+        ] {
+            sandbox.git(&dir, &["config", key, value]);
+        }
+        sandbox.git(
+            &dir,
+            &[
+                "sparse-checkout",
+                "set",
+                "--no-cone",
+                "/.gitattributes",
+                "/keep/",
+            ],
+        );
+        fs::write(
+            dir.join(".git/info/sparse-checkout"),
+            "/.gitattributes\n/out/\n",
+        )
+        .unwrap();
+        let (index, files) = (
+            fs::read(dir.join(".git/index")).unwrap(),
+            state(&sandbox, &dir),
+        );
+
+        let refused = Repo::at(&dir).sparse_reapply().unwrap_err();
+
+        assert!(refused.0.contains("out/big.bin"), "{refused}");
+        assert!(refused.0.contains("required filter 'lfs'"), "{refused}");
+        assert_eq!(fs::read(dir.join(".git/index")).unwrap(), index);
+        assert_eq!(state(&sandbox, &dir), files);
+        assert!(dir.join("keep/a.txt").exists());
+    }
 }
