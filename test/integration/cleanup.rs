@@ -1134,20 +1134,23 @@ fn a_session_is_gone_only_when_no_record_matches_its_process() {
         .spawn()
         .unwrap();
     let child_pid = child.id().to_string();
+    let list = || {
+        let output = prune
+            .env
+            .bin(&prune.env.repo)
+            .args(["cleanup", "--only", "processes"])
+            .env("AGT_NOW", later().to_string())
+            .env("AGT_CLEANUP_PID", &child_pid)
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        keys(&report, "processes")
+    };
     let listed = || {
         // The environment is readable a moment after the spawn, once the child has exec'd.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let output = prune
-                .env
-                .bin(&prune.env.repo)
-                .args(["cleanup", "--only", "processes"])
-                .env("AGT_NOW", later().to_string())
-                .env("AGT_CLEANUP_PID", &child_pid)
-                .output()
-                .unwrap();
-            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let found = keys(&report, "processes");
+            let found = list();
             if !found.is_empty() || std::time::Instant::now() > deadline {
                 return found;
             }
@@ -1163,10 +1166,11 @@ fn a_session_is_gone_only_when_no_record_matches_its_process() {
     record(".claude", stale);
     assert_eq!(listed(), [child_pid.as_str()]);
     // A matching record in another config directory wins over the stale one.
+    // The child is already listed, so an empty list is the answer.
     record(".claude-two", &proc_start(me));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < deadline {
-        assert_eq!(listed(), Vec::<String>::new());
+        assert_eq!(list(), Vec::<String>::new());
     }
     child.kill().unwrap();
     child.wait().unwrap();
@@ -2012,33 +2016,33 @@ fn a_browser_with_a_running_parent_waits_a_day_though_its_session_is_gone() {
             .unwrap()
     };
     let mut browser = spawn("/x/chrome-devtools-mcp");
+    let list = |child: &std::process::Child, minutes: i64| {
+        let output = prune
+            .env
+            .bin(&prune.env.repo)
+            .args(["cleanup", "--only", "processes"])
+            .env("AGT_NOW", (unix_now() as i64 + minutes * 60).to_string())
+            .env("AGT_CLEANUP_PID", child.id().to_string())
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
     let listed = |child: &std::process::Child, minutes: i64| {
-        let pid = child.id().to_string();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let output = prune
-                .env
-                .bin(&prune.env.repo)
-                .args(["cleanup", "--only", "processes"])
-                .env("AGT_NOW", (unix_now() as i64 + minutes * 60).to_string())
-                .env("AGT_CLEANUP_PID", &pid)
-                .output()
-                .unwrap();
-            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let report = list(child, minutes);
             if !keys(&report, "processes").is_empty() || std::time::Instant::now() > deadline {
                 break report;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     };
-    // The browser's parent, this test, runs: like any tool of a gone session it waits a day.
-    // (Browsers whose parent is gone wait minutes; the unit tests in `cleanup::procs` cover it.)
-    assert_eq!(
-        keys(&listed(&browser, 10), "processes"),
-        Vec::<String>::new()
-    );
+    // Waits until the browser's environment is readable, so the empty list below is an answer.
     let report = listed(&browser, 25 * 60);
     assert_eq!(keys(&report, "processes"), [browser.id().to_string()]);
+    // The browser's parent, this test, runs: like any tool of a gone session it waits a day.
+    // (Browsers whose parent is gone wait minutes; the unit tests in `cleanup::procs` cover it.)
+    assert_eq!(keys(&list(&browser, 10), "processes"), Vec::<String>::new());
     let reason = report["plan"]["processes"][0]["reason"].as_str().unwrap();
     assert!(reason.contains("running 1 day(s)"), "{reason}");
     browser.kill().unwrap();

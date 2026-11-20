@@ -58,7 +58,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/rust-cache
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --locked
+      # The macOS runner has 3 cores and slow process starts. Twice the threads keep the cores
+      # busy while tests wait on the processes they start.
+      - run: cargo nextest run --locked ${{ runner.os == 'macOS' && '-j 6' || '' }}
 
   musl:
     strategy:
