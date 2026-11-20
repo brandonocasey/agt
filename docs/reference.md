@@ -49,8 +49,9 @@ libgit2 leaves some of what the `git` program does out:
 - HTTP and HTTPS remotes read `http.sslVerify`, `http.sslCAInfo`, `http.sslCAPath` and
   `http.extraHeader`, each plain or scoped to a URL as `http.<url>.<key>`. A scope matches on
   scheme, host, port, a path prefix and an optional user, the longest path winning; a `*` in
-  its host matches nothing. Every matching `extraHeader` is sent, and an empty value drops the
-  ones before it. `http.proxy` is read through libgit2's proxy detection. `sslCAInfo` and
+  its host matches nothing. The matching `extraHeader` entries are read in config order, global
+  before repository, as git reads them: one that is less specific than an earlier match is
+  ignored, the others are sent, and an empty value drops the ones before it. `http.proxy` is read through libgit2's proxy detection. `sslCAInfo` and
   `sslCAPath` work where libgit2 uses OpenSSL (Linux) and have no effect on macOS, where it asks
   the keychain; an authority they name is trusted for the rest of the process, for every host.
   Client certificates (`http.sslCert`, `http.sslKey`), `~/.netrc`, `GIT_SSL_NO_VERIFY`,

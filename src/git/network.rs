@@ -399,6 +399,7 @@ mod tests {
     use super::needs_passphrase;
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
+    use crate::git::http_config;
 
     /// A work tree whose `origin` is a bare repository next to it, with `main` pushed there.
     fn with_origin(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
@@ -663,6 +664,66 @@ mod tests {
             "x-other-scheme",
         ] {
             assert!(!heads.contains(other), "{other} was sent: {heads}");
+        }
+    }
+
+    /// The `authorization:` lines of every request head that `server` has recorded.
+    fn authorizations(server: &Server) -> Vec<String> {
+        let mut lines: Vec<String> = server
+            .heads()
+            .lines()
+            .filter(|line| line.starts_with("authorization:"))
+            .map(str::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    #[test]
+    fn extra_headers_follow_the_order_git_reads_them_in() {
+        // Whether the global and the local config set a header scoped to the server (else
+        // unscoped): git drops an entry less specific than one it has read.
+        let cases = [(true, false), (false, true), (true, true), (false, false)];
+        for (global_scoped, local_scoped) in cases {
+            let sandbox = Sandbox::with_repo();
+            let dir = sandbox.repo();
+            let server = Server::start();
+            let url = server.url("/repo.git");
+            for (level, scoped) in [("--global", global_scoped), ("--local", local_scoped)] {
+                let (key, value) = if scoped {
+                    (
+                        format!("http.{}.extraHeader", server.url("/")),
+                        "Authorization: scoped",
+                    )
+                } else {
+                    ("http.extraHeader".to_owned(), "Authorization: plain")
+                };
+                sandbox.git(&dir, &["config", level, "--add", &key, value]);
+            }
+            let git = sandbox.command("git").args(["ls-remote", &url]).output();
+            assert!(!git.unwrap().status.success());
+            let expected = authorizations(&server);
+
+            let mut config = git2::Config::new().unwrap();
+            let global = sandbox.path().join("gitconfig");
+            config
+                .add_file(&global, git2::ConfigLevel::Global, false)
+                .unwrap();
+            config
+                .add_file(&dir.join(".git/config"), git2::ConfigLevel::Local, false)
+                .unwrap();
+            let mut ours: Vec<String> = http_config::settings(&config, &url)
+                .unwrap()
+                .headers
+                .iter()
+                .map(|header| header.to_lowercase())
+                .collect();
+            ours.sort();
+
+            assert_eq!(
+                ours, expected,
+                "global scoped {global_scoped}, local scoped {local_scoped}"
+            );
         }
     }
 

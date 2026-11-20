@@ -105,6 +105,44 @@ fn scoped<T>(
     Ok(None)
 }
 
+/// The `http.extraHeader` values for `target`, read as git reads them: in config order (the
+/// system file first), skipping an entry that is less specific than one already read; an empty
+/// value drops the headers so far.
+fn extra_headers(config: &git2::Config, target: &Parts) -> Result<Vec<String>> {
+    let mut best: Option<Specificity> = None;
+    let mut headers = Vec::new();
+    let mut entries = config.entries(Some("^http\\."))?;
+    while let Some(entry) = entries.next() {
+        let entry = entry?;
+        let name = entry.name().unwrap_or_default();
+        let Some((prefix, "extraheader")) = name.rsplit_once('.') else {
+            continue;
+        };
+        let rank = if prefix == "http" {
+            None
+        } else {
+            let scope = parts(&prefix["http.".len()..]);
+            let Some(rank) = scope.and_then(|scope| specificity(&scope, target)) else {
+                continue;
+            };
+            Some(rank)
+        };
+        if rank < best {
+            continue;
+        }
+        best = rank;
+        let value = entry.value().unwrap_or_default();
+        if value.is_empty() {
+            headers.clear();
+        } else if value.contains(['\r', '\n']) {
+            return fail(format!("http.extraHeader '{value}' has a line break"));
+        } else {
+            headers.push(value.to_owned());
+        }
+    }
+    Ok(headers)
+}
+
 /// The `http.*` settings for `url`; the defaults for a URL that is not HTTP or HTTPS.
 pub(super) fn settings(config: &git2::Config, url: &str) -> Result<Http> {
     let mut http = Http {
@@ -123,18 +161,6 @@ pub(super) fn settings(config: &git2::Config, url: &str) -> Result<Http> {
     http.verify = verify.unwrap_or(true);
     http.ca_file = scoped(config, &scopes, "sslcainfo", git2::Config::get_path)?;
     http.ca_dir = scoped(config, &scopes, "sslcapath", git2::Config::get_path)?;
-    for scope in &scopes {
-        let mut values = config.multivar(&format!("{scope}.extraheader"), None)?;
-        while let Some(entry) = values.next() {
-            let value = entry?.value().unwrap_or_default().to_owned();
-            if value.is_empty() {
-                http.headers.clear();
-            } else if value.contains(['\r', '\n']) {
-                return fail(format!("http.extraHeader '{value}' has a line break"));
-            } else {
-                http.headers.push(value);
-            }
-        }
-    }
+    http.headers = extra_headers(config, &target)?;
     Ok(http)
 }
