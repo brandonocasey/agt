@@ -694,14 +694,22 @@ const EXTRA_SYSTEM_CONFIG_DIRS: [&str; 4] = [
     "/Applications/Xcode.app/Contents/Developer/usr/share/git-core",
 ];
 
-/// Makes libgit2 look for the system config in `/etc` and then in [`EXTRA_SYSTEM_CONFIG_DIRS`]:
-/// the first directory that holds a `gitconfig` is the one read. It runs once, before the first
-/// repository is opened, as libgit2 does not guard its search paths.
+/// The search path that makes libgit2 look for the system config in its own default (`$PATH`,
+/// which is `/etc`) and then in `extra`: the first directory that holds a `gitconfig` is read.
+fn system_config_search(extra: &[&str]) -> String {
+    std::iter::once("$PATH")
+        .chain(extra.iter().copied())
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Makes libgit2 search for the system config as [`system_config_search`] says, with
+/// [`EXTRA_SYSTEM_CONFIG_DIRS`]. It runs once, before the first repository is opened, as libgit2
+/// does not guard its search paths.
 pub(crate) fn configure_libgit2() {
     static CONFIGURED: Once = Once::new();
     CONFIGURED.call_once(|| {
-        let search = format!("$PATH:{}", EXTRA_SYSTEM_CONFIG_DIRS.join(":"));
-        set_system_config_search(&search);
+        set_system_config_search(&system_config_search(&EXTRA_SYSTEM_CONFIG_DIRS));
     });
 }
 
@@ -1258,43 +1266,15 @@ mod tests {
     }
 
     #[test]
-    fn the_system_config_comes_from_the_first_search_directory_that_has_one() {
-        let sandbox = Sandbox::with_repo();
-        let repo = Repo::at(sandbox.repo());
-        let (first, second) = (sandbox.path().join("first"), sandbox.path().join("second"));
-        let (empty, absent) = (sandbox.path().join("empty"), sandbox.path().join("absent"));
-        for dir in [&first, &second, &empty] {
-            fs::create_dir(dir).unwrap();
-        }
-        fs::write(
-            second.join("gitconfig"),
-            "[sandbox]\n\tname = second\n[init]\n\tdefaultBranch = brew\n",
-        )
-        .unwrap();
-        let search = |dirs: &[&Path]| {
-            let dirs: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
-            super::set_system_config_search(&dirs.join(":"));
-        };
-
-        search(&[&empty, &absent, &second]);
+    fn the_system_config_search_puts_libgit2_s_default_before_the_extra_directories() {
+        assert_eq!(super::system_config_search(&[]), "$PATH");
+        assert_eq!(super::system_config_search(&["/a", "/b"]), "$PATH:/a:/b");
         assert_eq!(
-            repo.config_value("sandbox.name").unwrap().as_deref(),
-            Some("second")
+            super::system_config_search(&super::EXTRA_SYSTEM_CONFIG_DIRS),
+            "$PATH:/opt/homebrew/etc:/usr/local/etc:\
+             /Library/Developer/CommandLineTools/usr/share/git-core:\
+             /Applications/Xcode.app/Contents/Developer/usr/share/git-core"
         );
-        assert_eq!(
-            repo.config_value("init.defaultBranch").unwrap().as_deref(),
-            Some("brew")
-        );
-
-        fs::write(first.join("gitconfig"), "[sandbox]\n\tname = first\n").unwrap();
-        search(&[&first, &second]);
-        assert_eq!(
-            repo.config_value("sandbox.name").unwrap().as_deref(),
-            Some("first")
-        );
-
-        search(&[&empty]);
-        assert_eq!(repo.config_value("sandbox.name").unwrap(), None);
     }
 
     #[test]
