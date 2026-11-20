@@ -162,7 +162,7 @@ fn delete(record: &Record, path: &Path) -> Result<()> {
         return fs::remove_file(path).map_err(ctx(format!("remove {}", path.display())));
     }
     if let (true, Some(reference)) = (record.repository.is_dir(), &record.reference) {
-        Repo::at(&record.repository).git(&["update-ref", "-d", reference])?;
+        Repo::at(&record.repository).delete_ref(reference)?;
     }
     fs::remove_dir_all(path).map_err(ctx(format!("remove {}", path.display())))
 }

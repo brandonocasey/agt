@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use crate::support::forge::forgejo;
-use crate::support::{Env, executable};
+use crate::support::{Env, PROMPT_CASES, PROMPT_PROBE, executable};
 
 const AUTH: [&str; 4] = ["auth", "status", "--hostname", "github.com"];
 
@@ -97,6 +97,30 @@ fn ignore_row_outside_a_repository(lines: &str) -> Value {
     std::fs::create_dir_all(&outside).unwrap();
     let (_, report) = doctor_in(&env, &outside);
     row(&report, "git ignore").clone()
+}
+
+#[test]
+fn a_global_config_named_by_the_environment_hides_the_xdg_one() {
+    let env = setup("0.0.1");
+    std::fs::write(env.path("gitconfig"), "[user]\n\tname = Tester\n").unwrap();
+    std::fs::create_dir_all(env.path("config/git")).unwrap();
+    std::fs::write(
+        env.path("xdg-ignore"),
+        ".worktrees/\n/.agt/\n/.cache/agents/scratch/\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.path("config/git/config"),
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            env.path("xdg-ignore").display()
+        ),
+    )
+    .unwrap();
+    let outside = env.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let (_, report) = doctor_in(&env, &outside);
+    assert_eq!(row(&report, "git ignore")["status"], "warn", "{report}");
 }
 
 #[test]
@@ -411,4 +435,23 @@ fn offline_does_not_ask_tea_for_its_logins() {
         "{:?}",
         env.forge_calls()
     );
+}
+
+#[test]
+fn the_forge_tool_gets_the_prompt_settings_the_user_started_agt_with() {
+    for (user, expected) in PROMPT_CASES {
+        let env = setup("99.0.0");
+        env.respond(&AUTH, "Logged in to github.com account octo (keyring)");
+        let seen = env.path("seen");
+        env.hook_call(&AUTH, &format!("{PROMPT_PROBE} > {}", seen.display()));
+        let output = env
+            .bin(&env.repo)
+            .envs(user.iter().copied())
+            .env("AGT_MISE_BIN", env.path("mise"))
+            .args(["doctor", "--json"])
+            .output()
+            .expect("agt runs");
+        assert!(!output.stdout.is_empty(), "{output:?}");
+        assert_eq!(std::fs::read_to_string(seen).unwrap(), expected, "{user:?}");
+    }
 }

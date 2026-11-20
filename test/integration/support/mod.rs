@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 
 use assert_fs::TempDir;
 use serde_json::Value;
@@ -17,6 +19,22 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_agt");
 pub const FAKE_FORGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-forge.sh");
 pub const FAKE_TEA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/fake-tea.sh");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures");
+
+/// A shell command that prints `GIT_TERMINAL_PROMPT` and `GCM_INTERACTIVE`, `absent` for one that
+/// is not set.
+pub const PROMPT_PROBE: &str =
+    r#"printf '%s %s' "${GIT_TERMINAL_PROMPT-absent}" "${GCM_INTERACTIVE-absent}""#;
+
+/// The prompt variables a user may have set when starting agt.
+/// Each is paired with what a program agt starts has to print for [`PROMPT_PROBE`].
+pub const PROMPT_CASES: [(&[(&str, &str)], &str); 3] = [
+    (&[], "absent absent"),
+    (&[("GIT_TERMINAL_PROMPT", "1")], "1 absent"),
+    (
+        &[("GIT_TERMINAL_PROMPT", "1"), ("GCM_INTERACTIVE", "always")],
+        "1 always",
+    ),
+];
 
 /// Non-Git variables that can change a test. Tests that need one set it after `Env::command`.
 const SCRUBBED_ENV: &[&str] = &[
@@ -602,6 +620,61 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+/// A TCP host on a free local port and the ssh URL that reaches it. `accepted` receives a
+/// message for each connection, which is how a test sees that agt reached a remote.
+pub struct Host {
+    pub url: String,
+    pub accepted: mpsc::Receiver<()>,
+}
+
+/// A host that accepts a connection and never answers, as an ssh server that hangs does.
+pub fn silent_host() -> Host {
+    let mut held = Vec::new();
+    host("ssh", move |stream| held.push(stream))
+}
+
+/// A host that closes each connection at once, so a client fails.
+pub fn refusing_host() -> Host {
+    host("ssh", drop)
+}
+
+/// An HTTP host that answers every request with `401` and a Basic challenge.
+/// A git client then asks for credentials. `Host::url` is an `http` URL.
+pub fn challenging_host() -> Host {
+    host("http", |mut stream| {
+        let mut seen = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !seen.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(count) => seen.extend_from_slice(&chunk[..count]),
+            }
+        }
+        let _ = stream.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"agt\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    })
+}
+
+fn host(scheme: &str, mut on_connect: impl FnMut(TcpStream) + Send + 'static) -> Host {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "{scheme}://127.0.0.1:{}/repo.git",
+        listener.local_addr().unwrap().port()
+    );
+    let (accepted, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            on_connect(stream);
+            let _ = accepted.send(());
+        }
+    });
+    Host {
+        url,
+        accepted: receiver,
+    }
 }
 
 /// A backup archive read back: its record, the `files/` entries with modes, and `worktree-git/`.

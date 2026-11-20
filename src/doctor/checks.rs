@@ -13,13 +13,11 @@ use crate::core::local;
 use crate::forge::auto::Offline;
 use crate::forge::transport::{Cli, TEA_LOGINS_LIST, parse_tea_logins, tea_login_for};
 use crate::forge::{hosts, service};
-use crate::git::Repo;
+use crate::git::{Repo, global_config_path};
 use crate::store::model::Forge;
 
 use super::Row;
 
-/// `git merge-tree --write-tree` arrived in this git version.
-const MIN_GIT: [u64; 2] = [2, 38];
 /// `tea api -d`, which agt sends every request body through, first shipped in this tea version.
 const MIN_TEA: [u64; 2] = [0, 13];
 const MISE_PIN: &str = "github:brandonocasey/agt";
@@ -64,10 +62,6 @@ fn at_least(text: &str, min: [u64; 2]) -> bool {
     numbers(text).is_some_and(|have| have[..] >= min[..])
 }
 
-fn git() -> Cli {
-    Cli::other("git", "AGT_GIT_BIN")
-}
-
 fn mise() -> Cli {
     Cli::other("mise", "AGT_MISE_BIN")
 }
@@ -91,17 +85,15 @@ fn version(cli: &Cli) -> Option<String> {
     ok.then_some(found)
 }
 
+/// The version of the libgit2 agt is built with.
+fn libgit2_version() -> String {
+    let (major, minor, revision) = git2::Version::get().libgit2_version();
+    format!("{major}.{minor}.{revision}")
+}
+
 fn tools() -> Vec<Row> {
     let mut rows = Vec::new();
-    rows.push(match version(&git()) {
-        Some(found) if at_least(&found, MIN_GIT) => Row::ok("git", found),
-        Some(found) => Row::fail(
-            "git",
-            format!("{found}, older than 2.38 (needed for `git merge-tree --write-tree`)"),
-            "upgrade git to 2.38 or newer",
-        ),
-        None => Row::fail("git", "not found", "install git 2.38 or newer"),
-    });
+    rows.push(Row::ok("libgit2", libgit2_version()));
     for (name, cli, hint) in [
         (
             service::kind(Forge::Github).tool,
@@ -314,17 +306,12 @@ fn agt_version() -> Row {
 }
 
 fn excludes_file() -> Option<PathBuf> {
-    let configured = git()
-        .probe(&["config", "--path", "core.excludesFile"])
-        .filter(|(ok, ..)| *ok)
-        .map(|(_, out, _)| out.trim().to_owned())
-        .filter(|path| !path.is_empty());
-    configured
-        .map(PathBuf::from)
+    global_config_path("core.excludesFile")
+        .filter(|path| !path.as_os_str().is_empty())
         .or_else(|| Some(local::config_home().ok()?.join("git").join("ignore")))
 }
 
-/// Whether the excludes-file `text` ignores `probe`, with no repository to ask `git check-ignore`.
+/// Whether the excludes-file `text` ignores `probe`, with no repository to ask.
 /// The last matching line wins, so a later `!` line re-includes it.
 fn excluded(text: &str, probe: &str) -> bool {
     let parts: Vec<&str> = probe.split('/').collect();
@@ -367,9 +354,7 @@ fn git_ignore(repo: Option<&Repo>) -> Row {
     let missing: Vec<&str> = IGNORED
         .iter()
         .filter(|(_, probe)| match repo {
-            Some(repo) => !repo
-                .succeeds(&["check-ignore", "-q", "--", probe])
-                .unwrap_or(false),
+            Some(repo) => !repo.is_ignored(probe).unwrap_or(false),
             None => !excluded(&text, probe),
         })
         .map(|(pattern, _)| *pattern)

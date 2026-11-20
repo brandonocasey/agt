@@ -131,6 +131,56 @@ fn behind_origin() -> (Env, PathBuf, String, String) {
 }
 
 #[test]
+fn the_local_default_is_fast_forwarded_in_a_sparse_checkout_over_a_change_outside_it() {
+    let (env, _) = repo_with_commit();
+    let bare = remote(&env, "origin.git", "origin");
+    fs::create_dir_all(env.repo.join("sub")).unwrap();
+    commit(&env, &env.repo.clone(), "sub/keep", "k");
+    git(&env, &env.repo, &["push", "-q", "-u", "origin", "main"]);
+    git(
+        &env,
+        &env.repo,
+        &["sparse-checkout", "set", "--no-cone", "/sub/"],
+    );
+    let tip = advance(&env, &bare, "first");
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(value["local_default"]["status"], "updated", "{value}");
+    assert_eq!(git(&env, &env.repo, &["rev-parse", "HEAD"]), tip);
+    assert!(!env.repo.join("first").exists());
+    let status = git(&env, &env.repo, &["status", "--porcelain", "-uno"]);
+    assert_eq!(status, "");
+}
+
+/// A cone checkout of `keep` whose left-out `out/b` blob is deleted from the object database.
+/// A checkout that read or wrote left-out files would fail, as in a partial clone.
+fn sparse_repo_missing_a_left_out_blob() -> Env {
+    let (env, _) = repo_with_commit();
+    let repo = env.repo.clone();
+    fs::create_dir_all(repo.join("keep")).unwrap();
+    fs::create_dir_all(repo.join("out")).unwrap();
+    fs::write(repo.join("keep/a"), "a").unwrap();
+    fs::write(repo.join("out/b"), "b").unwrap();
+    git(&env, &repo, &["add", "-A"]);
+    git(&env, &repo, &["commit", "-q", "-m", "dirs"]);
+    git(&env, &repo, &["sparse-checkout", "set", "keep"]);
+    let blob = git(&env, &repo, &["rev-parse", "HEAD:out/b"]);
+    fs::remove_file(repo.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+    env
+}
+
+#[test]
+fn a_worktree_of_a_sparse_checkout_never_writes_the_files_left_out() {
+    let env = sparse_repo_missing_a_left_out_blob();
+    let value = agt_json(&env, &env.repo, &["create", "work"]);
+    let work = PathBuf::from(value["path"].as_str().unwrap());
+    assert!(work.join("keep/a").is_file());
+    assert!(!work.join("out").exists());
+    let status = git(&env, &work, &["status", "--porcelain"]);
+    assert_eq!(status, "");
+    assert_eq!(git(&env, &work, &["sparse-checkout", "list"]), "keep");
+}
+
+#[test]
 fn the_local_default_is_fast_forwarded_in_the_checkout_that_has_it() {
     let (env, _, first, tip) = behind_origin();
     // A local change the merge does not touch stays as it was.
@@ -632,6 +682,42 @@ fn detach_checks_out_a_commit_without_making_a_branch() {
 }
 
 #[test]
+fn a_detached_worktree_in_a_directory_with_awkward_characters_is_created_and_restored() {
+    let (env, first) = repo_with_commit();
+    let tree = env.path("my wt~1: x");
+    let created = agt_json(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "review-1",
+            "--detach",
+            "HEAD",
+            "--path",
+            tree.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(created["commit"], first.as_str());
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    let restored = agt_json(
+        &env,
+        &env.repo,
+        &["restore", removed["id"].as_str().unwrap()],
+    );
+    assert_eq!(restored["warnings"], serde_json::json!([]), "{restored}");
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+    assert_eq!(
+        git(&env, &env.repo, &["branch", "--list", "agt-detach*"]),
+        ""
+    );
+}
+
+#[test]
 fn a_detached_worktree_is_reused_only_at_the_same_commit() {
     let (env, first) = repo_with_commit();
     let second = commit(&env, &env.repo.clone(), "second", "2");
@@ -763,6 +849,383 @@ fn submodules_are_initialized_in_the_new_worktree() {
     let value = agt_json(&env, &env.repo, &["create", "with-sub"]);
     assert_eq!(value["submodules"], true);
     assert!(env.repo.join(".worktrees/with-sub/vendor/lib.txt").exists());
+}
+
+/// A repository whose submodule `vendor` is a local path, as `git submodule add` records it.
+/// `agt worktree create` runs in it without the test's blanket `protocol.file.allow=always`.
+fn file_submodule_create(env: &Env, name: &str, extra_env: &[(&str, &str)]) -> Output {
+    env.bin(&env.repo)
+        .args(["worktree", "create", name])
+        .envs(extra_env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+/// What `git submodule update --init`, for the submodule `only` when it is given, makes of the
+/// same repository in a worktree git added.
+fn git_submodule_update(
+    env: &Env,
+    name: &str,
+    extra_env: &[(&str, &str)],
+    only: Option<&str>,
+) -> Output {
+    let tree = env.path(name);
+    git(
+        env,
+        &env.repo,
+        &["worktree", "add", "-q", tree.to_str().unwrap()],
+    );
+    let mut update = env.command("git", &tree);
+    update
+        .args(["submodule", "update", "--init"])
+        .envs(extra_env.iter().copied());
+    if let Some(path) = only {
+        update.args(["--", path]);
+    }
+    update.output().unwrap()
+}
+
+#[test]
+fn a_file_path_submodule_needs_what_git_needs_to_clone_over_the_file_transport() {
+    let (env, _) = repo_with_commit();
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(&env, &library, &["init", "-q", "-b", "main"]);
+    commit(&env, &library, "lib.txt", "lib");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            library.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    git(&env, &env.repo, &["commit", "-q", "-m", "add submodule"]);
+
+    let refused = [
+        ("default", vec![]),
+        ("never", vec![("GIT_ALLOW_PROTOCOL", "https:ssh")]),
+    ];
+    for (label, extra) in &refused {
+        let agt = file_submodule_create(&env, &format!("agt-{label}"), extra);
+        let git = git_submodule_update(&env, &format!("git-{label}"), extra, None);
+        let stderr = String::from_utf8_lossy(&agt.stderr);
+        assert_eq!(agt.status.code(), Some(1), "{label}: {stderr}");
+        assert!(!git.status.success(), "{label}: git cloned it");
+        assert!(
+            stderr.contains("transport 'file' not allowed"),
+            "{label}: {stderr}"
+        );
+        assert!(
+            String::from_utf8_lossy(&git.stderr).contains("transport 'file' not allowed"),
+            "{label}: {}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+    }
+
+    let allowed = [
+        ("env", vec![("GIT_ALLOW_PROTOCOL", "file")]),
+        (
+            "config",
+            vec![
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
+                ("GIT_CONFIG_VALUE_0", "always"),
+            ],
+        ),
+    ];
+    for (label, extra) in &allowed {
+        let agt = file_submodule_create(&env, &format!("agt-{label}"), extra);
+        let git = git_submodule_update(&env, &format!("git-{label}"), extra, None);
+        assert!(
+            agt.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&agt.stderr)
+        );
+        assert!(git.status.success(), "{label}: git refused it");
+        assert!(
+            env.repo
+                .join(format!(".worktrees/agt-{label}/vendor/lib.txt"))
+                .exists()
+        );
+    }
+}
+
+/// A repository with the submodule `vendor`, recorded in `.gitmodules`.
+/// Its URL is the library when `reachable`, else a private host.
+/// It has `update = none` there when `update_none`.
+/// `settings` go in its config, where the submodule is not registered.
+fn submodule_policy_repo(reachable: bool, update_none: bool, settings: &[(&str, &str)]) -> Env {
+    let (env, _) = repo_with_commit();
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(&env, &library, &["init", "-q", "-b", "main"]);
+    commit(&env, &library, "lib.txt", "lib");
+    let add = [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        library.to_str().unwrap(),
+        "vendor",
+    ];
+    git(&env, &env.repo, &add);
+    if !reachable {
+        let private = "https://private.invalid/vendor.git";
+        git(
+            &env,
+            &env.repo,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.vendor.url",
+                private,
+            ],
+        );
+    }
+    if update_none {
+        let none = [
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.vendor.update",
+            "none",
+        ];
+        git(&env, &env.repo, &none);
+    }
+    git(&env, &env.repo, &["add", "-A"]);
+    git(&env, &env.repo, &["commit", "-q", "-m", "add submodule"]);
+    git(
+        &env,
+        &env.repo,
+        &["config", "--remove-section", "submodule.vendor"],
+    );
+    for (key, value) in settings {
+        git(&env, &env.repo, &["config", "--add", key, value]);
+    }
+    env
+}
+
+/// One repository setup for [`a_submodule_is_updated_when_git_updates_it_and_skipped_when_git_skips_it`]
+/// and whether git clones `vendor` in it.
+struct Policy {
+    label: &'static str,
+    reachable: bool,
+    update_none: bool,
+    settings: &'static [(&'static str, &'static str)],
+    cloned: bool,
+}
+
+const fn policy(
+    label: &'static str,
+    cloned: bool,
+    settings: &'static [(&'static str, &'static str)],
+) -> Policy {
+    Policy {
+        label,
+        reachable: cloned,
+        update_none: false,
+        settings,
+        cloned,
+    }
+}
+
+#[test]
+fn a_submodule_is_updated_when_git_updates_it_and_skipped_when_git_skips_it() {
+    let cases = [
+        policy("default", true, &[]),
+        Policy {
+            update_none: true,
+            ..policy("update none in .gitmodules", false, &[])
+        },
+        policy(
+            "update none in config",
+            false,
+            &[("submodule.vendor.update", "none")],
+        ),
+        policy(
+            "active path elsewhere",
+            false,
+            &[("submodule.active", "elsewhere")],
+        ),
+        policy(
+            "active path names it",
+            true,
+            &[("submodule.active", "vendor")],
+        ),
+        policy(
+            "active glob covers it",
+            true,
+            &[("submodule.active", "ven*")],
+        ),
+        policy("active path covers it", true, &[("submodule.active", ".")]),
+        policy(
+            "named active beats the path",
+            true,
+            &[
+                ("submodule.active", "elsewhere"),
+                ("submodule.vendor.active", "true"),
+            ],
+        ),
+        policy(
+            "named inactive under a path",
+            false,
+            &[
+                ("submodule.active", "."),
+                ("submodule.vendor.active", "false"),
+            ],
+        ),
+        policy(
+            "named inactive alone",
+            true,
+            &[("submodule.vendor.active", "false")],
+        ),
+    ];
+    let allow = [
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
+        ("GIT_CONFIG_VALUE_0", "always"),
+    ];
+    for Policy {
+        label,
+        reachable,
+        update_none,
+        settings,
+        cloned,
+    } in cases
+    {
+        for offline in [false, true] {
+            // Offline, agt names each submodule path, which git updates whatever
+            // `submodule.active` says.
+            let by_path = offline
+                && !update_none
+                && settings.iter().any(|(key, _)| *key == "submodule.active");
+            let env = submodule_policy_repo(reachable || by_path, update_none, settings);
+            let cloned = cloned || by_path;
+            let mut extra = allow.to_vec();
+            if offline {
+                extra.push(("AGT_OFFLINE", "1"));
+            }
+            let agt = file_submodule_create(&env, "agt", &extra);
+            let git = git_submodule_update(&env, "git", &allow, by_path.then_some("vendor"));
+            let stderr = String::from_utf8_lossy(&agt.stderr);
+            assert!(git.status.success(), "{label}: git failed");
+            assert!(
+                agt.status.success(),
+                "{label} (offline {offline}): {stderr}"
+            );
+            let on_disk = |tree: &str| env.path(tree).join("vendor/lib.txt").exists();
+            assert_eq!(on_disk("git"), cloned, "{label}: git");
+            let made = env.repo.join(".worktrees/agt/vendor/lib.txt").exists();
+            assert_eq!(made, cloned, "{label} (offline {offline}): agt");
+            let value: Value = serde_json::from_slice(&agt.stdout).unwrap();
+            assert_eq!(value["warnings"], serde_json::json!([]), "{label}");
+        }
+    }
+}
+
+/// A repository whose origin is a network URL and whose submodule `vendor` is recorded as the
+/// relative URL `../lib.git`, which git resolves against the origin.
+fn relative_submodule_repo(env: &Env, origin: &str) {
+    let library = env.path("library");
+    fs::create_dir_all(&library).unwrap();
+    git(env, &library, &["init", "-q", "-b", "main"]);
+    commit(env, &library, "lib.txt", "lib");
+    git(
+        env,
+        &env.repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            library.to_str().unwrap(),
+            "vendor",
+        ],
+    );
+    let modules = fs::read_to_string(env.repo.join(".gitmodules")).unwrap();
+    fs::write(
+        env.repo.join(".gitmodules"),
+        modules.replace(library.to_str().unwrap(), "../lib.git"),
+    )
+    .unwrap();
+    git(env, &env.repo, &["add", "-A"]);
+    git(env, &env.repo, &["commit", "-q", "-m", "add submodule"]);
+    git(
+        env,
+        &env.repo,
+        &["config", "--remove-section", "submodule.vendor"],
+    );
+    git(env, &env.repo, &["remote", "add", "origin", origin]);
+}
+
+#[test]
+fn a_credential_helper_runs_without_a_way_to_prompt() {
+    let (env, _) = repo_with_commit();
+    let host = crate::support::challenging_host();
+    git(&env, &env.repo, &["remote", "add", "origin", &host.url]);
+    let seen = env.path("helper-env");
+    let helper = format!(
+        "!f() {{ env > '{}'; echo username=u; echo password=p; }}; f",
+        seen.display()
+    );
+    git(&env, &env.repo, &["config", "credential.helper", &helper]);
+    let output = env
+        .bin(&env.repo)
+        .args(["worktree", "create", "work"])
+        .env_remove("GCM_INTERACTIVE")
+        .env_remove("GIT_TERMINAL_PROMPT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let recorded = fs::read_to_string(&seen).unwrap();
+    for line in ["GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never"] {
+        assert!(
+            recorded.lines().any(|seen| seen == line),
+            "{line}\n{recorded}"
+        );
+    }
+}
+
+#[test]
+fn an_online_create_takes_a_relative_submodule_url_for_a_network_url_when_the_origin_is() {
+    let (env, _) = repo_with_commit();
+    let host = crate::support::refusing_host();
+    relative_submodule_repo(&env, &host.url);
+    let output = env
+        .bin(&env.repo)
+        .args(["worktree", "create", "on", "--base", "main"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("transport 'file' not allowed"), "{stderr}");
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(host.accepted.try_recv().is_ok(), "never connected");
+}
+
+#[test]
+fn an_offline_create_skips_a_relative_submodule_url_when_the_origin_is_a_network_url() {
+    let (env, _) = repo_with_commit();
+    let host = crate::support::refusing_host();
+    relative_submodule_repo(&env, &host.url);
+    let output = env
+        .bin(&env.repo)
+        .args(["--offline", "worktree", "create", "off", "--base", "main"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warning = value["warnings"][0].as_str().unwrap();
+    assert!(warning.contains("submodule vendor"), "{value}");
+    assert!(host.accepted.try_recv().is_err(), "connected");
 }
 
 #[test]
@@ -1498,4 +1961,557 @@ fn offline_create_initializes_a_file_url_submodule_whose_name_has_a_space() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["warnings"].as_array().unwrap().len(), 0, "{value}");
     assert!(env.repo.join(".worktrees/off/vendor/lib.txt").exists());
+}
+
+/// A bare clone of `env.repo` at `name`, whose HEAD names `main`.
+fn bare_clone(env: &Env, name: &str) -> PathBuf {
+    let bare = env.path(name);
+    git(
+        env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            env.repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    bare
+}
+
+/// A project directory `name` holding a bare clone of `env.repo` in `.bare`, which a `.git` file
+/// points to.
+fn gitfile_bare_clone(env: &Env, name: &str) -> PathBuf {
+    let project = env.path(name);
+    fs::create_dir_all(&project).unwrap();
+    let bare = project.join(".bare");
+    git(
+        env,
+        &env.repo,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            env.repo.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    fs::write(project.join(".git"), "gitdir: ./.bare\n").unwrap();
+    project
+}
+
+#[test]
+fn the_branch_a_bare_repository_names_in_head_gets_a_worktree_as_it_does_in_git() {
+    let (env, first) = repo_with_commit();
+    let layouts = [
+        ("bare clone", bare_clone(&env, "bare")),
+        ("gitfile", gitfile_bare_clone(&env, "project")),
+    ];
+    for (label, repo) in layouts {
+        let by_git = env.path(&format!("git-{label}"));
+        git(
+            &env,
+            &repo,
+            &["worktree", "add", "-q", by_git.to_str().unwrap(), "main"],
+        );
+        git(
+            &env,
+            &repo,
+            &["worktree", "remove", by_git.to_str().unwrap()],
+        );
+        let target = env.path(&format!("agt-{label}"));
+        let value = agt_json(
+            &env,
+            &repo,
+            &["create", "main", "--path", target.to_str().unwrap()],
+        );
+        assert_eq!(value["branch"], "main", "{label}: {value}");
+        assert_eq!(git(&env, &target, &["rev-parse", "HEAD"]), first, "{label}");
+        assert_eq!(
+            git(&env, &target, &["symbolic-ref", "HEAD"]),
+            "refs/heads/main",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn a_backup_of_the_branch_a_bare_repository_names_in_head_is_restored_onto_it() {
+    let (env, first) = repo_with_commit();
+    let bare = bare_clone(&env, "bare");
+    let tree = env.path("main-tree");
+    git(
+        &env,
+        &bare,
+        &["worktree", "add", "-q", tree.to_str().unwrap(), "main"],
+    );
+    let removed = agt_json(&env, &bare, &["remove", tree.to_str().unwrap(), "--yes"]);
+    let restored = agt_json(&env, &bare, &["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], serde_json::json!([]), "{restored}");
+    assert_eq!(
+        git(&env, &tree, &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    assert_eq!(git(&env, &tree, &["rev-parse", "HEAD"]), first);
+}
+
+#[test]
+fn a_branch_that_a_worktree_is_rebasing_gets_no_second_worktree() {
+    let (env, _) = repo_with_commit();
+    git(&env, &env.repo, &["branch", "topic"]);
+    let rebasing = env.path("rebasing");
+    git(
+        &env,
+        &env.repo,
+        &["worktree", "add", "-q", rebasing.to_str().unwrap(), "topic"],
+    );
+    commit(&env, &rebasing, "first", "topic side");
+    commit(&env, &env.repo, "first", "main side");
+    let stopped = env
+        .command("git", &rebasing)
+        .args(["rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(
+        !stopped.status.success(),
+        "the rebase must stop on a conflict"
+    );
+    let oracle = env
+        .command("git", &env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            env.path("by-git").to_str().unwrap(),
+            "topic",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let output = agt(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "topic",
+            "--path",
+            env.path("second").to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already checked out"));
+    assert!(!env.path("second").exists());
+}
+
+#[test]
+fn a_branch_that_a_worktree_is_bisecting_gets_no_second_worktree() {
+    let (env, _) = repo_with_commit();
+    for name in ["second", "third", "fourth"] {
+        commit(&env, &env.repo, name, name);
+    }
+    git(&env, &env.repo, &["branch", "topic"]);
+    let bisecting = env.path("bisecting");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            bisecting.to_str().unwrap(),
+            "topic",
+        ],
+    );
+    git(&env, &bisecting, &["bisect", "start", "topic", "topic~3"]);
+    assert_eq!(git(&env, &bisecting, &["branch", "--show-current"]), "");
+    let oracle = env
+        .command("git", &env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            env.path("by-git").to_str().unwrap(),
+            "topic",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let output = agt(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "topic",
+            "--path",
+            env.path("second").to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already checked out"));
+    assert!(!env.path("second").exists());
+}
+
+#[test]
+fn a_linked_worktree_is_repaired_by_git_after_the_repository_moves() {
+    let (env, _) = repo_with_commit();
+    agt_json(&env, &env.repo, &["create", "by-agt"]);
+    let by_git = env.path("by-git");
+    git(
+        &env,
+        &env.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "by-git",
+            by_git.to_str().unwrap(),
+        ],
+    );
+    let moved = env.path("moved");
+    fs::rename(&env.repo, &moved).unwrap();
+    // `Env::git` runs in the directory that is gone.
+    let git_in = |dir: &Path, args: &[&str]| {
+        let output = env.command("git", dir).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let by_agt = moved.join(".worktrees/by-agt");
+    git_in(&moved, &["worktree", "repair", by_agt.to_str().unwrap()]);
+
+    let listed = git_in(&moved, &["worktree", "list", "--porcelain"]);
+    for tree in [&by_agt, &by_git] {
+        let line = format!("worktree {}", tree.canonicalize().unwrap().display());
+        assert!(listed.lines().any(|listed| listed == line), "{listed}");
+        git_in(tree, &["status", "-s"]);
+    }
+}
+
+#[test]
+fn a_path_that_holds_files_is_refused_and_leaves_no_registration() {
+    let (env, _) = repo_with_commit();
+    let taken = env.repo.join(".worktrees/foo");
+    fs::create_dir_all(&taken).unwrap();
+    fs::write(taken.join("mine.txt"), "mine").unwrap();
+
+    let output = agt(&env, &env.repo, &["create", "foo"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!env.repo.join(".git/worktrees/foo").exists());
+    assert_eq!(fs::read_to_string(taken.join("mine.txt")).unwrap(), "mine");
+}
+
+/// A repository whose `*.bin` files go through the `lfs` filter, which `cat` stands in for.
+/// `main` holds `first`, then `.gitattributes` and `data.bin`. The returned commit is the first.
+fn lfs_repo() -> (Env, String) {
+    let (env, first) = repo_with_commit();
+    for (key, value) in [
+        ("filter.lfs.clean", "cat"),
+        ("filter.lfs.smudge", "cat"),
+        ("filter.lfs.required", "false"),
+    ] {
+        git(&env, &env.repo, &["config", key, value]);
+    }
+    fs::write(env.repo.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    commit(&env, &env.repo.clone(), "data.bin", "real content");
+    (env, first)
+}
+
+fn require_lfs(env: &Env) {
+    git(env, &env.repo, &["config", "filter.lfs.required", "true"]);
+}
+
+fn only_main_worktree_is_left(env: &Env) {
+    assert_eq!(
+        git(env, &env.repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1
+    );
+    let registered = fs::read_dir(env.repo.join(".git/worktrees")).map_or(0, Iterator::count);
+    assert_eq!(registered, 0);
+}
+
+#[test]
+fn a_worktree_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_nothing() {
+    let (env, _) = lfs_repo();
+    require_lfs(&env);
+
+    let output = agt(&env, &env.repo, &["create", "work"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("data.bin"), "{stderr}");
+    assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    only_main_worktree_is_left(&env);
+}
+
+fn local_branches(env: &Env) -> Vec<String> {
+    git(
+        env,
+        &env.repo,
+        &["branch", "--list", "--format=%(refname:short)"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// A refused create of `work`, then the same command again: the filter error both times.
+fn refused_twice(env: &Env) {
+    for _ in 0..2 {
+        let output = agt(env, &env.repo, &["create", "work"]);
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+        assert!(!stderr.contains("exists"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_refused_create_of_a_new_branch_leaves_no_branch() {
+    let (env, _) = lfs_repo();
+    require_lfs(&env);
+
+    refused_twice(&env);
+
+    assert_eq!(local_branches(&env), ["main"]);
+}
+
+#[test]
+fn a_refused_create_keeps_a_branch_that_already_existed() {
+    let (env, _) = lfs_repo();
+    git(&env, &env.repo, &["branch", "work", "main"]);
+    require_lfs(&env);
+
+    for _ in 0..2 {
+        let output = agt(&env, &env.repo, &["create", "work"]);
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    }
+
+    assert_eq!(local_branches(&env), ["main", "work"]);
+}
+
+#[test]
+fn a_refused_create_of_a_branch_that_only_origin_has_leaves_no_local_branch() {
+    let (env, _) = lfs_repo();
+    remote(&env, "origin.git", "origin");
+    git(&env, &env.repo, &["push", "-q", "origin", "main:work"]);
+    git(&env, &env.repo, &["fetch", "-q", "origin"]);
+    require_lfs(&env);
+
+    refused_twice(&env);
+
+    assert_eq!(local_branches(&env), ["main"]);
+    git(&env, &env.repo, &["rev-parse", "--verify", "origin/work"]);
+}
+
+#[test]
+fn a_worktree_refuses_a_filter_that_only_the_global_config_requires() {
+    let (env, _) = repo_with_commit();
+    fs::write(env.repo.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    commit(&env, &env.repo.clone(), "data.bin", "real content");
+    fs::write(
+        env.path("gitconfig"),
+        "[filter \"lfs\"]\n\trequired = true\n",
+    )
+    .unwrap();
+
+    let output = agt(&env, &env.repo, &["create", "work"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("data.bin"), "{stderr}");
+    assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    only_main_worktree_is_left(&env);
+}
+
+#[test]
+fn a_restore_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_no_worktree() {
+    let (env, _) = lfs_repo();
+    let tree = env.path("tree");
+    agt_json(
+        &env,
+        &env.repo,
+        &["create", "old", "--path", tree.to_str().unwrap()],
+    );
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    require_lfs(&env);
+
+    let output = agt(
+        &env,
+        &env.repo,
+        &["restore", removed["id"].as_str().unwrap()],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("data.bin"), "{stderr}");
+    assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    assert!(!tree.exists());
+    only_main_worktree_is_left(&env);
+}
+
+#[test]
+fn a_refused_restore_leaves_no_branch_it_made() {
+    let (env, _) = lfs_repo();
+    let tree = env.path("tree");
+    agt_json(
+        &env,
+        &env.repo,
+        &["create", "old", "--path", tree.to_str().unwrap()],
+    );
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    git(&env, &env.repo, &["branch", "-D", "old"]);
+    require_lfs(&env);
+
+    for _ in 0..2 {
+        let output = agt(
+            &env,
+            &env.repo,
+            &["restore", removed["id"].as_str().unwrap()],
+        );
+
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+        assert!(!stderr.contains("exists"), "{stderr}");
+    }
+
+    assert_eq!(local_branches(&env), ["main"]);
+}
+
+#[test]
+fn a_worktree_checks_out_the_symlinks_and_gitlinks_a_required_filter_pattern_matches() {
+    let (env, first) = repo_with_commit();
+    let repo = env.repo.clone();
+    for (key, value) in [
+        ("filter.lfs.clean", "cat"),
+        ("filter.lfs.smudge", "cat"),
+        ("filter.lfs.required", "true"),
+    ] {
+        git(&env, &repo, &["config", key, value]);
+    }
+    fs::write(repo.join(".gitattributes"), "*.so filter=lfs\n").unwrap();
+    fs::create_dir(repo.join("lib")).unwrap();
+    std::os::unix::fs::symlink("libz.so.1", repo.join("lib/libz.so")).unwrap();
+    git(&env, &repo, &["add", "-A"]);
+    git(
+        &env,
+        &repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{first},plugin.so"),
+        ],
+    );
+    git(&env, &repo, &["commit", "-q", "-m", "links"]);
+
+    let made = agt_json(&env, &repo, &["create", "work"]);
+
+    let work = Path::new(made["path"].as_str().unwrap());
+    assert_eq!(
+        fs::read_link(work.join("lib/libz.so")).unwrap(),
+        Path::new("libz.so.1")
+    );
+    assert!(work.join("plugin.so").is_dir());
+}
+
+#[test]
+fn a_sparse_worktree_refuses_a_required_filter_path_it_writes_and_ignores_one_it_leaves_out() {
+    for (written, refused) in [("keep", true), ("out", false)] {
+        let (env, _) = lfs_repo();
+        let repo = env.repo.clone();
+        fs::create_dir_all(repo.join(written)).unwrap();
+        fs::create_dir_all(repo.join("keep")).unwrap();
+        fs::write(repo.join(written).join("big.bin"), "real content").unwrap();
+        git(&env, &repo, &["add", "-A"]);
+        git(&env, &repo, &["commit", "-q", "-m", "dirs"]);
+        git(
+            &env,
+            &repo,
+            &["sparse-checkout", "set", "--no-cone", "/keep/"],
+        );
+        require_lfs(&env);
+
+        let output = agt(&env, &repo, &["create", "work"]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if refused {
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(stderr.contains("keep/big.bin"), "{stderr}");
+            assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+            only_main_worktree_is_left(&env);
+        } else {
+            assert!(output.status.success(), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn a_worktree_and_a_restore_over_filtered_paths_work_when_the_filter_is_not_required() {
+    let (env, first) = lfs_repo();
+    let made = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(
+        fs::read_to_string(
+            made["path"]
+                .as_str()
+                .map(Path::new)
+                .unwrap()
+                .join("data.bin")
+        )
+        .unwrap(),
+        "real content"
+    );
+    let tree = env.path("tree");
+    agt_json(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "old",
+            "--detach",
+            &first,
+            "--path",
+            tree.to_str().unwrap(),
+        ],
+    );
+    fs::write(tree.join("kept.bin"), "unsaved").unwrap();
+    git(&env, &tree, &["add", "kept.bin"]);
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+
+    agt_json(
+        &env,
+        &env.repo,
+        &["restore", removed["id"].as_str().unwrap()],
+    );
+
+    assert_eq!(
+        fs::read_to_string(tree.join("kept.bin")).unwrap(),
+        "unsaved"
+    );
 }

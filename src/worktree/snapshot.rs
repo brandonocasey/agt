@@ -15,7 +15,7 @@ use super::info;
 use crate::core::clock;
 use crate::core::error::{Result, ctx, fail};
 use crate::core::local::create_dirs;
-use crate::git::{GITLINK, Repo, Worktree, nul_fields};
+use crate::git::{GITLINK_MODE, Repo, Worktree};
 
 pub struct Taken {
     pub record: Record,
@@ -30,33 +30,23 @@ pub(super) struct Change {
     pub deleted: bool,
     pub gitlink: bool,
     /// The mode and object id the path has in the second tree.
-    pub mode: String,
+    pub mode: u32,
     pub oid: String,
 }
 
 /// The paths that differ between the trees `from` and `to`.
 pub(super) fn changes(repo: &Repo, from: &str, to: &str) -> Result<Vec<Change>> {
-    let raw = repo.checked(
-        &["diff-tree", "-r", "--no-renames", "-z", from, to],
-        None,
-        &[],
-    )?;
-    let mut fields = raw.split(|byte| *byte == 0);
-    let mut found = Vec::new();
-    while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
-        let Some(path) = fields.next() else { break };
-        let header = String::from_utf8_lossy(header);
-        let parts: Vec<&str> = header.trim_start_matches(':').split(' ').collect();
-        let part = |index: usize| parts.get(index).copied().unwrap_or_default().to_owned();
-        found.push(Change {
-            path: path.to_vec(),
-            deleted: parts.get(4) == Some(&"D"),
-            gitlink: parts.iter().take(2).any(|mode| *mode == GITLINK),
-            mode: part(1),
-            oid: part(3),
-        });
-    }
-    Ok(found)
+    Ok(repo
+        .tree_changes(from, to)?
+        .into_iter()
+        .map(|change| Change {
+            deleted: change.status == 'D',
+            gitlink: change.old_mode == GITLINK_MODE || change.new_mode == GITLINK_MODE,
+            path: change.path,
+            mode: change.new_mode,
+            oid: change.new_id,
+        })
+        .collect())
 }
 
 /// Fails when `entry` has no commit, which a backup needs to restore on.
@@ -164,12 +154,8 @@ fn fill(writer: &mut Writer, contents: &Contents) -> Result<()> {
         .filter(|change| !change.deleted && !change.gitlink)
         .map(|change| (change.path.as_slice(), change))
         .collect();
-    let paths = contents.shared.checked(
-        &["ls-tree", "-r", "--name-only", "-z", contents.tree],
-        None,
-        &[],
-    )?;
-    for path in nul_fields(&paths) {
+    for path in contents.shared.tree_files(contents.tree)? {
+        let path = path.as_slice();
         let source = contents.root.join(OsStr::from_bytes(path));
         match fs::symlink_metadata(&source) {
             Ok(found) if found.is_file() || found.file_type().is_symlink() => {
@@ -188,10 +174,10 @@ fn fill(writer: &mut Writer, contents: &Contents) -> Result<()> {
 }
 
 fn add_object(writer: &mut Writer, shared: &Repo, change: &Change) -> Result<()> {
-    let contents = shared.checked(&["cat-file", "blob", &change.oid], None, &[])?;
-    match change.mode.as_str() {
-        "120000" => writer.symlink(&change.path, 0o777, &contents),
-        "100755" => writer.blob(&change.path, 0o755, &contents),
+    let contents = shared.blob_content(&change.oid)?;
+    match change.mode {
+        0o120000 => writer.symlink(&change.path, 0o777, &contents),
+        0o100755 => writer.blob(&change.path, 0o755, &contents),
         _ => writer.blob(&change.path, 0o644, &contents),
     }
 }

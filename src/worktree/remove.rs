@@ -135,8 +135,10 @@ fn unpinned_head(
     if gate::held_by_a_branch(&Repo::at(main), &entry.head)? {
         return Ok(None);
     }
-    let ignored =
-        Repo::at(main).succeeds(&["check-ignore", "-q", "--", &path.to_string_lossy()])?;
+    let ignored = match path.strip_prefix(main) {
+        Ok(inside) => Repo::at(main).is_ignored(&inside.to_string_lossy())?,
+        Err(_) => false,
+    };
     if !force && !ignored {
         return fail(format!(
             "{} has HEAD {} on no branch, and a backup keeps files, not commits; create a branch there, or pass --force to remove without them; nothing was backed up or removed",
@@ -163,6 +165,9 @@ pub(super) fn removal(
 ) -> Result<Value> {
     gate::check(path, main)?;
     let inner = nested::linked_inside(main, path)?;
+    for other in &inner {
+        Repo::require_git_file(&other.path)?;
+    }
     let mut hooks_report = None;
     if run_hooks {
         let (report, ok) = hooks::run(path, hooks::Kind::Remove)?;
@@ -202,16 +207,11 @@ pub(super) fn removal(
     let taken = snapshot::take(main, entry)?;
     let shared = Repo::at(main);
     for other in &inner {
-        shared.git(&[
-            "worktree",
-            "remove",
-            "--force",
-            &other.path.to_string_lossy(),
-        ])?;
+        shared.remove_worktree(&other.path)?;
     }
-    shared.git(&["worktree", "remove", "--force", &path.to_string_lossy()])?;
-    let local = gate::branches_holding(&shared, &entry.head, &["refs/heads"])?;
-    let remote = gate::branches_holding(&shared, &entry.head, &["refs/remotes"])?;
+    shared.remove_worktree(path)?;
+    let local = shared.refs_containing(&entry.head, "refs/heads/")?;
+    let remote = shared.refs_containing(&entry.head, "refs/remotes/")?;
     let mut done = json!({
         "removed": path,
         "id": taken.record.id,
@@ -248,6 +248,7 @@ pub(super) fn refuse<'a>(
     if entry.locked {
         return fail(format!("{} is locked; unlock it first", path.display()));
     }
+    Repo::require_git_file(path)?;
     if cwd::held().iter().any(|held| held.starts_with(path)) {
         return fail(format!(
             "the current directory is inside {}; run from elsewhere",

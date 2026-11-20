@@ -284,7 +284,7 @@ impl Ctx {
         while encoded[..cut].ends_with('%') || encoded[..cut - 1].ends_with('%') {
             cut -= 1;
         }
-        let hash = self.repo.hash_text(branch)?;
+        let hash = crate::git::hash_text(branch)?;
         Ok(format!("{}-{}", &encoded[..cut], prefix(&hash, 12)))
     }
 

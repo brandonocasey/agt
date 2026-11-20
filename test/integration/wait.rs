@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::support::Env;
+use crate::support::{Env, PROMPT_CASES, PROMPT_PROBE};
 
 /// Exit code and stdout of `agt wait` in the isolated environment.
 fn wait(env: &Env, args: &[&str]) -> (Option<i32>, String) {
@@ -125,4 +125,21 @@ fn the_old_max_and_every_names_still_work() {
         wait(&env, &["--max", "5", "--every", "1", "--", "true"]).0,
         Some(0)
     );
+}
+
+#[test]
+fn a_check_gets_the_prompt_settings_the_user_started_agt_with() {
+    for (user, expected) in PROMPT_CASES {
+        let env = Env::new();
+        let seen = env.path("seen");
+        let script = format!("{PROMPT_PROBE} > {}", seen.display());
+        let status = env
+            .bin(&env.repo)
+            .envs(user.iter().copied())
+            .args(["wait", "--", "sh", "-c", &script])
+            .status()
+            .expect("agt runs");
+        assert!(status.success(), "{user:?}");
+        assert_eq!(std::fs::read_to_string(seen).unwrap(), expected, "{user:?}");
+    }
 }

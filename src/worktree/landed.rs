@@ -9,7 +9,7 @@ use crate::core::clock;
 use crate::core::cwd;
 use crate::core::error::Result;
 use crate::forge::landed::Source;
-use crate::git::{Repo, Worktree, nul_fields};
+use crate::git::{Repo, Worktree};
 use crate::store::model::ReviewState;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -142,17 +142,9 @@ impl Scene {
 
     /// Local branches and their tips, without the protected ones.
     pub fn branches(&self, repo: &Repo) -> Result<Vec<(String, String)>> {
-        let listing = repo.git(&[
-            "for-each-ref",
-            "--format=%(refname)%09%(objectname)",
-            "refs/heads",
-        ])?;
-        Ok(listing
-            .lines()
-            .filter_map(|line| {
-                let (name, tip) = line.split_once('\t')?;
-                Some((name.strip_prefix("refs/heads/")?.to_owned(), tip.to_owned()))
-            })
+        Ok(repo
+            .branches()?
+            .into_iter()
             .filter(|(name, _)| !self.protected(name))
             .collect())
     }
@@ -389,8 +381,7 @@ const QUIET_SECS: i64 = 3 * clock::SECS_PER_DAY;
 pub fn recent(path: &Path, now: i64) -> Result<bool> {
     let repo = Repo::at(path);
     let since = |secs: i64| now - secs < QUIET_SECS;
-    let committed = repo.git(&["log", "-1", "--format=%ct", "HEAD"])?;
-    if committed.parse().is_ok_and(since) {
+    if since(repo.commit_time("HEAD")?) {
         return Ok(true);
     }
     let touched = |file: &Path| {
@@ -406,19 +397,8 @@ pub fn recent(path: &Path, now: i64) -> Result<bool> {
     {
         return Ok(true);
     }
-    let listing = repo.checked(
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-        None,
-        &[],
-    )?;
-    Ok(
-        nul_fields(&listing)
-            .any(|name| touched(&path.join(String::from_utf8_lossy(name).as_ref()))),
-    )
+    Ok(repo
+        .tracked_and_untracked(&[])?
+        .iter()
+        .any(|name| touched(&path.join(String::from_utf8_lossy(name).as_ref()))))
 }

@@ -7,7 +7,7 @@ use std::process::Output;
 
 use serde_json::Value;
 
-use crate::support::Env;
+use crate::support::{Env, PROMPT_CASES, PROMPT_PROBE};
 
 fn agt(env: &Env, dir: &Path, args: &[&str]) -> Output {
     env.bin(dir)
@@ -738,4 +738,32 @@ fn port_outside_a_repository_says_the_directory_is_not_inside_a_git_work_tree() 
             outside.display()
         )
     );
+}
+
+#[test]
+fn a_hook_gets_the_prompt_settings_the_user_started_agt_with() {
+    for (user, expected) in PROMPT_CASES {
+        for (branch, extra) in [("fg", None), ("bg", Some("--background"))] {
+            let env = repo();
+            repo_config(
+                &env,
+                &format!("[worktree.hooks]\ncreate = ['''{PROMPT_PROBE} > seen''']\n"),
+            );
+            let output = env
+                .bin(&env.repo)
+                .envs(user.iter().copied())
+                .args(["worktree", "create", branch])
+                .args(extra)
+                .output()
+                .expect("agt runs");
+            assert!(output.status.success(), "{output:?}");
+            let tree = env.repo.join(".worktrees").join(branch);
+            if extra.is_some() {
+                let waited = agt(&env, &tree, &["prepare", "--wait"]);
+                assert!(waited.status.success(), "{waited:?}");
+            }
+            let seen = fs::read_to_string(tree.join("seen")).unwrap();
+            assert_eq!(seen, expected, "{branch} {user:?}");
+        }
+    }
 }

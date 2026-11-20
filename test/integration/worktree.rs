@@ -8,7 +8,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, Env, proc_start, read_backup, replace_backup_entry};
+use crate::support::{BIN, Env, Host, proc_start, read_backup, replace_backup_entry, silent_host};
 
 mod cleanup;
 
@@ -305,6 +305,45 @@ fn restore_accepts_a_backup_without_file_mode_metadata() {
         fs::read(f.wt.join("new.bin")).unwrap(),
         [0u8, 159, 146, 150, 10]
     );
+}
+
+#[test]
+fn a_restore_of_a_legacy_backup_writes_a_required_filter_path_only_when_it_is_not_required() {
+    for required in [false, true] {
+        let f = Fixture::new();
+        for (key, value) in [("filter.lfs.clean", "cat"), ("filter.lfs.smudge", "cat")] {
+            f.env.git(&["config", key, value]);
+        }
+        fs::write(
+            f.env.repo.join(".git/info/attributes"),
+            "*.bin filter=lfs\n",
+        )
+        .unwrap();
+        f.dirty();
+        let (id, _) = legacy_backup(&f, json!([]));
+        f.env
+            .git(&["config", "filter.lfs.required", &required.to_string()]);
+
+        let output = f.agt(&f.env.repo, &["restore", &id]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if required {
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(stderr.contains("new.bin"), "{stderr}");
+            assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+            assert!(!f.wt.exists());
+            let registered = f.env.git(&["worktree", "list", "--porcelain"]);
+            assert!(!registered.contains("feat"), "{registered}");
+            let retried = f.agt(&f.env.repo, &["restore", &id]);
+            let again = String::from_utf8_lossy(&retried.stderr);
+            assert_eq!(retried.status.code(), Some(1), "{again}");
+            assert!(again.contains("required filter 'lfs'"), "{again}");
+            assert!(!again.contains("already exists"), "{again}");
+        } else {
+            assert!(output.status.success(), "{stderr}");
+            assert!(f.wt.join("new.bin").exists());
+        }
+    }
 }
 
 #[test]
@@ -643,6 +682,57 @@ fn remove_refuses_the_worktree_the_shell_started_in_even_after_dash_c_moves_away
         );
         assert!(f.wt.exists(), "{}", start.display());
     }
+}
+
+#[test]
+fn a_worktree_that_lost_its_git_file_is_refused_before_a_backup_is_taken() {
+    let f = Fixture::new();
+    f.env.write(".git/info/exclude", ".worktrees/\n");
+    let inner = f.env.repo.join(".worktrees").join("inner");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "inner",
+        &inner.to_string_lossy(),
+    ]);
+    fs::write(inner.join("a.txt"), "edited\n").unwrap();
+    fs::remove_file(inner.join(".git")).unwrap();
+
+    f.refuses(
+        &f.env.repo,
+        &["remove", &inner.to_string_lossy(), "--yes"],
+        "validation failed, cannot remove working tree",
+    );
+
+    assert_eq!(fs::read_to_string(inner.join("a.txt")).unwrap(), "edited\n");
+    assert_eq!(f.json(&["backups"])["backups"], json!([]));
+}
+
+#[test]
+fn a_nested_worktree_that_lost_its_git_file_is_refused_before_a_backup_is_taken() {
+    let f = Fixture::new();
+    f.env.write(".git/info/exclude", "inner/\n");
+    let inner = f.wt.join("inner");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "inner",
+        &inner.to_string_lossy(),
+    ]);
+    fs::remove_file(inner.join(".git")).unwrap();
+
+    f.refuses(
+        &f.env.repo,
+        &["remove", &f.wt.to_string_lossy(), "--yes"],
+        "validation failed, cannot remove working tree",
+    );
+
+    assert!(f.wt.exists());
+    assert_eq!(f.json(&["backups"])["backups"], json!([]));
 }
 
 #[test]
@@ -1022,6 +1112,118 @@ fn a_nested_repository_blocks_removal_in_plan_and_yes_alike() {
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
+/// `levels` nested directories (`d1/d2/...`), deeper than libgit2's directory iterator goes.
+fn deep_dir(root: &Path, levels: usize) -> PathBuf {
+    (1..=levels).fold(root.to_owned(), |path, level| {
+        path.join(format!("d{level}"))
+    })
+}
+
+#[test]
+fn a_worktree_120_directories_deep_is_removed_and_restored_like_a_shallow_one() {
+    for (kind, levels) in [
+        ("tracked", 3),
+        ("tracked", 120),
+        ("edited", 3),
+        ("edited", 120),
+        ("staged", 3),
+        ("staged", 120),
+        ("ignored", 3),
+        ("ignored", 120),
+    ] {
+        let f = Fixture::new();
+        let dir = deep_dir(&f.wt, levels);
+        fs::create_dir_all(&dir).unwrap();
+        let name = if kind == "ignored" {
+            ".env"
+        } else {
+            "deep.txt"
+        };
+        fs::write(
+            dir.join(name),
+            if kind == "edited" { "old\n" } else { "deep\n" },
+        )
+        .unwrap();
+        match kind {
+            "tracked" | "edited" => {
+                wgit(&f.env, &f.wt, &["add", "-A"]);
+                wgit(&f.env, &f.wt, &["commit", "-q", "-m", "deep"]);
+                fs::write(dir.join(name), "deep\n").unwrap();
+            }
+            "staged" => {
+                wgit(&f.env, &f.wt, &["add", "-A"]);
+            }
+            _ => {}
+        }
+        let relative = dir.strip_prefix(&f.wt).unwrap().join(name);
+        let relative = relative.to_string_lossy().into_owned();
+        let path = f.wt.to_string_lossy().into_owned();
+
+        let plan = f.json(&["remove", &path]);
+        assert_eq!(plan["plan"], json!(true), "{kind} {levels}");
+        assert!(dir.join(name).exists(), "{kind} {levels}");
+        let removed = f.remove();
+
+        assert!(!f.wt.exists(), "{kind} {levels}");
+        assert!(!f.env.git(&["worktree", "list"]).contains("feat"));
+        let backup = read_backup(Path::new(removed["backup"].as_str().unwrap()));
+        if kind == "ignored" {
+            assert_eq!(removed["ignored_lost"], json!(["d1/"]), "{kind} {levels}");
+            assert!(!backup.files.contains_key(&relative), "{kind} {levels}");
+        } else {
+            assert_eq!(backup.files[&relative], b"deep\n", "{kind} {levels}");
+        }
+
+        let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+        assert_eq!(restored["warnings"], json!([]), "{kind} {levels}");
+        if kind == "ignored" {
+            assert!(!dir.join(name).exists(), "{kind} {levels}");
+        } else {
+            assert_eq!(
+                fs::read(dir.join(name)).unwrap(),
+                b"deep\n",
+                "{kind} {levels}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_untracked_file_120_directories_deep_blocks_removal_until_forced() {
+    let f = Fixture::new();
+    let dir = deep_dir(&f.wt, 120);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("deep.txt"), "deep\n").unwrap();
+    let path = f.wt.to_string_lossy().into_owned();
+    for args in [vec!["remove", &path], vec!["remove", &path, "--yes"]] {
+        let output = f.agt(&f.env.repo, &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("d120/deep.txt"), "{error}");
+    }
+    assert!(dir.join("deep.txt").exists());
+
+    let removed = f.json(&["remove", &path, "--yes", "--force"]);
+
+    assert!(!f.wt.exists());
+    let backup = read_backup(Path::new(removed["backup"].as_str().unwrap()));
+    assert!(backup.files.keys().all(|name| !name.contains("deep.txt")));
+}
+
+#[test]
+fn a_nested_repository_120_directories_deep_blocks_removal() {
+    let f = Fixture::new();
+    nest(&f.env, &deep_dir(&f.wt, 120));
+    let path = f.wt.to_string_lossy().into_owned();
+    for args in [vec!["remove", &path], vec!["remove", &path, "--yes"]] {
+        let output = f.agt(&f.env.repo, &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("d120"), "{error}");
+    }
+    assert!(deep_dir(&f.wt, 120).join(".git").exists());
+}
+
 #[test]
 fn an_ignored_nested_repository_does_not_block_removal() {
     let f = Fixture::new();
@@ -1311,6 +1513,38 @@ fn remove_and_restore_leave_other_missing_worktrees_registered() {
     assert!(admin("other").exists(), "restore pruned another worktree");
 }
 
+#[test]
+fn restore_keeps_the_registration_of_a_missing_locked_worktree() {
+    let f = Fixture::new();
+    let removed = f.remove();
+    let id = removed["id"].as_str().unwrap();
+    let away = f.env.path("trees/away");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "away",
+        &away.to_string_lossy(),
+    ]);
+    f.env.git(&[
+        "worktree",
+        "lock",
+        "--reason",
+        "on a usb disk",
+        &away.to_string_lossy(),
+    ]);
+    fs::remove_dir_all(&away).unwrap();
+
+    f.refuses(
+        &f.env.repo,
+        &["restore", id, "--path", &away.to_string_lossy()],
+        "locked",
+    );
+
+    assert!(f.env.repo.join(".git/worktrees/away/locked").exists());
+}
+
 /// A child process killed and reaped when dropped, with its whole process group when it leads
 /// one, so nothing it forked outlives the test.
 struct Reaped(std::process::Child, bool);
@@ -1430,6 +1664,85 @@ fn restore_detaches_when_the_branch_is_checked_out_in_another_worktree() {
         fs::read_to_string(f.wt.join("a.txt")).unwrap(),
         "a changed\n"
     );
+}
+
+#[test]
+fn restore_detaches_when_the_branch_is_being_rebased_in_another_worktree() {
+    let f = Fixture::new();
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let feature = f.env.git(&["rev-parse", "feat"]);
+    f.env.write("feature.txt", "main side\n");
+    f.env.commit_all("main side");
+    f.env.git(&["switch", "-q", "feat"]);
+    let stopped = f
+        .env
+        .command("git", &f.env.repo)
+        .args(["rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(
+        !stopped.status.success(),
+        "the rebase must stop on a conflict"
+    );
+    let oracle = f
+        .env
+        .command("git", &f.env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            &f.env.path("by-git").to_string_lossy(),
+            "feat",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let restored = f.json(&["restore", &id]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("checked out in another worktree") && warning.contains(&feature),
+        "{warning}"
+    );
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
+}
+
+#[test]
+fn restore_detaches_when_the_branch_is_being_bisected_in_another_worktree() {
+    let f = Fixture::new();
+    for name in ["second.txt", "third.txt"] {
+        fs::write(f.wt.join(name), name).unwrap();
+        wgit(&f.env, &f.wt, &["add", "-A"]);
+        wgit(&f.env, &f.wt, &["commit", "-q", "-m", name]);
+    }
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let feature = f.env.git(&["rev-parse", "feat"]);
+    f.env.git(&["switch", "-q", "feat"]);
+    f.env.git(&["bisect", "start", "feat", "feat~3"]);
+    assert_eq!(f.env.git(&["branch", "--show-current"]), "");
+    let oracle = f
+        .env
+        .command("git", &f.env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            &f.env.path("by-git").to_string_lossy(),
+            "feat",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let restored = f.json(&["restore", &id]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("checked out in another worktree"),
+        "{warning}"
+    );
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
 }
 
 #[test]
@@ -1781,31 +2094,31 @@ fn offline_removal_asks_no_remote_about_a_tag_and_holds_it() {
     let tip = wgit(&f.env, &sub, &["rev-parse", "tmp"]);
     wgit(&f.env, &sub, &["branch", "-D", "tmp"]);
     wgit(&f.env, &sub, &["tag", "kept-tag", &tip]);
-    let log = f.env.path("asked.log");
-    let path = f.env.git_wrapper(
-        "wrapper",
-        &format!(
-            "case \"$*\" in *ls-remote*) echo \"$*\" >> '{}';; esac\n",
-            log.display()
-        ),
-    );
     let wt = f.wt.to_string_lossy().into_owned();
     let remove = |flags: &[&str]| {
         let mut command = f.env.bin(&f.env.repo);
         command
             .args(flags)
             .args(["worktree", "remove", &wt, "--yes"]);
-        command.env("PATH", &path).output().unwrap()
+        command.output().unwrap()
     };
-    let online = remove(&[]);
-    assert_eq!(online.status.code(), Some(1));
-    assert!(log.exists(), "the control run asks the remote");
-    fs::remove_file(&log).unwrap();
     let offline = remove(&["--offline"]);
     assert_eq!(offline.status.code(), Some(1));
     let error = String::from_utf8_lossy(&offline.stderr);
     assert!(error.contains("kept-tag"), "{error}");
-    assert!(!log.exists(), "--offline asked the remote");
+    // The control run asks the remote: it holds the tag's commit, so the removal goes through.
+    wgit(
+        &f.env,
+        &sub,
+        &["push", "-q", "origin", &format!("{tip}:refs/heads/held")],
+    );
+    let online = remove(&[]);
+    assert_eq!(
+        online.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&online.stderr)
+    );
 }
 
 #[test]
@@ -2221,7 +2534,7 @@ fn a_local_tag_the_remote_does_not_have_blocks_removal() {
 }
 
 #[test]
-fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
+fn many_tags_in_a_submodule_start_no_git_process() {
     let (f, sub) = with_submodule();
     let head = wgit(&f.env, &sub, &["rev-parse", "HEAD"]);
     let stdin: String = (0..500)
@@ -2237,7 +2550,8 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
     std::io::Write::write_all(&mut update.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
     assert!(update.wait().unwrap().success());
 
-    // A `git` in front of the real one that counts how often it is run.
+    // A `git` in front of the real one counts how often it is run.
+    // agt runs none.
     let count = f.env.path("git-runs");
     let path = f.env.git_wrapper(
         "counting-bin",
@@ -2255,8 +2569,8 @@ fn many_tags_in_a_submodule_cost_a_fixed_number_of_git_processes() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let runs = fs::read_to_string(&count).unwrap().lines().count();
-    assert!(runs < 150, "{runs} git processes for 500 tags");
+    let runs = fs::read_to_string(&count).map_or(0, |log| log.lines().count());
+    assert_eq!(runs, 0, "{runs} git processes for 500 tags");
 }
 
 const ALLOW_FILE: [&str; 2] = ["-c", "protocol.file.allow=always"];
@@ -2426,6 +2740,29 @@ fn restore_keeps_a_staged_deletion_outside_a_cone_with_a_sparse_index() {
 }
 
 #[test]
+fn a_sparse_index_with_an_uninitialized_submodule_removes_and_restores() {
+    let f = Fixture::new();
+    for (dir, name) in [("d1", "a"), ("d3", "c")] {
+        fs::create_dir_all(f.wt.join(dir)).unwrap();
+        fs::write(f.wt.join(dir).join(name), format!("{name}\n")).unwrap();
+    }
+    wgit(&f.env, &f.wt, &["add", "-A"]);
+    wgit(&f.env, &f.wt, &["commit", "-q", "-m", "dirs"]);
+    add_submodule(&f, "mod", "mod");
+    wgit(&f.env, &f.wt, &["submodule", "deinit", "-q", "-f", "mod"]);
+    wgit(
+        &f.env,
+        &f.wt,
+        &["sparse-checkout", "set", "--cone", "--sparse-index", "d1"],
+    );
+    let removed = f.remove();
+    let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+    assert_eq!(restored["warnings"], json!([]), "{restored}");
+    assert_eq!(wgit(&f.env, &f.wt, &["status", "--porcelain"]), "");
+    assert!(!f.wt.join("d3/c").exists());
+}
+
+#[test]
 fn restore_keeps_a_staged_deletion_outside_a_non_cone_sparse_checkout() {
     let f = sparse_fixture();
     wgit(
@@ -2495,133 +2832,69 @@ fn with_unheld_tag() -> (Fixture, PathBuf) {
     (f, sub)
 }
 
-#[test]
-fn the_remote_check_never_prompts_and_leaves_no_process_behind() {
-    for (own, expect) in [
-        (None, "ssh -o BatchMode=yes -o ConnectTimeout=5"),
-        (
-            Some("my-ssh -v"),
-            "my-ssh -v -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-    ] {
-        let (f, _sub) = with_unheld_tag();
-        // A git that, asked to ls-remote, records its environment, starts a child that would
-        // outlive it (as ssh does) and then hangs.
-        let (record, child_pid) = (f.env.path("ls-remote-env"), f.env.path("child-pid"));
-        let path = f.env.git_wrapper(
-            "hanging-bin",
-            &format!(
-                "case \"$*\" in\n*ls-remote*)\n  env > '{}'\n  sleep 60 &\n  echo $! > '{}'\n  sleep 60\n  exit 0\n  ;;\nesac\n",
-                record.display(),
-                child_pid.display()
-            ),
-        );
-        let mut command = f.env.bin(&f.env.repo);
-        command
-            .env("PATH", path)
-            .env("AGT_LS_REMOTE_TIMEOUT", "1")
-            .env("GIT_ASKPASS", "/bin/would-block")
-            .env("SSH_ASKPASS", "/bin/would-block")
-            .args(["worktree", "remove", &f.wt.to_string_lossy()]);
-        match own {
-            Some(own) => command.env("GIT_SSH_COMMAND", own),
-            None => command.env_remove("GIT_SSH_COMMAND"),
-        };
-        let started = std::time::Instant::now();
-        let output = command.output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        assert!(started.elapsed().as_secs() < 8, "{:?}", started.elapsed());
-        let seen = fs::read_to_string(&record).unwrap();
-        for line in [
-            "GIT_TERMINAL_PROMPT=0",
-            "GIT_ASKPASS=false",
-            "SSH_ASKPASS=false",
-            "SSH_ASKPASS_REQUIRE=never",
-            "GCM_INTERACTIVE=never",
-            &format!("GIT_SSH_COMMAND={expect}"),
-        ] {
-            assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
-        }
-        let pid = fs::read_to_string(&child_pid).unwrap().trim().to_owned();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        if alive {
-            let _ = std::process::Command::new("kill").arg(&pid).status();
-        }
-        assert!(!alive, "the child of the timed-out git is still running");
-    }
-}
-
-#[test]
-fn the_remote_check_picks_the_ssh_command_in_gits_order_and_quotes_git_ssh() {
-    let cases = [
-        // core.sshCommand (a deploy key) beats GIT_SSH.
-        (
-            None,
-            Some("deploy-ssh -i key"),
-            Some("/opt/env ssh/wrapper"),
-            "deploy-ssh -i key -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-        // GIT_SSH_COMMAND beats both.
-        (
-            Some("own-ssh"),
-            Some("deploy-ssh -i key"),
-            Some("/opt/env ssh/wrapper"),
-            "own-ssh -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-        // GIT_SSH alone is a program path: one quoted word, even with a space or a quote.
-        (
-            None,
-            None,
-            Some("/opt/it's ssh/wrapper"),
-            "'/opt/it'\\''s ssh/wrapper' -o BatchMode=yes -o ConnectTimeout=5",
-        ),
-    ];
-    for (command, configured, program, expect) in cases {
-        let (f, sub) = with_unheld_tag();
-        if let Some(configured) = configured {
-            wgit(&f.env, &sub, &["config", "core.sshCommand", configured]);
-        }
-        let record = f.env.path("ls-remote-env");
-        // A git that, asked to ls-remote, records its environment and advertises nothing.
-        let path = f.env.git_wrapper(
-            "recording-bin",
-            &format!(
-                "case \"$*\" in\n*ls-remote*) env > '{}'; exit 0 ;;\nesac\n",
-                record.display()
-            ),
-        );
-        let mut run = f.env.bin(&f.env.repo);
-        run.env("PATH", path)
-            .args(["worktree", "remove", &f.wt.to_string_lossy()]);
-        match command {
-            Some(command) => run.env("GIT_SSH_COMMAND", command),
-            None => run.env_remove("GIT_SSH_COMMAND"),
-        };
-        match program {
-            Some(program) => run.env("GIT_SSH", program),
-            None => run.env_remove("GIT_SSH"),
-        };
-        assert_eq!(run.output().unwrap().status.code(), Some(1));
-        let seen = fs::read_to_string(&record).unwrap();
-        let line = format!("GIT_SSH_COMMAND={expect}");
-        assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
-    }
-}
-
-#[test]
-fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
+/// A worktree like [`with_unheld_tag`] whose submodule remote is a host that never answers.
+fn with_silent_remote() -> (Fixture, Host) {
     let (f, sub) = with_unheld_tag();
+    let host = silent_host();
+    wgit(&f.env, &sub, &["remote", "set-url", "origin", &host.url]);
+    (f, host)
+}
+
+fn remove_command(f: &Fixture, timeout: &str) -> std::process::Command {
+    let mut command = f.env.bin(&f.env.repo);
+    command.env("AGT_LS_REMOTE_TIMEOUT", timeout).args([
+        "worktree",
+        "remove",
+        &f.wt.to_string_lossy(),
+    ]);
+    command
+}
+
+#[test]
+fn the_remote_check_gives_up_on_a_host_that_never_answers() {
+    let (f, host) = with_silent_remote();
+    let started = std::time::Instant::now();
+    let output = remove_command(&f, "1").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(started.elapsed().as_secs() < 8, "{:?}", started.elapsed());
+    assert!(
+        host.accepted.try_recv().is_ok(),
+        "the check never reached the host"
+    );
+}
+
+/// Points the submodule clone's `origin` at `host` through a `url.<host>.insteadOf` rewrite.
+/// The rewrite sits in the clone's own config, so only reads of it reach `host`.
+fn route_origin_through_rewrite(f: &Fixture, sub: &Path, host: &Host) {
     wgit(
         &f.env,
-        &sub,
-        &["config", "core.sshCommand", "deploy-ssh -i key"],
+        sub,
+        &["config", &format!("url.{}.insteadOf", host.url), "mirror:"],
     );
+    wgit(&f.env, sub, &["remote", "set-url", "origin", "mirror:"]);
+}
+
+#[test]
+fn the_remote_check_reaches_the_host_the_clones_own_url_rewrite_names() {
+    let (f, sub) = with_unheld_tag();
+    let host = silent_host();
+    route_origin_through_rewrite(&f, &sub, &host);
+
+    let output = remove_command(&f, "1").output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        host.accepted.try_recv().is_ok(),
+        "the check ignored the clone's url rewrite: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_remote_check_keeps_the_url_rewrite_of_a_clone_whose_worktree_is_gone() {
+    let (f, sub) = with_unheld_tag();
+    let host = silent_host();
+    route_origin_through_rewrite(&f, &sub, &host);
     // A clone left behind by `git rm` of a submodule: core.worktree points at a deleted directory.
     let gitdir = wgit(&f.env, &sub, &["rev-parse", "--absolute-git-dir"]);
     wgit(&f.env, &f.wt, &["rm", "-q", "-f", "mod"]);
@@ -2638,69 +2911,72 @@ fn the_remote_check_keeps_the_ssh_command_of_a_clone_whose_worktree_is_gone() {
             "../gone",
         ],
     );
-    let record = f.env.path("ls-remote-env");
-    // A git that, asked to ls-remote, records its environment and advertises nothing.
-    let path = f.env.git_wrapper(
-        "recording-bin",
-        &format!(
-            "case \"$*\" in\n*ls-remote*) env > '{}'; exit 0 ;;\nesac\n",
-            record.display()
-        ),
-    );
-    let mut run = f.env.bin(&f.env.repo);
-    run.env("PATH", path)
-        .env_remove("GIT_SSH_COMMAND")
-        .env_remove("GIT_SSH")
-        .args(["worktree", "remove", &f.wt.to_string_lossy()]);
-    run.output().unwrap();
-    let seen = fs::read_to_string(&record).unwrap();
-    let line = "GIT_SSH_COMMAND=deploy-ssh -i key -o BatchMode=yes -o ConnectTimeout=5";
-    assert!(seen.lines().any(|l| l == line), "{line}\n{seen}");
-}
 
-/// A `PATH` whose git, asked to ls-remote, starts a child (as ssh is) and then hangs, and the
-/// file that child's pid lands in.
-fn hanging_ls_remote(f: &Fixture) -> (String, PathBuf) {
-    let child_pid = f.env.path("child-pid");
-    let path = f.env.git_wrapper(
-        "hanging-bin",
-        &format!(
-            "case \"$*\" in\n*ls-remote*)\n  sleep 60 &\n  echo $! > '{}'\n  wait\n  exit 0\n  ;;\nesac\n",
-            child_pid.display()
-        ),
+    let output = remove_command(&f, "1").output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        host.accepted.try_recv().is_ok(),
+        "the check never reached the host: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    (path, child_pid)
 }
 
 #[test]
-fn a_signal_to_agt_kills_the_remote_check_and_its_children() {
+fn offline_removal_opens_no_connection_to_the_remote() {
+    let (f, host) = with_silent_remote();
+    let offline = f
+        .env
+        .bin(&f.env.repo)
+        .args(["--offline", "worktree", "remove", &f.wt.to_string_lossy()])
+        .output()
+        .unwrap();
+    assert_eq!(offline.status.code(), Some(1));
+    assert!(
+        host.accepted.try_recv().is_err(),
+        "the offline removal reached the remote"
+    );
+
+    // The same removal online connects, so the host would have seen an offline attempt too.
+    let online = remove_command(&f, "1").output().unwrap();
+    assert_eq!(online.status.code(), Some(1));
+    assert!(host.accepted.try_recv().is_ok());
+}
+
+/// Waits until the remote check has connected to `host`.
+fn wait_for_the_connection(host: &Host) {
+    host.accepted
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the remote check never connected");
+}
+
+#[test]
+fn a_signal_to_agt_ends_it_during_the_remote_check() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        let (f, _sub) = with_unheld_tag();
-        let (path, child_pid) = hanging_ls_remote(&f);
-        let agt = f
-            .env
-            .bin(&f.env.repo)
-            .env("PATH", path)
-            .env("AGT_LS_REMOTE_TIMEOUT", "60")
-            .args(["worktree", "remove", &f.wt.to_string_lossy()])
+        let (f, host) = with_silent_remote();
+        let mut agt = remove_command(&f, "60")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        crate::support::process::assert_signal_kills_the_tool(agt, signal, &child_pid);
+        wait_for_the_connection(&host);
+        let id = i32::try_from(agt.id()).unwrap();
+        // SAFETY: plain kill(2) of the agt process this test started.
+        unsafe { libc::kill(id, signal) };
+        let status = agt.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(signal)
+        );
     }
 }
 
 #[test]
 fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
     use std::os::unix::process::CommandExt;
-    let (f, _sub) = with_unheld_tag();
-    let (path, child_pid) = hanging_ls_remote(&f);
-    let mut run = f.env.bin(&f.env.repo);
-    run.env("PATH", path)
-        .env("AGT_LS_REMOTE_TIMEOUT", "3")
-        .args(["worktree", "remove", &f.wt.to_string_lossy()])
-        .stdout(std::process::Stdio::null())
+    let (f, host) = with_silent_remote();
+    let mut run = remove_command(&f, "3");
+    run.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // As `nohup` starts it. SAFETY: signal(2) is async-signal-safe, so it may run before exec.
     unsafe {
@@ -2710,17 +2986,12 @@ fn a_signal_agt_was_started_to_ignore_stays_ignored_during_the_remote_check() {
         });
     }
     let mut agt = run.spawn().unwrap();
-    let started = std::time::Instant::now();
-    while fs::read_to_string(&child_pid).map_or(true, |text| text.trim().is_empty()) {
-        assert!(started.elapsed().as_secs() < 20, "no child");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait_for_the_connection(&host);
     let id = i32::try_from(agt.id()).unwrap();
     // SAFETY: plain kill(2) of the agt process this test started.
     unsafe { libc::kill(id, libc::SIGHUP) };
-    // agt lives on to the timeout and refuses, killing the check then.
+    // agt lives on to the timeout and refuses.
     assert_eq!(agt.wait().unwrap().code(), Some(1));
-    crate::support::process::assert_gone(&child_pid);
 }
 
 #[test]

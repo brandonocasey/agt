@@ -1,20 +1,24 @@
-//! The root `--offline` flag against commands that would reach a remote: a `git` that records
-//! `fetch`, `ls-remote` and `push` and refuses them, and the fake `gh`, `glab` and `tea` call log,
-//! show that no call happens.
+//! The root `--offline` flag against commands that would reach a remote.
+//! A host that records each connection is where `origin` leads.
+//! That host and the fake `gh`, `glab` and `tea` call log show no call.
 
 use std::fs;
 use std::process::Output;
 
-use crate::support::{Env, executable, path_with};
+use crate::support::{Env, Host, executable, path_with, refusing_host};
 
 struct Site {
     env: Env,
     path: String,
+    /// Where origin leads once the site is built; it records each connection.
+    host: Host,
+    url: String,
 }
 
 impl Site {
-    /// A repository with `main` pushed to a bare origin that reads as a GitHub URL, and a `git`
-    /// in front of the real one that records and refuses network commands.
+    /// A repository with `main` pushed to a bare origin that reads as a GitHub URL.
+    /// That URL leads to a host that records each connection.
+    /// A `git` in front of the real one records and refuses network commands.
     fn new() -> Self {
         Self::at("git@github.com:acme/app.git")
     }
@@ -38,7 +42,38 @@ impl Site {
                 log.display()
             ),
         );
-        Self { env, path }
+        let host = refusing_host();
+        let site = Self {
+            env,
+            path,
+            host,
+            url: url.to_owned(),
+        };
+        site.record_origin();
+        site
+    }
+
+    /// Makes origin's URL lead to `target`; the bare repository's own path is the one that
+    /// reaches the pushed commits.
+    fn route_origin_to(&self, target: &str) {
+        let bare = self.env.path("origin.git");
+        let bare = bare.to_str().unwrap();
+        for stale in [bare, &self.host.url] {
+            self.env
+                .git_status(&["config", "--unset-all", &format!("url.{stale}.insteadOf")]);
+        }
+        self.env
+            .git(&["config", &format!("url.{target}.insteadOf"), &self.url]);
+    }
+
+    /// Lets origin reach the bare repository.
+    fn reach_origin(&self) {
+        self.route_origin_to(self.env.path("origin.git").to_str().unwrap());
+    }
+
+    /// Makes origin lead to the recording host again.
+    fn record_origin(&self) {
+        self.route_origin_to(&self.host.url);
     }
 
     fn agt(&self, args: &[&str]) -> Output {
@@ -55,13 +90,19 @@ impl Site {
             .unwrap()
     }
 
-    /// Every recorded network call of git, gh or glab.
+    /// Every recorded network call of git, gh or glab, and each connection to origin.
     fn network(&self) -> Vec<String> {
         let mut calls: Vec<String> = fs::read_to_string(self.env.path("network.log"))
             .unwrap_or_default()
             .lines()
             .map(str::to_owned)
             .collect();
+        calls.extend(
+            self.host
+                .accepted
+                .try_iter()
+                .map(|()| "connection to origin".to_owned()),
+        );
         // `doctor` asks each tool for its version, which reaches no host.
         calls.extend(
             self.env
@@ -93,19 +134,56 @@ impl Site {
     }
 }
 
+/// A fetch happens in process, where the `git` wrapper cannot see it.
+/// The control run checks the result instead: a commit only the remote has arrives.
 #[test]
-fn the_network_log_sees_a_fetch_without_the_flag() {
+fn a_run_without_the_flag_fetches() {
     let site = Site::new();
+    site.reach_origin();
     site.env.git(&["checkout", "-q", "-b", "topic"]);
-    let output = site
-        .env
+    let other = site.env.path("other");
+    let bare = site.env.path("origin.git");
+    site.env.git(&[
+        "clone",
+        "-q",
+        bare.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]);
+    let in_other = |args: &[&str]| {
+        let output = site.env.command("git", &other).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    in_other(&["commit", "-q", "--allow-empty", "-m", "remote only"]);
+    in_other(&["push", "-q", "origin", "main"]);
+    let pushed = in_other(&["rev-parse", "HEAD"]);
+    assert!(!site.env.git_status(&["cat-file", "-e", &pushed]));
+
+    site.env
         .bin(&site.env.repo)
         .args(["branch", "check", "--checks", "landable"])
         .env("PATH", &site.path)
         .output()
         .unwrap();
-    assert_ne!(output.status.code(), Some(0));
-    assert!(!site.network().is_empty());
+    assert!(
+        site.env.git_status(&["cat-file", "-e", &pushed]),
+        "the remote's commit was not fetched"
+    );
+}
+
+/// The offline tests see in-process git through the host origin leads to, so a run that is
+/// allowed to fetch must show up there.
+#[test]
+fn a_run_without_the_flag_connects_to_origin() {
+    let site = Site::new();
+    site.env.git(&["checkout", "-q", "-b", "topic"]);
+    site.env
+        .bin(&site.env.repo)
+        .args(["branch", "check", "--checks", "landable"])
+        .env("PATH", &site.path)
+        .output()
+        .unwrap();
+    assert_ne!(site.network(), Vec::<String>::new());
 }
 
 #[test]
@@ -144,10 +222,12 @@ fn worktree_create_cannot_tell_whether_origin_has_the_branch() {
 #[test]
 fn worktree_create_of_a_known_remote_branch_asks_no_remote() {
     let site = Site::new();
+    site.reach_origin();
     site.env.git(&["branch", "other"]);
     site.env.git(&["push", "-q", "origin", "other"]);
     site.env.git(&["branch", "-D", "other"]);
     site.env.git(&["fetch", "-q", "origin"]);
+    site.record_origin();
     let out = site.ok(&["worktree", "create", "other"]);
     assert!(out.contains("\"tracking\":\"origin/other\""), "{out}");
 }

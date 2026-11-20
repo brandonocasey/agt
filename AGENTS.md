@@ -79,4 +79,4 @@ or changes what a skill uses, and never to a version that is not yet tagged.
   repository, and fake `gh`/`glab`/`tea` through `AGT_GH_BIN`, `AGT_GLAB_BIN` and
   `AGT_TEA_BIN`. They never touch real state or call a real forge.
 - Build output goes to `dist/target` (see `.cargo/config.toml`).
-- Git, `gh`, `glab` and `tea` run as subprocesses so behavior matches the command line.
+- `gh`, `glab` and `tea` run as subprocesses so behavior matches the command line. Git runs in process through libgit2 (`git2`); no production code under `src/` starts a `git` program (tests may, to build fixtures and as an oracle). The one exception is outside agt's code: for a short credential helper name, libgit2 runs `sh -c "git credential-<name> get"`, so such a helper needs `git` on `PATH`.

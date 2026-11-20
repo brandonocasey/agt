@@ -26,10 +26,10 @@ pub fn run(repo: &Repo, branch: &str, base: Option<&str>) -> Result<(Value, u8)>
         .read_only()?
         .merge_conflicts(&base, &tip)?;
     let already: Vec<String> = repo
-        .git(&["cherry", "--end-of-options", &base, &tip])?
-        .lines()
-        .filter_map(|line| line.strip_prefix("- "))
-        .map(str::to_owned)
+        .cherry(&base, &tip)?
+        .into_iter()
+        .filter(|commit| commit.in_upstream)
+        .map(|commit| commit.sha)
         .collect();
     let value = json!({
         "branch": branch,
