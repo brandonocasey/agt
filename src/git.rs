@@ -10,6 +10,7 @@ pub mod base;
 mod deep;
 mod env_config;
 pub mod fast_forward;
+mod file_mode;
 mod files;
 mod filter;
 #[cfg(test)]

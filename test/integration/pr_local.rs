@@ -3,8 +3,9 @@
 //! No forge tool is called and nothing reaches a network.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 use serde_json::Value;
 
@@ -119,6 +120,54 @@ fn commit_on(env: &Env, parent: &str, file: &str, content: &str) -> String {
         parent,
         &format!("100644,{blob},{file}"),
         &format!("add {file}"),
+    )
+}
+
+/// A commit on top of `parent` that writes `file`, an entry `parent` already has, as a blob of
+/// `content` with the raw tree-entry `mode`. git and libgit2 only write canonical modes, so the
+/// tree is written byte by byte.
+fn commit_with_raw_mode(env: &Env, parent: &str, file: &str, content: &str, mode: &str) -> String {
+    let path = env.path("blob");
+    fs::write(&path, content).unwrap();
+    let blob = git_ok(
+        env,
+        &env.repo,
+        &["hash-object", "-w", path.to_str().unwrap()],
+    );
+    let listing = git_in(env, &env.repo, &["ls-tree", "-z", parent]).stdout;
+    let mut raw = Vec::new();
+    for record in listing.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
+        let record = String::from_utf8(record.to_vec()).unwrap();
+        let (info, name) = record.split_once('\t').unwrap();
+        let mut parts = info.split(' ');
+        let (old_mode, _, old_id) = (parts.next(), parts.next(), parts.next().unwrap());
+        let (mode, id) = if name == file {
+            (mode, blob.as_str())
+        } else {
+            (old_mode.unwrap(), old_id)
+        };
+        raw.extend(format!("{mode} {name}\0").bytes());
+        raw.extend(
+            (0..id.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&id[at..at + 2], 16).unwrap()),
+        );
+    }
+    let mut hashing = env
+        .command("git", &env.repo)
+        .args(["hash-object", "-t", "tree", "-w", "--literally", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hashing.stdin.take().unwrap().write_all(&raw).unwrap();
+    let output = hashing.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let tree = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    git_ok(
+        env,
+        &env.repo,
+        &["commit-tree", &tree, "-p", parent, "-m", "raw mode"],
     )
 }
 
@@ -2340,5 +2389,63 @@ fn merges_over_filtered_paths_work_when_the_filter_is_not_required() {
             "rewritten",
             "{extra:?}"
         );
+    }
+}
+
+/// libgit2 hands a tree entry's raw mode to the checkout, and an entry written by an old git
+/// can carry a mode that git itself reads as a regular file.
+const LEGACY_MODES: [&str; 2] = ["100775", "100600"];
+
+#[test]
+fn a_fast_forward_that_writes_a_legacy_mode_entry_works_with_and_without_a_required_filter() {
+    for required in [false, true] {
+        for mode in LEGACY_MODES {
+            let env = lfs_setup(required);
+            let feat = commit_with_raw_mode(&env, "main", "a.txt", "legacy\n", mode);
+            point(&env, "feat", &feat);
+
+            let output = local(&env, &merge_args(&feat, "feat", &[]));
+
+            let context = format!("required={required} mode={mode}");
+            assert!(
+                output.status.success(),
+                "{context}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(env.repo.join("a.txt")).unwrap(),
+                "legacy\n",
+                "{context}"
+            );
+        }
+    }
+}
+
+/// `main` is sparse and leaves the legacy entry off disk, where libgit2 would see it as a local
+/// change. It moves to a commit with that entry, then `feat`, based before it, is rebased onto it.
+#[test]
+fn a_rebase_onto_a_target_with_a_legacy_mode_entry_works_with_and_without_a_required_filter() {
+    for required in [false, true] {
+        for mode in LEGACY_MODES {
+            let env = lfs_setup(required);
+            let base = tip(&env, "main");
+            let legacy = commit_with_raw_mode(&env, &base, "a.txt", "legacy\n", mode);
+            let feat = add_branch(&env, "feat", "c.txt", "c\n");
+            point(&env, "legacy", &legacy);
+            add_worktree(&env, "work", &["feat"]);
+            keep_only_sub(&env);
+            ok(&env, &merge_args(&legacy, "legacy", &[]));
+
+            let output = local(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
+
+            let context = format!("required={required} mode={mode}");
+            assert!(
+                output.status.success(),
+                "{context}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(tip(&env, "main"), tip(&env, "feat"), "{context}");
+            assert_ne!(tip(&env, "main"), feat, "{context}");
+        }
     }
 }

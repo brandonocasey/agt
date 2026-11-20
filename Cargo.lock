@@ -20,6 +20,7 @@ dependencies = [
  "git2",
  "indexmap",
  "libc",
+ "libgit2-sys",
  "proc-macro2",
  "regex",
  "serde",

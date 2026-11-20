@@ -9,6 +9,7 @@ use std::path::Path;
 use git2::build::CheckoutBuilder;
 use git2::{AttrCheckFlags, CheckoutNotificationType, DiffFile};
 
+use super::file_mode::{FILE_TYPE, REGULAR_FILE, file_mode};
 use crate::core::error::{Error, Result};
 
 /// `GIT_ATTR_CHECK_INCLUDE_HEAD`, which `git2` has no name for: also read the attributes `HEAD`
@@ -24,10 +25,6 @@ enum Use {
 
 /// The reason a checkout stopped at a path a required filter applies to.
 pub(super) type Refusal = RefCell<Option<String>>;
-
-/// The file-type bits of a mode, and the value they have for a regular file.
-const FILE_TYPE: u32 = 0o170_000;
-const REGULAR_FILE: u32 = 0o100_000;
 
 /// The question "may this path be staged or written?" for one operation on `repo`. When no
 /// filter is required it answers yes at once: it reads the config once, where an attribute
@@ -139,10 +136,13 @@ pub(super) fn may_write(
     path: Option<&Path>,
     target: Option<&DiffFile<'_>>,
 ) -> bool {
+    if !guard.any_required {
+        return true;
+    }
     let Some(path) = path else {
         return true;
     };
-    let mode = target.map_or(REGULAR_FILE, |target| i32::from(target.mode()) as u32);
+    let mode = target.map_or(REGULAR_FILE, file_mode);
     let Some(message) = guard.refusal_for_writing(path, mode) else {
         return true;
     };

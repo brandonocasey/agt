@@ -7,6 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::deep::{changed_since, is_too_deep};
+use super::file_mode::file_mode;
 use super::index::{Scope, UntrackedMode, left_out_paths, status_items};
 use super::{Repo, folded, peeled_commit, peeled_tree};
 use crate::core::error::{Error, Result};
@@ -251,8 +252,8 @@ fn changes(diff: &git2::Diff<'_>) -> Vec<TreeChange> {
             };
             Some(TreeChange {
                 path: delta.new_file().path_bytes()?.to_vec(),
-                old_mode: u32::from(delta.old_file().mode()),
-                new_mode: u32::from(delta.new_file().mode()),
+                old_mode: file_mode(&delta.old_file()),
+                new_mode: file_mode(&delta.new_file()),
                 new_id: delta.new_file().id().to_string(),
                 status,
             })
@@ -310,4 +311,53 @@ pub(super) fn is_nested_repo(repo: &git2::Repository, path: &[u8]) -> bool {
     };
     let nested = workdir.join(OsStr::from_bytes(dir));
     nested.join(".git").exists() && !repo.is_path_ignored(&nested).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::commit;
+    use crate::core::testing::Sandbox;
+    use crate::git::Repo;
+
+    /// The commit on top of `HEAD` whose tree holds `name` with the raw `mode` (git and libgit2
+    /// write only canonical modes, so the tree object is written byte by byte).
+    fn commit_with_raw_mode(root: &std::path::Path, name: &str, mode: &str) -> String {
+        let repo = git2::Repository::open(root).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let blob = repo.blob(b"content\n").unwrap();
+        let mut raw = format!("{mode} {name}\0").into_bytes();
+        raw.extend(blob.as_bytes());
+        let tree = repo
+            .odb()
+            .unwrap()
+            .write(git2::ObjectType::Tree, &raw)
+            .unwrap();
+        let signature = git2::Signature::now("n", "n@example.com").unwrap();
+        let tree = repo.find_tree(tree).unwrap();
+        repo.commit(None, &signature, &signature, "raw", &tree, &[&head])
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn a_legacy_mode_regular_file_reads_as_git_reads_it() {
+        for (raw, expected) in [
+            ("100775", 0o100_755),
+            ("100755", 0o100_755),
+            ("100664", 0o100_644),
+            ("100600", 0o100_644),
+        ] {
+            let sandbox = Sandbox::new();
+            let root = sandbox.repo();
+            sandbox.git(&root, &["init", "-q", "-b", "main"]);
+            commit(&sandbox, &root, &[("a.txt", "a\n")], "first");
+            let legacy = commit_with_raw_mode(&root, "script", raw);
+
+            let changes = Repo::at(&root).tree_changes("HEAD", &legacy).unwrap();
+
+            let change = changes.iter().find(|change| change.path == b"script");
+            let change = change.unwrap_or_else(|| panic!("script is not a change for {raw}"));
+            assert_eq!((change.old_mode, change.new_mode), (0, expected), "{raw}");
+        }
+    }
 }
