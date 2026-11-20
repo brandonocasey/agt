@@ -227,6 +227,20 @@ pub(super) fn removal(
     Ok(done)
 }
 
+/// Refuses a worktree directory that has lost its `.git` file, as git does. `Repo::at` resolves
+/// such a directory to the checkout above it, so every check and the backup would read that
+/// checkout and not the worktree.
+fn require_git_file(path: &Path) -> Result<()> {
+    let git_file = path.join(".git");
+    if std::fs::symlink_metadata(&git_file).is_err() {
+        return fail(format!(
+            "validation failed, cannot remove working tree: '{}' does not exist",
+            git_file.display()
+        ));
+    }
+    Ok(())
+}
+
 /// The entry for `path`, or the reason it must not be removed.
 pub(super) fn refuse<'a>(
     listing: &'a [Worktree],
@@ -245,6 +259,7 @@ pub(super) fn refuse<'a>(
     if entry.locked {
         return fail(format!("{} is locked; unlock it first", path.display()));
     }
+    require_git_file(path)?;
     if cwd::held().iter().any(|held| held.starts_with(path)) {
         return fail(format!(
             "the current directory is inside {}; run from elsewhere",

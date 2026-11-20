@@ -646,6 +646,32 @@ fn remove_refuses_the_worktree_the_shell_started_in_even_after_dash_c_moves_away
 }
 
 #[test]
+fn a_worktree_that_lost_its_git_file_is_refused_before_a_backup_is_taken() {
+    let f = Fixture::new();
+    f.env.write(".git/info/exclude", ".worktrees/\n");
+    let inner = f.env.repo.join(".worktrees").join("inner");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "inner",
+        &inner.to_string_lossy(),
+    ]);
+    fs::write(inner.join("a.txt"), "edited\n").unwrap();
+    fs::remove_file(inner.join(".git")).unwrap();
+
+    f.refuses(
+        &f.env.repo,
+        &["remove", &inner.to_string_lossy(), "--yes"],
+        "validation failed, cannot remove working tree",
+    );
+
+    assert_eq!(fs::read_to_string(inner.join("a.txt")).unwrap(), "edited\n");
+    assert_eq!(f.json(&["backups"])["backups"], json!([]));
+}
+
+#[test]
 fn refuses_what_it_must_not_remove() {
     let f = Fixture::new();
     let wt = f.wt.to_string_lossy().into_owned();
