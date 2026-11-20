@@ -2254,6 +2254,26 @@ fn a_worktree_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves
 }
 
 #[test]
+fn a_worktree_refuses_a_filter_that_only_the_global_config_requires() {
+    let (env, _) = repo_with_commit();
+    fs::write(env.repo.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    commit(&env, &env.repo.clone(), "data.bin", "real content");
+    fs::write(
+        env.path("gitconfig"),
+        "[filter \"lfs\"]\n\trequired = true\n",
+    )
+    .unwrap();
+
+    let output = agt(&env, &env.repo, &["create", "work"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("data.bin"), "{stderr}");
+    assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    only_main_worktree_is_left(&env);
+}
+
+#[test]
 fn a_restore_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_no_worktree() {
     let (env, _) = lfs_repo();
     let tree = env.path("tree");

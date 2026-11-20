@@ -307,11 +307,14 @@ fn write_links(admin: &Path, path: &Path, head: &Head) -> Result<()> {
 /// Checks out HEAD in the worktree at `path`, only the files the sparse-checkout patterns of
 /// `main` select when it has any.
 fn fill_worktree(main: &git2::Repository, path: &Path) -> Result<()> {
-    let linked = git2::Repository::open(path)?;
+    let work = Repo::at(path);
     if sparse::is_enabled(main)? {
+        let linked = work.open_refs()?;
         copy_sparse_files(main, &linked)?;
-        return Repo::at(path).sparse_check_out_head();
+        drop(linked);
+        return work.sparse_check_out_head();
     }
+    let linked = work.open_writing()?;
     let refusal = Refusal::default();
     let mut options = git2::build::CheckoutBuilder::new();
     filter::refuse_required_filters(&mut options, &linked, &refusal);
