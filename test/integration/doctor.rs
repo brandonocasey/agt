@@ -100,6 +100,30 @@ fn ignore_row_outside_a_repository(lines: &str) -> Value {
 }
 
 #[test]
+fn a_global_config_named_by_the_environment_hides_the_xdg_one() {
+    let env = setup("0.0.1");
+    std::fs::write(env.path("gitconfig"), "[user]\n\tname = Tester\n").unwrap();
+    std::fs::create_dir_all(env.path("config/git")).unwrap();
+    std::fs::write(
+        env.path("xdg-ignore"),
+        ".worktrees/\n/.agt/\n/.cache/agents/scratch/\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.path("config/git/config"),
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            env.path("xdg-ignore").display()
+        ),
+    )
+    .unwrap();
+    let outside = env.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let (_, report) = doctor_in(&env, &outside);
+    assert_eq!(row(&report, "git ignore")["status"], "warn", "{report}");
+}
+
+#[test]
 fn outside_a_repository_a_parent_directory_line_ignores_the_scratch_path() {
     let ignore = ignore_row_outside_a_repository(".worktrees/\n/.agt/\n/.cache/agents/\n");
     assert_eq!(ignore["status"], "ok", "{ignore}");

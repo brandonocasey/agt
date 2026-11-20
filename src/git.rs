@@ -722,17 +722,21 @@ fn set_system_config_search(search: &str) {
 }
 
 /// The path set at `key` in the user's global git config, with `~` expanded.
-/// The config is the XDG file if there is one, then `GIT_CONFIG_GLOBAL` or else the home file,
-/// a later file winning; `None` when unset.
+/// `GIT_CONFIG_GLOBAL`, when set, names the only global file; otherwise the config is the XDG
+/// file if there is one, then the home file, a later file winning. `None` when unset.
 pub fn global_config_path(key: &str) -> Option<PathBuf> {
     let mut config = git2::Config::new().ok()?;
-    let global = std::env::var_os("GIT_CONFIG_GLOBAL")
-        .map(PathBuf::from)
-        .or_else(|| git2::Config::find_global().ok());
-    for (file, level) in [
-        (git2::Config::find_xdg().ok(), git2::ConfigLevel::XDG),
-        (global, git2::ConfigLevel::Global),
-    ] {
+    let files = match std::env::var_os("GIT_CONFIG_GLOBAL") {
+        Some(file) => [
+            (None, git2::ConfigLevel::XDG),
+            (Some(PathBuf::from(file)), git2::ConfigLevel::Global),
+        ],
+        None => [
+            (git2::Config::find_xdg().ok(), git2::ConfigLevel::XDG),
+            (git2::Config::find_global().ok(), git2::ConfigLevel::Global),
+        ],
+    };
+    for (file, level) in files {
         if let Some(file) = file.filter(|file| file.is_file()) {
             config.add_file(&file, level, false).ok()?;
         }
