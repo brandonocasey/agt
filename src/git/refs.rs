@@ -1,5 +1,7 @@
 //! Refs and the commits they name: listing, filtering, moving and deleting, through libgit2.
 
+use std::collections::HashSet;
+
 use super::{Repo, commit_id, peeled_commit, subject_of};
 use crate::core::error::{Error, Result, fail};
 
@@ -42,17 +44,19 @@ impl Repo {
     pub fn refs_containing(&self, commit: &str, prefix: &str) -> Result<Vec<String>> {
         let repo = self.open_refs()?;
         let wanted = commit_id(&repo, commit)?;
-        let mut names = Vec::new();
+        let mut tips = Vec::new();
         for tip in ref_tips_in(&repo, &[prefix])? {
-            let Some(found) = tip.commit.as_deref() else {
-                continue;
-            };
-            let found = git2::Oid::from_str(found)?;
-            if found == wanted || repo.graph_descendant_of(found, wanted)? {
-                names.push(short_ref_name(&tip.name).to_owned());
+            if let Some(found) = tip.commit.as_deref() {
+                tips.push((tip.name, git2::Oid::from_str(found)?));
             }
         }
-        Ok(names)
+        let ids: Vec<git2::Oid> = tips.iter().map(|(_, id)| *id).collect();
+        let containing = commits_containing(&repo, wanted, &ids)?;
+        Ok(tips
+            .iter()
+            .filter(|(_, id)| containing.contains(id))
+            .map(|(name, _)| short_ref_name(&repo, name))
+            .collect())
     }
 
     /// The local branches and their tips.
@@ -162,14 +166,15 @@ impl Repo {
         }
     }
 
-    /// Deletes local branch `name`: when `force` is false only if it is merged into HEAD or
-    /// its upstream, as `git branch -d`.
+    /// Deletes local branch `name`, as `git branch -d` does (`git branch -D` when `force`). A
+    /// work tree that has it checked out, or is rebasing or bisecting it, refuses either.
+    /// Without `force` it must also be merged into its upstream, or into HEAD when it has none.
     pub fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
         {
             let repo = self.open_refs()?;
             local_branch(&repo, name)?;
         }
-        if let Some(holder) = self.holders(name)?.first() {
+        if let Some(holder) = self.checkout_blocker(name)? {
             return fail(format!(
                 "cannot delete branch '{name}' used by worktree at '{}'",
                 holder.display()
@@ -241,12 +246,70 @@ fn local_branch<'r>(repo: &'r git2::Repository, name: &str) -> Result<git2::Bran
         .map_err(|_| Error(format!("branch '{name}' not found")))
 }
 
-/// `ref` as `git for-each-ref --format=%(refname:short)` prints it.
-fn short_ref_name(name: &str) -> &str {
-    ["refs/heads/", "refs/remotes/", "refs/tags/"]
-        .iter()
-        .find_map(|prefix| name.strip_prefix(prefix))
-        .unwrap_or(name)
+/// `wanted` and the commits among those reachable from `tips` that have it in their history,
+/// found in one walk that leaves out the history of `wanted`.
+fn commits_containing(
+    repo: &git2::Repository,
+    wanted: git2::Oid,
+    tips: &[git2::Oid],
+) -> Result<HashSet<git2::Oid>> {
+    let mut found = HashSet::from([wanted]);
+    if tips.is_empty() {
+        return Ok(found);
+    }
+    let mut walk = repo.revwalk()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
+    for tip in tips {
+        walk.push(*tip)?;
+    }
+    walk.hide(wanted)?;
+    for id in walk {
+        let id = id?;
+        if repo
+            .find_commit(id)?
+            .parent_ids()
+            .any(|parent| found.contains(&parent))
+        {
+            found.insert(id);
+        }
+    }
+    Ok(found)
+}
+
+/// The ways `git rev-parse` reads a short name, as a prefix and a suffix around it.
+const SHORT_NAME_RULES: [(&str, &str); 6] = [
+    ("", ""),
+    ("refs/", ""),
+    ("refs/tags/", ""),
+    ("refs/heads/", ""),
+    ("refs/remotes/", ""),
+    ("refs/remotes/", "/HEAD"),
+];
+
+/// `name` as `git for-each-ref --format=%(refname:short)` prints it: the shortest form that no
+/// other ref also answers to, else the full name.
+fn short_ref_name(repo: &git2::Repository, name: &str) -> String {
+    for (rule, (prefix, suffix)) in SHORT_NAME_RULES.iter().enumerate().skip(1).rev() {
+        let Some(short) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .filter(|short| !short.is_empty() && (suffix.is_empty() || !short.contains('/')))
+        else {
+            continue;
+        };
+        let ambiguous = SHORT_NAME_RULES
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != rule)
+            .any(|(_, (prefix, suffix))| {
+                repo.find_reference(&format!("{prefix}{short}{suffix}"))
+                    .is_ok()
+            });
+        if !ambiguous {
+            return short.to_owned();
+        }
+    }
+    name.to_owned()
 }
 
 /// Whether `ancestor` is `descendant` or in its history.
@@ -273,4 +336,119 @@ fn branch_is_merged(repo: &git2::Repository, branch: &git2::Branch<'_>) -> Resul
         Err(_) => peeled_commit(repo, "HEAD")?.and_then(|head| git2::Oid::from_str(&head).ok()),
     };
     Ok(target.is_some_and(|target| is_reachable(repo, tip, target)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::super::fixtures::{commit, rev};
+    use crate::core::testing::Sandbox;
+    use crate::git::Repo;
+
+    /// What `git for-each-ref --contains` prints for `commit` under `prefix`.
+    fn oracle(sandbox: &Sandbox, dir: &Path, commit: &str, prefix: &str) -> Vec<String> {
+        let output = sandbox.git_output(
+            dir,
+            &[
+                "for-each-ref",
+                "--contains",
+                commit,
+                "--format=%(refname:short)",
+                prefix,
+            ],
+        );
+        output.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn refs_containing_names_what_git_for_each_ref_contains_does() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(&sandbox, &dir, &[("a.txt", "1\n")], "c1");
+        commit(&sandbox, &dir, &[("a.txt", "2\n")], "c2");
+        sandbox.git(&dir, &["branch", "side"]);
+        commit(&sandbox, &dir, &[("b.txt", "3\n")], "c3");
+        sandbox.git(&dir, &["switch", "-q", "side"]);
+        commit(&sandbox, &dir, &[("c.txt", "s\n")], "s1");
+        sandbox.git(&dir, &["switch", "-q", "-"]);
+        sandbox.git(&dir, &["merge", "-q", "--no-ff", "side", "-m", "merge"]);
+        sandbox.git(&dir, &["switch", "-q", "--orphan", "lone"]);
+        commit(&sandbox, &dir, &[("z.txt", "z\n")], "lone");
+        sandbox.git(&dir, &["switch", "-q", "-"]);
+        // Names that two kinds of ref share, so a short name alone would be ambiguous.
+        sandbox.git(&dir, &["branch", "dup", "HEAD~1"]);
+        sandbox.git(&dir, &["tag", "dup", "HEAD~2"]);
+        sandbox.git(&dir, &["tag", "-a", "-m", "release", "v1", "HEAD~1"]);
+        sandbox.git(&dir, &["branch", "origin", "HEAD"]);
+        sandbox.git(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        sandbox.git(&dir, &["update-ref", "refs/remotes/origin/side", "side"]);
+        sandbox.git(&dir, &["update-ref", "refs/remotes/origin/dup", "dup"]);
+        sandbox.git(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        let repo = Repo::at(&dir);
+
+        let commits = sandbox.git_output(&dir, &["rev-list", "--all"]);
+        assert!(commits.lines().count() >= 6, "{commits}");
+        for commit in commits.lines() {
+            for prefix in ["refs/heads/", "refs/remotes/", "refs/tags/"] {
+                let mut ours = repo.refs_containing(commit, prefix).unwrap();
+                let mut expected = oracle(&sandbox, &dir, commit, prefix);
+                ours.sort();
+                expected.sort();
+                assert_eq!(ours, expected, "{commit} under {prefix}");
+            }
+        }
+        let tip = rev(&sandbox, &dir, "HEAD");
+        let remotes = repo.refs_containing(&tip, "refs/remotes/").unwrap();
+        assert!(remotes.contains(&"origin/HEAD".to_owned()), "{remotes:?}");
+        let heads = repo.refs_containing(&tip, "refs/heads/").unwrap();
+        assert!(heads.contains(&"heads/origin".to_owned()), "{heads:?}");
+        let old = repo.refs_containing("HEAD~1", "refs/heads/").unwrap();
+        assert!(old.contains(&"heads/dup".to_owned()), "{old:?}");
+    }
+
+    #[test]
+    fn a_branch_that_a_worktree_is_bisecting_is_not_deleted() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        for name in ["one", "two", "three", "four"] {
+            commit(&sandbox, &dir, &[("a.txt", name)], name);
+        }
+        sandbox.git(&dir, &["branch", "topic"]);
+        let linked = sandbox.path().join("bisecting");
+        sandbox.git(
+            &dir,
+            &["worktree", "add", "-q", linked.to_str().unwrap(), "topic"],
+        );
+        sandbox.git(&linked, &["bisect", "start", "topic", "topic~3"]);
+        let repo = Repo::at(&dir);
+        let oracle = sandbox
+            .command("git")
+            .args(["branch", "-D", "topic"])
+            .output()
+            .unwrap();
+        assert!(!oracle.status.success(), "git deleted a bisected branch");
+
+        for force in [false, true] {
+            let refused = repo.delete_branch("topic", force).unwrap_err().to_string();
+            assert!(refused.contains("used by worktree"), "{refused}");
+        }
+        assert!(
+            repo.branches()
+                .unwrap()
+                .iter()
+                .any(|(name, _)| name == "topic")
+        );
+
+        sandbox.git(&linked, &["bisect", "reset"]);
+        sandbox.git(&linked, &["switch", "-q", "--detach"]);
+        repo.delete_branch("topic", true).unwrap();
+    }
 }

@@ -4,9 +4,10 @@ use std::fs;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, Once, OnceLock, PoisonError};
 
 pub mod base;
+mod deep;
 mod env_config;
 pub mod fast_forward;
 mod files;
@@ -14,6 +15,7 @@ mod files;
 mod fixtures;
 mod history;
 mod hooks;
+mod http_config;
 mod identity;
 mod index;
 mod known_hosts;
@@ -154,6 +156,7 @@ impl Repo {
     }
 
     fn open_raw(&self) -> std::result::Result<git2::Repository, git2::Error> {
+        configure_libgit2();
         match self.kind {
             Kind::WorkTree => git2::Repository::open_ext(
                 &self.root,
@@ -682,8 +685,37 @@ fn reject_bad_config(repo: &git2::Repository) -> Result<()> {
     }
 }
 
+/// The directories that hold the system git config besides `/etc`, which libgit2 knows. A
+/// package manager or Xcode sets `credential.helper` and `init.defaultBranch` there.
+const EXTRA_SYSTEM_CONFIG_DIRS: [&str; 4] = [
+    "/opt/homebrew/etc",
+    "/usr/local/etc",
+    "/Library/Developer/CommandLineTools/usr/share/git-core",
+    "/Applications/Xcode.app/Contents/Developer/usr/share/git-core",
+];
+
+/// Makes libgit2 look for the system config in `/etc` and then in [`EXTRA_SYSTEM_CONFIG_DIRS`]:
+/// the first directory that holds a `gitconfig` is the one read. It runs once, before the first
+/// repository is opened, as libgit2 does not guard its search paths.
+pub(crate) fn configure_libgit2() {
+    static CONFIGURED: Once = Once::new();
+    CONFIGURED.call_once(|| {
+        let search = format!("$PATH:{}", EXTRA_SYSTEM_CONFIG_DIRS.join(":"));
+        set_system_config_search(&search);
+    });
+}
+
+/// Sets the directories libgit2 searches for the system config; `$PATH` stands for its own
+/// default. It MUST NOT run while another thread uses libgit2.
+fn set_system_config_search(search: &str) {
+    // SAFETY: callers run before a repository is opened, or while no other thread uses libgit2.
+    // The call fails only for a path that is not valid text, which none of these is.
+    let _ = unsafe { git2::opts::set_search_path(git2::ConfigLevel::System, search) };
+}
+
 /// The path set at `key` in the user's global git config, with `~` expanded.
-/// The config is `GIT_CONFIG_GLOBAL`, else the home or XDG config; `None` when unset.
+/// The config is the XDG file if there is one, then `GIT_CONFIG_GLOBAL` or else the home file,
+/// a later file winning; `None` when unset.
 pub fn global_config_path(key: &str) -> Option<PathBuf> {
     let mut config = git2::Config::new().ok()?;
     let global = std::env::var_os("GIT_CONFIG_GLOBAL")
@@ -1223,6 +1255,46 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_system_config_comes_from_the_first_search_directory_that_has_one() {
+        let sandbox = Sandbox::with_repo();
+        let repo = Repo::at(sandbox.repo());
+        let (first, second) = (sandbox.path().join("first"), sandbox.path().join("second"));
+        let (empty, absent) = (sandbox.path().join("empty"), sandbox.path().join("absent"));
+        for dir in [&first, &second, &empty] {
+            fs::create_dir(dir).unwrap();
+        }
+        fs::write(
+            second.join("gitconfig"),
+            "[sandbox]\n\tname = second\n[init]\n\tdefaultBranch = brew\n",
+        )
+        .unwrap();
+        let search = |dirs: &[&Path]| {
+            let dirs: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+            super::set_system_config_search(&dirs.join(":"));
+        };
+
+        search(&[&empty, &absent, &second]);
+        assert_eq!(
+            repo.config_value("sandbox.name").unwrap().as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            repo.config_value("init.defaultBranch").unwrap().as_deref(),
+            Some("brew")
+        );
+
+        fs::write(first.join("gitconfig"), "[sandbox]\n\tname = first\n").unwrap();
+        search(&[&first, &second]);
+        assert_eq!(
+            repo.config_value("sandbox.name").unwrap().as_deref(),
+            Some("first")
+        );
+
+        search(&[&empty]);
+        assert_eq!(repo.config_value("sandbox.name").unwrap(), None);
     }
 
     #[test]

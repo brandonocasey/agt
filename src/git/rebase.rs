@@ -4,6 +4,7 @@
 
 use std::fs;
 
+use super::index::conflict_path;
 use super::merge::move_branch_to;
 use super::{Repo, commit_id, hooks, identity};
 use crate::core::error::{Error, Result};
@@ -100,8 +101,7 @@ impl Replaying<'_> {
                 .conflicts()?
                 .flatten()
                 .filter_map(|conflict| {
-                    let side = conflict.our.or(conflict.their).or(conflict.ancestor)?;
-                    Some(String::from_utf8_lossy(&side.path).into_owned())
+                    conflict_path(&conflict).map(|path| String::from_utf8_lossy(path).into_owned())
                 })
                 .collect();
             return Ok(Some(Rebased::Stopped {

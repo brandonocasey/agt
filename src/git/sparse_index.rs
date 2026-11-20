@@ -3,9 +3,12 @@
 //! expanded index in memory; a change libgit2 makes to the index first rewrites the file as the
 //! full index.
 
+use std::io::Write;
+use std::path::Path;
+
 use sha1_smol::Sha1;
 
-use super::index::{SKIP_WORKTREE, STAGE_MASK};
+use super::index::{ASSUME_UNCHANGED, SKIP_WORKTREE, STAGE_MASK};
 use crate::core::error::{Error, Result, ctx};
 
 /// The index entry mode of a collapsed directory.
@@ -84,18 +87,33 @@ pub(super) fn open_index_file(repo: &git2::Repository) -> Result<git2::Index> {
 }
 
 /// Expands a sparse index of `repo` in place so libgit2 can read and write it.
-/// Git reads the full index as it does a sparse one.
+/// Git reads the full index as it does a sparse one. The file is read and replaced under
+/// `index.lock`, as git does, so a `git add` that finishes in between is not lost.
 pub(super) fn expand_in_place(repo: &git2::Repository) -> Result<()> {
     if !is_unreadable_sparse(repo)? {
         return Ok(());
     }
     let real = repo.path().join("index");
-    let bytes = std::fs::read(&real).map_err(ctx(format!("read {}", real.display())))?;
+    let lock = repo.path().join("index.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .map_err(ctx(format!("create {}", lock.display())))?;
+    let written = expand_into(repo, &real, &mut file).and_then(|()| {
+        std::fs::rename(&lock, &real).map_err(ctx(format!("replace {}", real.display())))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&lock);
+    }
+    written
+}
+
+/// Writes the full index that the sparse index file `real` stands for to `out`.
+fn expand_into(repo: &git2::Repository, real: &Path, out: &mut std::fs::File) -> Result<()> {
+    let bytes = std::fs::read(real).map_err(ctx(format!("read {}", real.display())))?;
     let expanded = serialize(&expanded_entries(repo, &bytes)?);
-    let next = repo.path().join("index.agt-expanded");
-    std::fs::write(&next, expanded).map_err(ctx(format!("write {}", next.display())))?;
-    std::fs::rename(&next, &real).map_err(ctx(format!("replace {}", real.display())))?;
-    Ok(())
+    out.write_all(&expanded).map_err(ctx("write index.lock"))
 }
 
 /// The entries of the sparse index `bytes`, sorted by path, with each collapsed directory
@@ -230,7 +248,8 @@ fn serialize(entries: &[Entry]) -> Vec<u8> {
         let extended = entry.extended != 0;
         let name = entry.flags & NAME_MASK;
         let stage = entry.flags & STAGE_MASK;
-        let flags = name | stage | if extended { EXTENDED } else { 0 };
+        let assumed = entry.flags & ASSUME_UNCHANGED;
+        let flags = name | stage | assumed | if extended { EXTENDED } else { 0 };
         out.extend_from_slice(&flags.to_be_bytes());
         if extended {
             out.extend_from_slice(&entry.extended.to_be_bytes());
@@ -245,4 +264,61 @@ fn serialize(entries: &[Entry]) -> Vec<u8> {
     debug_assert_eq!(checksum.len(), CHECKSUM);
     out.extend_from_slice(&checksum);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use crate::core::testing::Sandbox;
+    use crate::git::Repo;
+    use crate::git::fixtures::commit;
+
+    /// A repository with a sparse index over the cone `a`; `top.txt` is assume-unchanged.
+    fn sparse_with_assumed_file(sandbox: &Sandbox) -> std::path::PathBuf {
+        let dir = sandbox.repo();
+        commit(
+            sandbox,
+            &dir,
+            &[("top.txt", "top\n"), ("a/a.txt", "a\n"), ("b/b.txt", "b\n")],
+            "tree",
+        );
+        sandbox.git(
+            &dir,
+            &["sparse-checkout", "set", "--cone", "--sparse-index", "a"],
+        );
+        sandbox.git(&dir, &["update-index", "--assume-unchanged", "top.txt"]);
+        dir
+    }
+
+    #[test]
+    fn a_write_that_expands_a_sparse_index_keeps_the_assume_unchanged_marks() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sparse_with_assumed_file(&sandbox);
+        assert!(
+            sandbox
+                .git_output(&dir, &["ls-files", "-v"])
+                .contains("h top.txt")
+        );
+
+        Repo::at(&dir).sparse_reapply().unwrap();
+
+        let listed = sandbox.git_output(&dir, &["ls-files", "-v"]);
+        assert!(listed.contains("h top.txt"), "{listed}");
+        assert!(!dir.join(".git/index.lock").exists());
+    }
+
+    #[test]
+    fn a_sparse_index_that_git_holds_locked_is_neither_replaced_nor_unlocked() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sparse_with_assumed_file(&sandbox);
+        let before = fs::read(dir.join(".git/index")).unwrap();
+        fs::write(dir.join(".git/index.lock"), "").unwrap();
+
+        let refused = Repo::at(&dir).sparse_reapply().unwrap_err().to_string();
+
+        assert!(refused.contains("index.lock"), "{refused}");
+        assert_eq!(fs::read(dir.join(".git/index")).unwrap(), before);
+        assert!(dir.join(".git/index.lock").exists());
+    }
 }

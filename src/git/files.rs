@@ -6,7 +6,8 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::index::left_out_paths;
+use super::deep::{changed_since, is_too_deep};
+use super::index::{Scope, UntrackedMode, left_out_paths, status_items};
 use super::{Repo, folded, peeled_commit, peeled_tree};
 use crate::core::error::{Error, Result};
 
@@ -50,14 +51,8 @@ impl Repo {
     /// added, modified or type changed. A repository without a commit compares to nothing.
     pub fn staged_changes(&self, paths: &[&Path]) -> Result<Vec<TreeChange>> {
         let repo = self.open()?;
-        let head = match peeled_commit(&repo, "HEAD")? {
-            Some(head) => Some(peeled_tree(&repo, &head)?),
-            None => None,
-        };
-        let mut options = git2::DiffOptions::new();
-        options.include_typechange(true);
         let wanted = self.under_any(&repo, paths)?;
-        let diff = repo.diff_tree_to_index(head.as_ref(), None, Some(&mut options))?;
+        let diff = staged_diff(&repo)?;
         Ok(changes(&diff)
             .into_iter()
             .filter(|change| matches!(change.status, 'A' | 'M' | 'T') && wanted(&change.path))
@@ -97,11 +92,17 @@ impl Repo {
     pub fn changed_since_head(&self) -> Result<Vec<Vec<u8>>> {
         let repo = self.open()?;
         let head = peeled_tree(&repo, "HEAD")?;
-        let diff = repo.diff_tree_to_workdir_with_index(Some(&head), None)?;
+        let changed = match repo.diff_tree_to_workdir_with_index(Some(&head), None) {
+            Ok(diff) => changes(&diff)
+                .into_iter()
+                .map(|change| change.path)
+                .collect(),
+            Err(error) if is_too_deep(&error) => changed_since(&repo, &head)?,
+            Err(error) => return Err(error.into()),
+        };
         let left_out = left_out_paths(&repo)?;
-        Ok(changes(&diff)
+        Ok(changed
             .into_iter()
-            .map(|change| change.path)
             .filter(|path| !left_out.contains(path))
             .collect())
     }
@@ -116,18 +117,11 @@ impl Repo {
     /// So is an untracked directory holding only ignored paths, followed by those paths.
     pub fn ignored_entries(&self) -> Result<Vec<Vec<u8>>> {
         let repo = self.open()?;
-        let mut options = git2::StatusOptions::new();
-        options
-            .include_untracked(true)
-            .recurse_untracked_dirs(true)
-            .include_ignored(true)
-            .recurse_ignored_dirs(false);
-        let statuses = repo.statuses(Some(&mut options))?;
         let mut ignored = BTreeSet::new();
         let mut occupied = BTreeSet::new();
-        for entry in statuses.iter() {
-            let path = entry.path_bytes().to_vec();
-            if entry.status().is_ignored() && !is_nested_repo(&repo, &path) {
+        for item in status_items(&repo, UNTRACKED_AND_IGNORED)? {
+            let path = item.path;
+            if item.status.is_ignored() && !is_nested_repo(&repo, &path) {
                 ignored.insert(path);
             } else {
                 occupied.extend(ancestor_dirs(&path));
@@ -217,6 +211,18 @@ impl Repo {
     }
 }
 
+/// What is staged against HEAD, as a diff of HEAD's tree (none before the first commit) and
+/// the index.
+pub(super) fn staged_diff(repo: &git2::Repository) -> Result<git2::Diff<'_>> {
+    let head = match peeled_commit(repo, "HEAD")? {
+        Some(head) => Some(peeled_tree(repo, &head)?),
+        None => None,
+    };
+    let mut options = git2::DiffOptions::new();
+    options.include_typechange(true);
+    Ok(repo.diff_tree_to_index(head.as_ref(), None, Some(&mut options))?)
+}
+
 /// Whether anything `wanted` is staged against HEAD, a deletion included.
 fn staged_anything(repo: &git2::Repository, wanted: &impl Fn(&[u8]) -> bool) -> Result<bool> {
     let Some(head) = peeled_commit(repo, "HEAD")? else {
@@ -254,22 +260,24 @@ fn changes(diff: &git2::Diff<'_>) -> Vec<TreeChange> {
         .collect()
 }
 
+/// The status listing of the untracked and ignored files, each file of an untracked directory
+/// on its own.
+const UNTRACKED_AND_IGNORED: Scope = Scope {
+    untracked: UntrackedMode::All,
+    ignored: true,
+    staged: true,
+    renames: false,
+    submodules: true,
+};
+
 fn untracked_in(repo: &git2::Repository) -> Result<Vec<Vec<u8>>> {
-    let mut options = git2::StatusOptions::new();
-    options
-        .include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(true)
-        .recurse_ignored_dirs(false);
-    let statuses = repo.statuses(Some(&mut options))?;
-    Ok(statuses
-        .iter()
-        .filter(|entry| {
-            let status = entry.status();
-            (status.is_wt_new() && !status.is_index_new())
-                || (status.is_ignored() && is_nested_repo(repo, entry.path_bytes()))
+    Ok(status_items(repo, UNTRACKED_AND_IGNORED)?
+        .into_iter()
+        .filter(|item| {
+            (item.status.is_wt_new() && !item.status.is_index_new())
+                || (item.status.is_ignored() && is_nested_repo(repo, &item.path))
         })
-        .map(|entry| entry.path_bytes().to_vec())
+        .map(|item| item.path)
         .collect())
 }
 
@@ -283,7 +291,7 @@ pub(super) fn nested_repos(repo: &git2::Repository) -> Result<Vec<Vec<u8>>> {
 }
 
 /// The directories above `path`, each with its trailing slash, from the outermost down.
-fn ancestor_dirs(path: &[u8]) -> Vec<Vec<u8>> {
+pub(super) fn ancestor_dirs(path: &[u8]) -> Vec<Vec<u8>> {
     path.iter()
         .enumerate()
         .filter(|(at, byte)| **byte == b'/' && *at + 1 < path.len())

@@ -593,6 +593,39 @@ fn a_rebase_merge_commits_as_the_environment_names_the_committer() {
 }
 
 #[test]
+fn a_rebase_merge_commits_at_the_date_the_environment_names_as_git_does() {
+    // 1767225600 is 2026-01-01T00:00:00Z.
+    for date in [
+        "1767225600 +0000",
+        "@1767225600 +0000",
+        "2026-01-01T00:00:00Z",
+        "2026-01-01 00:00:00 +0000",
+        "2026-01-01 02:00:00 +0200",
+        "2025-12-31 19:00:00 -0500",
+    ] {
+        let env = setup();
+        let feat = add_branch(&env, "feat", "b.txt", "b\n");
+        advance_main(&env, "c.txt", "c\n");
+        git_ok(&env, &env.repo, &["switch", "-q", "feat"]);
+        fs::write(env.path("gitconfig"), "[init]\n\tdefaultBranch = main\n").unwrap();
+
+        let output = env
+            .bin(&env.repo)
+            .args(["pr", "--local"])
+            .args(merge_args(&feat, "feat", &["--method", "rebase"]))
+            .env("GIT_COMMITTER_NAME", "Env Person")
+            .env("GIT_COMMITTER_EMAIL", "env@example.org")
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{date}: {stderr}");
+        let made = git_ok(&env, &env.repo, &["log", "-1", "--format=%ct", "feat"]);
+        assert_eq!(made, "1767225600", "{date}");
+    }
+}
+
+#[test]
 fn a_wrong_sha_a_short_sha_and_a_branch_behind_the_target_are_refused() {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");

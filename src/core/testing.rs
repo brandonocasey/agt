@@ -100,6 +100,8 @@ impl Sandbox {
 fn hide_global_git_config() {
     static HIDDEN: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     HIDDEN.get_or_init(|| {
+        // Before the search path is emptied, or opening a repository would add the system ones.
+        crate::git::configure_libgit2();
         let empty = tempfile::tempdir().unwrap();
         for level in [
             git2::ConfigLevel::System,

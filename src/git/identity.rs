@@ -29,11 +29,11 @@ fn parse_date(text: &str) -> Result<git2::Time> {
     let invalid = || Error(format!("invalid date format: {text}"));
     let raw = text.strip_prefix('@').unwrap_or(text);
     if let Some((epoch, zone)) = raw.split_once(' ') {
-        let seconds = epoch.parse::<i64>().map_err(|_| invalid())?;
-        return Ok(git2::Time::new(
-            seconds,
-            zone_minutes(zone, false).ok_or_else(invalid)?,
-        ));
+        if let Ok(seconds) = epoch.parse::<i64>() {
+            let minutes = zone_minutes(zone, false).ok_or_else(invalid)?;
+            return Ok(git2::Time::new(seconds, minutes));
+        }
+        return spaced_date(text).ok_or_else(invalid);
     }
     let seconds = clock::parse(text).map_err(|_| invalid())?;
     let zone = if text.ends_with(['Z', 'z']) {
@@ -43,6 +43,16 @@ fn parse_date(text: &str) -> Result<git2::Time> {
             .and_then(|zone| zone_minutes(zone, true))
     };
     Ok(git2::Time::new(seconds, zone.ok_or_else(invalid)?))
+}
+
+/// A date written `YYYY-MM-DD HH:MM:SS +hhmm`, the form `git log --date=iso` prints.
+fn spaced_date(text: &str) -> Option<git2::Time> {
+    let [date, time, zone] = text.split(' ').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let minutes = zone_minutes(zone, false)?;
+    let local = clock::parse(&format!("{date}T{time}Z")).ok()?;
+    Some(git2::Time::new(local - i64::from(minutes) * 60, minutes))
 }
 
 /// The minutes east of UTC that `zone` (`+hhmm`, or `+hh:mm` with `colon`) names.

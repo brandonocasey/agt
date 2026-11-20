@@ -1022,6 +1022,118 @@ fn a_nested_repository_blocks_removal_in_plan_and_yes_alike() {
     assert_eq!(f.env.git(&["for-each-ref", "refs/agt/backups"]), "");
 }
 
+/// `levels` nested directories (`d1/d2/...`), deeper than libgit2's directory iterator goes.
+fn deep_dir(root: &Path, levels: usize) -> PathBuf {
+    (1..=levels).fold(root.to_owned(), |path, level| {
+        path.join(format!("d{level}"))
+    })
+}
+
+#[test]
+fn a_worktree_120_directories_deep_is_removed_and_restored_like_a_shallow_one() {
+    for (kind, levels) in [
+        ("tracked", 3),
+        ("tracked", 120),
+        ("edited", 3),
+        ("edited", 120),
+        ("staged", 3),
+        ("staged", 120),
+        ("ignored", 3),
+        ("ignored", 120),
+    ] {
+        let f = Fixture::new();
+        let dir = deep_dir(&f.wt, levels);
+        fs::create_dir_all(&dir).unwrap();
+        let name = if kind == "ignored" {
+            ".env"
+        } else {
+            "deep.txt"
+        };
+        fs::write(
+            dir.join(name),
+            if kind == "edited" { "old\n" } else { "deep\n" },
+        )
+        .unwrap();
+        match kind {
+            "tracked" | "edited" => {
+                wgit(&f.env, &f.wt, &["add", "-A"]);
+                wgit(&f.env, &f.wt, &["commit", "-q", "-m", "deep"]);
+                fs::write(dir.join(name), "deep\n").unwrap();
+            }
+            "staged" => {
+                wgit(&f.env, &f.wt, &["add", "-A"]);
+            }
+            _ => {}
+        }
+        let relative = dir.strip_prefix(&f.wt).unwrap().join(name);
+        let relative = relative.to_string_lossy().into_owned();
+        let path = f.wt.to_string_lossy().into_owned();
+
+        let plan = f.json(&["remove", &path]);
+        assert_eq!(plan["plan"], json!(true), "{kind} {levels}");
+        assert!(dir.join(name).exists(), "{kind} {levels}");
+        let removed = f.remove();
+
+        assert!(!f.wt.exists(), "{kind} {levels}");
+        assert!(!f.env.git(&["worktree", "list"]).contains("feat"));
+        let backup = read_backup(Path::new(removed["backup"].as_str().unwrap()));
+        if kind == "ignored" {
+            assert_eq!(removed["ignored_lost"], json!(["d1/"]), "{kind} {levels}");
+            assert!(!backup.files.contains_key(&relative), "{kind} {levels}");
+        } else {
+            assert_eq!(backup.files[&relative], b"deep\n", "{kind} {levels}");
+        }
+
+        let restored = f.json(&["restore", removed["id"].as_str().unwrap()]);
+        assert_eq!(restored["warnings"], json!([]), "{kind} {levels}");
+        if kind == "ignored" {
+            assert!(!dir.join(name).exists(), "{kind} {levels}");
+        } else {
+            assert_eq!(
+                fs::read(dir.join(name)).unwrap(),
+                b"deep\n",
+                "{kind} {levels}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_untracked_file_120_directories_deep_blocks_removal_until_forced() {
+    let f = Fixture::new();
+    let dir = deep_dir(&f.wt, 120);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("deep.txt"), "deep\n").unwrap();
+    let path = f.wt.to_string_lossy().into_owned();
+    for args in [vec!["remove", &path], vec!["remove", &path, "--yes"]] {
+        let output = f.agt(&f.env.repo, &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("d120/deep.txt"), "{error}");
+    }
+    assert!(dir.join("deep.txt").exists());
+
+    let removed = f.json(&["remove", &path, "--yes", "--force"]);
+
+    assert!(!f.wt.exists());
+    let backup = read_backup(Path::new(removed["backup"].as_str().unwrap()));
+    assert!(backup.files.keys().all(|name| !name.contains("deep.txt")));
+}
+
+#[test]
+fn a_nested_repository_120_directories_deep_blocks_removal() {
+    let f = Fixture::new();
+    nest(&f.env, &deep_dir(&f.wt, 120));
+    let path = f.wt.to_string_lossy().into_owned();
+    for args in [vec!["remove", &path], vec!["remove", &path, "--yes"]] {
+        let output = f.agt(&f.env.repo, &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("d120"), "{error}");
+    }
+    assert!(deep_dir(&f.wt, 120).join(".git").exists());
+}
+
 #[test]
 fn an_ignored_nested_repository_does_not_block_removal() {
     let f = Fixture::new();
@@ -1309,6 +1421,38 @@ fn remove_and_restore_leave_other_missing_worktrees_registered() {
     f.json(&["restore", id, "--path", &stale.to_string_lossy()]);
     assert!(stale.join("feature.txt").exists());
     assert!(admin("other").exists(), "restore pruned another worktree");
+}
+
+#[test]
+fn restore_keeps_the_registration_of_a_missing_locked_worktree() {
+    let f = Fixture::new();
+    let removed = f.remove();
+    let id = removed["id"].as_str().unwrap();
+    let away = f.env.path("trees/away");
+    f.env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "away",
+        &away.to_string_lossy(),
+    ]);
+    f.env.git(&[
+        "worktree",
+        "lock",
+        "--reason",
+        "on a usb disk",
+        &away.to_string_lossy(),
+    ]);
+    fs::remove_dir_all(&away).unwrap();
+
+    f.refuses(
+        &f.env.repo,
+        &["restore", id, "--path", &away.to_string_lossy()],
+        "locked",
+    );
+
+    assert!(f.env.repo.join(".git/worktrees/away/locked").exists());
 }
 
 /// A child process killed and reaped when dropped, with its whole process group when it leads

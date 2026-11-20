@@ -9,7 +9,9 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::index::{SKIP_WORKTREE, STAGE_MASK, copy_entry, refreshed_index};
+use super::index::{
+    SKIP_WORKTREE, STAGE_MASK, copy_entry, modified_tracked_paths, refreshed_index,
+};
 use super::{GITLINK_MODE, Repo};
 use crate::core::error::{Error, Result, ctx, fail};
 
@@ -123,9 +125,7 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
     Ok(())
 }
 
-/// The tracked files that differ from the index once the checkout filters (line endings,
-/// attributes) are applied to them, looked up on first use. Reads only; nothing is written to
-/// the index or the object database.
+/// The tracked files that differ from the index, looked up on first use.
 struct WorkTreeChanges<'r> {
     repo: &'r git2::Repository,
     paths: Option<HashSet<Vec<u8>>>,
@@ -134,20 +134,7 @@ struct WorkTreeChanges<'r> {
 impl WorkTreeChanges<'_> {
     fn contains(&mut self, path: &[u8]) -> Result<bool> {
         if self.paths.is_none() {
-            let mut options = git2::StatusOptions::new();
-            options
-                .show(git2::StatusShow::Workdir)
-                .include_untracked(false)
-                .include_ignored(false)
-                .exclude_submodules(true);
-            let statuses = self.repo.statuses(Some(&mut options))?;
-            self.paths = Some(
-                statuses
-                    .iter()
-                    .filter(|entry| !entry.status().is_empty())
-                    .map(|entry| entry.path_bytes().to_vec())
-                    .collect(),
-            );
+            self.paths = Some(modified_tracked_paths(self.repo)?);
         }
         Ok(self
             .paths
@@ -501,6 +488,28 @@ mod tests {
                 state(&sandbox, &theirs),
                 "disable, cone={cone}"
             );
+        }
+    }
+
+    #[test]
+    fn an_edited_assume_unchanged_file_outside_the_patterns_stays_through_a_reapply() {
+        for cone in [true, false] {
+            let sandbox = Sandbox::new();
+            let (ours, theirs) = pair(&sandbox, cone);
+            for dir in [&ours, &theirs] {
+                sandbox.git(dir, &["update-index", "--assume-unchanged", "a/deep/x.txt"]);
+                fs::write(dir.join("a/deep/x.txt"), "edited\n").unwrap();
+            }
+
+            Repo::at(&ours).sparse_reapply().unwrap();
+            sandbox.git(&theirs, &["sparse-checkout", "reapply"]);
+
+            let reapplied = state(&sandbox, &theirs);
+            assert!(
+                reapplied.contains("./a/deep/x.txt"),
+                "git keeps the edited file: {reapplied}"
+            );
+            assert_eq!(state(&sandbox, &ours), reapplied, "cone={cone}");
         }
     }
 

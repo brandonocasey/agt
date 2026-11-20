@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use super::index::{STAGE_MASK, copy_entry};
+use super::index::{STAGE_MASK, conflict_path, copy_entry};
 use super::patch_id;
 use super::{CommitInfo, LogEntry, Repo, commit_id, peeled_commit, peeled_tree, subject_of};
 use crate::core::error::{Error, Result, fail};
@@ -280,12 +280,11 @@ fn settle(
     index: &mut git2::Index,
     conflict: &git2::IndexConflict,
 ) -> Result<String> {
-    let side = conflict.our.as_ref().or(conflict.their.as_ref());
-    let Some(side) = side.or(conflict.ancestor.as_ref()) else {
+    let Some(path) = conflict_path(conflict) else {
         return fail("a merge conflict names no path");
     };
-    let text = String::from_utf8_lossy(&side.path).into_owned();
-    index.conflict_remove(Path::new(OsStr::from_bytes(&side.path)))?;
+    let text = String::from_utf8_lossy(path).into_owned();
+    index.conflict_remove(Path::new(OsStr::from_bytes(path)))?;
     let (Some(our), Some(their)) = (&conflict.our, &conflict.their) else {
         if let Some(kept) = side_entry(conflict) {
             index.add(&kept)?;

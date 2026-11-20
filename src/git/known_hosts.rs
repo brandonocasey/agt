@@ -50,11 +50,13 @@ pub(super) fn check(files: &[PathBuf], host: &str, port: u16, key: &[u8]) -> Res
     };
     let mut verdict = Verdict::Unknown;
     for file in files {
-        let text = match fs::read_to_string(file) {
-            Ok(text) => text,
+        let bytes = match fs::read(file) {
+            Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(Error(format!("read {}: {error}", file.display()))),
         };
+        // ssh skips what it cannot read; a stray byte must not fail every host.
+        let text = String::from_utf8_lossy(&bytes);
         for line in text.lines() {
             match line_verdict(line, &name, key) {
                 Verdict::Revoked => return Ok(Verdict::Revoked),
@@ -332,6 +334,21 @@ mod tests {
         assert_eq!(
             check(&files, "later.example.com", 22, &blob).unwrap(),
             Verdict::Revoked
+        );
+    }
+
+    #[test]
+    fn a_stray_non_utf8_byte_does_not_hide_the_hosts_of_a_file() {
+        let sandbox = Sandbox::new();
+        let (pair, blob) = key(&sandbox, "offered");
+        let file = sandbox.path().join("known_hosts");
+        let mut text = b"# comment \xff\xfe\n".to_vec();
+        text.extend(format!("listed.example.com {pair}\n").bytes());
+        fs::write(&file, text).unwrap();
+
+        assert_eq!(
+            check(&[file], "listed.example.com", 22, &blob).unwrap(),
+            Verdict::Known
         );
     }
 

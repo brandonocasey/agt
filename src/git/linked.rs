@@ -7,6 +7,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use super::deep::{check_out, is_too_deep};
 use super::index::{SKIP_WORKTREE, refreshed_index};
 use super::{Repo, commit_id, configured, sparse, without_trailing_slash};
 use crate::core::error::{Error, Result, ctx};
@@ -64,17 +65,32 @@ impl Repo {
     }
 
     /// Removes the linked worktree at `path` with its files and its registration, whatever it
-    /// holds (`git worktree remove --force`).
+    /// holds, but not when it is locked (`git worktree remove --force`). The files go first, so
+    /// a failure leaves a registration that a second call removes.
     pub fn remove_worktree(&self, path: &Path) -> Result<()> {
         let repo = self.open_refs()?;
         let wanted = comparable(path);
         for name in repo.worktrees()?.iter().flatten() {
             let linked = repo.find_worktree(name)?;
-            if comparable(Path::new(linked.path())) != wanted {
+            let work_tree = Path::new(linked.path());
+            if comparable(work_tree) != wanted {
                 continue;
             }
+            if let git2::WorktreeLockStatus::Locked(reason) = linked.is_locked()? {
+                return Err(Error(match reason {
+                    Some(reason) => {
+                        format!("cannot remove a locked working tree, lock reason: {reason}")
+                    }
+                    None => "cannot remove a locked working tree".to_owned(),
+                }));
+            }
+            // libgit2 deletes at most 100 directory levels, and no work tree without a `.git`.
+            if fs::symlink_metadata(work_tree).is_ok() {
+                fs::remove_dir_all(work_tree)
+                    .map_err(ctx(format!("remove {}", work_tree.display())))?;
+            }
             let mut options = git2::WorktreePruneOptions::new();
-            options.valid(true).locked(true).working_tree(true);
+            options.valid(true);
             linked.prune(Some(&mut options))?;
             return Ok(());
         }
@@ -99,8 +115,10 @@ impl Repo {
         for path in paths {
             options.path(path.as_slice());
         }
-        repo.checkout_tree(commit.as_object(), Some(&mut options))?;
-        Ok(())
+        match repo.checkout_tree(commit.as_object(), Some(&mut options)) {
+            Err(error) if is_too_deep(&error) => check_out(&repo, &commit.tree()?, paths),
+            checked => Ok(checked?),
+        }
     }
 
     /// Removes from the index the `deleted` paths that a sparse checkout marked skip-worktree
@@ -366,7 +384,7 @@ fn update_submodule(
     }
     let config = repo.config()?;
     let mut options = git2::SubmoduleUpdateOptions::new();
-    options.fetch(super::network::fetch_options(&config, &url));
+    options.fetch(super::network::fetch_options(&config, &url)?);
     submodule
         .update(true, Some(&mut options))
         .map_err(super::network::explain)?;
@@ -459,8 +477,10 @@ fn is_file_transport(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Path;
 
-    use super::{Checkout, Head, link_worktree};
+    use super::Checkout;
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
     use crate::git::fixtures::commit;
@@ -513,37 +533,122 @@ mod tests {
         assert_eq!(repo.worktrees().unwrap().len(), 2);
     }
 
+    /// A repository with a linked worktree `linked` on a new branch, and the worktree's path.
+    fn with_linked(sandbox: &Sandbox) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = sandbox.repo();
+        commit(sandbox, &dir, &[("a.txt", "a\n")], "one");
+        let linked = sandbox.path().join("linked");
+        Repo::at(&dir)
+            .add_worktree(
+                &linked,
+                &Checkout::NewBranch {
+                    name: "feat",
+                    at: "HEAD",
+                },
+            )
+            .unwrap();
+        (dir, linked)
+    }
+
     #[test]
-    fn a_failed_link_removes_only_the_directories_it_created() {
+    fn a_locked_worktree_is_not_removed_as_git_refuses() {
         let sandbox = Sandbox::with_repo();
-        let admin = sandbox.path().join("repo/.git/worktrees/feat");
-        let taken = sandbox.path().join("taken");
-        let head = Head::Branch("refs/heads/feat".to_owned());
-        fs::create_dir_all(&taken).unwrap();
-        fs::write(taken.join("work.txt"), "winner\n").unwrap();
+        let (dir, linked) = with_linked(&sandbox);
+        sandbox.git(
+            &dir,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "on a usb disk",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let oracle = sandbox
+            .command("git")
+            .args(["worktree", "remove", "--force", linked.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!oracle.status.success(), "git removed a locked worktree");
 
-        let error = link_worktree(&admin, &taken, &head).unwrap_err();
+        let refused = Repo::at(&dir).remove_worktree(&linked).unwrap_err();
 
-        assert!(error.0.contains("create"), "{error}");
+        assert!(refused.0.contains("locked"), "{refused}");
+        assert!(refused.0.contains("on a usb disk"), "{refused}");
+        assert!(linked.join("a.txt").is_file());
+        assert_eq!(Repo::at(&dir).worktrees().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_worktree_nested_deeper_than_libgit2_deletes_is_removed_whole() {
+        let sandbox = Sandbox::with_repo();
+        let (dir, linked) = with_linked(&sandbox);
+        let deep = (0..150).fold(linked.clone(), |path, _| path.join("d"));
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf.txt"), "leaf\n").unwrap();
+
+        Repo::at(&dir).remove_worktree(&linked).unwrap();
+
+        assert!(!linked.exists());
+        assert_eq!(Repo::at(&dir).worktrees().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn checking_out_a_path_nested_deeper_than_libgit2_walks_replaces_the_file() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let deep = (1..=110)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let (file, script, link) = (
+            format!("{deep}/a.sh"),
+            format!("{deep}/b.txt"),
+            format!("{deep}/link"),
+        );
+        commit(
+            &sandbox,
+            &dir,
+            &[(&file, "#!/bin/sh\n"), (&script, "b\n")],
+            "one",
+        );
+        std::os::unix::fs::symlink("b.txt", dir.join(&link)).unwrap();
+        sandbox.git(&dir, &["add", "-A"]);
+        sandbox.git(&dir, &["update-index", "--chmod=+x", &file]);
+        sandbox.git(&dir, &["commit", "-q", "-m", "link"]);
+        fs::write(dir.join(&file), "changed\n").unwrap();
+        fs::set_permissions(dir.join(&file), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_file(dir.join(&script)).unwrap();
+        fs::remove_file(dir.join(&link)).unwrap();
+        fs::write(dir.join(&link), "not a link\n").unwrap();
+        let paths = [file.clone(), script.clone(), link.clone()].map(String::into_bytes);
+
+        Repo::at(&dir).checkout_paths("HEAD", &paths).unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), "#!/bin/sh\n");
+        assert_ne!(fs::metadata(dir.join(&file)).unwrap().mode() & 0o111, 0);
+        assert_eq!(fs::read_to_string(dir.join(&script)).unwrap(), "b\n");
+        assert_eq!(fs::read_link(dir.join(&link)).unwrap(), Path::new("b.txt"));
+        assert_eq!(sandbox.git_output(&dir, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn a_worktree_that_lost_its_git_file_is_removed_with_its_directory() {
+        let sandbox = Sandbox::with_repo();
+        let (dir, linked) = with_linked(&sandbox);
+        fs::remove_file(linked.join(".git")).unwrap();
+        fs::write(linked.join("kept.txt"), "x\n").unwrap();
+
+        Repo::at(&dir).remove_worktree(&linked).unwrap();
+
+        assert!(!linked.exists());
+        assert_eq!(Repo::at(&dir).worktrees().unwrap().len(), 1);
         assert_eq!(
-            fs::read_to_string(taken.join("work.txt")).unwrap(),
-            "winner\n"
+            sandbox
+                .git_output(&dir, &["worktree", "list"])
+                .lines()
+                .count(),
+            1
         );
-        assert!(
-            !admin.exists(),
-            "this call's admin directory was left behind"
-        );
-
-        fs::create_dir_all(&admin).unwrap();
-        fs::write(admin.join("HEAD"), "ref: refs/heads/winner\n").unwrap();
-        let fresh = sandbox.path().join("fresh");
-
-        link_worktree(&admin, &fresh, &head).unwrap_err();
-
-        assert!(
-            admin.join("HEAD").is_file(),
-            "another call's admin directory was removed"
-        );
-        assert!(!fresh.exists());
     }
 }

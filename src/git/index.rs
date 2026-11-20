@@ -7,12 +7,13 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use super::deep::{is_too_deep, walk};
 use super::files::{is_nested_repo, nested_repos};
 use super::{GITLINK_MODE, Gitlink, Repo, StatusEntry};
 use crate::core::error::{Error, Result};
 
 /// `GIT_INDEX_ENTRY_VALID`: the file is assumed unchanged.
-const ASSUME_UNCHANGED: u16 = 0x8000;
+pub(super) const ASSUME_UNCHANGED: u16 = 0x8000;
 /// `GIT_INDEX_ENTRY_SKIP_WORKTREE`, in the extended flags.
 pub(super) const SKIP_WORKTREE: u16 = 1 << 14;
 /// The stage bits of an index entry's flags.
@@ -34,10 +35,29 @@ pub enum SubmoduleDirt {
 
 /// How `git status` lists untracked files, from `status.showUntrackedFiles`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum UntrackedMode {
+pub(super) enum UntrackedMode {
     No,
     Normal,
     All,
+}
+
+/// What a status listing holds; the options of [`git2::StatusOptions`] that callers vary.
+#[derive(Clone, Copy)]
+pub(super) struct Scope {
+    pub untracked: UntrackedMode,
+    pub ignored: bool,
+    /// The changes staged against HEAD, besides those of the work tree against the index.
+    pub staged: bool,
+    pub renames: bool,
+    pub submodules: bool,
+}
+
+/// One path of a status listing.
+pub(super) struct StatusItem {
+    pub path: Vec<u8>,
+    /// The path git prints: the new path of a rename.
+    pub shown: Vec<u8>,
+    pub status: git2::Status,
 }
 
 impl Repo {
@@ -164,14 +184,17 @@ impl Repo {
             if let Some(message) = refused {
                 return Err(Error(message));
             }
-            added?;
+            match added {
+                Err(error) if is_too_deep(&error) => stage_walked(repo, index, UntrackedMode::All)?,
+                added => added?,
+            }
             for dir in nested_repos(repo)? {
                 let path = Path::new(OsStr::from_bytes(&dir[..dir.len() - 1]));
                 index
                     .add_path(path)
                     .map_err(|error| Error(format!("{}: {error}", path.display())))?;
             }
-            index.update_all(["*"], None)?;
+            update_tracked(repo, index)?;
             restore_entries(index, &absent)?;
             Ok(index.write_tree_to(repo)?.to_string())
         })
@@ -185,7 +208,7 @@ impl Repo {
         self.with_scratch_index(|repo, index| {
             unhide(repo, index)?;
             let absent = absent_hidden(repo, index);
-            index.update_all(["*"], None)?;
+            update_tracked(repo, index)?;
             restore_entries(index, &absent)?;
             Ok(index.write_tree_to(repo)?.to_string())
         })
@@ -218,17 +241,110 @@ fn hidden_edits_in(repo: &git2::Repository) -> Result<Vec<String>> {
         if flagged.is_empty() {
             return Ok(Vec::new());
         }
-        let mut options = git2::DiffOptions::new();
-        let diff = repo.diff_index_to_workdir(Some(index), Some(&mut options))?;
-        Ok(diff
-            .deltas()
-            .map(|delta| {
-                let path = delta.new_file().path_bytes().unwrap_or_default();
-                String::from_utf8_lossy(path).into_owned()
-            })
-            .filter(|name| flagged.contains(name))
+        let changed = changed_in_work_tree(repo)?;
+        Ok(flagged
+            .into_iter()
+            .filter(|name| changed.contains(name.as_bytes()))
             .collect())
     })
+}
+
+/// The tracked files that differ from the index once the checkout filters are applied to them,
+/// hidden or not. Reads only; nothing is written to the index or the object database.
+pub(super) fn modified_tracked_paths(repo: &git2::Repository) -> Result<HashSet<Vec<u8>>> {
+    scratch_index(repo, |repo, index| {
+        unhide(repo, index)?;
+        changed_in_work_tree(repo)
+    })
+}
+
+/// The tracked files whose work tree file differs from the index entry, deleted ones included.
+fn changed_in_work_tree(repo: &git2::Repository) -> Result<HashSet<Vec<u8>>> {
+    let scope = Scope {
+        untracked: UntrackedMode::No,
+        ignored: false,
+        staged: false,
+        renames: false,
+        submodules: false,
+    };
+    Ok(status_items(repo, scope)?
+        .into_iter()
+        .filter(|item| !item.status.is_empty())
+        .map(|item| item.path)
+        .collect())
+}
+
+/// Stages the changes of the tracked files in the work tree into `index`, as `git add -u` does.
+fn update_tracked(repo: &git2::Repository, index: &mut git2::Index) -> Result<()> {
+    match index.update_all(["*"], None) {
+        Err(error) if is_too_deep(&error) => stage_walked(repo, index, UntrackedMode::No),
+        updated => Ok(updated?),
+    }
+}
+
+/// What [`status_items`] lists for `scope`: libgit2's status, or the scan in `deep.rs` for a
+/// work tree nested too deep for libgit2's directory iterator.
+pub(super) fn status_items(repo: &git2::Repository, scope: Scope) -> Result<Vec<StatusItem>> {
+    let mut options = git2::StatusOptions::new();
+    options
+        .show(if scope.staged {
+            git2::StatusShow::IndexAndWorkdir
+        } else {
+            git2::StatusShow::Workdir
+        })
+        .include_untracked(scope.untracked != UntrackedMode::No)
+        .recurse_untracked_dirs(scope.untracked == UntrackedMode::All)
+        .include_ignored(scope.ignored)
+        .recurse_ignored_dirs(false)
+        .exclude_submodules(!scope.submodules)
+        .renames_head_to_index(scope.renames)
+        .renames_index_to_workdir(scope.renames);
+    match repo.statuses(Some(&mut options)) {
+        Ok(statuses) => Ok(statuses
+            .iter()
+            .map(|entry| StatusItem {
+                path: entry.path_bytes().to_vec(),
+                shown: entry_path(&entry).to_vec(),
+                status: entry.status(),
+            })
+            .collect()),
+        Err(error) if is_too_deep(&error) => walk(repo, scope),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Stages what the work tree holds into `index`, for a tree libgit2's `add_all` and `update_all`
+/// cannot walk: the files changed or gone, and the untracked ones `untracked` lists. A nested
+/// repository is left to the caller.
+fn stage_walked(
+    repo: &git2::Repository,
+    index: &mut git2::Index,
+    untracked: UntrackedMode,
+) -> Result<()> {
+    let scope = Scope {
+        untracked,
+        ignored: false,
+        staged: false,
+        renames: false,
+        submodules: true,
+    };
+    for item in walk(repo, scope)? {
+        if item.path.ends_with(b"/") || item.status.is_conflicted() {
+            continue;
+        }
+        let path = Path::new(OsStr::from_bytes(&item.path));
+        if item.status.is_wt_deleted() {
+            index.remove_path(path)?;
+            continue;
+        }
+        if let Some(message) = required_filter(repo, path) {
+            return Err(Error(message));
+        }
+        index
+            .add_path(path)
+            .map_err(|error| Error(format!("{}: {error}", path.display())))?;
+    }
+    Ok(())
 }
 
 /// The paths that count as a change: the hidden edits and what `git status` lists.
@@ -305,7 +421,7 @@ fn restore_entries(index: &mut git2::Index, entries: &[git2::IndexEntry]) -> Res
     Ok(())
 }
 
-fn is_hidden(entry: &git2::IndexEntry) -> bool {
+pub(super) fn is_hidden(entry: &git2::IndexEntry) -> bool {
     entry.flags & ASSUME_UNCHANGED != 0 || entry.flags_extended & SKIP_WORKTREE != 0
 }
 
@@ -341,24 +457,23 @@ fn dirty_submodules(repo: &git2::Repository) -> Result<Vec<String>> {
 
 /// The status entries of `repo`, as `git status --porcelain=v1` columns.
 fn listed(repo: &git2::Repository, mode: UntrackedMode, renames: bool) -> Result<Vec<StatusEntry>> {
-    let mut options = git2::StatusOptions::new();
-    options
-        .include_untracked(mode != UntrackedMode::No)
-        .recurse_untracked_dirs(mode == UntrackedMode::All)
-        .include_ignored(mode != UntrackedMode::No)
-        .recurse_ignored_dirs(false)
-        .renames_head_to_index(renames)
-        .renames_index_to_workdir(renames);
-    let statuses = repo.statuses(Some(&mut options))?;
+    let scope = Scope {
+        untracked: mode,
+        ignored: mode != UntrackedMode::No,
+        staged: true,
+        renames,
+        submodules: true,
+    };
+    let items = status_items(repo, scope)?;
     let conflicts = conflict_columns(repo)?;
     let index = repo.index()?;
     let mut found = Vec::new();
-    for entry in statuses.iter() {
-        let mut flags = entry.status();
+    for item in items {
+        let mut flags = item.status;
         // A file a sparse checkout left out is not a deletion.
         if flags.is_wt_deleted()
             && index
-                .get_path(Path::new(OsStr::from_bytes(entry.path_bytes())), 0)
+                .get_path(Path::new(OsStr::from_bytes(&item.path)), 0)
                 .is_some_and(|hidden| is_hidden(&hidden))
         {
             flags.remove(git2::Status::WT_DELETED);
@@ -366,7 +481,7 @@ fn listed(repo: &git2::Repository, mode: UntrackedMode, renames: bool) -> Result
                 continue;
             }
         }
-        let path = String::from_utf8_lossy(entry_path(&entry)).into_owned();
+        let path = String::from_utf8_lossy(&item.shown).into_owned();
         if flags.is_conflicted() {
             let (staged, unstaged) = conflicts
                 .iter()
@@ -378,7 +493,7 @@ fn listed(repo: &git2::Repository, mode: UntrackedMode, renames: bool) -> Result
                 path,
             });
         } else if (flags.is_wt_new() && !flags.is_index_new())
-            || (flags.is_ignored() && is_nested_repo(repo, entry.path_bytes()))
+            || (flags.is_ignored() && is_nested_repo(repo, &item.path))
         {
             found.push(StatusEntry {
                 staged: b'?',
@@ -445,12 +560,9 @@ fn conflict_columns(repo: &git2::Repository) -> Result<Vec<(String, u8, u8)>> {
     let mut columns = Vec::new();
     for conflict in index.conflicts()? {
         let conflict = conflict?;
-        let side = conflict
-            .our
-            .as_ref()
-            .or(conflict.their.as_ref())
-            .or(conflict.ancestor.as_ref());
-        let Some(side) = side else { continue };
+        let Some(path) = conflict_path(&conflict) else {
+            continue;
+        };
         let (staged, unstaged) = match (
             conflict.ancestor.is_some(),
             conflict.our.is_some(),
@@ -464,13 +576,20 @@ fn conflict_columns(repo: &git2::Repository) -> Result<Vec<(String, u8, u8)>> {
             (false, true, false) => (b'A', b'U'),
             _ => (b'U', b'A'),
         };
-        columns.push((
-            String::from_utf8_lossy(&side.path).into_owned(),
-            staged,
-            unstaged,
-        ));
+        columns.push((String::from_utf8_lossy(path).into_owned(), staged, unstaged));
     }
     Ok(columns)
+}
+
+/// The path of a conflicted file, from the side that still has it: ours, else theirs, else the
+/// ancestor.
+pub(super) fn conflict_path(conflict: &git2::IndexConflict) -> Option<&[u8]> {
+    let side = conflict
+        .our
+        .as_ref()
+        .or(conflict.their.as_ref())
+        .or(conflict.ancestor.as_ref())?;
+    Some(&side.path)
 }
 
 /// A copy of an index entry, which libgit2 does not make clonable.
@@ -674,6 +793,134 @@ mod tests {
                     .lines()
                     .any(|line| line.starts_with("160000") && line.ends_with(gitlink)),
                 "{listing}"
+            );
+        }
+    }
+
+    /// Builds every kind of change in the directory `levels` deep and returns that directory.
+    fn mixed_changes(sandbox: &Sandbox, levels: usize) -> String {
+        let dir = (1..=levels)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let script = format!(
+            "set -e
+mkdir -p {dir} && cd {dir}
+printf '*.log\\nbuild/\\n' > .gitignore
+for name in clean edited staged both gone removed moved assumed; do echo $name > $name.txt; done
+echo '#!/bin/sh' > run.sh
+echo target > link
+git add -A && git commit -q -m base
+echo more >> edited.txt
+echo more >> staged.txt && git add staged.txt
+echo more >> both.txt && git add both.txt && echo again >> both.txt
+rm gone.txt
+git rm -q removed.txt
+git mv moved.txt renamed.txt
+chmod +x run.sh
+rm link && ln -s clean.txt link
+echo new > added.txt && git add added.txt
+echo new > new.txt
+mkdir -p fresh/sub && echo a > fresh/a.txt && echo b > fresh/sub/b.txt
+echo log > x.log
+mkdir build && echo o > build/out.o
+mkdir only-ignored && echo y > only-ignored/y.log
+mkdir nested && (cd nested && git init -q && git commit -q --allow-empty -m n)
+echo more >> assumed.txt && git update-index --assume-unchanged assumed.txt"
+        );
+        sandbox.shell_output(&sandbox.repo(), &script);
+        dir
+    }
+
+    fn git_lines(sandbox: &Sandbox, script: &str) -> Vec<String> {
+        sandbox
+            .shell_output(&sandbox.repo(), script)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn git_sorted(sandbox: &Sandbox, script: &str) -> Vec<String> {
+        let mut lines = git_lines(sandbox, script);
+        lines.sort();
+        lines
+    }
+
+    fn sorted(paths: Vec<Vec<u8>>) -> Vec<String> {
+        let mut paths: Vec<String> = paths
+            .into_iter()
+            .map(|path| String::from_utf8(path).unwrap())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// libgit2's directory iterator stops 100 levels down; a tree below that reads as git reads it.
+    #[test]
+    fn a_work_tree_nested_past_the_iterator_limit_reads_as_git_reads_it() {
+        for levels in [1, 100] {
+            let sandbox = Sandbox::with_repo();
+            sandbox.git(
+                &sandbox.repo(),
+                &["commit", "-q", "--allow-empty", "-m", "root"],
+            );
+            let dir = mixed_changes(&sandbox, levels);
+            let repo = Repo::at(sandbox.repo());
+
+            let mut status: Vec<String> = repo
+                .status(true, SubmoduleDirt::Report)
+                .unwrap()
+                .into_iter()
+                .map(|entry| {
+                    format!(
+                        "{}{} {}",
+                        entry.staged as char, entry.unstaged as char, entry.path
+                    )
+                })
+                .collect();
+            status.sort();
+            assert_eq!(
+                status,
+                git_sorted(&sandbox, "git status --porcelain=v1 -uall --no-renames"),
+                "status at {levels}"
+            );
+            assert_eq!(
+                sorted(repo.untracked_files().unwrap()),
+                git_sorted(&sandbox, "git ls-files -o --exclude-standard"),
+                "untracked at {levels}"
+            );
+            assert_eq!(
+                sorted(repo.ignored_entries().unwrap()),
+                git_sorted(
+                    &sandbox,
+                    "git ls-files -o -i --exclude-standard --directory"
+                ),
+                "ignored at {levels}"
+            );
+            assert_eq!(
+                sorted(repo.changed_since_head().unwrap()),
+                git_sorted(&sandbox, "git diff HEAD --name-only --no-renames"),
+                "changed at {levels}"
+            );
+            let oracle = format!(
+                "cp .git/index '{0}/oracle-index' && GIT_INDEX_FILE='{0}/oracle-index' git add -A && GIT_INDEX_FILE='{0}/oracle-index' git write-tree",
+                sandbox.path().display()
+            );
+            assert_eq!(
+                repo.worktree_tree().unwrap(),
+                git_lines(&sandbox, &oracle)[0],
+                "tree at {levels}"
+            );
+            let shown = git_lines(&sandbox, "git status --porcelain").len();
+            assert_eq!(
+                repo.uncommitted_count().unwrap(),
+                shown + 1,
+                "count at {levels}"
+            );
+            assert_eq!(
+                repo.hidden_edits().unwrap(),
+                [format!("{dir}/assumed.txt")],
+                "hidden edits at {levels}"
             );
         }
     }

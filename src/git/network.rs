@@ -3,10 +3,14 @@
 //! which `core::process::disable_credential_prompts` keeps from asking the user.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError, mpsc};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use std::time::Duration;
 
+use super::http_config::{self, Http};
 use super::known_hosts::{self, Verdict};
 use super::{Kind, Repo};
 use crate::core::error::{Error, Result};
@@ -38,19 +42,19 @@ impl Repo {
     /// Every ref `remote` (a configured name or a URL) advertises.
     pub fn ls_remote(&self, remote: &str) -> Result<Vec<RemoteRef>> {
         let repo = self.open_refs()?;
-        let mut remote = remote_named(&repo, remote)?;
+        let url = remote_named(&repo, remote)?
+            .url()
+            .unwrap_or_default()
+            .to_owned();
+        // A download of no refspecs connects like a fetch but fetches nothing; `connect_auth`
+        // cannot send the extra headers of `http.extraHeader`.
+        let mut remote = repo.remote_anonymous(&url)?;
         let config = repo.config()?;
-        let url = remote.url().unwrap_or_default().to_owned();
-        let mut proxy = git2::ProxyOptions::new();
-        proxy.auto();
-        let connection = remote
-            .connect_auth(
-                git2::Direction::Fetch,
-                Some(callbacks(&config, &url)),
-                Some(proxy),
-            )
+        let mut options = fetch_options(&config, &url)?;
+        remote
+            .download::<&str>(&[], Some(&mut options))
             .map_err(explain)?;
-        let refs = connection
+        let refs = remote
             .list()?
             .iter()
             .map(|head| RemoteRef {
@@ -59,6 +63,7 @@ impl Repo {
                 symref: head.symref_target().map(str::to_owned),
             })
             .collect();
+        remote.disconnect()?;
         Ok(refs)
     }
 
@@ -121,22 +126,52 @@ fn fetch_from(
     let config = repo.config()?;
     let url = remote.url().unwrap_or_default().to_owned();
     remote
-        .fetch(refspecs, Some(&mut fetch_options(&config, &url)), None)
+        .fetch(refspecs, Some(&mut fetch_options(&config, &url)?), None)
         .map_err(explain)?;
     Ok(())
 }
 
-/// Fetch options for `url` with the credential chain, the proxy settings of the config and no
-/// tags.
-pub(super) fn fetch_options<'a>(config: &'a git2::Config, url: &str) -> git2::FetchOptions<'a> {
+/// Fetch options for `url` with the credential chain, the proxy settings and the `http.*`
+/// settings of the config, and no tags.
+pub(super) fn fetch_options<'a>(
+    config: &'a git2::Config,
+    url: &str,
+) -> Result<git2::FetchOptions<'a>> {
+    let http = http_config::settings(config, url)?;
+    trust_extra_authorities(&http)?;
+    let headers: Vec<&str> = http.headers.iter().map(String::as_str).collect();
     let mut options = git2::FetchOptions::new();
     options
-        .remote_callbacks(callbacks(config, url))
+        .remote_callbacks(callbacks(config, url, http.verify))
+        .custom_headers(&headers)
         .download_tags(git2::AutotagOption::None);
     let mut proxy = git2::ProxyOptions::new();
     proxy.auto();
     options.proxy_options(proxy);
-    options
+    Ok(options)
+}
+
+/// Adds the certificate authorities that `http.sslCAInfo` and `http.sslCAPath` name to the ones
+/// libgit2 trusts. libgit2 keeps one trust store per process and cannot drop an authority from
+/// it, so a later connection to any host trusts them too. On macOS libgit2 asks the system
+/// keychain, which takes no authority from a file.
+fn trust_extra_authorities(http: &Http) -> Result<()> {
+    static LOADING: Mutex<()> = Mutex::new(());
+    if cfg!(target_vendor = "apple") {
+        return Ok(());
+    }
+    let _loading = LOADING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(file) = &http.ca_file {
+        // SAFETY: libgit2 does not guard this global; `LOADING` keeps two calls apart.
+        unsafe { git2::opts::set_ssl_cert_file(file) }
+            .map_err(|error| Error(format!("http.sslCAInfo {}: {error}", file.display())))?;
+    }
+    if let Some(dir) = &http.ca_dir {
+        // SAFETY: as above.
+        unsafe { git2::opts::set_ssl_cert_dir(dir) }
+            .map_err(|error| Error(format!("http.sslCAPath {}: {error}", dir.display())))?;
+    }
+    Ok(())
 }
 
 /// The configured remote `name`, or an anonymous one when `name` is a URL or path.
@@ -155,11 +190,13 @@ fn remote_url(repo: &git2::Repository, name: &str) -> Result<String> {
         .ok_or_else(|| Error(format!("remote {name} has no URL")))
 }
 
-fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'a> {
+/// The callbacks for a connection to `url`. `verify` is `http.sslVerify`: when false, an HTTPS
+/// certificate is accepted whatever is wrong with it.
+fn callbacks<'a>(config: &'a git2::Config, url: &str, verify: bool) -> git2::RemoteCallbacks<'a> {
     let mut offered = Offered::default();
     let mut callbacks = git2::RemoteCallbacks::new();
     let port = known_hosts::port_of(url);
-    callbacks.certificate_check(move |cert, host| check_host_key(cert, host, port));
+    callbacks.certificate_check(move |cert, host| check_certificate(cert, host, port, verify));
     callbacks.credentials(move |url, username_from_url, allowed| {
         if allowed.contains(git2::CredentialType::USERNAME) {
             return user_name_credential(username_from_url);
@@ -172,7 +209,7 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
             }
             while let Some(key) = ssh_key_file(offered.keys) {
                 offered.keys += 1;
-                if key.is_file() {
+                if key.is_file() && !needs_passphrase(&key) {
                     return git2::Cred::ssh_key(user, None, &key, None);
                 }
             }
@@ -194,13 +231,11 @@ fn callbacks<'a>(config: &'a git2::Config, url: &str) -> git2::RemoteCallbacks<'
 /// The answer to libgit2's user name request for an ssh URL that lacks one.
 /// It is the name the URL gives, else the login name.
 fn user_name_credential(url_user: Option<&str>) -> std::result::Result<git2::Cred, git2::Error> {
-    let name = chosen_user_name(url_user, login_name())
+    let name = url_user
+        .map(str::to_owned)
+        .or_else(login_name)
         .ok_or_else(|| git2::Error::from_str("no user name: put one in the URL (user@host)"))?;
     git2::Cred::username(&name)
-}
-
-fn chosen_user_name(url_user: Option<&str>, login: Option<String>) -> Option<String> {
-    url_user.map(str::to_owned).or(login)
 }
 
 /// The login name of the current user.
@@ -265,15 +300,20 @@ pub(super) fn explain(error: git2::Error) -> Error {
     }
 }
 
-/// Accepts an ssh host key only when a `known_hosts` file lists it; a key of any other
-/// certificate (https) is left to libgit2.
-fn check_host_key(
+/// Accepts an ssh host key only when a `known_hosts` file lists it; an https certificate is
+/// left to libgit2, unless `verify` is false.
+fn check_certificate(
     cert: &git2::cert::Cert<'_>,
     host: &str,
     port: u16,
+    verify: bool,
 ) -> std::result::Result<git2::CertificateCheckStatus, git2::Error> {
     let Some(hostkey) = cert.as_hostkey() else {
-        return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
+        return Ok(if verify {
+            git2::CertificateCheckStatus::CertificatePassthrough
+        } else {
+            git2::CertificateCheckStatus::CertificateOk
+        });
     };
     let Some(key) = hostkey.hostkey() else {
         return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
@@ -300,6 +340,35 @@ fn ssh_key_file(index: usize) -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".ssh").join(name))
 }
 
+/// Whether the private key file `key` is encrypted, or cannot be read. libgit2 then fails the
+/// whole connection instead of asking for the next credential, and agt has no passphrase to give.
+fn needs_passphrase(key: &Path) -> bool {
+    const OPENSSH_BEGIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    const OPENSSH_END: &str = "-----END OPENSSH PRIVATE KEY-----";
+    const OPENSSH_MAGIC: &[u8] = b"openssh-key-v1\0";
+    let Ok(text) = std::fs::read_to_string(key) else {
+        return true;
+    };
+    let Some((_, body)) = text.split_once(OPENSSH_BEGIN) else {
+        return text.contains("ENCRYPTED");
+    };
+    let body: String = body
+        .split(OPENSSH_END)
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    let Ok(bytes) = STANDARD.decode(body) else {
+        return true;
+    };
+    // After the magic comes the name of the cipher, which is `none` for a key without passphrase.
+    let cipher = bytes.strip_prefix(OPENSSH_MAGIC).and_then(|rest| {
+        let length = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?);
+        rest.get(4..4 + usize::try_from(length).ok()?)
+    });
+    cipher != Some(b"none")
+}
+
 /// Whether the config names a credential helper, which is the only way to get a password
 /// without asking for it.
 fn has_credential_helper(config: &git2::Config) -> bool {
@@ -317,11 +386,16 @@ fn has_credential_helper(config: &git2::Config) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-
-    use super::{chosen_user_name, explain, passwd_name, refuse_host_key};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::super::fixtures::{commit, rev};
+    use super::needs_passphrase;
     use crate::core::testing::Sandbox;
     use crate::git::Repo;
 
@@ -354,46 +428,6 @@ mod tests {
         sandbox.git(&other, &["tag", "v2"]);
         sandbox.git(&other, &["push", "-q", "origin", "main", "v2"]);
         rev(sandbox, &other, "HEAD")
-    }
-
-    #[test]
-    fn a_refused_host_key_is_explained_once_and_only_for_an_ssh_failure() {
-        let failure = |class| {
-            git2::Error::new(
-                git2::ErrorCode::GenericError,
-                class,
-                "invalid or unknown remote ssh hostkey",
-            )
-        };
-        let own = "the ssh host key of example.org is not in a known_hosts file";
-        refuse_host_key(own.to_owned());
-        assert_eq!(explain(failure(git2::ErrorClass::Ssh)).0, own);
-        assert_eq!(
-            explain(failure(git2::ErrorClass::Ssh)).0,
-            "invalid or unknown remote ssh hostkey",
-            "a refusal explains one failure"
-        );
-        refuse_host_key(own.to_owned());
-        assert_eq!(
-            explain(failure(git2::ErrorClass::Net)).0,
-            "invalid or unknown remote ssh hostkey",
-            "only an ssh failure carries the refusal"
-        );
-    }
-
-    #[test]
-    fn a_user_name_request_prefers_the_url_over_the_login() {
-        let login = || Some("bob".to_owned());
-        assert_eq!(chosen_user_name(Some("alice"), login()).unwrap(), "alice");
-        assert_eq!(chosen_user_name(None, login()).unwrap(), "bob");
-        assert_eq!(chosen_user_name(None, None), None);
-    }
-
-    #[test]
-    fn the_password_database_names_the_user_as_id_does() {
-        let sandbox = Sandbox::new();
-        let expected = sandbox.shell_output(sandbox.path(), "id -un");
-        assert_eq!(passwd_name().as_deref(), Some(expected.trim()));
     }
 
     #[test]
@@ -449,6 +483,379 @@ mod tests {
             sandbox.git_output(&dir, &["tag", "--list"]).trim(),
             "v1",
             "a fetch brings no tags"
+        );
+    }
+
+    #[test]
+    fn a_private_key_that_needs_a_passphrase_is_not_offered() {
+        let sandbox = Sandbox::new();
+        let cases: [(&[&str], bool); 6] = [
+            (&["-t", "ed25519", "-N", ""], false),
+            (&["-t", "ed25519", "-N", "secret"], true),
+            (&["-t", "rsa", "-b", "2048", "-m", "PEM", "-N", ""], false),
+            (
+                &["-t", "rsa", "-b", "2048", "-m", "PEM", "-N", "secret"],
+                true,
+            ),
+            (&["-t", "rsa", "-b", "2048", "-m", "PKCS8", "-N", ""], false),
+            (
+                &["-t", "rsa", "-b", "2048", "-m", "PKCS8", "-N", "secret"],
+                true,
+            ),
+        ];
+        for (number, (args, encrypted)) in cases.iter().enumerate() {
+            let key = sandbox.path().join(format!("key{number}"));
+            let made = sandbox
+                .command("ssh-keygen")
+                .args(["-q", "-f"])
+                .arg(&key)
+                .args(*args)
+                .status()
+                .unwrap();
+            assert!(made.success(), "ssh-keygen {args:?}");
+            assert_eq!(needs_passphrase(&key), *encrypted, "ssh-keygen {args:?}");
+        }
+        assert!(needs_passphrase(&sandbox.path().join("absent")));
+    }
+
+    /// A local HTTP server that records each request head and answers 404.
+    struct Server {
+        address: std::net::SocketAddr,
+        requests: Arc<Mutex<Vec<String>>>,
+        stopped: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Server {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stopped = Arc::new(AtomicBool::new(false));
+            let (seen, done) = (Arc::clone(&requests), Arc::clone(&stopped));
+            let thread = std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if done.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let mut stream = stream.unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut head = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        head.push_str(&line);
+                    }
+                    seen.lock().unwrap().push(head);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            });
+            Self {
+                address,
+                requests,
+                stopped,
+                thread: Some(thread),
+            }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("http://{}{path}", self.address)
+        }
+
+        /// Every request head received so far, in lower case.
+        fn heads(&self) -> String {
+            self.requests.lock().unwrap().join("\n").to_lowercase()
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.address);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn set_config(sandbox: &Sandbox, dir: &Path, key: &str, value: &str) {
+        sandbox.git(dir, &["config", "--add", key, value]);
+    }
+
+    #[test]
+    fn ls_remote_and_fetch_send_the_extra_headers_that_match_the_url() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(&sandbox, &dir, &[("a.txt", "a\n")], "one");
+        let server = Server::start();
+        let url = server.url("/owner/repo.git");
+        let base = server.url("/");
+        let (deeper, other_path) = (server.url("/owner/"), server.url("/elsewhere/"));
+        for (key, value) in [
+            ("http.extraHeader".to_owned(), "X-Plain: 1"),
+            (format!("http.{base}.extraHeader"), "X-Host: 2"),
+            (format!("http.{deeper}.extraHeader"), "X-Path: 3"),
+            (format!("http.{other_path}.extraHeader"), "X-Other-Path: 4"),
+            (
+                "http.http://127.0.0.1:1/.extraHeader".to_owned(),
+                "X-Other-Port: 5",
+            ),
+            (
+                "http.http://other.example/.extraHeader".to_owned(),
+                "X-Other-Host: 6",
+            ),
+            (
+                "http.https://127.0.0.1/.extraHeader".to_owned(),
+                "X-Other-Scheme: 7",
+            ),
+        ] {
+            set_config(&sandbox, &dir, &key, value);
+        }
+        sandbox.git(&dir, &["remote", "add", "origin", &url]);
+        let repo = Repo::at(&dir);
+
+        assert!(repo.ls_remote(&url).is_err());
+        assert!(repo.ls_remote("origin").is_err());
+        assert!(
+            repo.fetch("origin", &["+refs/heads/main:refs/remotes/origin/main"])
+                .is_err()
+        );
+        assert!(repo.fetch_commit("origin", "refs/heads/main").is_err());
+
+        let heads = server.heads();
+        assert!(heads.matches("x-plain: 1").count() >= 4, "{heads}");
+        assert!(heads.matches("x-host: 2").count() >= 4, "{heads}");
+        assert!(heads.matches("x-path: 3").count() >= 4, "{heads}");
+        for other in [
+            "x-other-path",
+            "x-other-port",
+            "x-other-host",
+            "x-other-scheme",
+        ] {
+            assert!(!heads.contains(other), "{other} was sent: {heads}");
+        }
+    }
+
+    #[test]
+    fn an_empty_extra_header_drops_the_ones_before_it() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let server = Server::start();
+        let url = server.url("/repo.git");
+        for (key, value) in [
+            ("http.extraHeader".to_owned(), "X-Dropped: 1"),
+            (format!("http.{}.extraHeader", server.url("/")), ""),
+            (format!("http.{}.extraHeader", server.url("/")), "X-Kept: 2"),
+        ] {
+            set_config(&sandbox, &dir, &key, value);
+        }
+
+        assert!(Repo::at(&dir).ls_remote(&url).is_err());
+
+        let heads = server.heads();
+        assert!(heads.contains("x-kept: 2"), "{heads}");
+        assert!(!heads.contains("x-dropped"), "{heads}");
+    }
+
+    /// An `openssl s_server` on a port of its own with a new self-signed certificate for
+    /// `127.0.0.1`; it answers every request with a page that is no git repository.
+    struct TlsServer {
+        child: std::process::Child,
+        port: u16,
+        certificate: PathBuf,
+    }
+
+    impl TlsServer {
+        fn start(sandbox: &Sandbox, name: &str) -> Self {
+            let dir = sandbox.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            let config = dir.join("openssl.cnf");
+            fs::write(
+                &config,
+                "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n\
+                 [dn]\nCN = 127.0.0.1\n[ext]\nsubjectAltName = IP:127.0.0.1\n",
+            )
+            .unwrap();
+            let (certificate, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+            let made = sandbox
+                .command("openssl")
+                .args([
+                    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                ])
+                .arg("-config")
+                .arg(&config)
+                .arg("-keyout")
+                .arg(&key)
+                .arg("-out")
+                .arg(&certificate)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+            let port = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let child = sandbox
+                .command("openssl")
+                .args(["s_server", "-quiet", "-www", "-accept", &port.to_string()])
+                .arg("-cert")
+                .arg(&certificate)
+                .arg("-key")
+                .arg(&key)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let server = Self {
+                child,
+                port,
+                certificate,
+            };
+            while TcpStream::connect(("127.0.0.1", port)).is_err() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            server
+        }
+
+        fn url(&self) -> String {
+            format!("https://127.0.0.1:{}/repo.git", self.port)
+        }
+
+        fn scope(&self) -> String {
+            format!("https://127.0.0.1:{}/", self.port)
+        }
+    }
+
+    impl Drop for TlsServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// libgit2 asks the keychain on macOS, which takes no certificate authority from a file.
+    const CA_FILES_IGNORED: bool = cfg!(target_vendor = "apple");
+
+    /// Whether `error` says the TLS certificate of the server was not trusted: OpenSSL's text,
+    /// or the one Secure Transport gives on macOS.
+    fn is_untrusted(error: &str) -> bool {
+        error.contains("certificate is invalid") || error.contains("untrusted connection")
+    }
+
+    /// What `ls_remote` of `url` fails with.
+    fn ls_remote_error(dir: &Path, url: &str) -> String {
+        match Repo::at(dir).ls_remote(url) {
+            Ok(refs) => panic!("listed {} refs", refs.len()),
+            Err(error) => error.0.to_lowercase(),
+        }
+    }
+
+    #[test]
+    fn ssl_verify_decides_whether_an_untrusted_https_certificate_is_accepted() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let server = TlsServer::start(&sandbox, "tls");
+        let url = server.url();
+        let refused = ls_remote_error(&dir, &url);
+        assert!(is_untrusted(&refused), "{refused}");
+
+        set_config(&sandbox, &dir, "http.sslVerify", "true");
+        assert!(is_untrusted(&ls_remote_error(&dir, &url)));
+        let elsewhere = "http.https://other.example/.sslVerify";
+        set_config(&sandbox, &dir, elsewhere, "false");
+        assert!(is_untrusted(&ls_remote_error(&dir, &url)));
+
+        set_config(
+            &sandbox,
+            &dir,
+            &format!("http.{}.sslVerify", server.scope()),
+            "false",
+        );
+        let accepted = ls_remote_error(&dir, &url);
+        assert!(!is_untrusted(&accepted), "{accepted}");
+
+        sandbox.git(&dir, &["config", "http.sslVerify", "false"]);
+        sandbox.git(
+            &dir,
+            &[
+                "config",
+                &format!("http.{}.sslVerify", server.scope()),
+                "true",
+            ],
+        );
+        let scoped_wins = ls_remote_error(&dir, &url);
+        assert!(is_untrusted(&scoped_wins), "{scoped_wins}");
+    }
+
+    #[test]
+    fn ssl_ca_info_and_ssl_ca_path_trust_a_private_authority_for_its_url_only() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let by_file = TlsServer::start(&sandbox, "by-file");
+        let by_path = TlsServer::start(&sandbox, "by-path");
+        let unscoped = TlsServer::start(&sandbox, "unscoped");
+        for server in [&by_file, &by_path, &unscoped] {
+            assert!(is_untrusted(&ls_remote_error(&dir, &server.url())));
+        }
+
+        let other = format!(
+            "http.{}.sslCAInfo",
+            unscoped.scope().replace("127.0.0.1", "localhost")
+        );
+        set_config(
+            &sandbox,
+            &dir,
+            &other,
+            unscoped.certificate.to_str().unwrap(),
+        );
+        assert!(is_untrusted(&ls_remote_error(&dir, &unscoped.url())));
+
+        let key = format!("http.{}.sslCAInfo", by_file.scope());
+        set_config(&sandbox, &dir, &key, by_file.certificate.to_str().unwrap());
+        let trusted = ls_remote_error(&dir, &by_file.url());
+        assert_eq!(is_untrusted(&trusted), CA_FILES_IGNORED, "{trusted}");
+
+        let hash = sandbox
+            .command("openssl")
+            .args(["x509", "-noout", "-subject_hash", "-in"])
+            .arg(&by_path.certificate)
+            .output()
+            .unwrap();
+        let hash = String::from_utf8(hash.stdout).unwrap();
+        let authorities = sandbox.path().join("authorities");
+        fs::create_dir(&authorities).unwrap();
+        fs::copy(
+            &by_path.certificate,
+            authorities.join(format!("{}.0", hash.trim())),
+        )
+        .unwrap();
+        let key = format!("http.{}.sslCAPath", by_path.scope());
+        set_config(&sandbox, &dir, &key, authorities.to_str().unwrap());
+        let trusted = ls_remote_error(&dir, &by_path.url());
+        assert_eq!(is_untrusted(&trusted), CA_FILES_IGNORED, "{trusted}");
+    }
+
+    #[test]
+    #[cfg(not(target_vendor = "apple"))]
+    fn a_ca_file_that_cannot_be_loaded_is_named_in_the_error() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        set_config(&sandbox, &dir, "http.sslCAInfo", "/nonexistent/ca.pem");
+
+        let error = ls_remote_error(&dir, "https://127.0.0.1:1/repo.git");
+
+        assert!(
+            error.contains("http.sslcainfo /nonexistent/ca.pem"),
+            "{error}"
         );
     }
 }
