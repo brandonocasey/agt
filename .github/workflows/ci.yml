@@ -8,8 +8,8 @@ on:
 permissions:
   contents: read
 
-# A new push to a branch supersedes its running checks. Each push to main has
-# its own group, so none is cancelled or replaced while it waits.
+# A new push to a branch supersedes its running checks.
+# Each push to main has its own group, so none is cancelled or replaced.
 concurrency:
   group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: true
@@ -28,8 +28,8 @@ jobs:
       - uses: ./.github/actions/rust-cache
       - run: cargo check --locked --all-targets
 
-  # Lint and test compile separately anyway, so running them as two jobs
-  # makes the wall time the longer of the two instead of their sum.
+  # Lint and test compile separately anyway. As two jobs, the wall time is
+  # the longer of the two, not their sum.
   lint:
     strategy:
       fail-fast: false

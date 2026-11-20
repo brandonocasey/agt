@@ -10,7 +10,7 @@ on:
 permissions:
   contents: write
 
-# Match ci.yml so the test job restores the cache that main saved.
+# This env MUST match ci.yml, so the test job restores the cache main saved.
 env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
