@@ -677,10 +677,15 @@ mod tests {
             let dir = sandbox.path().join(name);
             fs::create_dir(&dir).unwrap();
             let config = dir.join("openssl.cnf");
+            // OpenSSL looks an authority up by subject, and a store that already holds one
+            // never asks a directory for another with the same subject, so each server's
+            // certificate has a subject of its own.
             fs::write(
                 &config,
-                "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n\
-                 [dn]\nCN = 127.0.0.1\n[ext]\nsubjectAltName = IP:127.0.0.1\n",
+                format!(
+                    "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n\
+                     [dn]\nCN = {name}\n[ext]\nsubjectAltName = IP:127.0.0.1\n"
+                ),
             )
             .unwrap();
             let (certificate, key) = (dir.join("cert.pem"), dir.join("key.pem"));
