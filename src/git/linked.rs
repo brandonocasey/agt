@@ -65,8 +65,9 @@ impl Repo {
     }
 
     /// Removes the linked worktree at `path` with its files and its registration, whatever it
-    /// holds, but not when it is locked (`git worktree remove --force`). The files go first, so
-    /// a failure leaves a registration that a second call removes.
+    /// holds, but not when it is locked or its `.git` file is gone (`git worktree remove
+    /// --force`). The files go first, so a failure leaves a registration that a second call
+    /// removes.
     pub fn remove_worktree(&self, path: &Path) -> Result<()> {
         let repo = self.open_refs()?;
         let wanted = comparable(path);
@@ -84,8 +85,17 @@ impl Repo {
                     None => "cannot remove a locked working tree".to_owned(),
                 }));
             }
-            // libgit2 deletes at most 100 directory levels, and no work tree without a `.git`.
+            // Without its `.git` the directory may be an unrelated checkout that `Repo::at` would
+            // resolve to, so git refuses and leaves the files. A missing directory is only pruned.
+            // `remove_dir_all` replaces libgit2's prune, which stops 100 directory levels down.
             if fs::symlink_metadata(work_tree).is_ok() {
+                let git_file = work_tree.join(".git");
+                if fs::symlink_metadata(&git_file).is_err() {
+                    return Err(Error(format!(
+                        "validation failed, cannot remove working tree: '{}' does not exist",
+                        git_file.display()
+                    )));
+                }
                 fs::remove_dir_all(work_tree)
                     .map_err(ctx(format!("remove {}", work_tree.display())))?;
             }
@@ -633,22 +643,29 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_that_lost_its_git_file_is_removed_with_its_directory() {
+    fn a_worktree_that_lost_its_git_file_is_refused_and_kept() {
         let sandbox = Sandbox::with_repo();
         let (dir, linked) = with_linked(&sandbox);
         fs::remove_file(linked.join(".git")).unwrap();
         fs::write(linked.join("kept.txt"), "x\n").unwrap();
+        let oracle = sandbox
+            .command("git")
+            .args(["worktree", "remove", "--force", linked.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!oracle.status.success(), "git removed it");
 
-        Repo::at(&dir).remove_worktree(&linked).unwrap();
+        let refused = Repo::at(&dir).remove_worktree(&linked).unwrap_err();
 
-        assert!(!linked.exists());
-        assert_eq!(Repo::at(&dir).worktrees().unwrap().len(), 1);
+        assert!(refused.0.contains("does not exist"), "{refused}");
+        assert_eq!(fs::read_to_string(linked.join("kept.txt")).unwrap(), "x\n");
+        assert_eq!(Repo::at(&dir).worktrees().unwrap().len(), 2);
         assert_eq!(
             sandbox
                 .git_output(&dir, &["worktree", "list"])
                 .lines()
                 .count(),
-            1
+            2
         );
     }
 }
