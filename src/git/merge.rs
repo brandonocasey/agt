@@ -222,6 +222,9 @@ fn check_out_safely(
         )
         .notify(|kind, path, _, target, _| {
             if kind.contains(git2::CheckoutNotificationType::UPDATED) {
+                if !guard.any_required {
+                    return true;
+                }
                 // The patterns leave this path out: it ends skip-worktree, so no filter applies.
                 let skipped =
                     path.is_some_and(|path| outside_patterns(path.as_os_str().as_bytes()));
