@@ -1165,8 +1165,8 @@ fn a_session_is_gone_only_when_no_record_matches_its_process() {
     // A record for a process that started at another time: the pid was reused.
     record(".claude", stale);
     assert_eq!(listed(), [child_pid.as_str()]);
-    // A matching record in another config directory wins over the stale one. The child is
-    // readable by now, so an empty list is the answer, not a wait for one.
+    // A matching record in another config directory wins over the stale one.
+    // The child is already listed, so an empty list is the answer.
     record(".claude-two", &proc_start(me));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < deadline {

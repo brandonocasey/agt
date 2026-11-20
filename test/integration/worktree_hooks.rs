@@ -199,7 +199,7 @@ fn a_failing_remove_hook_blocks_the_removal_and_no_hooks_skips_it() {
     assert!(!tree.exists());
 }
 
-/// A create hook command that runs until `gate` exists, and for one minute at most.
+/// A create hook command that waits for `gate` and gives up after about one minute.
 fn hold_until(gate: &Path) -> String {
     format!(
         "i=0; while [ ! -e '{}' ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done",

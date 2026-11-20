@@ -1036,8 +1036,7 @@ const fn policy(
     }
 }
 
-/// Git is the oracle: `worktree create` clones the submodule exactly when
-/// `git submodule update --init` does, online and offline.
+/// `worktree create` clones the submodule exactly when `git submodule update --init` does.
 fn check_submodule_policy(case: Policy) {
     let Policy {
         label,
