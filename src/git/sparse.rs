@@ -119,7 +119,7 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
         if skipped && selected(&entry.path) {
             let file = workdir.join(OsStr::from_bytes(&entry.path));
             if fs::symlink_metadata(&file).is_err() {
-                restore.push(file);
+                restore.push((file, entry.mode));
             }
         }
     }
@@ -128,7 +128,7 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
         repo,
         restore
             .iter()
-            .map(|file| file.strip_prefix(workdir).unwrap_or(file)),
+            .map(|(file, mode)| (file.strip_prefix(workdir).unwrap_or(file), *mode)),
     )?;
     for entry in entries.iter().filter(|entry| entry.flags & STAGE_MASK == 0) {
         let file = workdir.join(OsStr::from_bytes(&entry.path));
@@ -198,7 +198,7 @@ fn check_out(
     repo: &git2::Repository,
     index: &mut git2::Index,
     workdir: &Path,
-    files: &[PathBuf],
+    files: &[(PathBuf, u32)],
 ) -> Result<()> {
     if files.is_empty() {
         return Ok(());
@@ -208,7 +208,7 @@ fn check_out(
         .force()
         .update_index(false)
         .disable_pathspec_match(true);
-    for file in files {
+    for (file, _) in files {
         let relative = file.strip_prefix(workdir).unwrap_or(file);
         options.path(relative);
     }
@@ -665,5 +665,42 @@ mod tests {
             .output()
             .unwrap();
         assert!(!output.status.success());
+    }
+
+    #[test]
+    fn reapply_restores_a_symlink_that_a_required_filter_pattern_matches() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(
+            &sandbox,
+            &dir,
+            &[
+                (".gitattributes", "*.so filter=lfs\n"),
+                ("keep/a.txt", "a\n"),
+            ],
+            "one",
+        );
+        std::os::unix::fs::symlink("libz.so.1", dir.join("keep/lib.so")).unwrap();
+        sandbox.git(&dir, &["add", "-A"]);
+        sandbox.git(&dir, &["commit", "-q", "-m", "link"]);
+        sandbox.git(&dir, &["config", "filter.lfs.required", "true"]);
+        sandbox.git(
+            &dir,
+            &["sparse-checkout", "set", "--no-cone", "/.gitattributes"],
+        );
+        assert!(!dir.join("keep").exists());
+        fs::write(
+            dir.join(".git/info/sparse-checkout"),
+            "/.gitattributes\n/keep/\n",
+        )
+        .unwrap();
+
+        Repo::at(&dir).sparse_reapply().unwrap();
+
+        assert_eq!(
+            fs::read_link(dir.join("keep/lib.so")).unwrap(),
+            Path::new("libz.so.1")
+        );
+        assert_eq!(sandbox.git_output(&dir, &["status", "--porcelain"]), "");
     }
 }

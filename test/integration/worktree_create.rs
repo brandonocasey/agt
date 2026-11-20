@@ -2284,6 +2284,43 @@ fn a_restore_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_
 }
 
 #[test]
+fn a_worktree_checks_out_the_symlinks_and_gitlinks_a_required_filter_pattern_matches() {
+    let (env, first) = repo_with_commit();
+    let repo = env.repo.clone();
+    for (key, value) in [
+        ("filter.lfs.clean", "cat"),
+        ("filter.lfs.smudge", "cat"),
+        ("filter.lfs.required", "true"),
+    ] {
+        git(&env, &repo, &["config", key, value]);
+    }
+    fs::write(repo.join(".gitattributes"), "*.so filter=lfs\n").unwrap();
+    fs::create_dir(repo.join("lib")).unwrap();
+    std::os::unix::fs::symlink("libz.so.1", repo.join("lib/libz.so")).unwrap();
+    git(&env, &repo, &["add", "-A"]);
+    git(
+        &env,
+        &repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{first},plugin.so"),
+        ],
+    );
+    git(&env, &repo, &["commit", "-q", "-m", "links"]);
+
+    let made = agt_json(&env, &repo, &["create", "work"]);
+
+    let work = Path::new(made["path"].as_str().unwrap());
+    assert_eq!(
+        fs::read_link(work.join("lib/libz.so")).unwrap(),
+        Path::new("libz.so.1")
+    );
+    assert!(work.join("plugin.so").is_dir());
+}
+
+#[test]
 fn a_sparse_worktree_refuses_a_required_filter_path_it_writes_and_ignores_one_it_leaves_out() {
     for (written, refused) in [("keep", true), ("out", false)] {
         let (env, _) = lfs_repo();

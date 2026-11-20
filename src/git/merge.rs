@@ -187,12 +187,12 @@ fn check_out_safely(
         .notify_on(
             git2::CheckoutNotificationType::CONFLICT | git2::CheckoutNotificationType::UPDATED,
         )
-        .notify(|kind, path, _, _, _| {
+        .notify(|kind, path, _, target, _| {
             if kind.contains(git2::CheckoutNotificationType::UPDATED) {
                 // The patterns leave this path out: it ends skip-worktree, so no filter applies.
                 let skipped =
                     path.is_some_and(|path| outside_patterns(path.as_os_str().as_bytes()));
-                return skipped || filter::may_write(repo, &refusal, path);
+                return skipped || filter::may_write(repo, &refusal, path, target.as_ref());
             }
             blocked.extend(path.map(Path::to_owned));
             true

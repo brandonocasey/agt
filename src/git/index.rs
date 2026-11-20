@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::deep::{is_too_deep, walk};
 use super::files::{is_nested_repo, nested_repos};
-use super::filter::{Use, required_filter};
+use super::filter::refusal_for_staging;
 use super::{GITLINK_MODE, Gitlink, Repo, StatusEntry};
 use crate::core::error::{Error, Result};
 
@@ -178,7 +178,7 @@ impl Repo {
                 if path.as_os_str().as_bytes().ends_with(b"/") {
                     return 1;
                 }
-                refused = required_filter(repo, path, Use::Stage);
+                refused = refusal_for_staging(repo, path);
                 if refused.is_some() { -1 } else { 0 }
             };
             let added = index.add_all(["*"], git2::IndexAddOption::DEFAULT, Some(&mut check));
@@ -338,7 +338,7 @@ fn stage_walked(
             index.remove_path(path)?;
             continue;
         }
-        if let Some(message) = required_filter(repo, path, Use::Stage) {
+        if let Some(message) = refusal_for_staging(repo, path) {
             return Err(Error(message));
         }
         index
@@ -778,6 +778,30 @@ mod tests {
                 "{listing}"
             );
         }
+    }
+
+    #[test]
+    fn staging_refuses_a_required_filter_file_and_reads_a_symlink_the_pattern_matches() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        commit(
+            &sandbox,
+            &dir,
+            &[(".gitattributes", "*.so filter=lfs\n")],
+            "attrs",
+        );
+        sandbox.git(&dir, &["config", "filter.lfs.required", "true"]);
+        std::os::unix::fs::symlink("libz.so.1", dir.join("link.so")).unwrap();
+        let repo = Repo::at(&dir);
+
+        let staged = repo.worktree_tree().unwrap();
+
+        sandbox.git(&dir, &["add", "-A"]);
+        assert_eq!(staged, sandbox.git_output(&dir, &["write-tree"]).trim());
+        std::fs::write(dir.join("real.so"), "x\n").unwrap();
+        let refused = repo.worktree_tree().unwrap_err();
+        assert!(refused.0.contains("real.so"), "{refused}");
+        assert!(refused.0.contains("required filter 'lfs'"), "{refused}");
     }
 
     /// A symlink staged as another target and put back is the same as HEAD, whatever its

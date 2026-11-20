@@ -97,14 +97,19 @@ pub(super) fn check_out(
     paths: &[Vec<u8>],
 ) -> Result<()> {
     let root = work_tree(repo)?;
-    filter::ensure_writable(
-        repo,
-        paths.iter().map(|path| Path::new(OsStr::from_bytes(path))),
-    )?;
-    let mut index = repo.index()?;
+    let mut entries = Vec::new();
     for path in paths {
         let relative = Path::new(OsStr::from_bytes(path));
-        let entry = tree.get_path(relative)?;
+        entries.push((relative, tree.get_path(relative)?));
+    }
+    filter::ensure_writable(
+        repo,
+        entries
+            .iter()
+            .map(|(path, entry)| (*path, entry.filemode() as u32)),
+    )?;
+    let mut index = repo.index()?;
+    for (relative, entry) in &entries {
         let blob = repo.find_blob(entry.id())?;
         let full = root.join(relative);
         let written = write_entry(&full, entry.filemode(), blob.content());

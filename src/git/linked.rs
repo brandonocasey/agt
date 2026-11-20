@@ -686,6 +686,39 @@ mod tests {
     }
 
     #[test]
+    fn checking_out_a_symlink_that_a_required_filter_pattern_matches_works_below_libgit2_s_depth() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let deep = (1..=110)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let file = format!("{deep}/lib.so");
+        commit(
+            &sandbox,
+            &dir,
+            &[(".gitattributes", "*.so filter=lfs\n")],
+            "attrs",
+        );
+        fs::create_dir_all(dir.join(&deep)).unwrap();
+        std::os::unix::fs::symlink("libz.so.1", dir.join(&file)).unwrap();
+        sandbox.git(&dir, &["add", "-A"]);
+        sandbox.git(&dir, &["commit", "-q", "-m", "link"]);
+        sandbox.git(&dir, &["config", "filter.lfs.required", "true"]);
+        fs::remove_file(dir.join(&file)).unwrap();
+        fs::write(dir.join(&file), "edited\n").unwrap();
+
+        Repo::at(&dir)
+            .checkout_paths("HEAD", &[file.clone().into_bytes()])
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(dir.join(&file)).unwrap(),
+            Path::new("libz.so.1")
+        );
+    }
+
+    #[test]
     fn a_worktree_that_lost_its_git_file_is_refused_and_kept() {
         let sandbox = Sandbox::with_repo();
         let (dir, linked) = with_linked(&sandbox);
