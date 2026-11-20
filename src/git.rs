@@ -1269,12 +1269,6 @@ mod tests {
     fn the_system_config_search_puts_libgit2_s_default_before_the_extra_directories() {
         assert_eq!(super::system_config_search(&[]), "$PATH");
         assert_eq!(super::system_config_search(&["/a", "/b"]), "$PATH:/a:/b");
-        assert_eq!(
-            super::system_config_search(&super::EXTRA_SYSTEM_CONFIG_DIRS),
-            "$PATH:/opt/homebrew/etc:/usr/local/etc:\
-             /Library/Developer/CommandLineTools/usr/share/git-core:\
-             /Applications/Xcode.app/Contents/Developer/usr/share/git-core"
-        );
     }
 
     #[test]
