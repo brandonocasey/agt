@@ -29,6 +29,9 @@ const PASSWD_BUFFER_LIMIT: usize = 1 << 20;
 /// The key files tried, in order, after the ssh agent.
 const SSH_KEY_FILES: [&str; 3] = ["id_ed25519", "id_rsa", "id_ecdsa"];
 
+/// A refspec that matches no ref a remote advertises.
+const NO_REF: &str = "refs/agt/nothing";
+
 /// What the credential callback has handed out, so that a rejected credential is not offered
 /// again and the connection fails instead of looping.
 #[derive(Default)]
@@ -42,17 +45,15 @@ impl Repo {
     /// Every ref `remote` (a configured name or a URL) advertises.
     pub fn ls_remote(&self, remote: &str) -> Result<Vec<RemoteRef>> {
         let repo = self.open_refs()?;
-        let url = remote_named(&repo, remote)?
-            .url()
-            .unwrap_or_default()
-            .to_owned();
-        // A download of no refspecs connects like a fetch but fetches nothing; `connect_auth`
-        // cannot send the extra headers of `http.extraHeader`.
-        let mut remote = repo.remote_anonymous(&url)?;
+        let mut remote = remote_named(&repo, remote)?;
+        let url = remote.url().unwrap_or_default().to_owned();
         let config = repo.config()?;
         let mut options = fetch_options(&config, &url)?;
+        // `connect_auth` cannot send the extra headers of `http.extraHeader`, so the listing is
+        // a download. libgit2 fetches the configured refspecs, or `HEAD`, when none is given; a
+        // refspec that no ref matches connects like a fetch and wants no object.
         remote
-            .download::<&str>(&[], Some(&mut options))
+            .download(&[NO_REF], Some(&mut options))
             .map_err(explain)?;
         let refs = remote
             .list()?
@@ -462,6 +463,28 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_writes_no_object_into_the_repository() {
+        let sandbox = Sandbox::new();
+        let (dir, _) = with_origin(&sandbox);
+        let pushed = push_elsewhere(&sandbox, &dir);
+        let has_pushed = || {
+            sandbox
+                .command("git")
+                .current_dir(&dir)
+                .args(["cat-file", "-e", &pushed])
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(!has_pushed(), "the clone had the commit already");
+
+        let refs = Repo::at(&dir).ls_remote("origin").unwrap();
+
+        assert!(refs.iter().any(|head| head.id == pushed), "{pushed}");
+        assert!(!has_pushed(), "the listing stored {pushed}");
+    }
+
+    #[test]
     fn fetch_moves_the_tracking_branch_and_fetch_commit_moves_nothing() {
         let sandbox = Sandbox::new();
         let (dir, _) = with_origin(&sandbox);
@@ -662,6 +685,28 @@ mod tests {
         let heads = server.heads();
         assert!(heads.contains("x-kept: 2"), "{heads}");
         assert!(!heads.contains("x-dropped"), "{heads}");
+    }
+
+    #[test]
+    fn a_listing_goes_through_the_proxy_a_configured_remote_names() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let proxy = Server::start();
+        sandbox.git(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://unreachable.invalid/repo.git",
+            ],
+        );
+        set_config(&sandbox, &dir, "remote.origin.proxy", &proxy.url(""));
+
+        assert!(Repo::at(&dir).ls_remote("origin").is_err());
+
+        let heads = proxy.heads();
+        assert!(heads.contains("connect unreachable.invalid:443"), "{heads}");
     }
 
     /// An `openssl s_server` on a port of its own with a new self-signed certificate for
