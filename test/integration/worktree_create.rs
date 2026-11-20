@@ -1013,8 +1013,7 @@ fn submodule_policy_repo(reachable: bool, update_none: bool, settings: &[(&str, 
     env
 }
 
-/// One repository setup for [`a_submodule_is_updated_when_git_updates_it_and_skipped_when_git_skips_it`]
-/// and whether git clones `vendor` in it.
+/// One repository setup for [`check_submodule_policy`] and whether git clones `vendor` in it.
 struct Policy {
     label: &'static str,
     reachable: bool,
@@ -1037,98 +1036,110 @@ const fn policy(
     }
 }
 
-#[test]
-fn a_submodule_is_updated_when_git_updates_it_and_skipped_when_git_skips_it() {
-    let cases = [
-        policy("default", true, &[]),
-        Policy {
-            update_none: true,
-            ..policy("update none in .gitmodules", false, &[])
-        },
-        policy(
-            "update none in config",
-            false,
-            &[("submodule.vendor.update", "none")],
-        ),
-        policy(
-            "active path elsewhere",
-            false,
-            &[("submodule.active", "elsewhere")],
-        ),
-        policy(
-            "active path names it",
-            true,
-            &[("submodule.active", "vendor")],
-        ),
-        policy(
-            "active glob covers it",
-            true,
-            &[("submodule.active", "ven*")],
-        ),
-        policy("active path covers it", true, &[("submodule.active", ".")]),
-        policy(
-            "named active beats the path",
-            true,
-            &[
-                ("submodule.active", "elsewhere"),
-                ("submodule.vendor.active", "true"),
-            ],
-        ),
-        policy(
-            "named inactive under a path",
-            false,
-            &[
-                ("submodule.active", "."),
-                ("submodule.vendor.active", "false"),
-            ],
-        ),
-        policy(
-            "named inactive alone",
-            true,
-            &[("submodule.vendor.active", "false")],
-        ),
-    ];
-    let allow = [
-        ("GIT_CONFIG_COUNT", "1"),
-        ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
-        ("GIT_CONFIG_VALUE_0", "always"),
-    ];
-    for Policy {
+/// Git is the oracle: `worktree create` clones the submodule exactly when
+/// `git submodule update --init` does, online and offline.
+fn check_submodule_policy(case: Policy) {
+    let Policy {
         label,
         reachable,
         update_none,
         settings,
         cloned,
-    } in cases
-    {
-        for offline in [false, true] {
-            // Offline, agt names each submodule path, which git updates whatever
-            // `submodule.active` says.
-            let by_path = offline
-                && !update_none
-                && settings.iter().any(|(key, _)| *key == "submodule.active");
-            let env = submodule_policy_repo(reachable || by_path, update_none, settings);
-            let cloned = cloned || by_path;
-            let mut extra = allow.to_vec();
-            if offline {
-                extra.push(("AGT_OFFLINE", "1"));
-            }
-            let agt = file_submodule_create(&env, "agt", &extra);
-            let git = git_submodule_update(&env, "git", &allow, by_path.then_some("vendor"));
-            let stderr = String::from_utf8_lossy(&agt.stderr);
-            assert!(git.status.success(), "{label}: git failed");
-            assert!(
-                agt.status.success(),
-                "{label} (offline {offline}): {stderr}"
-            );
-            let on_disk = |tree: &str| env.path(tree).join("vendor/lib.txt").exists();
-            assert_eq!(on_disk("git"), cloned, "{label}: git");
-            let made = env.repo.join(".worktrees/agt/vendor/lib.txt").exists();
-            assert_eq!(made, cloned, "{label} (offline {offline}): agt");
-            let value: Value = serde_json::from_slice(&agt.stdout).unwrap();
-            assert_eq!(value["warnings"], serde_json::json!([]), "{label}");
+    } = case;
+    let allow = [
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "protocol.file.allow"),
+        ("GIT_CONFIG_VALUE_0", "always"),
+    ];
+    for offline in [false, true] {
+        // Offline, agt names each submodule path, which git updates whatever
+        // `submodule.active` says.
+        let by_path =
+            offline && !update_none && settings.iter().any(|(key, _)| *key == "submodule.active");
+        let env = submodule_policy_repo(reachable || by_path, update_none, settings);
+        let cloned = cloned || by_path;
+        let mut extra = allow.to_vec();
+        if offline {
+            extra.push(("AGT_OFFLINE", "1"));
         }
+        let agt = file_submodule_create(&env, "agt", &extra);
+        let git = git_submodule_update(&env, "git", &allow, by_path.then_some("vendor"));
+        let stderr = String::from_utf8_lossy(&agt.stderr);
+        assert!(git.status.success(), "{label}: git failed");
+        assert!(
+            agt.status.success(),
+            "{label} (offline {offline}): {stderr}"
+        );
+        let on_disk = |tree: &str| env.path(tree).join("vendor/lib.txt").exists();
+        assert_eq!(on_disk("git"), cloned, "{label}: git");
+        let made = env.repo.join(".worktrees/agt/vendor/lib.txt").exists();
+        assert_eq!(made, cloned, "{label} (offline {offline}): agt");
+        let value: Value = serde_json::from_slice(&agt.stdout).unwrap();
+        assert_eq!(value["warnings"], serde_json::json!([]), "{label}");
     }
+}
+
+macro_rules! submodule_policy_tests {
+    ($($name:ident => $case:expr;)*) => {
+        $(#[test]
+        fn $name() {
+            check_submodule_policy($case);
+        })*
+    };
+}
+
+submodule_policy_tests! {
+    a_submodule_is_updated_by_default => policy("default", true, &[]);
+    a_submodule_is_skipped_for_update_none_in_gitmodules => Policy {
+        update_none: true,
+        ..policy("update none in .gitmodules", false, &[])
+    };
+    a_submodule_is_skipped_for_update_none_in_config => policy(
+        "update none in config",
+        false,
+        &[("submodule.vendor.update", "none")],
+    );
+    a_submodule_is_skipped_for_an_active_path_elsewhere => policy(
+        "active path elsewhere",
+        false,
+        &[("submodule.active", "elsewhere")],
+    );
+    a_submodule_is_updated_for_an_active_path_that_names_it => policy(
+        "active path names it",
+        true,
+        &[("submodule.active", "vendor")],
+    );
+    a_submodule_is_updated_for_an_active_glob_that_covers_it => policy(
+        "active glob covers it",
+        true,
+        &[("submodule.active", "ven*")],
+    );
+    a_submodule_is_updated_for_an_active_path_that_covers_it => policy(
+        "active path covers it",
+        true,
+        &[("submodule.active", ".")],
+    );
+    a_named_active_submodule_beats_the_active_path => policy(
+        "named active beats the path",
+        true,
+        &[
+            ("submodule.active", "elsewhere"),
+            ("submodule.vendor.active", "true"),
+        ],
+    );
+    a_named_inactive_submodule_under_an_active_path_is_skipped => policy(
+        "named inactive under a path",
+        false,
+        &[
+            ("submodule.active", "."),
+            ("submodule.vendor.active", "false"),
+        ],
+    );
+    a_named_inactive_submodule_alone_is_updated => policy(
+        "named inactive alone",
+        true,
+        &[("submodule.vendor.active", "false")],
+    );
 }
 
 /// A repository whose origin is a network URL and whose submodule `vendor` is recorded as the
