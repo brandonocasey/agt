@@ -9,6 +9,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use super::filter;
 use super::index::{
     SKIP_WORKTREE, STAGE_MASK, copy_entry, modified_tracked_paths, refreshed_index,
 };
@@ -94,8 +95,24 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
     let mut index = refreshed_index(repo)?;
     let entries: Vec<git2::IndexEntry> = index.iter().collect();
     let mut changes = WorkTreeChanges { repo, paths: None };
-    let mut restore = Vec::new();
     let mut emptied = Vec::new();
+    let mut restore = Vec::new();
+    for entry in entries.iter().filter(|entry| entry.flags & STAGE_MASK == 0) {
+        let skipped = entry.flags_extended & SKIP_WORKTREE != 0;
+        if skipped && selected(&entry.path) {
+            let file = workdir.join(OsStr::from_bytes(&entry.path));
+            if fs::symlink_metadata(&file).is_err() {
+                restore.push(file);
+            }
+        }
+    }
+    // Nothing may change before this: a refusal leaves the index and the work tree as they were.
+    filter::ensure_writable(
+        repo,
+        restore
+            .iter()
+            .map(|file| file.strip_prefix(workdir).unwrap_or(file)),
+    )?;
     for entry in entries.iter().filter(|entry| entry.flags & STAGE_MASK == 0) {
         let file = workdir.join(OsStr::from_bytes(&entry.path));
         let skipped = entry.flags_extended & SKIP_WORKTREE != 0;
@@ -103,9 +120,6 @@ fn apply(repo: &git2::Repository, mut selected: impl FnMut(&[u8]) -> bool) -> Re
         let keep = selected(&entry.path);
         if keep && skipped {
             changed.flags_extended &= !SKIP_WORKTREE;
-            if fs::symlink_metadata(&file).is_err() {
-                restore.push(file);
-            }
         } else if !keep && !skipped {
             if !leave_out(&file, entry, &mut changes)? {
                 continue;

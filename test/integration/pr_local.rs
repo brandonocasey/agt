@@ -2173,3 +2173,77 @@ fn a_head_that_is_not_the_sha_is_refused_before_any_intent_is_recorded() {
     assert!(message.contains("inspect it again"), "{message}");
     assert_eq!(intents(&env), serde_json::json!({}));
 }
+
+/// `main` holds `a.txt`, then `.gitattributes` sending `*.bin` through the `lfs` filter (`cat`
+/// stands in for it) and `data.bin`. With `required`, the filter is marked required.
+fn lfs_setup(required: bool) -> Env {
+    let env = setup();
+    for (key, value) in [("filter.lfs.clean", "cat"), ("filter.lfs.smudge", "cat")] {
+        git_ok(&env, &env.repo, &["config", key, value]);
+    }
+    env.write(".gitattributes", "*.bin filter=lfs\n");
+    env.write("data.bin", "real content");
+    env.commit_all("track bins");
+    if required {
+        git_ok(&env, &env.repo, &["config", "filter.lfs.required", "true"]);
+    }
+    env
+}
+
+#[test]
+fn a_merge_that_writes_a_required_filter_path_is_refused_and_changes_nothing() {
+    let env = lfs_setup(true);
+    let sha = add_branch(&env, "feat", "data.bin", "rewritten");
+    let head = tip(&env, "main");
+
+    let message = refused(&env, &merge_args(&sha, "feat", &[]));
+
+    assert!(message.contains("data.bin"), "{message}");
+    assert!(message.contains("required filter 'lfs'"), "{message}");
+    assert_eq!(
+        fs::read_to_string(env.repo.join("data.bin")).unwrap(),
+        "real content"
+    );
+    assert_eq!(tip(&env, "main"), head);
+    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_rebase_merge_that_writes_a_required_filter_path_is_refused_and_leaves_the_target() {
+    let env = lfs_setup(true);
+    let feat = add_branch(&env, "feat", "data.bin", "rewritten");
+    advance_main(&env, "b.txt", "b\n");
+    add_worktree(&env, "work", &["feat"]);
+    let main = tip(&env, "main");
+
+    let message = err(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
+
+    assert!(message.contains("data.bin"), "{message}");
+    assert!(message.contains("required filter 'lfs'"), "{message}");
+    assert_eq!(tip(&env, "main"), main);
+    assert_eq!(
+        fs::read_to_string(env.repo.join("data.bin")).unwrap(),
+        "real content"
+    );
+    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn merges_over_filtered_paths_work_when_the_filter_is_not_required() {
+    for (extra, main_moves) in [(vec![], false), (vec!["--method", "rebase"], true)] {
+        let env = lfs_setup(false);
+        let feat = add_branch(&env, "feat", "data.bin", "rewritten");
+        if main_moves {
+            advance_main(&env, "b.txt", "b\n");
+            add_worktree(&env, "work", &["feat"]);
+        }
+
+        ok(&env, &merge_args(&feat, "feat", &extra));
+
+        assert_eq!(
+            fs::read_to_string(env.repo.join("data.bin")).unwrap(),
+            "rewritten",
+            "{extra:?}"
+        );
+    }
+}

@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use super::filter::{self, Refusal};
 use super::index::{copy_entry, left_out_paths};
 use super::{Repo, Worktree, commit_id, folded, sparse};
 use crate::core::error::{Error, Result, ctx};
@@ -168,20 +169,27 @@ pub(super) fn move_branch_to(
 }
 
 /// Writes the `paths` of `target` into the work tree and the index, refusing, with nothing
-/// changed, when that would overwrite a local change or an untracked or ignored file.
+/// changed, when that would overwrite a local change or an untracked or ignored file, or write a
+/// path a required filter applies to.
 fn check_out_safely(
     repo: &git2::Repository,
     target: &git2::Commit<'_>,
     paths: &[&Vec<u8>],
 ) -> Result<()> {
     let mut blocked = Vec::new();
+    let refusal = Refusal::default();
     let mut options = git2::build::CheckoutBuilder::new();
     options
         .safe()
         .overwrite_ignored(false)
         .disable_pathspec_match(true)
-        .notify_on(git2::CheckoutNotificationType::CONFLICT)
-        .notify(|_, path, _, _, _| {
+        .notify_on(
+            git2::CheckoutNotificationType::CONFLICT | git2::CheckoutNotificationType::UPDATED,
+        )
+        .notify(|kind, path, _, _, _| {
+            if kind.contains(git2::CheckoutNotificationType::UPDATED) {
+                return filter::may_write(repo, &refusal, path);
+            }
             blocked.extend(path.map(Path::to_owned));
             true
         });
@@ -190,6 +198,9 @@ fn check_out_safely(
     }
     let checked = repo.checkout_tree(target.as_object(), Some(&mut options));
     drop(options);
+    if let Some(message) = refusal.take() {
+        return Err(Error(message));
+    }
     if checked.is_err() && !blocked.is_empty() {
         return Err(Error(overwrite_message(repo, &blocked)?));
     }

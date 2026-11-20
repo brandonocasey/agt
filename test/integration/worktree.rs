@@ -308,6 +308,39 @@ fn restore_accepts_a_backup_without_file_mode_metadata() {
 }
 
 #[test]
+fn a_restore_of_a_legacy_backup_writes_a_required_filter_path_only_when_it_is_not_required() {
+    for required in [false, true] {
+        let f = Fixture::new();
+        for (key, value) in [("filter.lfs.clean", "cat"), ("filter.lfs.smudge", "cat")] {
+            f.env.git(&["config", key, value]);
+        }
+        fs::write(
+            f.env.repo.join(".git/info/attributes"),
+            "*.bin filter=lfs\n",
+        )
+        .unwrap();
+        f.dirty();
+        let (id, _) = legacy_backup(&f, json!([]));
+        if required {
+            f.env.git(&["config", "filter.lfs.required", "true"]);
+        }
+
+        let output = f.agt(&f.env.repo, &["restore", &id]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if required {
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(stderr.contains("new.bin"), "{stderr}");
+            assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+            assert!(!f.wt.join("new.bin").exists());
+        } else {
+            assert!(output.status.success(), "{stderr}");
+            assert!(f.wt.join("new.bin").exists());
+        }
+    }
+}
+
+#[test]
 fn restore_file_modes_cannot_escape_through_parent_paths_or_symlinks() {
     for relative in ["../outside", "link/outside"] {
         let f = Fixture::new();

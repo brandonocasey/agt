@@ -1,6 +1,7 @@
 //! Creating and removing linked worktrees, moving a work tree to a snapshot, and submodules.
 //! They go through libgit2, which runs no hooks.
-//! It applies no filter drivers, such as Git Large File Storage.
+//! A checkout refuses a path that a required filter applies to, because no filter driver (such as
+//! Git Large File Storage) runs; other filters and hooks do not run either.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -8,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::deep::{check_out, is_too_deep};
+use super::filter::{self, Refusal};
 use super::index::{SKIP_WORKTREE, refreshed_index};
 use super::{Repo, commit_id, configured, sparse, without_trailing_slash};
 use crate::core::error::{Error, Result, ctx};
@@ -128,14 +130,17 @@ impl Repo {
     pub fn checkout_paths(&self, commit: &str, paths: &[Vec<u8>]) -> Result<()> {
         let repo = self.open_writing()?;
         let commit = repo.find_commit(commit_id(&repo, commit)?)?;
+        let refusal = Refusal::default();
         let mut options = git2::build::CheckoutBuilder::new();
         options.force().disable_pathspec_match(true);
+        filter::refuse_required_filters(&mut options, &repo, &refusal);
         for path in paths {
             options.path(path.as_slice());
         }
-        match repo.checkout_tree(commit.as_object(), Some(&mut options)) {
+        let checked = repo.checkout_tree(commit.as_object(), Some(&mut options));
+        match checked {
             Err(error) if is_too_deep(&error) => check_out(&repo, &commit.tree()?, paths),
-            checked => Ok(checked?),
+            checked => filter::finished(&refusal, checked),
         }
     }
 
@@ -307,8 +312,11 @@ fn fill_worktree(main: &git2::Repository, path: &Path) -> Result<()> {
         copy_sparse_files(main, &linked)?;
         return Repo::at(path).sparse_check_out_head();
     }
-    linked.checkout_head(None)?;
-    Ok(())
+    let refusal = Refusal::default();
+    let mut options = git2::build::CheckoutBuilder::new();
+    filter::refuse_required_filters(&mut options, &linked, &refusal);
+    let checked = linked.checkout_head(Some(&mut options));
+    filter::finished(&refusal, checked)
 }
 
 /// Gives the new worktree the sparse-checkout patterns and per-worktree config of `from`,
@@ -648,6 +656,33 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join(&script)).unwrap(), "b\n");
         assert_eq!(fs::read_link(dir.join(&link)).unwrap(), Path::new("b.txt"));
         assert_eq!(sandbox.git_output(&dir, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn checking_out_a_required_filter_path_nested_deeper_than_libgit2_walks_is_refused() {
+        let sandbox = Sandbox::with_repo();
+        let dir = sandbox.repo();
+        let deep = (1..=110)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let file = format!("{deep}/a.bin");
+        commit(
+            &sandbox,
+            &dir,
+            &[(".gitattributes", "*.bin filter=lfs\n"), (&file, "real\n")],
+            "one",
+        );
+        sandbox.git(&dir, &["config", "filter.lfs.required", "true"]);
+        fs::write(dir.join(&file), "edited\n").unwrap();
+
+        let refused = Repo::at(&dir)
+            .checkout_paths("HEAD", &[file.clone().into_bytes()])
+            .unwrap_err();
+
+        assert!(refused.0.contains(&file), "{refused}");
+        assert!(refused.0.contains("required filter 'lfs'"), "{refused}");
+        assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), "edited\n");
     }
 
     #[test]

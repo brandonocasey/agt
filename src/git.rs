@@ -11,6 +11,7 @@ mod deep;
 mod env_config;
 pub mod fast_forward;
 mod files;
+mod filter;
 #[cfg(test)]
 mod fixtures;
 mod history;

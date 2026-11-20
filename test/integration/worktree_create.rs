@@ -2206,3 +2206,154 @@ fn a_path_that_holds_files_is_refused_and_leaves_no_registration() {
     assert!(!env.repo.join(".git/worktrees/foo").exists());
     assert_eq!(fs::read_to_string(taken.join("mine.txt")).unwrap(), "mine");
 }
+
+/// A repository whose `*.bin` files go through the `lfs` filter, which `cat` stands in for.
+/// `main` holds `first`, then `.gitattributes` and `data.bin`. The returned commit is the first.
+fn lfs_repo() -> (Env, String) {
+    let (env, first) = repo_with_commit();
+    for (key, value) in [("filter.lfs.clean", "cat"), ("filter.lfs.smudge", "cat")] {
+        git(&env, &env.repo, &["config", key, value]);
+    }
+    fs::write(env.repo.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    commit(&env, &env.repo.clone(), "data.bin", "real content");
+    (env, first)
+}
+
+fn require_lfs(env: &Env) {
+    git(env, &env.repo, &["config", "filter.lfs.required", "true"]);
+}
+
+fn only_main_worktree_is_left(env: &Env) {
+    assert_eq!(
+        git(env, &env.repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1
+    );
+    let registered = fs::read_dir(env.repo.join(".git/worktrees")).map_or(0, Iterator::count);
+    assert_eq!(registered, 0);
+}
+
+#[test]
+fn a_worktree_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_nothing() {
+    let (env, _) = lfs_repo();
+    require_lfs(&env);
+
+    let output = agt(&env, &env.repo, &["create", "work"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("data.bin"), "{stderr}");
+    assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    only_main_worktree_is_left(&env);
+}
+
+#[test]
+fn a_restore_whose_checkout_writes_a_required_filter_path_is_refused_and_leaves_no_worktree() {
+    let (env, _) = lfs_repo();
+    let tree = env.path("tree");
+    agt_json(
+        &env,
+        &env.repo,
+        &["create", "old", "--path", tree.to_str().unwrap()],
+    );
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+    require_lfs(&env);
+
+    let output = agt(
+        &env,
+        &env.repo,
+        &["restore", removed["id"].as_str().unwrap()],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("data.bin"), "{stderr}");
+    assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+    assert!(!tree.exists());
+    only_main_worktree_is_left(&env);
+}
+
+#[test]
+fn a_sparse_worktree_refuses_a_required_filter_path_it_writes_and_ignores_one_it_leaves_out() {
+    for (written, refused) in [("keep", true), ("out", false)] {
+        let (env, _) = lfs_repo();
+        let repo = env.repo.clone();
+        fs::create_dir_all(repo.join(written)).unwrap();
+        fs::create_dir_all(repo.join("keep")).unwrap();
+        fs::write(repo.join(written).join("big.bin"), "real content").unwrap();
+        git(&env, &repo, &["add", "-A"]);
+        git(&env, &repo, &["commit", "-q", "-m", "dirs"]);
+        git(
+            &env,
+            &repo,
+            &["sparse-checkout", "set", "--no-cone", "/keep/"],
+        );
+        require_lfs(&env);
+
+        let output = agt(&env, &repo, &["create", "work"]);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if refused {
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(stderr.contains("keep/big.bin"), "{stderr}");
+            assert!(stderr.contains("required filter 'lfs'"), "{stderr}");
+            only_main_worktree_is_left(&env);
+        } else {
+            assert!(output.status.success(), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn a_worktree_and_a_restore_over_filtered_paths_work_when_the_filter_is_not_required() {
+    let (env, first) = lfs_repo();
+    let made = agt_json(&env, &env.repo, &["create", "work"]);
+    assert_eq!(
+        fs::read_to_string(
+            made["path"]
+                .as_str()
+                .map(Path::new)
+                .unwrap()
+                .join("data.bin")
+        )
+        .unwrap(),
+        "real content"
+    );
+    let tree = env.path("tree");
+    agt_json(
+        &env,
+        &env.repo,
+        &[
+            "create",
+            "old",
+            "--detach",
+            &first,
+            "--path",
+            tree.to_str().unwrap(),
+        ],
+    );
+    fs::write(tree.join("kept.bin"), "unsaved").unwrap();
+    git(&env, &tree, &["add", "kept.bin"]);
+    let removed = agt_json(
+        &env,
+        &env.repo,
+        &["remove", tree.to_str().unwrap(), "--yes"],
+    );
+
+    agt_json(
+        &env,
+        &env.repo,
+        &["restore", removed["id"].as_str().unwrap()],
+    );
+
+    assert_eq!(
+        fs::read_to_string(tree.join("kept.bin")).unwrap(),
+        "unsaved"
+    );
+}

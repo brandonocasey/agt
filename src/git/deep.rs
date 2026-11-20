@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::GITLINK_MODE;
 use super::files::{ancestor_dirs, staged_diff};
+use super::filter;
 use super::index::{STAGE_MASK, Scope, StatusItem, UntrackedMode, is_hidden};
 use crate::core::error::{Error, Result};
 
@@ -96,6 +97,10 @@ pub(super) fn check_out(
     paths: &[Vec<u8>],
 ) -> Result<()> {
     let root = work_tree(repo)?;
+    filter::ensure_writable(
+        repo,
+        paths.iter().map(|path| Path::new(OsStr::from_bytes(path))),
+    )?;
     let mut index = repo.index()?;
     for path in paths {
         let relative = Path::new(OsStr::from_bytes(path));

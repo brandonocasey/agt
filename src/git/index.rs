@@ -9,6 +9,7 @@ use std::path::Path;
 
 use super::deep::{is_too_deep, walk};
 use super::files::{is_nested_repo, nested_repos};
+use super::filter::{Use, required_filter};
 use super::{GITLINK_MODE, Gitlink, Repo, StatusEntry};
 use crate::core::error::{Error, Result};
 
@@ -177,7 +178,7 @@ impl Repo {
                 if path.as_os_str().as_bytes().ends_with(b"/") {
                     return 1;
                 }
-                refused = required_filter(repo, path);
+                refused = required_filter(repo, path, Use::Stage);
                 if refused.is_some() { -1 } else { 0 }
             };
             let added = index.add_all(["*"], git2::IndexAddOption::DEFAULT, Some(&mut check));
@@ -337,7 +338,7 @@ fn stage_walked(
             index.remove_path(path)?;
             continue;
         }
-        if let Some(message) = required_filter(repo, path) {
+        if let Some(message) = required_filter(repo, path, Use::Stage) {
             return Err(Error(message));
         }
         index
@@ -608,24 +609,6 @@ pub(super) fn copy_entry(entry: &git2::IndexEntry) -> git2::IndexEntry {
         flags_extended: entry.flags_extended,
         path: entry.path.clone(),
     }
-}
-
-/// Why `path` cannot be staged: its `filter` attribute names a driver the config marks
-/// required, and libgit2 runs no filter drivers, so the content would be hashed unfiltered.
-fn required_filter(repo: &git2::Repository, path: &Path) -> Option<String> {
-    let flags = git2::AttrCheckFlags::FILE_THEN_INDEX;
-    let driver = repo.get_attr(path, "filter", flags).ok()??;
-    let required = repo
-        .config()
-        .ok()?
-        .get_bool(&format!("filter.{driver}.required"))
-        .unwrap_or(false);
-    required.then(|| {
-        format!(
-            "{}: the required filter '{driver}' cannot be run, so the file cannot be read as git would stage it",
-            path.display()
-        )
-    })
 }
 
 #[cfg(test)]
