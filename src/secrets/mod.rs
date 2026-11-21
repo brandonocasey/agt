@@ -63,36 +63,10 @@ fn report(args: &Cli, rows: &Findings) -> Result<Output> {
 
 fn scan(args: &Cli) -> Result<Findings> {
     let repo = Repo::discover()?;
-    let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
-    let paths: Vec<PathBuf> = args.paths.iter().map(|path| cwd.join(path)).collect();
-    // A missing path would match nothing and report clean, which a scanner MUST NOT do. A
-    // staged scan also accepts a path in the index or in the staged diff, such as a staged
-    // file since deleted from disk or a staged deletion that hooks pass along.
-    for (path, full) in args.paths.iter().zip(&paths) {
-        let found = full.symlink_metadata().is_ok()
-            || (args.staged
-                && (!repo
-                    .checked_paths(
-                        &["ls-files", "-z", "--"],
-                        std::slice::from_ref(full),
-                        None,
-                        &[],
-                    )?
-                    .is_empty()
-                    || !repo
-                        .checked_paths(
-                            &["diff", "--cached", "--name-only", "-z", "--"],
-                            std::slice::from_ref(full),
-                            None,
-                            &[],
-                        )?
-                        .is_empty()));
-        if !found {
-            return fail(format!("no such path: {}", path.display()));
-        }
-    }
+    let paths = scan_paths(&repo, args)?;
     let mut git: Vec<&str> = if args.staged {
         vec![
+            "--literal-pathspecs",
             "diff",
             "--cached",
             "--raw",
@@ -103,7 +77,13 @@ fn scan(args: &Cli) -> Result<Findings> {
             "--diff-filter=ACMRT",
         ]
     } else {
-        vec!["ls-files", "-co", "--exclude-standard", "-z"]
+        vec![
+            "--literal-pathspecs",
+            "ls-files",
+            "-co",
+            "--exclude-standard",
+            "-z",
+        ]
     };
     git.push("--");
     let listing = repo.checked_paths(&git, &paths, None, &[])?;
@@ -134,6 +114,45 @@ fn scan(args: &Cli) -> Result<Findings> {
         scan_text(&String::from_utf8_lossy(name), &content, &mut rows);
     }
     Ok(rows)
+}
+
+fn scan_paths(repo: &Repo, args: &Cli) -> Result<Vec<PathBuf>> {
+    let cwd = std::env::current_dir().map_err(ctx("read current directory"))?;
+    let paths: Vec<PathBuf> = args.paths.iter().map(|path| cwd.join(path)).collect();
+    // A missing path would match nothing and report clean, which a scanner MUST NOT do. A
+    // staged scan also accepts a path in the index or in the staged diff, such as a staged
+    // file since deleted from disk or a staged deletion that hooks pass along.
+    for (path, full) in args.paths.iter().zip(&paths) {
+        let found = full.symlink_metadata().is_ok()
+            || (args.staged
+                && (!repo
+                    .checked_paths(
+                        &["--literal-pathspecs", "ls-files", "-z", "--"],
+                        std::slice::from_ref(full),
+                        None,
+                        &[],
+                    )?
+                    .is_empty()
+                    || !repo
+                        .checked_paths(
+                            &[
+                                "--literal-pathspecs",
+                                "diff",
+                                "--cached",
+                                "--name-only",
+                                "-z",
+                                "--",
+                            ],
+                            std::slice::from_ref(full),
+                            None,
+                            &[],
+                        )?
+                        .is_empty()));
+        if !found {
+            return fail(format!("no such path: {}", path.display()));
+        }
+    }
+    Ok(paths)
 }
 
 /// The file's bytes (the staged blob `object`, else the working-tree file), or `None` for a
