@@ -472,7 +472,7 @@ fn delete_branch(repo: &Repo, subject: &Subject, yes: bool, report: &mut Report)
         return Ok(());
     }
     eprintln!("agt: deleting branch {branch}");
-    match repo.delete_branch(branch, flag == "-D") {
+    match repo.git(&["branch", flag, "--", branch]) {
         Ok(_) => {
             row["restore"] = json!(format!("git branch {branch} {}", subject.tip));
             report.delete.push(row);

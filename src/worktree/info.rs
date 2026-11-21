@@ -10,7 +10,7 @@ use super::disposable::{is_disposable, is_os_junk};
 use super::nested;
 use crate::core::agents::{Live, inside};
 use crate::core::error::{Error, Result, ctx};
-use crate::git::{Repo, SubmoduleDirt, Worktree};
+use crate::git::{Repo, Worktree, nul_fields};
 
 /// The main checkout: the first entry of `git worktree list`.
 pub fn main_checkout(repo: &Repo) -> Result<Worktree> {
@@ -107,9 +107,19 @@ fn listing(root: &Path, expand: bool) -> Result<Listing> {
 }
 
 fn collect(dir: &Path, prefix: &str, expand: bool, found: &mut Listing) -> Result<()> {
-    let mut listed: Vec<String> = Repo::at(dir)
-        .ignored_entries()?
-        .iter()
+    let listing = Repo::at(dir).checked(
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+        None,
+        &[],
+    )?;
+    let mut listed: Vec<String> = nul_fields(&listing)
         .map(|entry| String::from_utf8_lossy(entry).into_owned())
         .collect();
     listed.sort();
@@ -184,7 +194,7 @@ pub(super) fn parents(path: &str) -> impl Iterator<Item = &str> {
 /// What `git status` lists: whether each path is untracked, and the path.
 fn status(root: &Path) -> Result<Vec<(bool, String)>> {
     Ok(Repo::at(root)
-        .status(true, SubmoduleDirt::Report)?
+        .status(true, &[])?
         .into_iter()
         .map(|entry| (entry.untracked(), entry.path))
         .collect())
@@ -254,9 +264,17 @@ pub fn describe(
     // A branch with no commit yet has no HEAD to compare.
     let unborn = entry.unborn();
     if let Some((_, reference)) = default.filter(|_| !unborn) {
-        let (ahead_by, behind_by) = repo.ahead_behind(&entry.head, reference)?;
-        behind = json!(behind_by);
-        ahead = json!(ahead_by);
+        let counts = repo.git(&[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{reference}...{}", entry.head),
+        ])?;
+        let mut numbers = counts.split_whitespace().map(str::parse::<u64>);
+        if let (Some(Ok(left)), Some(Ok(right))) = (numbers.next(), numbers.next()) {
+            behind = json!(left);
+            ahead = json!(right);
+        }
         merged = json!(repo.is_ancestor(&entry.head, reference)?);
     }
     Ok(json!({

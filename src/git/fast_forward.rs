@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use super::{GITLINK_MODE, Repo, error_line};
+use super::{GITLINK, Repo, error_line};
 use crate::core::error::Result;
 use crate::core::shell::quote;
 
@@ -68,7 +68,7 @@ pub fn fast_forward(repo: &Repo, name: &str, from: &str, to: &str) -> Result<Upd
                 ".",
                 &spec,
             ];
-            finish(repo, &fetch, None, repo.fast_forward_ref(name, from, to))
+            run(repo, &fetch, None)?
         }
         Ok(Place::Worktree(path)) => {
             let merge = [
@@ -79,9 +79,7 @@ pub fn fast_forward(repo: &Repo, name: &str, from: &str, to: &str) -> Result<Upd
                 "--quiet",
                 to,
             ];
-            let work = Repo::at(&path);
-            let moved = work.fast_forward_checkout(to);
-            finish(&work, &merge, Some(path), moved)
+            run(&Repo::at(&path), &merge, Some(path.clone()))?
         }
     })
 }
@@ -146,18 +144,21 @@ fn place(
 /// Whether a submodule pointer differs between `from` and `to`.
 /// A merge leaves a moved submodule at its old commit, which dirties the checkout.
 pub fn moves_submodule(repo: &Repo, from: &str, to: &str) -> Result<bool> {
-    Ok(repo
-        .tree_changes(from, to)?
-        .iter()
-        .any(|change| change.old_mode == GITLINK_MODE || change.new_mode == GITLINK_MODE))
+    let raw = repo.git(&["diff", "--raw", "--ignore-submodules=none", from, to])?;
+    Ok(raw.lines().any(|line| {
+        line.split_whitespace()
+            .take(2)
+            .any(|mode| mode.trim_start_matches(':') == GITLINK)
+    }))
 }
 
-/// The outcome of the update; git may refuse over local changes a merge would overwrite.
-/// The reason is git's message; `retry` is the command to run once that is resolved.
-fn finish(repo: &Repo, command: &[&str], path: Option<PathBuf>, moved: Result<()>) -> Update {
-    let Err(error) = moved else {
-        return Update::Moved { path };
-    };
+/// Runs the update. Git may refuse over local changes a merge would overwrite.
+/// The reason is git's message, and `retry` the command to run once that is resolved.
+fn run(repo: &Repo, command: &[&str], path: Option<PathBuf>) -> Result<Update> {
+    let (code, error) = repo.probe(command)?;
+    if code == Some(0) {
+        return Ok(Update::Moved { path });
+    }
     let words: Vec<String> = command.iter().map(|word| quote(word)).collect();
     let retry = format!(
         "git -C {} {}",
@@ -166,13 +167,13 @@ fn finish(repo: &Repo, command: &[&str], path: Option<PathBuf>, moved: Result<()
     );
     // `--no-overwrite-ignore` makes git count an ignored file as untracked. The message is reworded
     // to name both.
-    let message = error_line(&error.0).replace(
+    let message = error_line(&error).replace(
         "untracked working tree files",
         "untracked or ignored working tree files",
     );
-    Update::Refused(Refused {
+    Ok(Update::Refused(Refused {
         reason: format!("git {} refused: {message}", command[0]),
         path,
         retry: Some(retry),
-    })
+    }))
 }

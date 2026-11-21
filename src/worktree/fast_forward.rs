@@ -38,7 +38,7 @@ fn update(
     report: &mut Value,
 ) -> Result<Option<String>> {
     let name = local.branch.as_str();
-    let config = |key: &str| repo.config_value(&format!("branch.{name}.{key}"));
+    let config = |key: &str| repo.git_opt(&["config", "--get", &format!("branch.{name}.{key}")]);
     // Without an upstream, origin's branch of the same name is the one `create` weighed it against.
     let remote = config("remote")?.unwrap_or_else(|| "origin".to_owned());
     let merge = config("merge")?.unwrap_or_else(|| format!("refs/heads/{name}"));
@@ -110,6 +110,6 @@ fn advance_tracking(repo: &Repo, remote: &str, tracked: &str, to: &str) {
     };
     if old != to && repo.is_ancestor(&old, to).unwrap_or(false) {
         let message = "agt worktree create: fetched default";
-        let _ = repo.move_ref(&tracking, &old, to, message);
+        let _ = repo.succeeds(&["update-ref", "-m", message, &tracking, to, &old]);
     }
 }

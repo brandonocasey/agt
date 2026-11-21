@@ -448,30 +448,6 @@ fn landable_lists_conflicting_paths_against_an_explicit_target() {
 }
 
 #[test]
-fn landable_fails_for_a_branch_that_shares_no_history_with_the_target() {
-    let site = Site::new();
-    site.env.git(&["checkout", "-q", "--orphan", "lone"]);
-    site.env.write("lone.txt", "lone\n");
-    site.env.commit_all("lone");
-    let merge_tree = site
-        .env
-        .command("git", &site.env.repo)
-        .args(["merge-tree", "--write-tree", "main", "lone"])
-        .output()
-        .unwrap();
-    assert_eq!(merge_tree.status.code(), Some(128));
-
-    let output = site.agt(&["check", "lone", "--base", "main", "--checks", "landable"]);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let error = report["checks"]["landable"]["error"].as_str().unwrap();
-    assert!(
-        error.contains("refusing to merge unrelated histories"),
-        "{error}"
-    );
-}
-
-#[test]
 fn landable_without_a_default_branch_names_its_own_flag() {
     let env = Env::new();
     env.git(&["symbolic-ref", "HEAD", "refs/heads/trunk"]);

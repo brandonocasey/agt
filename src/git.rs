@@ -1,44 +1,32 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::ops::Deref;
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, Once, OnceLock, PoisonError};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 pub mod base;
-mod deep;
-mod env_config;
 pub mod fast_forward;
-mod file_mode;
-mod files;
-mod filter;
-#[cfg(test)]
-mod fixtures;
-mod history;
-mod hooks;
-mod http_config;
-mod identity;
-mod index;
-mod known_hosts;
-mod linked;
-mod merge;
-mod network;
-mod patch_id;
-mod rebase;
-mod refs;
-mod remotes;
-mod sparse;
-mod sparse_index;
-mod worktrees;
 
 use crate::core::error::{Error, Result, ctx, fail};
+use crate::core::process;
 
-pub use index::SubmoduleDirt;
-pub use linked::{Checkout, Transports};
-pub use merge::Busy;
-pub use rebase::Rebased;
-pub use refs::{BranchFilter, RefTip};
+/// Git's English messages for `rev-parse --show-toplevel` outside a repository or in a bare one.
+const NO_WORK_TREE: [&str; 2] = [
+    "not a git repository",
+    "this operation must be run in a work tree",
+];
+
+// Fixed diff options so patch-ids and anchors do not depend on user diff config.
+const DIFF_FLAGS: [&str; 5] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
 
 pub struct CommitInfo {
     pub sha: String,
@@ -67,6 +55,9 @@ impl StatusEntry {
     }
 }
 
+/// The mode git records for a submodule's commit in a tree or the index.
+pub const GITLINK: &str = "160000";
+
 /// A submodule recorded in the index: the commit it is at, and its path.
 pub struct Gitlink {
     pub commit: String,
@@ -90,66 +81,29 @@ impl Worktree {
     }
 }
 
-/// Which repository a [`Repo`] opens from its path.
-#[derive(Clone, Copy)]
-enum Kind {
-    /// A directory in a work tree, found the way git finds it: by looking upward.
-    WorkTree,
-    /// A git directory taken as it is, whatever its `core.worktree` says.
-    GitDir,
-}
-
 pub struct Repo {
     root: PathBuf,
-    kind: Kind,
     main_checkout: OnceLock<PathBuf>,
     // Nothing in one agt process moves the common dir, so it is read from git once per `Repo`;
     // a failed read is not kept.
     common_dir: OnceLock<String>,
     // Answers about refs, HEAD and config, kept when [`Repo::remembering_refs`] asked for it.
     refs: Option<Mutex<HashMap<String, Option<String>>>>,
-    // The one open repository of a [`Repo::read_only`] one, whose object writes stay in memory.
-    held: Option<Mutex<git2::Repository>>,
-}
-
-/// An open repository: a new one, or the lock on the held one of a read-only [`Repo`].
-enum Handle<'a> {
-    Fresh(git2::Repository),
-    Held(MutexGuard<'a, git2::Repository>),
-}
-
-impl Deref for Handle<'_> {
-    type Target = git2::Repository;
-
-    fn deref(&self) -> &git2::Repository {
-        match self {
-            Handle::Fresh(repo) => repo,
-            Handle::Held(repo) => repo,
-        }
-    }
+    env: Vec<(OsString, OsString)>,
+    _scratch: Option<tempfile::TempDir>,
 }
 
 impl Repo {
     /// The repository whose work tree is `root`, which MUST be a directory git accepts; it need
     /// not be the current directory.
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self::of(root.into(), Kind::WorkTree)
-    }
-
-    /// The repository whose git directory is `git_dir`, even when its `core.worktree` names a
-    /// directory that is gone. It has no work tree, so only refs, objects and config can be read.
-    pub fn at_git_dir(git_dir: impl Into<PathBuf>) -> Self {
-        Self::of(git_dir.into(), Kind::GitDir)
-    }
-
-    fn of(root: PathBuf, kind: Kind) -> Self {
         Self {
-            root,
-            kind,
+            root: root.into(),
             main_checkout: OnceLock::new(),
             common_dir: OnceLock::new(),
             refs: None,
-            held: None,
+            env: Vec::new(),
+            _scratch: None,
         }
     }
 
@@ -157,67 +111,93 @@ impl Repo {
         &self.root
     }
 
-    fn open_raw(&self) -> std::result::Result<git2::Repository, git2::Error> {
-        configure_libgit2();
-        match self.kind {
-            Kind::WorkTree => git2::Repository::open_ext(
-                &self.root,
-                git2::RepositoryOpenFlags::FROM_ENV,
-                std::iter::empty::<&OsStr>(),
-            ),
-            Kind::GitDir => git2::Repository::open_bare(&self.root),
-        }
-    }
-
-    fn open_new(&self) -> Result<git2::Repository> {
-        self.open_raw().map_err(|error| {
-            Error(format!(
-                "open the git repository at {}: {}",
-                self.root.display(),
-                crate::core::error::libgit2_message(&error)
-            ))
-        })
-    }
-
-    /// The repository for a call that reads or changes only refs, objects, config or remotes:
-    /// its index is not looked at.
-    fn open_refs(&self) -> Result<Handle<'_>> {
-        match &self.held {
-            Some(held) => Ok(Handle::Held(
-                held.lock().unwrap_or_else(PoisonError::into_inner),
-            )),
-            None => self.open_new().map(Handle::Fresh),
-        }
-    }
-
-    /// The repository for a call that may read the index, which is expanded in memory when it
-    /// is a sparse one.
-    fn open(&self) -> Result<Handle<'_>> {
-        let handle = self.open_refs()?;
-        sparse_index::expand_if_sparse(&handle)?;
-        Ok(handle)
-    }
-
-    /// The repository for a call that makes libgit2 change the index. A sparse index file is
-    /// rewritten as a full one first, which a read-only `Repo` never does.
-    fn open_writing(&self) -> Result<Handle<'_>> {
-        if self.held.is_some() {
-            return self.open();
-        }
-        let handle = self.open_refs()?;
-        sparse_index::expand_in_place(&handle)?;
-        Ok(handle)
-    }
-
     /// The absolute git directory of this work tree (a linked worktree's own, not the common one).
     pub fn git_dir(&self) -> Result<PathBuf> {
-        Ok(without_trailing_slash(self.open_refs()?.path()))
+        self.git(&["rev-parse", "--absolute-git-dir"])
+            .map(PathBuf::from)
     }
 
     /// The root of the work tree that contains this directory.
     pub fn toplevel(&self) -> Result<PathBuf> {
-        self.find_toplevel()?
-            .ok_or_else(|| Error("this operation must be run in a work tree".into()))
+        self.git(&["rev-parse", "--show-toplevel"])
+            .map(PathBuf::from)
+    }
+
+    /// What `git status` lists, without renames. `untracked` also lists untracked files; `extra`
+    /// adds `status` options.
+    pub fn status(&self, untracked: bool, extra: &[&str]) -> Result<Vec<StatusEntry>> {
+        let mut args = vec![
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            if untracked {
+                "--untracked-files=all"
+            } else {
+                "--untracked-files=no"
+            },
+        ];
+        args.extend(extra);
+        let listing = self.checked(&args, None, &[])?;
+        Ok(nul_fields(&listing)
+            .filter(|entry| entry.len() > 3)
+            .map(|entry| StatusEntry {
+                staged: entry[0],
+                unstaged: entry[1],
+                path: String::from_utf8_lossy(&entry[3..]).into_owned(),
+            })
+            .collect())
+    }
+
+    /// How many changes the work tree has: the paths `git status` lists, a rename counting
+    /// once, and the edits it hides.
+    pub fn uncommitted_count(&self) -> Result<usize> {
+        self.count_changes(&[])
+    }
+
+    /// Like `uncommitted_count`, but ignores the user's `status.showUntrackedFiles` and
+    /// `diff.ignoreSubmodules` settings: untracked files and submodule changes always count.
+    pub fn strict_uncommitted_count(&self) -> Result<usize> {
+        self.count_changes(&["--untracked-files=normal", "--ignore-submodules=none"])
+    }
+
+    fn count_changes(&self, options: &[&str]) -> Result<usize> {
+        let mut args = vec!["status", "--porcelain=v1", "-z"];
+        args.extend(options);
+        let listed = self.checked(&args, None, &[])?;
+        let mut entries = nul_fields(&listed);
+        let mut paths: HashSet<_> = self.hidden_edits()?.into_iter().collect();
+        while let Some(entry) = entries.next() {
+            if entry.len() <= 3 {
+                continue;
+            }
+            paths.insert(String::from_utf8_lossy(&entry[3..]).into_owned());
+            if matches!(entry[0], b'R' | b'C') || matches!(entry[1], b'R' | b'C') {
+                entries.next();
+            }
+        }
+        Ok(paths.len())
+    }
+
+    /// The submodules the index records, limited to `pathspec` when it is not empty.
+    pub fn gitlinks(&self, pathspec: &[&str]) -> Result<Vec<Gitlink>> {
+        let mut args = vec!["ls-files", "--stage", "-z"];
+        if !pathspec.is_empty() {
+            args.push("--");
+            args.extend(pathspec);
+        }
+        let listing = self.checked(&args, None, &[])?;
+        Ok(nul_fields(&listing)
+            .filter_map(|entry| {
+                let entry = String::from_utf8_lossy(entry);
+                let (meta, path) = entry.split_once('\t')?;
+                let mut fields = meta.split(' ');
+                (fields.next() == Some(GITLINK)).then(|| Gitlink {
+                    commit: fields.next().unwrap_or_default().to_owned(),
+                    path: path.to_owned(),
+                })
+            })
+            .collect())
     }
 
     pub fn discover() -> Result<Self> {
@@ -227,21 +207,24 @@ impl Repo {
         Ok(Self::at(top))
     }
 
-    /// The work tree root that contains this directory, or `None` outside any work tree, in a
-    /// bare repository or inside a git directory. Other failures return an error.
+    /// The work tree root that contains this directory, or `None` outside any work tree.
+    /// Other failures return an error with git's own text.
     pub fn find_toplevel(&self) -> Result<Option<PathBuf>> {
-        let repo = match self.open_raw() {
-            Ok(repo) => repo,
-            Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let Some(workdir) = repo.workdir() else {
+        // Git exits 128 for both messages, so the text decides; LC_ALL=C keeps it English.
+        let output = self.exec(
+            &["rev-parse", "--show-toplevel"],
+            None,
+            &[("LC_ALL", Path::new("C"))],
+        )?;
+        if output.status.success() {
+            return Ok(Some(PathBuf::from(text(output.stdout)?)));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if NO_WORK_TREE.iter().any(|message| stderr.contains(message)) {
             return Ok(None);
-        };
-        // `git rev-parse --show-toplevel` has no work tree to name inside the git directory.
-        let inside_git_dir = fs::canonicalize(&self.root)
-            .is_ok_and(|root| root.starts_with(without_trailing_slash(repo.path())));
-        Ok((!inside_git_dir).then(|| without_trailing_slash(workdir)))
+        }
+        fail(format!("git rev-parse --show-toplevel failed: {stderr}"))
     }
 
     /// Makes this `Repo` remember answers about refs, HEAD and config; failed reads are not kept.
@@ -252,40 +235,189 @@ impl Repo {
         self
     }
 
-    /// Keeps object writes in memory while existing objects stay readable, so a read-only
-    /// command never modifies the repository.
+    /// Sends object writes to a throwaway directory while existing objects stay readable, so a
+    /// read-only command never modifies the repository.
     pub fn read_only(mut self) -> Result<Self> {
-        let repo = self.open_new()?;
-        repo.odb()?.add_new_mempack_backend(MEMORY_PRIORITY)?;
-        self.held = Some(Mutex::new(repo));
+        let objects = self.git(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ])?;
+        let scratch = tempfile::tempdir().map_err(ctx("create temporary object directory"))?;
+        self.env.push((
+            "GIT_OBJECT_DIRECTORY".into(),
+            scratch.path().as_os_str().into(),
+        ));
+        self.env
+            .push(("GIT_ALTERNATE_OBJECT_DIRECTORIES".into(), objects.into()));
+        self.env.push(("GIT_OPTIONAL_LOCKS".into(), "0".into()));
+        self._scratch = Some(scratch);
         Ok(self)
     }
 
-    /// The answer to `key`, from the first read of it when this `Repo` remembers answers and
-    /// that read was settled. A read that cannot open the repository is not settled.
-    fn fact(
+    /// `git args` in the work tree, with the options every call shares.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(&self.root)
+            // `git status` and friends would otherwise refresh and rewrite the index of a
+            // worktree that is only being read.
+            // A user's `log.showSignature` would put signature text ahead of every parsed field.
+            .args([
+                "--no-optional-locks",
+                "-c",
+                "core.quotepath=false",
+                "-c",
+                "log.showSignature=false",
+            ])
+            .args(args)
+            .envs(self.env.iter().map(|(key, value)| (key, value)));
+        if matches!(args, ["ls-remote" | "fetch" | "submodule", ..]) {
+            no_credential_prompts(&mut command);
+        }
+        command
+    }
+
+    fn exec(&self, args: &[&str], input: Option<Vec<u8>>, env: &[(&str, &Path)]) -> Result<Output> {
+        self.exec_paths(args, &[], input, env)
+    }
+
+    fn exec_paths(
         &self,
-        key: &str,
-        read: impl FnOnce(&git2::Repository) -> Result<Option<String>>,
-    ) -> Result<Option<String>> {
-        self.remembered(key, || match self.open_refs() {
-            Ok(repo) => read(&repo).map(|value| (value, true)),
-            Err(_) => Ok((None, false)),
-        })
+        args: &[&str],
+        paths: &[PathBuf],
+        input: Option<Vec<u8>>,
+        env: &[(&str, &Path)],
+    ) -> Result<Output> {
+        let mut command = self.command(args);
+        command.args(paths).envs(env.iter().copied());
+        let captured = process::output(&mut command, input.as_deref(), None)
+            .map_err(ctx(format!("run git {}", args.join(" "))))?;
+        captured
+            .input
+            .map_err(ctx(format!("write to git {}", args.join(" "))))?;
+        Ok(captured.output)
+    }
+
+    pub fn checked(
+        &self,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+        env: &[(&str, &Path)],
+    ) -> Result<Vec<u8>> {
+        self.checked_paths(args, &[], input, env)
+    }
+
+    pub fn checked_paths(
+        &self,
+        args: &[&str],
+        paths: &[PathBuf],
+        input: Option<Vec<u8>>,
+        env: &[(&str, &Path)],
+    ) -> Result<Vec<u8>> {
+        let output = self.exec_paths(args, paths, input, env)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return fail(format!("git {} failed: {}", args.join(" "), stderr.trim()));
+        }
+        Ok(output.stdout)
+    }
+
+    /// Runs `git args` and returns its output, giving up after `seconds`. For commands that
+    /// talk to a remote, which must not hang or ask anything: no credential prompt of any kind
+    /// (git, ssh, askpass helpers, credential managers), ssh in batch mode with a connect
+    /// timeout, and git in its own process group so that a timeout or a signal to agt kills ssh with it.
+    pub fn git_within(&self, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
+        let ssh = self.batch_ssh_command(args);
+        let mut command = self.command(args);
+        no_credential_prompts(&mut command);
+        command.env("GIT_SSH_COMMAND", ssh);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let captured = process::output(&mut command, None, Some(deadline)).map_err(|error| {
+            if error.kind() == ErrorKind::TimedOut {
+                Error(format!(
+                    "git {} took longer than {seconds}s",
+                    args.join(" ")
+                ))
+            } else {
+                Error(format!("run git {}: {error}", args.join(" ")))
+            }
+        })?;
+        if !captured.output.status.success() {
+            return fail(format!("git {} failed", args.join(" ")));
+        }
+        Ok(captured.output.stdout)
+    }
+
+    /// The ssh command a remote check uses: the user's own (`GIT_SSH_COMMAND`, `core.sshCommand`,
+    /// `GIT_SSH`, in git's order of precedence) with batch mode and a connect timeout added, or
+    /// plain ssh with them. `GIT_SSH` is a program path git runs without a shell, so it is quoted.
+    /// `core.sshCommand` is read with the `--git-dir` and `--work-tree` of `args`, as the command
+    /// itself resolves the repository: a stray `core.worktree` would otherwise fail the read.
+    fn batch_ssh_command(&self, args: &[&str]) -> String {
+        let mut config: Vec<&str> = Vec::new();
+        let mut rest = args.iter();
+        while let Some(&flag) = rest.next() {
+            match (flag, rest.clone().next()) {
+                ("--git-dir" | "--work-tree", Some(&value)) => {
+                    config.extend([flag, value]);
+                    rest.next();
+                }
+                _ => break,
+            }
+        }
+        config.extend(["config", "core.sshCommand"]);
+        let nonempty = |value: Option<String>| value.filter(|command| !command.is_empty());
+        let own = nonempty(std::env::var("GIT_SSH_COMMAND").ok())
+            .or_else(|| nonempty(self.git_opt(&config).ok().flatten()))
+            .or_else(|| {
+                nonempty(std::env::var("GIT_SSH").ok())
+                    .map(|program| format!("'{}'", program.replace('\'', "'\\''")))
+            });
+        format!(
+            "{} -o BatchMode=yes -o ConnectTimeout=5",
+            own.as_deref().unwrap_or("ssh")
+        )
+    }
+
+    pub fn git(&self, args: &[&str]) -> Result<String> {
+        text(self.checked(args, None, &[])?)
+    }
+
+    pub fn git_opt(&self, args: &[&str]) -> Result<Option<String>> {
+        Ok(self.ask(args)?.0)
+    }
+
+    /// Like [`Self::git_opt`], with whether the answer is settled. Only exit 0, or exit 1 for a
+    /// missing value, settles it.
+    fn ask(&self, args: &[&str]) -> Result<(Option<String>, bool)> {
+        let output = self.exec(args, None, &[])?;
+        if !output.status.success() {
+            return Ok((None, output.status.code() == Some(1)));
+        }
+        let value = Some(text(output.stdout)?).filter(|value| !value.is_empty());
+        Ok((value, true))
+    }
+
+    /// [`Self::git_opt`] for a fact about refs, kept if this `Repo` remembers them.
+    fn ref_fact(&self, args: &[&str]) -> Result<Option<String>> {
+        self.remembered_ref_fact(args, || self.ask(args))
     }
 
     /// Returns the first kept answer, or else `read`'s. An answer is kept when this `Repo`
     /// remembers refs and it is settled.
-    fn remembered(
+    fn remembered_ref_fact(
         &self,
-        key: &str,
+        args: &[&str],
         read: impl FnOnce() -> Result<(Option<String>, bool)>,
     ) -> Result<Option<String>> {
         let Some(refs) = &self.refs else {
             return Ok(read()?.0);
         };
+        let key = args.join("\0");
         let known = refs.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(value) = known.get(key) {
+        if let Some(value) = known.get(&key) {
             return Ok(value.clone());
         }
         drop(known);
@@ -293,51 +425,94 @@ impl Repo {
         if settled {
             refs.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(key.to_owned(), value.clone());
+                .insert(key, value.clone());
         }
         Ok(value)
     }
 
+    /// The exit code of `git <args>` (`None` when a signal ended it) and its stderr, for the
+    /// commands whose codes mean more than failure.
+    pub fn probe(&self, args: &[&str]) -> Result<(Option<i32>, String)> {
+        let output = self.exec(args, None, &[])?;
+        Ok((
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+
+    /// Whether `remote` has `reference` (a full ref name). The error is git's own text when it
+    /// could not ask.
+    pub fn remote_has(&self, remote: &str, reference: &str) -> Result<bool> {
+        // `ls-remote --exit-code` exits 2 when the ref is absent and otherwise non-zero only on
+        // failure, whatever the language of git's messages.
+        match self.probe(&[
+            "ls-remote",
+            "--exit-code",
+            "--end-of-options",
+            remote,
+            reference,
+        ])? {
+            (Some(0), _) => Ok(true),
+            (Some(2), _) => Ok(false),
+            (_, error) => Err(Error(error)),
+        }
+    }
+
+    /// Fetches `refspec` from `remote` and returns the commit it points at. An empty refmap
+    /// keeps the fetch from moving remote-tracking branches; FETCH_HEAD is read at once so a
+    /// later fetch cannot change it.
+    pub fn fetch_commit(&self, remote: &str, refspec: &str) -> Result<String> {
+        self.git(&[
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            "--refmap=",
+            remote,
+            refspec,
+        ])?;
+        self.git(&["rev-parse", "FETCH_HEAD"])
+    }
+
+    pub fn succeeds(&self, args: &[&str]) -> Result<bool> {
+        Ok(self.exec(args, None, &[])?.status.success())
+    }
+
     pub fn head(&self) -> Result<String> {
-        self.fact("head", |repo| peeled_commit(repo, "HEAD"))?
+        self.ref_fact(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?
             .ok_or_else(|| Error("repository has no commits".into()))
     }
 
+    /// The object `spec` names, `None` when it does not exist.
+    fn verify(&self, spec: &str) -> Result<Option<String>> {
+        self.git_opt(&verify_args(spec))
+    }
+
     pub fn commit(&self, rev: &str) -> Result<String> {
-        let repo = self.open_refs()?;
-        peeled_commit(&repo, rev)?.ok_or_else(|| Error(format!("unknown commit: {rev}")))
+        self.verify(&format!("{rev}^{{commit}}"))?
+            .ok_or_else(|| Error(format!("unknown commit: {rev}")))
     }
 
     /// The first line of the message of `commit`.
     pub fn subject(&self, commit: &str) -> Result<String> {
-        let repo = self.open_refs()?;
-        reject_bad_config(&repo)?;
-        let found = peeled_object(&repo, commit, git2::ObjectType::Commit)?
-            .ok_or_else(|| Error(format!("unknown commit: {commit}")))?;
-        Ok(subject_of(
-            found.as_commit().map_or(&[][..], |c| c.message_bytes()),
-        ))
+        let spec = format!("{commit}^{{commit}}");
+        self.git(&["log", "-1", "--format=%s", "--end-of-options", &spec, "--"])
+            .map(|text| text.trim_end().to_owned())
     }
 
     pub fn parent(&self, commit: &str) -> Result<Option<String>> {
-        let repo = self.open_refs()?;
-        let Some(found) = peeled_object(&repo, commit, git2::ObjectType::Commit)? else {
-            return Ok(None);
-        };
-        let parent = found.as_commit().and_then(|c| c.parent_id(0).ok());
-        Ok(parent.map(|id| id.to_string()))
+        self.verify(&format!("{commit}^1"))
     }
 
     pub fn tree_of(&self, commit: &str) -> Result<String> {
-        let repo = self.open_refs()?;
-        peeled_object(&repo, commit, git2::ObjectType::Tree)?
-            .map(|tree| tree.id().to_string())
-            .ok_or_else(|| Error(format!("unknown tree of {commit}")))
+        let spec = format!("{commit}^{{tree}}");
+        self.git(&["rev-parse", "--verify", "--end-of-options", &spec])
     }
 
     pub fn current_branch(&self) -> Result<Option<String>> {
-        let full = self.fact("head-branch", |repo| symbolic_target(repo, "HEAD"))?;
-        Ok(full.map(|full| local_branch_name(&full).to_owned()))
+        // Not `--short`: it prints `heads/<name>` when a tag or remote ref has the same name.
+        Ok(self
+            .ref_fact(&["symbolic-ref", "--quiet", "HEAD"])?
+            .map(|full| local_branch_name(&full).to_owned()))
     }
 
     /// `<unix time> <sha>` of the oldest reflog entry of a local branch, which stays the same
@@ -345,36 +520,35 @@ impl Repo {
     /// branches live in the common dir, so linked worktrees agree. `None` without a reflog.
     pub fn branch_birth(&self, branch: &str) -> Result<Option<String>> {
         let reference = format!("refs/heads/{branch}");
-        self.fact(&format!("birth {reference}"), |repo| {
-            let Ok(log) = repo.reflog(&reference) else {
-                return Ok(None);
-            };
-            let Some(oldest) = log.len().checked_sub(1).and_then(|last| log.get(last)) else {
-                return Ok(None);
-            };
-            let time = oldest.committer().when().seconds();
-            Ok(Some(format!("{time} {}", oldest.id_new())))
-        })
+        let Some(log) = self.ref_fact(&[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%H %gd",
+            &reference,
+            "--",
+        ])?
+        else {
+            return Ok(None);
+        };
+        let Some((sha, selector)) = log.lines().last().and_then(|line| line.split_once(' ')) else {
+            return Ok(None);
+        };
+        let time = selector
+            .rsplit_once("@{")
+            .and_then(|(_, rest)| rest.strip_suffix('}'))
+            .filter(|time| !time.is_empty() && time.bytes().all(|b| b.is_ascii_digit()));
+        Ok(time.map(|time| format!("{time} {sha}")))
     }
 
     /// The commit `reference` (a full ref name) leads to, or `None` when it does not exist.
     pub fn ref_commit(&self, reference: &str) -> Result<Option<String>> {
-        self.fact(&format!("ref {reference}"), |repo| {
-            peeled_commit(repo, reference)
-        })
+        self.ref_fact(&verify_args(&format!("{reference}^{{commit}}")))
     }
 
     /// The commit local branch `name` is at, or `None` when there is no such branch.
     pub fn branch_tip(&self, name: &str) -> Result<Option<String>> {
         self.ref_commit(&format!("refs/heads/{name}"))
-    }
-
-    /// The full name of the ref that symbolic ref `name` (`HEAD`, `refs/remotes/origin/HEAD`)
-    /// points to. `None` when `name` is missing or not symbolic.
-    fn symbolic_ref(&self, name: &str) -> Result<Option<String>> {
-        self.fact(&format!("symref {name}"), |repo| {
-            symbolic_target(repo, name)
-        })
     }
 
     /// Returns the full ref of the default branch: `--default-branch`, then `origin/HEAD`, then
@@ -397,28 +571,29 @@ impl Repo {
             self.commit(name)?;
             return Ok(Some(name.to_owned()));
         }
-        if let Some(remote) = self.symbolic_ref("refs/remotes/origin/HEAD")? {
+        if let Some(remote) =
+            self.ref_fact(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?
+        {
             return Ok(Some(remote));
         }
         Ok(self.default_branch_ref()?.map(|(_, reference)| reference))
-    }
-
-    /// The value of the config key `name`, `None` when unset or empty.
-    pub fn config_value(&self, name: &str) -> Result<Option<String>> {
-        self.fact(&format!("config {name}"), |repo| configured(repo, name))
     }
 
     /// The names the default branch may have, best first: the branch `origin/HEAD` names,
     /// `main`, `master`, then `init.defaultBranch`.
     pub fn default_branch_names(&self) -> Result<Vec<String>> {
         let mut names = Vec::new();
-        if let Some(remote) = self.symbolic_ref("refs/remotes/origin/HEAD")? {
-            let short = remote.strip_prefix("refs/remotes/").unwrap_or(&remote);
-            names.push(short.strip_prefix("origin/").unwrap_or(short).to_owned());
+        if let Some(remote) = self.ref_fact(&[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])? {
+            names.push(remote.strip_prefix("origin/").unwrap_or(&remote).to_owned());
         }
         names.extend(["main".to_owned(), "master".to_owned()]);
-        names.extend(self.config_value("init.defaultBranch")?);
-        let mut seen = HashSet::new();
+        names.extend(self.ref_fact(&["config", "init.defaultBranch"])?);
+        let mut seen = std::collections::HashSet::new();
         names.retain(|name| seen.insert(name.clone()));
         Ok(names)
     }
@@ -451,32 +626,13 @@ impl Repo {
     }
 
     pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
-        self.fact(&format!("merge-base {a}\0{b}"), |repo| {
-            let (Some(a), Some(b)) = (resolved(repo, a), resolved(repo, b)) else {
-                return Ok(None);
-            };
-            Ok(repo.merge_base(a, b).ok().map(|base| base.to_string()))
-        })
+        self.ref_fact(&["merge-base", "--end-of-options", a, b])
     }
 
     pub fn root_commit(&self, head: &str) -> Result<String> {
-        let key = format!("roots {head}");
+        let args = ["rev-list", "--max-parents=0", "--end-of-options", head];
         let roots = self
-            .remembered(&key, || {
-                let repo = self.open_refs()?;
-                let mut walk = repo.revwalk()?;
-                let start = peeled_commit(&repo, head)?
-                    .ok_or_else(|| Error(format!("unknown commit: {head}")))?;
-                walk.push(git2::Oid::from_str(&start)?)?;
-                let mut roots = Vec::new();
-                for id in walk {
-                    let id = id?;
-                    if repo.find_commit(id)?.parent_count() == 0 {
-                        roots.push(id.to_string());
-                    }
-                }
-                Ok((Some(roots.join("\n")), true))
-            })?
+            .remembered_ref_fact(&args, || self.git(&args).map(|roots| (Some(roots), true)))?
             .unwrap_or_default();
         let mut roots: Vec<&str> = roots.lines().collect();
         roots.sort_unstable();
@@ -488,63 +644,65 @@ impl Repo {
 
     /// Missing objects count as "not an ancestor", since stored commits may have been collected.
     pub fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool> {
-        let repo = self.open_refs()?;
-        let (Some(ancestor), Some(commit)) = (resolved(&repo, ancestor), resolved(&repo, commit))
-        else {
-            return Ok(false);
-        };
-        Ok(ancestor == commit || repo.graph_descendant_of(commit, ancestor).unwrap_or(false))
+        self.succeeds(&[
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            ancestor,
+            commit,
+        ])
     }
 
     /// Commits in `to` that `from` lacks (`git rev-list --count from..to`).
     pub fn distance(&self, from: &str, to: &str) -> Result<u64> {
-        let repo = self.open_refs()?;
-        let mut walk = self.walk(&repo, Some(from), to)?;
-        let mut count = 0;
-        for id in &mut walk {
-            id?;
-            count += 1;
-        }
-        Ok(count)
+        let range = range(Some(from), to);
+        let count = self.git(&["rev-list", "--count", "--end-of-options", &range])?;
+        count
+            .parse()
+            .map_err(|_| Error(format!("git rev-list --count printed {count}")))
     }
 
     pub fn object_exists(&self, spec: &str) -> Result<bool> {
-        Ok(self.open_refs()?.revparse_single(spec).is_ok())
+        self.succeeds(&["cat-file", "-e", "--end-of-options", spec])
     }
 
-    /// A revision walk over `from..to` (all of `to` when `from` is `None`).
-    fn walk<'r>(
-        &self,
-        repo: &'r git2::Repository,
-        from: Option<&str>,
-        to: &str,
-    ) -> Result<git2::Revwalk<'r>> {
-        let mut walk = repo.revwalk()?;
-        walk.push(commit_id(repo, to)?)?;
-        if let Some(from) = from {
-            walk.hide(commit_id(repo, from)?)?;
-        }
-        Ok(walk)
-    }
-
-    /// The commit of each of `revs`, keyed by rev. A rev that names no commit, is empty or holds
-    /// a newline is absent.
+    /// The commit of each of `revs`, keyed by rev, from one git process. A rev that names no
+    /// commit, is empty or holds a newline is absent.
     pub fn commit_ids<'a>(&self, revs: &[&'a str]) -> Result<HashMap<&'a str, String>> {
-        let repo = self.open_refs()?;
-        let mut found = HashMap::new();
-        for rev in revs
+        let asked: Vec<&'a str> = revs
             .iter()
+            .copied()
             .filter(|rev| !rev.is_empty() && !rev.contains('\n'))
-        {
-            if let Some(id) = peeled_commit(&repo, rev)? {
-                found.insert(*rev, id);
-            }
+            .collect();
+        if asked.is_empty() {
+            return Ok(HashMap::new());
         }
-        Ok(found)
+        let input: String = asked
+            .iter()
+            .map(|rev| format!("{rev}^{{commit}}\n"))
+            .collect();
+        let checked = text(self.checked(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(input.into_bytes()),
+            &[],
+        )?)?;
+        let lines: Vec<&str> = checked.lines().collect();
+        if lines.len() != asked.len() {
+            return fail(format!(
+                "git cat-file --batch-check printed {} lines for {} revisions",
+                lines.len(),
+                asked.len()
+            ));
+        }
+        Ok(asked
+            .into_iter()
+            .zip(lines)
+            .filter_map(|(rev, line)| Some((rev, line.strip_suffix(" commit")?.to_owned())))
+            .collect())
     }
 
-    /// The `candidates` that [`Self::is_ancestor`] says are ancestors of `head`. A name that is
-    /// no commit is not an ancestor.
+    /// The `candidates` that [`Self::is_ancestor`] says are ancestors of `head`, in two git
+    /// processes. A name that is no commit is not an ancestor.
     pub fn ancestors_of<'a>(&self, head: &str, candidates: &[&'a str]) -> Result<HashSet<&'a str>> {
         let mut revs = candidates.to_vec();
         revs.push(head);
@@ -552,22 +710,22 @@ impl Repo {
         let Some(head_id) = ids.get(head) else {
             return Ok(HashSet::new());
         };
-        let repo = self.open_refs()?;
-        // What a candidate reaches that the head does not: a candidate in that list is not an
-        // ancestor of the head.
-        let mut walk = repo.revwalk()?;
-        let mut pushed = false;
+        // Lists what a candidate reaches that the head does not. A candidate in that list is
+        // not an ancestor of the head.
+        let mut seen = HashSet::new();
+        let mut input = String::new();
         for id in candidates.iter().filter_map(|candidate| ids.get(candidate)) {
-            walk.push(git2::Oid::from_str(id)?)?;
-            pushed = true;
+            if seen.insert(id) {
+                input.push_str(&format!("{id}\n"));
+            }
         }
-        if !pushed {
+        if seen.is_empty() {
             return Ok(HashSet::new());
         }
-        walk.hide(git2::Oid::from_str(head_id)?)?;
-        let outside: HashSet<String> = walk
-            .map(|id| id.map(|id| id.to_string()))
-            .collect::<std::result::Result<_, _>>()?;
+        input.push_str(&format!("^{head_id}\n"));
+        let outside =
+            text(self.checked(&["rev-list", "--stdin"], Some(input.into_bytes()), &[])?)?;
+        let outside: HashSet<&str> = outside.lines().collect();
         Ok(candidates
             .iter()
             .copied()
@@ -582,31 +740,439 @@ impl Repo {
     /// keep the first; revs naming no commit are dropped.
     pub fn independent<'a>(&self, revs: &[&'a str]) -> Result<Vec<&'a str>> {
         let ids = self.commit_ids(revs)?;
-        let mut first: Vec<(&'a str, git2::Oid)> = Vec::new();
+        let mut first: Vec<(&'a str, &str)> = Vec::new();
         for rev in revs {
-            if let Some(id) = ids.get(rev) {
-                let id = git2::Oid::from_str(id)?;
-                if first.iter().all(|(_, seen)| *seen != id) {
-                    first.push((rev, id));
-                }
+            if let Some(id) = ids.get(rev)
+                && first.iter().all(|(_, seen)| *seen != id.as_str())
+            {
+                first.push((rev, id));
             }
         }
-        let repo = self.open_refs()?;
-        let mut tips = Vec::new();
-        for (rev, id) in &first {
-            let covered = first.iter().any(|(_, other)| {
-                other != id && repo.graph_descendant_of(*other, *id).unwrap_or(false)
-            });
-            if !covered {
-                tips.push(*rev);
-            }
+        if first.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(tips)
+        let mut args = vec!["merge-base", "--independent", "--end-of-options"];
+        args.extend(first.iter().map(|(_, id)| *id));
+        let tips = text(self.checked(&args, None, &[])?)?;
+        let tips: HashSet<&str> = tips.lines().collect();
+        Ok(first
+            .into_iter()
+            .filter(|(_, id)| tips.contains(id))
+            .map(|(rev, _)| rev)
+            .collect())
     }
 
     pub fn user_name(&self) -> Result<Option<String>> {
-        let repo = self.open_refs()?;
-        configured(&repo, "user.name")
+        self.git_opt(&["config", "user.name"])
+    }
+
+    /// A copy of the index in a scratch directory, to run index-changing commands against.
+    fn scratch_index(&self) -> Result<(tempfile::TempDir, PathBuf)> {
+        let index = self.git(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        let scratch = tempfile::tempdir().map_err(ctx("create temporary index directory"))?;
+        let temp_index = scratch.path().join("index");
+        // Keep the index's mtime on the copy: git trusts cached stat data only for entries
+        // older than the index file, so a newer copy would hide files changed in the same
+        // second as the last `git add` (racy git). macOS copies keep it; Linux copies do not.
+        // Read the time before copying: if git replaces the index meanwhile, an older time
+        // only makes git recheck more files.
+        let modified = fs::metadata(&index).and_then(|meta| meta.modified());
+        match fs::copy(&index, &temp_index) {
+            Ok(_) => {
+                let modified = modified.map_err(ctx(format!("read git index time {index}")))?;
+                fs::File::options()
+                    .write(true)
+                    .open(&temp_index)
+                    .and_then(|file| file.set_modified(modified))
+                    .map_err(ctx("set temporary index time"))?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return fail(format!("copy git index {index}: {error}")),
+        }
+        Ok((scratch, temp_index))
+    }
+
+    /// Tree id of the work tree as `git add -A` would stage it, built in a copy of the index so
+    /// the real index is untouched and tracked ignored files stay in the tree.
+    pub fn worktree_tree(&self) -> Result<String> {
+        let (_scratch, temp_index) = self.scratch_index()?;
+        let env = [("GIT_INDEX_FILE", temp_index.as_path())];
+        self.checked(&["add", "-A"], None, &env)?;
+        text(self.checked(&["write-tree"], None, &env)?)
+    }
+
+    /// Like [`Self::worktree_tree`], but a tracked file marked skip-worktree or assume-unchanged
+    /// that exists on disk is taken as it is, not as the index has it. A file that is gone (a
+    /// sparse checkout) keeps its entry, or the tree would record it as deleted.
+    pub fn worktree_tree_with_hidden_edits(&self) -> Result<String> {
+        let (_scratch, temp_index) = self.scratch_index()?;
+        self.unhide(&temp_index)?;
+        let env = [("GIT_INDEX_FILE", temp_index.as_path())];
+        // `--sparse` (git 2.35) makes add take files outside the sparse-checkout patterns too.
+        // `-u`: tracked files only. A backup never keeps untracked files.
+        let sparse = self.exec(&["add", "--sparse", "-u"], None, &env)?;
+        if !sparse.status.success() {
+            let stderr = String::from_utf8_lossy(&sparse.stderr);
+            if !(stderr.contains("unknown option") || stderr.contains("usage:")) {
+                return fail(format!("git add --sparse -u failed: {}", stderr.trim()));
+            }
+            // An older git cannot add paths outside the patterns: take what it can, then
+            // refuse if the tree is not the working tree, rather than lose an edit.
+            self.checked(&["add", "-u"], None, &env)?;
+            let tree = text(self.checked(&["write-tree"], None, &env)?)?;
+            let lost = self.checked(&["diff-files", "--name-only", "-z"], None, &env)?;
+            if let Some(name) = nul_fields(&lost).next() {
+                return fail(format!(
+                    "{} is outside the sparse-checkout patterns and this git ({}) cannot back it up; widen the patterns with `git sparse-checkout add` or upgrade to git 2.35",
+                    String::from_utf8_lossy(name),
+                    self.git(&["--version"])?
+                ));
+            }
+            return Ok(tree);
+        }
+        text(self.checked(&["write-tree"], None, &env)?)
+    }
+
+    /// The tracked files marked skip-worktree or assume-unchanged that exist on disk and differ
+    /// from the index: edits `git status` does not show.
+    pub fn hidden_edits(&self) -> Result<Vec<String>> {
+        let (_scratch, temp_index) = self.scratch_index()?;
+        let flagged = self.unhide(&temp_index)?;
+        if flagged.is_empty() {
+            return Ok(Vec::new());
+        }
+        let env = [("GIT_INDEX_FILE", temp_index.as_path())];
+        let changed = self.checked(&["diff", "--name-only", "-z", "--no-renames"], None, &env)?;
+        Ok(nul_fields(&changed)
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .filter(|name| flagged.contains(name))
+            .collect())
+    }
+
+    /// Clears skip-worktree and assume-unchanged in the scratch index for each flagged file that
+    /// exists on disk; returns those paths.
+    fn unhide(&self, temp_index: &Path) -> Result<Vec<String>> {
+        let env = [("GIT_INDEX_FILE", temp_index)];
+        let listing = self.checked(&["ls-files", "-v", "-z"], None, &env)?;
+        let mut flagged = Vec::new();
+        let mut input = Vec::new();
+        for entry in nul_fields(&listing).filter(|e| e.len() > 2) {
+            let (tag, path) = (entry[0], &entry[2..]);
+            if tag != b'S' && !tag.is_ascii_lowercase() {
+                continue;
+            }
+            let name = String::from_utf8_lossy(path).into_owned();
+            if fs::symlink_metadata(self.root.join(OsStr::from_bytes(path))).is_ok() {
+                input.extend_from_slice(path);
+                input.push(0);
+                flagged.push(name);
+            }
+        }
+        if !input.is_empty() {
+            // One flag per run: with both, git clears only one of them.
+            for flag in ["--no-skip-worktree", "--no-assume-unchanged"] {
+                self.checked(
+                    &["update-index", flag, "-z", "--stdin"],
+                    Some(input.clone()),
+                    &env,
+                )?;
+            }
+        }
+        Ok(flagged)
+    }
+
+    /// Non-merge commits in `from..to` (or all of `to` when `from` is `None`), oldest first.
+    pub fn commits(&self, from: Option<&str>, to: &str) -> Result<Vec<CommitInfo>> {
+        self.commits_with(from, to, false)
+    }
+
+    /// Like [`Repo::commits`], following only the first parent of each merge, so commits a merge
+    /// brought in are left out.
+    pub fn commits_first_parent(&self, from: Option<&str>, to: &str) -> Result<Vec<CommitInfo>> {
+        self.commits_with(from, to, true)
+    }
+
+    fn commits_with(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        first_parent: bool,
+    ) -> Result<Vec<CommitInfo>> {
+        let range = range(from, to);
+        let mut args = vec![
+            "-c",
+            "log.showRoot=true",
+            "log",
+            "--reverse",
+            "--no-merges",
+            "-p",
+            "--no-renames",
+            "--format=commit %H",
+        ];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        args.extend(DIFF_FLAGS);
+        args.extend(["--end-of-options", &range, "--"]);
+        let patch = self.checked(&args, None, &[])?;
+        let ids: HashMap<String, String> = self
+            .patch_ids(patch)?
+            .into_iter()
+            .map(|(patch_id, sha)| (sha, patch_id))
+            .collect();
+        Ok(self
+            .log_with(from, to, first_parent)?
+            .into_iter()
+            .filter(|entry| entry.parents.len() <= 1)
+            .map(|entry| CommitInfo {
+                patch_id: ids.get(&entry.sha).cloned(),
+                sha: entry.sha,
+                tree: entry.tree,
+                subject: entry.subject,
+            })
+            .collect())
+    }
+
+    pub fn commit_patch_id(&self, commit: &str) -> Result<Option<String>> {
+        let mut args = vec!["diff-tree", "-p", "--root", "--no-renames"];
+        args.extend(DIFF_FLAGS);
+        args.extend(["--end-of-options", commit, "--"]);
+        self.first_patch_id(&args)
+    }
+
+    /// Every commit in `from..to`, merges included, oldest first.
+    pub fn log(&self, from: Option<&str>, to: &str) -> Result<Vec<LogEntry>> {
+        self.log_with(from, to, false)
+    }
+
+    /// The author name and subject of each commit of `shas` that exists; others are skipped.
+    pub fn authored(&self, shas: &[&str]) -> Result<HashMap<String, (String, String)>> {
+        let mut found = HashMap::new();
+        if shas.is_empty() {
+            return Ok(found);
+        }
+        let input = format!("{}\n", shas.join("\n")).into_bytes();
+        let checked = text(self.checked(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(input),
+            &[],
+        )?)?;
+        let present: Vec<&str> = checked
+            .lines()
+            .filter_map(|line| line.strip_suffix(" commit"))
+            .collect();
+        if present.is_empty() {
+            return Ok(found);
+        }
+        let input = format!("{}\n", present.join("\n")).into_bytes();
+        let listing = text(self.checked(
+            &[
+                "log",
+                "--no-walk=unsorted",
+                "--stdin",
+                "--format=%H%x00%an%x00%s",
+            ],
+            Some(input),
+            &[],
+        )?)?;
+        for line in listing.lines() {
+            let mut parts = line.splitn(3, '\0');
+            if let (Some(sha), Some(author), Some(subject)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                found.insert(sha.to_owned(), (author.to_owned(), subject.to_owned()));
+            }
+        }
+        Ok(found)
+    }
+
+    /// The merge commits in `from..to`.
+    pub fn merges(&self, from: Option<&str>, to: &str) -> Result<HashSet<String>> {
+        let range = range(from, to);
+        let listing = self.git(&["rev-list", "--merges", "--end-of-options", &range, "--"])?;
+        Ok(listing.lines().map(str::to_owned).collect())
+    }
+
+    fn log_with(&self, from: Option<&str>, to: &str, first_parent: bool) -> Result<Vec<LogEntry>> {
+        let range = range(from, to);
+        let mut args = vec!["log", "--reverse", "--format=%H%x00%T%x00%P%x00%s"];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        args.extend(["--end-of-options", &range, "--"]);
+        let listing = self.git(&args)?;
+        listing
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let mut parts = line.splitn(4, '\0');
+                let (Some(sha), Some(tree), Some(parents), Some(subject)) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return fail(format!("unexpected git log line: {line}"));
+                };
+                Ok(LogEntry {
+                    sha: sha.to_owned(),
+                    tree: tree.to_owned(),
+                    parents: parents.split_whitespace().map(str::to_owned).collect(),
+                    subject: subject.to_owned(),
+                })
+            })
+            .collect()
+    }
+
+    /// `git merge-tree --write-tree <extra> ours theirs`. It writes objects, so it only runs on
+    /// a read-only repository.
+    fn merge_tree_run(&self, ours: &str, theirs: &str, extra: &[&str]) -> Result<Output> {
+        if self._scratch.is_none() {
+            return fail("merge-tree needs a read-only repository");
+        }
+        let mut args = vec!["merge-tree", "--write-tree"];
+        args.extend(extra);
+        args.extend(["--end-of-options", ours, theirs]);
+        self.exec(&args, None, &[])
+    }
+
+    /// The tree of git's automatic merge of `ours` and `theirs`, conflict markers included;
+    /// `None` when git cannot tell (`merge-tree --write-tree` needs git 2.38).
+    pub fn merge_tree(&self, ours: &str, theirs: &str) -> Result<Option<String>> {
+        let output = self.merge_tree_run(ours, theirs, &[])?;
+        // Exit 1 means conflicts; the first line is still the merged tree.
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Ok(None);
+        }
+        let printed = text(output.stdout)?;
+        Ok(printed.lines().next().map(str::to_owned))
+    }
+
+    /// The paths git cannot merge when it merges `theirs` into `ours`; empty for a clean merge.
+    pub fn merge_conflicts(&self, ours: &str, theirs: &str) -> Result<Vec<String>> {
+        let output = self.merge_tree_run(ours, theirs, &["--name-only", "--no-messages"])?;
+        match output.status.code() {
+            Some(0) => Ok(Vec::new()),
+            // Exit 1 means conflicts: the merged tree, then one line per conflicted path.
+            Some(1) => {
+                let mut paths: Vec<String> = text(output.stdout)?
+                    .lines()
+                    .skip(1)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                paths.dedup();
+                Ok(paths)
+            }
+            _ => fail(format!(
+                "git merge-tree failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+        }
+    }
+
+    /// Patch-id of the whole change from `from` (empty tree when `None`) to a commit or tree.
+    pub fn range_patch_id(&self, from: Option<&str>, to: &str) -> Result<Option<String>> {
+        let from = match from {
+            Some(from) => from.to_owned(),
+            None => text(self.checked(
+                &["hash-object", "-t", "tree", "--stdin"],
+                Some(Vec::new()),
+                &[],
+            )?)?,
+        };
+        let mut args = vec!["diff", "--no-renames"];
+        args.extend(DIFF_FLAGS);
+        args.extend(["--end-of-options", &from, to, "--"]);
+        self.first_patch_id(&args)
+    }
+
+    fn first_patch_id(&self, args: &[&str]) -> Result<Option<String>> {
+        let patch = self.checked(args, None, &[])?;
+        Ok(self.patch_ids(patch)?.into_iter().next().map(|(id, _)| id))
+    }
+
+    fn patch_ids(&self, patch: Vec<u8>) -> Result<Vec<(String, String)>> {
+        if patch.is_empty() {
+            return Ok(Vec::new());
+        }
+        let output = text(self.checked(&["patch-id", "--stable"], Some(patch), &[])?)?;
+        Ok(output
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .map(|(id, sha)| (id.to_owned(), sha.to_owned()))
+            .collect())
+    }
+
+    /// `git diff -U3 -M`, the context forges show around review comments.
+    pub fn diff_context(&self, from: &str, to: &str) -> Result<String> {
+        self.diff("-U3", from, to)
+    }
+
+    pub fn diff_u0(&self, from: &str, to: &str) -> Result<String> {
+        self.diff("-U0", from, to)
+    }
+
+    fn diff(&self, context: &str, from: &str, to: &str) -> Result<String> {
+        let mut args = vec!["diff", context, "-M"];
+        args.extend(DIFF_FLAGS);
+        args.extend(["--end-of-options", from, to, "--"]);
+        let diff = self.checked(&args, None, &[])?;
+        Ok(String::from_utf8_lossy(&diff).into_owned())
+    }
+
+    /// Whether the repository has a remote called `name`, whatever its URL.
+    pub fn has_remote(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .git_opt(&["remote"])?
+            .is_some_and(|names| names.lines().any(|line| line == name)))
+    }
+
+    /// The URL of `origin` as git expands it, `None` without an origin.
+    pub fn origin_url(&self) -> Result<Option<String>> {
+        self.git_opt(&["remote", "get-url", "origin"])
+    }
+
+    /// The lowercase host and `owner/repo` path of `origin`; `None` without an origin or when no
+    /// URL of it names a repository. The URL git expands (`insteadOf`) is tried first, then the
+    /// one written in the config, so a rewritten URL that no longer parses still resolves.
+    pub fn origin_location(&self) -> Result<Option<(String, String)>> {
+        if let Some(location) = self.origin_url()?.and_then(|url| split_remote(&url)) {
+            return Ok(Some(location));
+        }
+        let written = self.git_opt(&["config", "--get", "remote.origin.url"])?;
+        Ok(written.and_then(|url| split_remote(&url)))
+    }
+
+    /// The host and `owner/repo` path of every remote whose URL names a repository, as
+    /// [`Repo::origin_location`] reads `origin`: `origin` first, then `upstream`, then the rest
+    /// by name.
+    pub fn remote_locations(&self) -> Result<Vec<RemoteLocation>> {
+        let mut names: Vec<String> = self
+            .git_opt(&["remote"])?
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        names.sort_by_key(|name| {
+            let rank = match name.as_str() {
+                "origin" => 0,
+                "upstream" => 1,
+                _ => 2,
+            };
+            (rank, name.clone())
+        });
+        let mut found = Vec::new();
+        for name in names {
+            let expanded = self.git_opt(&["remote", "get-url", &name])?;
+            let location = match expanded.and_then(|url| split_remote(&url)) {
+                Some(location) => Some(location),
+                None => self
+                    .git_opt(&["config", "--get", &format!("remote.{name}.url")])?
+                    .and_then(|url| split_remote(&url)),
+            };
+            if let Some((host, repo)) = location {
+                found.push(RemoteLocation { name, host, repo });
+            }
+        }
+        Ok(found)
     }
 
     /// The absolute git common dir, which names a `local/` repository.
@@ -614,15 +1180,21 @@ impl Repo {
         if let Some(dir) = self.common_dir.get() {
             return Ok(dir.clone());
         }
-        let dir = without_trailing_slash(self.open_refs()?.commondir())
-            .to_string_lossy()
-            .into_owned();
+        let dir = self.git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         Ok(self.common_dir.get_or_init(|| dir).clone())
     }
 
-    pub fn is_bare(&self) -> Result<bool> {
-        let repo = self.open_refs()?;
-        Ok(env_config::is_bare(&repo))
+    fn is_bare(&self) -> Result<bool> {
+        Ok(self.git(&["rev-parse", "--is-bare-repository"])? == "true")
+    }
+
+    /// Every worktree of the repository; the first is the main checkout.
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        Ok(parse_worktrees(&self.checked(
+            &["worktree", "list", "--porcelain", "-z"],
+            None,
+            &[],
+        )?))
     }
 
     pub fn main_checkout_root(&self) -> Result<PathBuf> {
@@ -667,208 +1239,20 @@ impl Repo {
             .map(|name| name.to_string_lossy().trim_end_matches(".git").to_owned())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "repo".to_owned());
-        let hash = hash_text(&common)?;
+        let hash = self.hash_text(&common)?;
         let short = crate::core::text::prefix(&hash, 12);
         Ok(format!("local/{name}-{short}"))
     }
-}
 
-/// Fails on a `log.showSignature` that is not a boolean, as `git log` does however it is
-/// overridden. The reads that stood for `git log` call it; the other reads never did.
-fn reject_bad_config(repo: &git2::Repository) -> Result<()> {
-    const KEY: &str = "log.showsignature";
-    let config = repo.config()?;
-    let Ok(entry) = config.get_entry(KEY) else {
-        return Ok(());
-    };
-    match (entry.value(), config.get_bool(KEY)) {
-        (Some(value), Err(_)) => fail(format!("bad boolean config value '{value}' for '{KEY}'")),
-        _ => Ok(()),
+    /// A stable id for `value`: git hash-object stays the same across Rust versions, unlike std
+    /// hashers. It writes no object.
+    pub fn hash_text(&self, value: &str) -> Result<String> {
+        text(self.checked(
+            &["hash-object", "--stdin"],
+            Some(value.as_bytes().to_vec()),
+            &[],
+        )?)
     }
-}
-
-/// The directories that hold the system git config besides `/etc`, which libgit2 knows. A
-/// package manager or Xcode sets `credential.helper` and `init.defaultBranch` there.
-const EXTRA_SYSTEM_CONFIG_DIRS: [&str; 4] = [
-    "/opt/homebrew/etc",
-    "/usr/local/etc",
-    "/Library/Developer/CommandLineTools/usr/share/git-core",
-    "/Applications/Xcode.app/Contents/Developer/usr/share/git-core",
-];
-
-/// The search path that makes libgit2 look for the system config in its own default (`$PATH`,
-/// which is `/etc`) and then in `extra`: the first directory that holds a `gitconfig` is read.
-fn system_config_search(extra: &[&str]) -> String {
-    std::iter::once("$PATH")
-        .chain(extra.iter().copied())
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
-/// Makes libgit2 search for the system config as [`system_config_search`] says, with
-/// [`EXTRA_SYSTEM_CONFIG_DIRS`]. It runs once, before the first repository is opened, as libgit2
-/// does not guard its search paths.
-pub(crate) fn configure_libgit2() {
-    static CONFIGURED: Once = Once::new();
-    CONFIGURED.call_once(|| {
-        set_system_config_search(&system_config_search(&EXTRA_SYSTEM_CONFIG_DIRS));
-    });
-}
-
-/// Sets the directories libgit2 searches for the system config; `$PATH` stands for its own
-/// default. It MUST NOT run while another thread uses libgit2.
-fn set_system_config_search(search: &str) {
-    // SAFETY: callers run before a repository is opened, or while no other thread uses libgit2.
-    // The call fails only for a path that is not valid text, which none of these is.
-    let _ = unsafe { git2::opts::set_search_path(git2::ConfigLevel::System, search) };
-}
-
-/// The path set at `key` in the user's global git config, with `~` expanded.
-/// `GIT_CONFIG_GLOBAL`, when set, names the only global file; otherwise the config is the XDG
-/// file if there is one, then the home file, a later file winning. `None` when unset.
-pub fn global_config_path(key: &str) -> Option<PathBuf> {
-    let mut config = git2::Config::new().ok()?;
-    let files = match std::env::var_os("GIT_CONFIG_GLOBAL") {
-        Some(file) => [
-            (None, git2::ConfigLevel::XDG),
-            (Some(PathBuf::from(file)), git2::ConfigLevel::Global),
-        ],
-        None => [
-            (git2::Config::find_xdg().ok(), git2::ConfigLevel::XDG),
-            (git2::Config::find_global().ok(), git2::ConfigLevel::Global),
-        ],
-    };
-    for (file, level) in files {
-        if let Some(file) = file.filter(|file| file.is_file()) {
-            config.add_file(&file, level, false).ok()?;
-        }
-    }
-    config.get_path(key).ok()
-}
-
-/// The value of `key` in the config file `file`, `None` when it is unset.
-pub fn config_file_value(file: &Path, key: &str) -> Result<Option<String>> {
-    let config = git2::Config::open(file)?;
-    Ok(config.get_string(key).ok())
-}
-
-/// The entries of the config file `file` whose names match the regular expression `names`, as
-/// name and value.
-pub fn config_file_entries(file: &Path, names: &str) -> Result<Vec<(String, String)>> {
-    let config = git2::Config::open(file)?;
-    let mut found = Vec::new();
-    let mut entries = config.entries(Some(names))?;
-    while let Some(entry) = entries.next() {
-        let entry = entry?;
-        if let (Some(name), Some(value)) = (entry.name(), entry.value()) {
-            found.push((name.to_owned(), value.to_owned()));
-        }
-    }
-    Ok(found)
-}
-
-/// How early the in-memory object store of a read-only repository is asked to take a write.
-const MEMORY_PRIORITY: i32 = 1000;
-
-/// A stable id for `value`: the id git gives a blob of it, which stays the same across Rust
-/// versions, unlike std hashers. It writes no object.
-pub fn hash_text(value: &str) -> Result<String> {
-    Ok(git2::Oid::hash_object(git2::ObjectType::Blob, value.as_bytes())?.to_string())
-}
-
-/// The object `spec` names, peeled to `kind`; `None` when it does not exist or cannot be one.
-fn peeled_object<'r>(
-    repo: &'r git2::Repository,
-    spec: &str,
-    kind: git2::ObjectType,
-) -> Result<Option<git2::Object<'r>>> {
-    let Ok(found) = repo.revparse_single(spec) else {
-        return Ok(None);
-    };
-    Ok(found.peel(kind).ok())
-}
-
-/// The tree of the commit or tree `spec` names.
-fn peeled_tree<'r>(repo: &'r git2::Repository, spec: &str) -> Result<git2::Tree<'r>> {
-    peeled_object(repo, spec, git2::ObjectType::Tree)?
-        .and_then(|found| found.into_tree().ok())
-        .ok_or_else(|| Error(format!("unknown tree: {spec}")))
-}
-
-/// The commit `spec` names, peeled through tags; `None` when it names none.
-fn peeled_commit(repo: &git2::Repository, spec: &str) -> Result<Option<String>> {
-    Ok(peeled_object(repo, spec, git2::ObjectType::Commit)?.map(|commit| commit.id().to_string()))
-}
-
-/// The commit `spec` names, or `None`.
-fn resolved(repo: &git2::Repository, spec: &str) -> Option<git2::Oid> {
-    peeled_object(repo, spec, git2::ObjectType::Commit)
-        .ok()
-        .flatten()
-        .map(|commit| commit.id())
-}
-
-/// The value of the config key `name` for `repo`, the environment's `GIT_CONFIG_*` first;
-/// `None` when unset or empty.
-fn configured(repo: &git2::Repository, name: &str) -> Result<Option<String>> {
-    if let Some(value) = env_config::value(name) {
-        return Ok(Some(value).filter(|value| !value.is_empty()));
-    }
-    let config = repo.config()?;
-    Ok(config
-        .get_string(name)
-        .ok()
-        .filter(|value| !value.is_empty()))
-}
-
-fn commit_id(repo: &git2::Repository, spec: &str) -> Result<git2::Oid> {
-    resolved(repo, spec).ok_or_else(|| Error(format!("unknown commit: {spec}")))
-}
-
-/// What the symbolic ref `name` points at; `None` when `name` is missing or holds an id.
-fn symbolic_target(repo: &git2::Repository, name: &str) -> Result<Option<String>> {
-    Ok(repo
-        .find_reference(name)
-        .ok()
-        .and_then(|found| found.symbolic_target().map(str::to_owned)))
-}
-
-/// The index and tree mode of a submodule.
-pub const GITLINK_MODE: u32 = 0o160000;
-
-/// `path` with `.` and `..` folded away and no symbolic links followed.
-fn folded(path: &Path) -> PathBuf {
-    let mut folded = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::ParentDir => {
-                folded.pop();
-            }
-            Component::CurDir => {}
-            other => folded.push(other),
-        }
-    }
-    folded
-}
-
-/// `path` as libgit2 prints a directory, with no trailing slash.
-fn without_trailing_slash(path: &Path) -> PathBuf {
-    let text = path.as_os_str().as_bytes();
-    let trimmed = text.strip_suffix(b"/").filter(|rest| !rest.is_empty());
-    PathBuf::from(OsStr::from_bytes(trimmed.unwrap_or(text)))
-}
-
-/// The first line of a commit message as `git log --format=%s` prints it: the first paragraph
-/// joined on one line.
-fn subject_of(message: &[u8]) -> String {
-    let message = String::from_utf8_lossy(message);
-    message
-        .lines()
-        .skip_while(|line| line.trim().is_empty())
-        .take_while(|line| !line.trim().is_empty())
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Files in a git directory that mark an unfinished rebase, merge, cherry-pick, revert or
@@ -892,6 +1276,22 @@ pub fn unfinished_markers(git_dir: &Path) -> Vec<&'static str> {
         .collect()
 }
 
+fn no_credential_prompts(command: &mut Command) {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "false")
+        .env("SSH_ASKPASS", "false")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("GCM_INTERACTIVE", "never");
+}
+
+/// The non-empty fields of NUL-separated git output.
+pub fn nul_fields(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
+    listing
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+}
+
 /// Git's stderr as one line, without `error:` and `fatal:` marks and without hints.
 /// Progress text that a carriage return overwrites on a terminal is left out too.
 pub fn error_line(stderr: &str) -> String {
@@ -913,6 +1313,18 @@ pub fn error_line(stderr: &str) -> String {
     lines.join(" ")
 }
 
+fn verify_args(spec: &str) -> [&str; 5] {
+    ["rev-parse", "--verify", "--quiet", "--end-of-options", spec]
+}
+
+/// The revision range `from..to`, or all of `to` when `from` is `None`.
+fn range(from: Option<&str>, to: &str) -> String {
+    match from {
+        Some(from) => format!("{from}..{to}"),
+        None => to.to_owned(),
+    }
+}
+
 /// The short name of a full branch ref: a local branch or one of `origin`.
 pub fn branch_name(reference: &str) -> &str {
     reference
@@ -924,6 +1336,46 @@ pub fn branch_name(reference: &str) -> &str {
 /// The name of a local branch ref; anything else is returned as it is.
 pub fn local_branch_name(reference: &str) -> &str {
     reference.strip_prefix("refs/heads/").unwrap_or(reference)
+}
+
+/// Reads the output of `git worktree list --porcelain -z`.
+pub fn parse_worktrees(listing: &[u8]) -> Vec<Worktree> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut found: Vec<Worktree> = Vec::new();
+    for field in listing.split(|byte| *byte == 0) {
+        if let Some(path) = field.strip_prefix(b"worktree ") {
+            found.push(Worktree {
+                path: PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+                head: String::new(),
+                branch: None,
+                locked: false,
+                bare: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(entry) = found.last_mut() else {
+            continue;
+        };
+        let line = String::from_utf8_lossy(field);
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            entry.head = head.to_owned();
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            entry.branch = Some(local_branch_name(branch).into());
+        } else if line == "locked" || line.starts_with("locked ") {
+            entry.locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            entry.prunable = true;
+        } else if line == "bare" {
+            entry.bare = true;
+        }
+    }
+    found
+}
+
+pub fn text(bytes: Vec<u8>) -> Result<String> {
+    let text = String::from_utf8(bytes).map_err(ctx("git printed invalid UTF-8"))?;
+    Ok(text.trim_end_matches('\n').to_owned())
 }
 
 /// A git remote whose URL names a repository on a host.
@@ -972,20 +1424,28 @@ fn remote_key(url: &str) -> Option<String> {
 mod tests {
     use std::{fs, path::Path};
 
-    use super::{Repo, branch_name, remote_key};
+    use super::{Repo, branch_name, parse_worktrees, remote_key};
     use crate::core::testing::Sandbox;
 
-    type Query = fn(&Repo) -> crate::core::error::Result<()>;
-
-    /// The repository of `sandbox`; the sandbox hides the developer's global git config from
-    /// libgit2.
+    /// The repository of `sandbox`, whose git calls see only the sandbox's home and global
+    /// config, not the developer's.
     fn sandboxed(sandbox: &Sandbox) -> Repo {
         sandboxed_at(sandbox, &sandbox.repo())
     }
 
     /// Like [`sandboxed`], for the repository at `repo_root`.
-    fn sandboxed_at(_sandbox: &Sandbox, repo_root: &Path) -> Repo {
-        Repo::at(repo_root)
+    fn sandboxed_at(sandbox: &Sandbox, repo_root: &Path) -> Repo {
+        let root = sandbox.path();
+        let mut repo = Repo::at(repo_root);
+        for (key, value) in [
+            ("HOME", root.join("home")),
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
+        ] {
+            repo.env.push((key.into(), value.into_os_string()));
+        }
+        repo.env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+        repo
     }
 
     #[test]
@@ -1166,7 +1626,7 @@ mod tests {
         sandbox.git(&root, &["init", "-q", "-b", "main"]);
         let empty = |message: &str| {
             sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", message]);
-            repo.commit("HEAD").unwrap()
+            repo.git(&["rev-parse", "HEAD"]).unwrap()
         };
         let c0 = empty("c0");
         sandbox.git(&root, &["switch", "-q", "-c", "side"]);
@@ -1177,11 +1637,7 @@ mod tests {
         sandbox.git(&root, &["tag", "-a", "-m", "release", "v1"]);
         let c2 = empty("c2");
         fs::write(root.join("blob.txt"), "blob\n").unwrap();
-        let blob = git2::Repository::open(&root)
-            .unwrap()
-            .blob_path(&root.join("blob.txt"))
-            .unwrap()
-            .to_string();
+        let blob = repo.git(&["hash-object", "-w", "blob.txt"]).unwrap();
         let absent = "deadbeef".repeat(5);
         let revs = [
             c0,
@@ -1272,12 +1728,6 @@ mod tests {
     }
 
     #[test]
-    fn the_system_config_search_puts_libgit2_s_default_before_the_extra_directories() {
-        assert_eq!(super::system_config_search(&[]), "$PATH");
-        assert_eq!(super::system_config_search(&["/a", "/b"]), "$PATH:/a:/b");
-    }
-
-    #[test]
     fn parses_remote_urls() {
         let cases = [
             (
@@ -1302,104 +1752,17 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_list_the_main_checkout_first_then_linked_ones_with_awkward_paths() {
-        let sandbox = Sandbox::with_repo();
-        let root = sandbox.repo();
-        sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
-        let repo = sandboxed(&sandbox);
-        let weird = sandbox.path().join("new\nline");
-        let locked = sandbox.path().join("locked");
-        let gone = sandbox.path().join("gone");
-        sandbox.git(
-            &root,
-            &["worktree", "add", "-q", "--detach", weird.to_str().unwrap()],
-        );
-        sandbox.git(
-            &root,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "keep",
-                locked.to_str().unwrap(),
-            ],
-        );
-        sandbox.git(
-            &root,
-            &[
-                "worktree",
-                "lock",
-                "--reason",
-                "why",
-                locked.to_str().unwrap(),
-            ],
-        );
-        sandbox.git(
-            &root,
-            &["worktree", "add", "-q", "--detach", gone.to_str().unwrap()],
-        );
-        fs::remove_dir_all(&gone).unwrap();
-        let found = repo.worktrees().unwrap();
-        let by_path = |path: &Path| {
-            found
-                .iter()
-                .find(|entry| entry.path == fs::canonicalize(path).unwrap_or(path.to_owned()))
-                .unwrap_or_else(|| panic!("{} is not listed", path.display()))
-        };
-        assert_eq!(found.len(), 4);
-        assert_eq!(found[0].path, fs::canonicalize(&root).unwrap());
+    fn parses_worktree_listings_with_awkward_paths() {
+        let listing = b"worktree /srv/main\0HEAD aaa\0branch refs/heads/main\0\0\
+worktree /srv/new\nline\0HEAD bbb\0detached\0locked why\0prunable gone\0\0\
+worktree /srv/bare.git\0bare\0\0";
+        let found = parse_worktrees(listing);
+        assert_eq!(found.len(), 3);
         assert_eq!(found[0].branch.as_deref(), Some("main"));
-        assert_eq!(found[0].head, repo.head().unwrap());
-        assert!(by_path(&weird).branch.is_none() && !by_path(&weird).locked);
-        assert_eq!(by_path(&locked).branch.as_deref(), Some("keep"));
-        assert!(by_path(&locked).locked && !by_path(&locked).prunable);
-        assert!(
-            found
-                .iter()
-                .any(|entry| entry.path.ends_with("gone") && entry.prunable)
-        );
-    }
-
-    #[test]
-    fn a_read_only_repo_answers_the_queries_that_look_at_the_repository_twice() {
-        let sandbox = Sandbox::new();
-        let root = sandbox.repo();
-        sandbox.git(&root, &["init", "-q", "-b", "main"]);
-        sandbox.git(&root, &["commit", "-q", "--allow-empty", "-m", "first"]);
-        sandbox.git(&root, &["branch", "topic"]);
-        let repo = std::sync::Arc::new(Repo::at(&root).read_only().unwrap());
-        let queries: [(&str, Query); 5] = [
-            ("uncommitted_count", |repo| {
-                repo.uncommitted_count().map(drop)
-            }),
-            ("strict_uncommitted_count", |repo| {
-                repo.strict_uncommitted_count().map(drop)
-            }),
-            ("refs_containing", |repo| {
-                assert_eq!(repo.refs_containing("main", "refs/heads/")?.len(), 2);
-                Ok(())
-            }),
-            ("branch_rows", |repo| {
-                let rows = repo.branch_rows(&super::BranchFilter::All)?;
-                assert_eq!(rows.len(), 2);
-                Ok(())
-            }),
-            ("delete_branch", |repo| {
-                repo.delete_branch("topic", false)?;
-                assert_eq!(repo.branches()?.len(), 1);
-                Ok(())
-            }),
-        ];
-        for (name, query) in queries {
-            let (sender, receiver) = std::sync::mpsc::channel();
-            let shared = std::sync::Arc::clone(&repo);
-            std::thread::spawn(move || sender.send(query(&shared)));
-            let answered = receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap_or_else(|_| panic!("{name} never returned: it waits on its own lock"));
-            answered.unwrap_or_else(|error| panic!("{name}: {error}"));
-        }
+        assert_eq!(found[0].head, "aaa");
+        assert_eq!(found[1].path, std::path::Path::new("/srv/new\nline"));
+        assert!(found[1].locked && found[1].prunable && found[1].branch.is_none());
+        assert!(found[2].bare && !found[2].locked);
     }
 
     #[test]

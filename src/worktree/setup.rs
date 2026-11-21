@@ -122,7 +122,6 @@ pub(super) fn spawn(root: &Path, steps: &[Step]) -> Result<Value> {
     if Offline::current().is_set() {
         command.env("AGT_OFFLINE", "1");
     }
-    process::keep_user_prompts(&mut command);
     let spawned = command
         .stdin(Stdio::null())
         .stdout(sink)

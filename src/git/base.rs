@@ -18,17 +18,18 @@ pub fn candidates(repo: &Repo, flag: &str) -> Result<Vec<Candidate>> {
     let mut found = Vec::new();
     // Offline, the remotes' tips are not refreshed: the local default branch alone is weighed.
     let remotes = if Offline::current().is_set() {
-        Vec::new()
+        String::new()
     } else {
-        repo.remote_names()?
+        repo.git(&["remote"])?
     };
-    for remote in &remotes {
+    for remote in remotes.lines() {
         let named = |error: Error| Error(format!("remote {remote}: {error}"));
-        let heads = repo.ls_remote(remote).map_err(named)?;
+        let heads = repo
+            .git(&["ls-remote", "--symref", remote, "HEAD"])
+            .map_err(named)?;
         let branch = heads
-            .iter()
-            .filter(|head| head.name == "HEAD")
-            .find_map(|head| head.symref.as_deref()?.strip_prefix("refs/heads/"))
+            .lines()
+            .find_map(|line| line.strip_prefix("ref: refs/heads/")?.split('\t').next())
             .ok_or_else(|| Error(format!("remote {remote}: no default branch advertised")))?;
         let commit = repo
             .fetch_commit(remote, &format!("refs/heads/{branch}"))

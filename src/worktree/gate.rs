@@ -15,7 +15,7 @@ use super::nested;
 use crate::core::env;
 use crate::core::error::{Result, fail};
 use crate::forge::auto::Offline;
-use crate::git::{RefTip, Repo, SubmoduleDirt, config_file_value, unfinished_markers};
+use crate::git::{Repo, unfinished_markers};
 
 /// Refuses, naming the repository and the reason, when removing the worktree at `worktree`
 /// would delete work that exists nowhere else. Under `--offline` it is [`check_offline`].
@@ -84,10 +84,25 @@ fn check_with(worktree: &Path, main: &Path, online: bool) -> Result<()> {
     Ok(())
 }
 
+/// The short names of the refs under `patterns` that contain the commit `head`.
+pub(super) fn branches_holding(
+    shared: &Repo,
+    head: &str,
+    patterns: &[&str],
+) -> Result<Vec<String>> {
+    let mut args = vec![
+        "for-each-ref",
+        "--contains",
+        head,
+        "--format=%(refname:short)",
+    ];
+    args.extend_from_slice(patterns);
+    Ok(shared.git(&args)?.lines().map(str::to_owned).collect())
+}
+
 /// Whether a local or remote branch contains the commit `head`.
 pub(super) fn held_by_a_branch(shared: &Repo, head: &str) -> Result<bool> {
-    Ok(!shared.refs_containing(head, "refs/heads/")?.is_empty()
-        || !shared.refs_containing(head, "refs/remotes/")?.is_empty())
+    Ok(!branches_holding(shared, head, &["refs/heads", "refs/remotes"])?.is_empty())
 }
 
 /// Removal deletes a linked worktree below `worktree` without a backup, so refuses one that
@@ -128,17 +143,19 @@ fn worktree_state(worktree: &Path) -> Result<()> {
             worktree.display()
         ));
     }
-    let own = repo.ref_tips(&["refs/worktree/", "refs/bisect/"])?;
-    if let Some(RefTip {
-        name: reference, ..
-    }) = own.first()
-    {
+    let own = repo.git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/worktree",
+        "refs/bisect",
+    ])?;
+    if let Some(reference) = own.lines().next() {
         return fail(format!(
             "{} has the per-worktree ref {reference}, which the backup does not keep; delete it or move its commits to a branch first",
             worktree.display()
         ));
     }
-    for entry in repo.status(false, SubmoduleDirt::Report)? {
+    for entry in repo.status(false, &[])? {
         let (staged, unstaged) = (entry.staged, entry.unstaged);
         if staged != b' ' && staged != b'?' && unstaged != b' ' && unstaged != b'?' {
             return fail(format!(
@@ -231,7 +248,8 @@ fn clones(modules: &Path) -> Vec<PathBuf> {
 
 /// The work tree of a clone: its `core.worktree`, resolved against the clone.
 fn workdir_of(clone: &Path) -> Option<PathBuf> {
-    let configured = config_file_value(&clone.join("config"), "core.worktree")
+    let configured = Repo::at(clone)
+        .git_opt(&["config", "--file", "config", "core.worktree"])
         .ok()
         .flatten()?;
     let workdir = fs::canonicalize(clone.join(configured)).ok()?;
@@ -242,29 +260,113 @@ fn workdir_of(clone: &Path) -> Option<PathBuf> {
     same.then_some(workdir)
 }
 
-/// The commits reachable from `roots` and from no remote-tracking branch.
+/// `git <args>` against the repository whose git directory is `gitdir`, even when its
+/// `core.worktree` names a directory that is gone: the work tree is given on the command line.
+fn plumbing(gitdir: &Path, args: &[&str]) -> Result<String> {
+    crate::git::text(plumbing_bytes(gitdir, args)?)
+}
+
+fn plumbing_bytes(gitdir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let dir = gitdir.to_string_lossy();
+    Repo::at(gitdir).checked(&at_gitdir(&dir, args), None, &[])
+}
+
+/// `args` run against the repository whose git directory is `dir`, with `dir` as its work tree.
+fn at_gitdir<'a>(dir: &'a str, args: &[&'a str]) -> Vec<&'a str> {
+    let mut all = vec!["--git-dir", dir, "--work-tree", dir];
+    all.extend_from_slice(args);
+    all
+}
+
+/// A ref of a repository, with the commit it leads to (none for a tag of a blob or tree).
+struct Tip {
+    reference: String,
+    object: String,
+    commit: Option<String>,
+}
+
+/// Every ref of the repository at `gitdir`, with its commit.
+fn tips(gitdir: &Path) -> Result<Vec<Tip>> {
+    let listing = plumbing(
+        gitdir,
+        &[
+            "for-each-ref",
+            "--format=%(objecttype) %(*objecttype) %(objectname) %(*objectname) %(refname)",
+        ],
+    )?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let [kind, peeled_kind, object, peeled, reference] = fields[..] else {
+                return None;
+            };
+            let commit = match (kind, peeled_kind) {
+                ("commit", _) => Some(object.to_owned()),
+                ("tag", "commit") => Some(peeled.to_owned()),
+                // A tag of a tag: rev-list peels it.
+                ("tag", "tag") => Some(object.to_owned()),
+                _ => None,
+            };
+            Some(Tip {
+                reference: reference.to_owned(),
+                object: object.to_owned(),
+                commit,
+            })
+        })
+        .collect())
+}
+
+/// The commits reachable from `roots` and from no remote-tracking branch, in one `rev-list`.
 fn beyond_remotes(gitdir: &Path, roots: &[&str], remotes: &[String]) -> Result<Vec<String>> {
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    Repo::at_git_dir(gitdir).commits_beyond(roots, remotes)
+    let mut input = String::new();
+    for root in roots {
+        input.push_str(root);
+        input.push('\n');
+    }
+    for remote in remotes {
+        input.push('^');
+        input.push_str(remote);
+        input.push('\n');
+    }
+    let dir = gitdir.to_string_lossy();
+    let output = Repo::at(gitdir).checked(
+        &at_gitdir(&dir, &["rev-list", "--stdin"]),
+        Some(input.into_bytes()),
+        &[],
+    )?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .map(str::to_owned)
+        .collect())
 }
 
 /// The commits of `commits` that none of the clones in `elsewhere` (git directories or work
-/// trees) has.
+/// trees) has, each looked up with one `cat-file --batch-check`.
 fn missing_elsewhere(elsewhere: &[PathBuf], commits: Vec<String>) -> Vec<String> {
     let mut missing = commits;
     for clone in elsewhere.iter().filter(|clone| clone.is_dir()) {
         if missing.is_empty() {
             break;
         }
-        let absent = Repo::at(clone)
-            .missing_objects(&missing)
-            .or_else(|_| Repo::at_git_dir(clone).missing_objects(&missing));
-        let Ok(absent) = absent else {
+        let input = missing.join("\n") + "\n";
+        let Ok(output) = Repo::at(clone).checked(
+            &["cat-file", "--batch-check"],
+            Some(input.into_bytes()),
+            &[],
+        ) else {
             continue;
         };
-        missing.retain(|commit| absent.contains(commit));
+        let answers = String::from_utf8_lossy(&output).into_owned();
+        let absent: HashSet<&str> = answers
+            .lines()
+            .filter(|line| line.ends_with(" missing"))
+            .filter_map(|line| line.split(' ').next())
+            .collect();
+        missing.retain(|commit| absent.contains(commit.as_str()));
     }
     missing
 }
@@ -277,38 +379,46 @@ fn remote_timeout() -> u64 {
 /// The tags the first remote of the repository advertises, as ref name and object id; an error
 /// when there is no remote, it cannot be reached, or it takes too long.
 fn advertised_tags(gitdir: &Path) -> Result<Vec<(String, String)>> {
-    let repo = Repo::at_git_dir(gitdir);
-    let remotes = repo.remote_names()?;
+    let remotes = plumbing(gitdir, &["remote"])?;
     let remote = remotes
-        .iter()
+        .lines()
         .find(|name| *name == "origin")
-        .or_else(|| remotes.first())
+        .or_else(|| remotes.lines().next())
         .ok_or_else(|| crate::core::error::Error("it has no remote".to_owned()))?;
-    Ok(repo
-        .ls_remote_within(remote, remote_timeout())?
-        .into_iter()
-        .filter(|advertised| advertised.name.starts_with("refs/tags/"))
-        .map(|advertised| (advertised.name, advertised.id))
+    let dir = gitdir.to_string_lossy();
+    let output = Repo::at(gitdir).git_within(
+        &at_gitdir(&dir, &["ls-remote", "--tags", remote]),
+        remote_timeout(),
+    )?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(object, reference)| (reference.to_owned(), object.to_owned()))
         .collect())
 }
 
 /// Refuses when a ref of the repository at `gitdir`, or its HEAD, leads to a commit that no
 /// remote-tracking branch, no clone in `elsewhere` and (for a tag) no remote has.
 fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf], online: bool) -> Result<()> {
-    let all = Repo::at_git_dir(gitdir).ref_tips(&[])?;
-    if all.iter().any(|tip| tip.name == "refs/stash") {
+    let all = tips(gitdir)?;
+    if all.iter().any(|tip| tip.reference == "refs/stash") {
         return fail(format!("{name} has a stash; apply or drop it first"));
     }
     let remotes: Vec<String> = all
         .iter()
-        .filter(|tip| tip.name.starts_with("refs/remotes/"))
+        .filter(|tip| tip.reference.starts_with("refs/remotes/"))
         .filter_map(|tip| tip.commit.clone())
         .collect();
-    let head = Repo::at_git_dir(gitdir).head().ok();
+    let head = plumbing(
+        gitdir,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    )
+    .ok()
+    .filter(|head| !head.is_empty());
     let mut roots: Vec<(String, String)> = all
         .iter()
-        .filter(|tip| !tip.name.starts_with("refs/remotes/"))
-        .filter_map(|tip| Some((tip.name.clone(), tip.commit.clone()?)))
+        .filter(|tip| !tip.reference.starts_with("refs/remotes/"))
+        .filter_map(|tip| Some((tip.reference.clone(), tip.commit.clone()?)))
         .collect();
     if let Some(head) = &head {
         roots.push(("HEAD".to_owned(), head.clone()));
@@ -336,9 +446,9 @@ fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf], online: bool) 
     };
     // A tag that the remote advertises is held there, whatever the branches say.
     let mut failure = String::new();
-    let tags: Vec<&RefTip> = all
+    let tags: Vec<&Tip> = all
         .iter()
-        .filter(|tip| tip.name.starts_with("refs/tags/") && tip.commit.is_some())
+        .filter(|tip| tip.reference.starts_with("refs/tags/") && tip.commit.is_some())
         .collect();
     let mut kept = roots.clone();
     if tags.iter().any(|tip| {
@@ -357,16 +467,16 @@ fn commits_held(name: &str, gitdir: &Path, elsewhere: &[PathBuf], online: bool) 
                     .iter()
                     .filter(|tip| {
                         advertised.iter().any(|(reference, object)| {
-                            *reference == tip.name && *object == tip.object
+                            *reference == tip.reference && *object == tip.object
                         })
                     })
-                    .map(|tip| tip.name.as_str())
+                    .map(|tip| tip.reference.as_str())
                     .collect();
                 kept.retain(|(reference, _)| !held.contains(reference.as_str()));
                 // Whatever a held tag reaches is on the remote, HEAD at that commit included.
                 not.extend(
                     tags.iter()
-                        .filter(|tip| held.contains(tip.name.as_str()))
+                        .filter(|tip| held.contains(tip.reference.as_str()))
                         .filter_map(|tip| tip.commit.clone()),
                 );
             }
@@ -409,7 +519,8 @@ fn holds_nothing_unique(
         ));
     }
     commits_held(name, gitdir, elsewhere, online)?;
-    if Repo::at_git_dir(gitdir).worktrees()?.len() > 1 {
+    let worktrees = plumbing_bytes(gitdir, &["worktree", "list", "--porcelain", "-z"])?;
+    if crate::git::parse_worktrees(&worktrees).len() > 1 {
         return fail(format!(
             "{name} has linked worktrees of its own; remove them first"
         ));
@@ -420,7 +531,7 @@ fn holds_nothing_unique(
     let work = Repo::at(workdir);
     // A submodule of this one gets its own pass, which filters its junk; here only its commit
     // counts.
-    let dirty = work.status(true, SubmoduleDirt::Ignore)?;
+    let dirty = work.status(true, &["--ignore-submodules=dirty"])?;
     // An untracked file the operating system recreates (a Finder `.DS_Store`) is no work, as
     // at the top level; every other entry, tracked or not, counts.
     let real = dirty.iter().any(|entry| {

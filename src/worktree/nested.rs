@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use super::info::parents;
 use crate::core::error::{Error, Result, ctx};
 use crate::core::local;
-use crate::git::{Repo, Worktree, config_file_entries};
+use crate::git::{Repo, Worktree};
 
 /// A directory with a `.git` of its own somewhere under a worktree.
 pub struct Found {
@@ -91,9 +91,21 @@ pub fn submodule_paths(root: &Path) -> Result<Vec<String>> {
     if !root.join(".gitmodules").is_file() {
         return Ok(Vec::new());
     }
-    let entries = config_file_entries(&root.join(".gitmodules"), r"^submodule\..*\.path$")
-        .unwrap_or_default();
-    Ok(entries.into_iter().map(|(_, path)| path).collect())
+    // NUL ends an entry and the first newline splits key from value, so a submodule name or
+    // path with spaces reads back whole.
+    let listing = Repo::at(root).git_opt(&[
+        "config",
+        "-z",
+        "--file",
+        ".gitmodules",
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+    ])?;
+    Ok(listing
+        .unwrap_or_default()
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n').map(|(_, path)| path.to_owned()))
+        .collect())
 }
 
 fn descend(

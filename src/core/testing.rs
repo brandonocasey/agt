@@ -11,7 +11,6 @@ pub(crate) struct Sandbox {
 
 impl Sandbox {
     pub(crate) fn new() -> Self {
-        hide_global_git_config();
         let root = tempfile::tempdir().unwrap();
         for dir in ["home", "state", "config", "cache", "repo"] {
             fs::create_dir(root.path().join(dir)).unwrap();
@@ -59,31 +58,6 @@ impl Sandbox {
         command
     }
 
-    /// What `git args` prints on stdout in `dir`, for tests that compare the library with the
-    /// command line.
-    pub(crate) fn git_output(&self, dir: &Path, args: &[&str]) -> String {
-        let output = self
-            .command("git")
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {args:?}");
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    /// What the shell `script` prints on stdout in `dir`.
-    pub(crate) fn shell_output(&self, dir: &Path, script: &str) -> String {
-        let output = self
-            .command("sh")
-            .current_dir(dir)
-            .args(["-c", script])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{script}");
-        String::from_utf8(output.stdout).unwrap()
-    }
-
     pub(crate) fn git(&self, dir: &Path, args: &[&str]) {
         let status = self
             .command("git")
@@ -93,25 +67,4 @@ impl Sandbox {
             .unwrap();
         assert!(status.success(), "git {args:?}");
     }
-}
-
-/// Points libgit2's global, XDG and system config search at an empty directory.
-/// It runs once per test process, so no developer config reaches a unit test.
-fn hide_global_git_config() {
-    static HIDDEN: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HIDDEN.get_or_init(|| {
-        // Before the search path is emptied, or opening a repository would add the system ones.
-        crate::git::configure_libgit2();
-        let empty = tempfile::tempdir().unwrap();
-        for level in [
-            git2::ConfigLevel::System,
-            git2::ConfigLevel::XDG,
-            git2::ConfigLevel::Global,
-            git2::ConfigLevel::ProgramData,
-        ] {
-            // SAFETY: runs once, before any test of this process opens a repository.
-            unsafe { git2::opts::set_search_path(level, empty.path()) }.unwrap();
-        }
-        empty
-    });
 }

@@ -379,18 +379,30 @@ fn place(cwd: &Path) -> Place {
         return place;
     }
     let repo = Repo::at(cwd);
-    let (Ok(Some(top)), Ok(common)) = (repo.find_toplevel(), repo.common_dir()) else {
+    let Some(paths) = repo
+        .git_opt(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ])
+        .ok()
+        .flatten()
+    else {
         return place;
     };
-    let (top, common) = (top.as_path(), common.as_str());
+    let mut lines = paths.lines();
+    let (Some(top), Some(common)) = (lines.next(), lines.next()) else {
+        return place;
+    };
     let common = Path::new(common);
     let main = match common.file_name() {
         Some(name) if name == ".git" => common.parent().unwrap_or(common),
-        _ => top,
+        _ => Path::new(top),
     };
     place.repository = Some(main.to_owned());
-    if main != top {
-        place.worktree = Some(top.to_owned());
+    if main != Path::new(top) {
+        place.worktree = Some(PathBuf::from(top));
     }
     place.branch = repo.current_branch().ok().flatten();
     place

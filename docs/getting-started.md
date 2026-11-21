@@ -10,7 +10,7 @@ For command details, use the [reference](reference.md).
 ## Install
 
 Release binaries support Apple Silicon macOS and Linux on x64 or arm64.
-Windows is not supported.
+Windows is not supported. Use Git 2.38 or newer for full review coverage checks.
 
 With mise installed, use the GitHub release:
 

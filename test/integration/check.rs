@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use crate::support::{Env, PROMPT_CASES, PROMPT_PROBE};
+use crate::support::Env;
 
 /// A repository with one commit and a counter script `bump`, which appends a line to `ran`.
 fn setup() -> Env {
@@ -463,29 +463,4 @@ fn a_modified_submodule_is_dirty_even_when_git_config_ignores_submodules() {
     let (_, summary, _) = run_bump(&env, "test", &[]);
     assert_eq!(summary["dirty"], true, "{summary}");
     assert_eq!(summary["recorded"], false);
-}
-
-#[test]
-fn a_check_gets_the_prompt_settings_the_user_started_agt_with() {
-    for (user, expected) in PROMPT_CASES {
-        let env = setup();
-        let output = env
-            .bin(&env.repo)
-            .envs(user.iter().copied())
-            .args([
-                "check",
-                "run",
-                "--name",
-                "probe",
-                "--",
-                "sh",
-                "-c",
-                PROMPT_PROBE,
-            ])
-            .output()
-            .expect("agt runs");
-        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let log = std::fs::read_to_string(json["log"].as_str().unwrap()).unwrap();
-        assert_eq!(log, expected, "{user:?}");
-    }
 }

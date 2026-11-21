@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::core::error::{Result, ctx, fail};
-use crate::core::{clock, local, process};
+use crate::core::{clock, local};
 
 /// How long after the command exits its remaining output is still copied.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
@@ -46,13 +46,12 @@ pub(super) fn execute(name: &str, argv: &[String]) -> Result<Outcome> {
     let sink = Arc::new(Mutex::new(sink));
     let ran_at = clock::now()?;
     let started = Instant::now();
-    let mut command = Command::new(&argv[0]);
-    command
+    let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    process::keep_user_prompts(&mut command);
-    let mut child = command.spawn().map_err(ctx(format!("run {}", argv[0])))?;
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(ctx(format!("run {}", argv[0])))?;
     let (done, finished) = mpsc::channel();
     let streams = [
         child.stdout.take().map(|out| tee(out, &sink, &done)),

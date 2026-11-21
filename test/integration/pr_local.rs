@@ -3,13 +3,12 @@
 //! No forge tool is called and nothing reaches a network.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
 
 use serde_json::Value;
 
-use crate::support::{Env, PROMPT_CASES, PROMPT_PROBE};
+use crate::support::Env;
 
 /// A repository with `main` at one commit and `main` checked out.
 fn setup() -> Env {
@@ -120,54 +119,6 @@ fn commit_on(env: &Env, parent: &str, file: &str, content: &str) -> String {
         parent,
         &format!("100644,{blob},{file}"),
         &format!("add {file}"),
-    )
-}
-
-/// A commit on top of `parent` that writes `file`, an entry `parent` already has, as a blob of
-/// `content` with the raw tree-entry `mode`. git and libgit2 only write canonical modes, so the
-/// tree is written byte by byte.
-fn commit_with_raw_mode(env: &Env, parent: &str, file: &str, content: &str, mode: &str) -> String {
-    let path = env.path("blob");
-    fs::write(&path, content).unwrap();
-    let blob = git_ok(
-        env,
-        &env.repo,
-        &["hash-object", "-w", path.to_str().unwrap()],
-    );
-    let listing = git_in(env, &env.repo, &["ls-tree", "-z", parent]).stdout;
-    let mut raw = Vec::new();
-    for record in listing.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
-        let record = String::from_utf8(record.to_vec()).unwrap();
-        let (info, name) = record.split_once('\t').unwrap();
-        let mut parts = info.split(' ');
-        let (old_mode, _, old_id) = (parts.next(), parts.next(), parts.next().unwrap());
-        let (mode, id) = if name == file {
-            (mode, blob.as_str())
-        } else {
-            (old_mode.unwrap(), old_id)
-        };
-        raw.extend(format!("{mode} {name}\0").bytes());
-        raw.extend(
-            (0..id.len())
-                .step_by(2)
-                .map(|at| u8::from_str_radix(&id[at..at + 2], 16).unwrap()),
-        );
-    }
-    let mut hashing = env
-        .command("git", &env.repo)
-        .args(["hash-object", "-t", "tree", "-w", "--literally", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    hashing.stdin.take().unwrap().write_all(&raw).unwrap();
-    let output = hashing.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let tree = String::from_utf8(output.stdout).unwrap().trim().to_owned();
-    git_ok(
-        env,
-        &env.repo,
-        &["commit-tree", &tree, "-p", parent, "-m", "raw mode"],
     )
 }
 
@@ -402,9 +353,9 @@ fn list_shows_each_branch_with_its_state_mergeability_author_and_title() {
     }
 }
 
-/// `list` reads its rows in process: it starts no git program, however many branches there are.
+/// `list` asks git for its rows in a few calls, not several per branch.
 #[test]
-fn list_starts_no_git_process_however_many_branches_there_are() {
+fn list_runs_a_few_git_calls_however_many_branches_there_are() {
     let env = list_fixture();
     for count in 0..6 {
         add_branch(&env, &format!("extra{count}"), "x.txt", "x\n");
@@ -423,8 +374,11 @@ fn list_starts_no_git_process_however_many_branches_there_are() {
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", stderr(&output));
-        let spawned = fs::read_to_string(&calls).map_or(0, |log| log.lines().count());
-        assert_eq!(spawned, 0, "{state}: {spawned} git calls for 10 branches");
+        let spawned = fs::read_to_string(&calls).unwrap().lines().count();
+        assert!(
+            spawned <= 12,
+            "{state}: {spawned} git calls for 10 branches"
+        );
     }
 }
 
@@ -505,173 +459,6 @@ fn a_merge_into_a_sparse_checkout_leaves_the_paths_outside_it_unwritten() {
         "y\n"
     );
     assert!(!env.repo.join("other").exists());
-}
-
-#[test]
-fn a_merge_into_a_checkout_with_a_sparse_index_moves_the_branch_and_the_files() {
-    let env = setup();
-    env.write("sub/keep.txt", "k\n");
-    env.write("other/x.txt", "x\n");
-    env.commit_all("dirs");
-    let sha = commit_on(&env, "main", "sub/y.txt", "y\n");
-    point(&env, "feat", &sha);
-    git_ok(
-        &env,
-        &env.repo,
-        &["sparse-checkout", "set", "--cone", "--sparse-index", "sub"],
-    );
-
-    ok(&env, &merge_args(&sha, "feat", &[]));
-    assert_eq!(tip(&env, "main"), sha);
-    assert_eq!(
-        fs::read_to_string(env.repo.join("sub/y.txt")).unwrap(),
-        "y\n"
-    );
-    assert!(!env.repo.join("other").exists());
-    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn a_view_of_a_branch_needs_no_readable_index() {
-    let env = setup();
-    add_branch(&env, "feat", "b.txt", "b\n");
-    git_ok(&env, &env.repo, &["update-index", "--split-index"]);
-    env.write("c.txt", "c\n");
-    git_ok(&env, &env.repo, &["add", "c.txt"]);
-
-    let view = ok(&env, &["view", "feat"]);
-    assert_eq!(view["head_branch"], "feat");
-}
-
-/// A repository with `sub/keep.txt` and `other/x.txt`, whose checkout keeps only `sub/`.
-fn sparse_setup() -> Env {
-    let env = setup();
-    env.write("sub/keep.txt", "k\n");
-    env.write("other/x.txt", "x\n");
-    env.commit_all("dirs");
-    env
-}
-
-fn keep_only_sub(env: &Env) {
-    git_ok(
-        env,
-        &env.repo,
-        &["sparse-checkout", "set", "--no-cone", "/sub/"],
-    );
-}
-
-#[test]
-fn a_merge_of_a_change_outside_a_sparse_checkout_moves_the_branch() {
-    let env = sparse_setup();
-    let sha = commit_on(&env, "main", "other/x.txt", "changed\n");
-    point(&env, "feat", &sha);
-    keep_only_sub(&env);
-
-    ok(&env, &merge_args(&sha, "feat", &[]));
-    assert_eq!(tip(&env, "main"), sha);
-    assert!(!env.repo.join("other").exists());
-    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn a_rebase_merge_in_a_sparse_checkout_with_a_change_outside_it() {
-    let env = sparse_setup();
-    let feat = commit_on(&env, "main", "sub/y.txt", "y\n");
-    let moved = commit_on(&env, "main", "other/x.txt", "changed\n");
-    point(&env, "feat", &feat);
-    git_ok(&env, &env.repo, &["switch", "-q", "feat"]);
-    point(&env, "main", &moved);
-    keep_only_sub(&env);
-
-    ok(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
-    assert_eq!(tip(&env, "main"), tip(&env, "feat"));
-    assert_ne!(tip(&env, "main"), feat);
-    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn a_rebase_merge_into_a_sparse_checkout_with_a_change_outside_it() {
-    let env = sparse_setup();
-    let feat = add_branch(&env, "feat", "a.txt", "from the branch\n");
-    advance_main(&env, "other/x.txt", "changed\n");
-    keep_only_sub(&env);
-    add_worktree(&env, "work", &["feat"]);
-
-    ok(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
-    assert_eq!(tip(&env, "main"), tip(&env, "feat"));
-    assert_ne!(tip(&env, "main"), feat);
-    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn a_rebase_merge_commits_as_the_environment_names_the_committer() {
-    let by_variable = [
-        ("GIT_COMMITTER_NAME", "Env Person"),
-        ("GIT_COMMITTER_EMAIL", "env@example.org"),
-    ];
-    let by_config = [
-        ("GIT_CONFIG_COUNT", "2"),
-        ("GIT_CONFIG_KEY_0", "user.name"),
-        ("GIT_CONFIG_VALUE_0", "Env Person"),
-        ("GIT_CONFIG_KEY_1", "user.email"),
-        ("GIT_CONFIG_VALUE_1", "env@example.org"),
-    ];
-    for (label, variables) in [("committer", &by_variable[..]), ("config", &by_config[..])] {
-        let env = setup();
-        let feat = add_branch(&env, "feat", "b.txt", "b\n");
-        advance_main(&env, "c.txt", "c\n");
-        git_ok(&env, &env.repo, &["switch", "-q", "feat"]);
-        fs::write(env.path("gitconfig"), "[init]\n\tdefaultBranch = main\n").unwrap();
-
-        let output = env
-            .bin(&env.repo)
-            .args(["pr", "--local"])
-            .args(merge_args(&feat, "feat", &["--method", "rebase"]))
-            .envs(variables.iter().copied())
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{label}: {stderr}");
-        let made = git_ok(
-            &env,
-            &env.repo,
-            &["log", "-1", "--format=%cn <%ce>", "feat"],
-        );
-        assert_eq!(made, "Env Person <env@example.org>", "{label}");
-    }
-}
-
-#[test]
-fn a_rebase_merge_commits_at_the_date_the_environment_names_as_git_does() {
-    // 1767225600 is 2026-01-01T00:00:00Z.
-    for date in [
-        "1767225600 +0000",
-        "@1767225600 +0000",
-        "2026-01-01T00:00:00Z",
-        "2026-01-01 00:00:00 +0000",
-        "2026-01-01 02:00:00 +0200",
-        "2025-12-31 19:00:00 -0500",
-    ] {
-        let env = setup();
-        let feat = add_branch(&env, "feat", "b.txt", "b\n");
-        advance_main(&env, "c.txt", "c\n");
-        git_ok(&env, &env.repo, &["switch", "-q", "feat"]);
-        fs::write(env.path("gitconfig"), "[init]\n\tdefaultBranch = main\n").unwrap();
-
-        let output = env
-            .bin(&env.repo)
-            .args(["pr", "--local"])
-            .args(merge_args(&feat, "feat", &["--method", "rebase"]))
-            .env("GIT_COMMITTER_NAME", "Env Person")
-            .env("GIT_COMMITTER_EMAIL", "env@example.org")
-            .env("GIT_COMMITTER_DATE", date)
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{date}: {stderr}");
-        let made = git_ok(&env, &env.repo, &["log", "-1", "--format=%ct", "feat"]);
-        assert_eq!(made, "1767225600", "{date}");
-    }
 }
 
 #[test]
@@ -1084,36 +871,26 @@ fn a_branch_behind_the_target_rebases_and_fast_forwards() {
 }
 
 /// Git 2.31 has no `rebase --no-update-refs`, which Git 2.38 added.
-/// `rebase.updateRefs` makes git's own rebase move branches inside the rebased range.
-/// The merge MUST NOT move the branch between main and the tip.
+/// The merge turns update-refs off by a config key, which an older git ignores.
+/// A `git` that rejects the flag stands in.
 #[test]
-fn a_rebase_merge_leaves_branches_in_the_range_alone_whatever_update_refs_says() {
+fn a_rebase_merge_does_not_use_the_flag_an_older_git_lacks() {
     let env = setup();
     let first = add_branch(&env, "feat", "b.txt", "b\n");
     let second = commit_on(&env, &first, "b2.txt", "b2\n");
     point(&env, "feat", &second);
     point(&env, "mid", &first);
-    // The same shape of range on commits of its own, so git's rebase here cannot touch `mid`.
-    let oracle_first = commit_on(&env, "main", "o1.txt", "o1\n");
-    point(&env, "oracle-mid", &oracle_first);
-    point(
-        &env,
-        "oracle",
-        &commit_on(&env, &oracle_first, "o2.txt", "o2\n"),
-    );
     advance_main(&env, "c.txt", "c\n");
     add_worktree(&env, "work", &["feat"]);
-    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
     git_ok(&env, &env.repo, &["config", "rebase.updateRefs", "true"]);
-    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
-    assert_ne!(
-        tip(&env, "oracle-mid"),
-        oracle_first,
-        "git's rebase should move the branch in the range, or this test proves nothing"
+    let path = env.git_wrapper(
+        "old-git",
+        "for arg in \"$@\"; do\n  [ \"$arg\" = --no-update-refs ] && { echo \"error: unknown option 'no-update-refs'\" >&2; exit 129; }\ndone\n",
     );
 
     let output = env
         .bin(&env.repo)
+        .env("PATH", path)
         .args(["pr", "--local"])
         .args(merge_args(&second, "feat", &["--method", "rebase"]))
         .output()
@@ -1121,110 +898,6 @@ fn a_rebase_merge_leaves_branches_in_the_range_alone_whatever_update_refs_says()
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(tip(&env, "main"), tip(&env, "feat"));
     assert_eq!(tip(&env, "mid"), first, "update-refs stays off");
-}
-
-/// A commit on top of `parent` with the tree of `parent`. It moves no branch or checkout.
-fn empty_commit_on(env: &Env, parent: &str, message: &str) -> String {
-    let tree = format!("{parent}^{{tree}}");
-    git_ok(
-        env,
-        &env.repo,
-        &["commit-tree", &tree, "-p", parent, "-m", message],
-    )
-}
-
-/// The subjects of the commits of `from..to`, newest first.
-fn subjects(env: &Env, from: &str, to: &str) -> Vec<String> {
-    let range = format!("{from}..{to}");
-    git_ok(env, &env.repo, &["log", "--format=%s", &range])
-        .lines()
-        .map(str::to_owned)
-        .collect()
-}
-
-#[test]
-fn a_rebase_keeps_a_commit_that_was_empty_from_the_start_as_git_does() {
-    let env = setup();
-    let empty = empty_commit_on(&env, "main", "empty");
-    let change = commit_on(&env, &empty, "b.txt", "b\n");
-    point(&env, "feat", &change);
-    let oracle_empty = empty_commit_on(&env, "main", "oracle empty");
-    let oracle_change = commit_on(&env, &oracle_empty, "ob.txt", "b\n");
-    point(&env, "oracle", &oracle_change);
-    let old_main = advance_main(&env, "c.txt", "c\n");
-    add_worktree(&env, "work", &["feat"]);
-    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
-    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
-
-    ok(&env, &merge_args(&change, "feat", &["--method", "rebase"]));
-
-    assert_eq!(
-        subjects(&env, &old_main, "oracle"),
-        ["add ob.txt", "oracle empty"]
-    );
-    assert_eq!(subjects(&env, &old_main, "main"), ["add b.txt", "empty"]);
-}
-
-/// `main` holds a copy of the branch's first commit, then edits the same line again.
-/// Replaying that commit conflicts, so git drops it as already upstream and replays the second.
-#[test]
-fn a_rebase_skips_a_commit_the_target_already_has_by_patch_id_as_git_does() {
-    let env = setup();
-    let lines = |first: &str, last: &str| {
-        let middle: String = (2..20).map(|number| format!("line {number}\n")).collect();
-        format!("{first}\n{middle}{last}\n")
-    };
-    let base = advance_main(&env, "f.txt", &lines("line 1", "line 20"));
-    let picked = commit_on(&env, &base, "f.txt", &lines("one", "line 20"));
-    let both = commit_on(&env, &picked, "f.txt", &lines("one", "twenty"));
-    point(&env, "feat", &both);
-    let oracle_picked = commit_on(&env, &base, "f.txt", &lines("one", "line 20"));
-    point(
-        &env,
-        "oracle",
-        &commit_on(&env, &oracle_picked, "f.txt", &lines("one", "twenty")),
-    );
-    advance_main(&env, "f.txt", &lines("one", "line 20"));
-    let old_main = advance_main(&env, "f.txt", &lines("uno", "line 20"));
-    add_worktree(&env, "work", &["feat"]);
-    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
-    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
-    assert_eq!(subjects(&env, &old_main, "oracle").len(), 1);
-
-    ok(&env, &merge_args(&both, "feat", &["--method", "rebase"]));
-
-    assert_eq!(subjects(&env, &old_main, "main").len(), 1);
-    assert_eq!(tip(&env, "main^{tree}"), tip(&env, "oracle^{tree}"));
-}
-
-/// The branch's one commit changes two lines that `main` changed in two commits.
-/// No commit of `main` has its patch-id, but replaying it changes nothing.
-#[test]
-fn a_rebase_drops_a_commit_that_becomes_empty_as_git_does() {
-    let env = setup();
-    let lines = |first: &str, last: &str| {
-        let middle: String = (2..20).map(|number| format!("line {number}\n")).collect();
-        format!("{first}\n{middle}{last}\n")
-    };
-    let base = advance_main(&env, "f.txt", &lines("line 1", "line 20"));
-    let both = commit_on(&env, &base, "f.txt", &lines("one", "twenty"));
-    point(&env, "feat", &both);
-    point(
-        &env,
-        "oracle",
-        &commit_on(&env, &base, "f.txt", &lines("one", "twenty")),
-    );
-    advance_main(&env, "f.txt", &lines("one", "line 20"));
-    let new_main = advance_main(&env, "f.txt", &lines("one", "twenty"));
-    add_worktree(&env, "work", &["feat"]);
-    let oracle = add_worktree(&env, "oracle-work", &["oracle"]);
-    git_ok(&env, &oracle, &["rebase", "-q", "main"]);
-    assert_eq!(tip(&env, "oracle"), new_main);
-
-    ok(&env, &merge_args(&both, "feat", &["--method", "rebase"]));
-
-    assert_eq!(tip(&env, "main"), new_main);
-    assert_eq!(tip(&env, "feat"), new_main);
 }
 
 #[test]
@@ -1566,53 +1239,31 @@ fn a_hook_that_refuses_the_rebase_leaves_everything_as_it_was() {
     assert!(!message.trim_end().contains('\n'), "{message:?}");
 }
 
-#[test]
-fn a_rebase_hook_gets_the_prompt_settings_the_user_started_agt_with() {
-    for (user, expected) in PROMPT_CASES {
-        let env = setup();
-        let sha = add_branch(&env, "feat", "b.txt", "b\n");
-        advance_main(&env, "c.txt", "c\n");
-        add_worktree(&env, "work", &["feat"]);
-        let seen = env.path("seen");
-        let hook = env.repo.join(".git/hooks/pre-rebase");
-        fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        crate::support::executable(
-            &hook,
-            format!("#!/bin/sh\n{PROMPT_PROBE} > '{}'\n", seen.display()),
-        );
-
-        let output = env
-            .bin(&env.repo)
-            .envs(user.iter().copied())
-            .args(["pr", "--local"])
-            .args(merge_args(&sha, "feat", &["--method", "rebase"]))
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(fs::read_to_string(seen).unwrap(), expected, "{user:?}");
-    }
-}
-
 /// A commit made after the head was checked is not merged unseen.
 /// A rebase would start from a tip the caller never named.
-/// A `pre-rebase` hook makes the commit, after the tip was read.
+/// A `core.fsmonitor` hook makes the commit. The status check of the work tree runs it, after the
+/// tip was read.
 #[test]
 fn a_commit_made_while_the_merge_runs_stops_the_merge_before_it_lands() {
     let env = setup();
     let sha = add_branch(&env, "feat", "b.txt", "b\n");
     advance_main(&env, "c.txt", "c\n");
     let work = add_worktree(&env, "work", &["feat"]);
-    let hook = env.repo.join(".git/hooks/pre-rebase");
+    let hook = env.path("fsmonitor");
     let once = env.path("committed");
-    fs::create_dir_all(hook.parent().unwrap()).unwrap();
     crate::support::executable(
         &hook,
         format!(
-            "#!/bin/sh\n[ -e '{once}' ] && exit 0\ntouch '{once}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE\n\
-             git -C '{work}' commit -q --allow-empty -m sneaked\n",
+            "#!/bin/sh\n[ -e '{once}' ] && exit 1\ntouch '{once}'\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE\n\
+             git -C '{work}' commit -q --allow-empty -m sneaked\nexit 1\n",
             once = once.display(),
             work = work.display()
         ),
+    );
+    git_ok(
+        &env,
+        &env.repo,
+        &["config", "core.fsmonitor", hook.to_str().unwrap()],
     );
     let main = tip(&env, "main");
 
@@ -2221,231 +1872,4 @@ fn a_head_that_is_not_the_sha_is_refused_before_any_intent_is_recorded() {
     let message = err(&env, &merge_args(&sha, "feat", &["--auto"]));
     assert!(message.contains("inspect it again"), "{message}");
     assert_eq!(intents(&env), serde_json::json!({}));
-}
-
-/// `main` holds `a.txt`, then `.gitattributes` sending `*.bin` through the `lfs` filter (`cat`
-/// stands in for it) and `data.bin`. With `required`, the filter is marked required.
-fn lfs_setup(required: bool) -> Env {
-    let env = setup();
-    for (key, value) in [("filter.lfs.clean", "cat"), ("filter.lfs.smudge", "cat")] {
-        git_ok(&env, &env.repo, &["config", key, value]);
-    }
-    env.write(".gitattributes", "*.bin filter=lfs\n");
-    env.write("data.bin", "real content");
-    env.commit_all("track bins");
-    let required = if required { "true" } else { "false" };
-    git_ok(
-        &env,
-        &env.repo,
-        &["config", "filter.lfs.required", required],
-    );
-    env
-}
-
-#[test]
-fn a_merge_that_writes_a_required_filter_path_is_refused_and_changes_nothing() {
-    let env = lfs_setup(true);
-    let sha = add_branch(&env, "feat", "data.bin", "rewritten");
-    let head = tip(&env, "main");
-
-    let message = refused(&env, &merge_args(&sha, "feat", &[]));
-
-    assert!(message.contains("data.bin"), "{message}");
-    assert!(message.contains("required filter 'lfs'"), "{message}");
-    assert_eq!(
-        fs::read_to_string(env.repo.join("data.bin")).unwrap(),
-        "real content"
-    );
-    assert_eq!(tip(&env, "main"), head);
-    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn a_rebase_merge_that_writes_a_required_filter_path_is_refused_and_leaves_the_target() {
-    let env = lfs_setup(true);
-    let feat = add_branch(&env, "feat", "data.bin", "rewritten");
-    advance_main(&env, "b.txt", "b\n");
-    add_worktree(&env, "work", &["feat"]);
-    let main = tip(&env, "main");
-
-    let message = err(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
-
-    assert!(message.contains("data.bin"), "{message}");
-    assert!(message.contains("required filter 'lfs'"), "{message}");
-    assert_eq!(tip(&env, "main"), main);
-    assert_eq!(tip(&env, "feat"), feat);
-    assert_eq!(
-        fs::read_to_string(env.repo.join("data.bin")).unwrap(),
-        "real content"
-    );
-    assert_eq!(git_ok(&env, &env.repo, &["status", "--porcelain"]), "");
-}
-
-#[test]
-fn a_merge_into_a_sparse_checkout_ignores_a_required_filter_path_outside_the_patterns() {
-    for (extra, main_moves) in [(vec![], false), (vec!["--method", "rebase"], true)] {
-        let env = lfs_setup(true);
-        env.write("sub/keep.txt", "k\n");
-        env.commit_all("sub");
-        let first = commit_on(&env, "main", "other/x.bin", "x\n");
-        let feat = commit_on(&env, &first, "sub/y.txt", "y\n");
-        point(&env, "feat", &feat);
-        if main_moves {
-            advance_main(&env, "b.txt", "b\n");
-            add_worktree(&env, "work", &["feat"]);
-        }
-        git_ok(
-            &env,
-            &env.repo,
-            &["sparse-checkout", "set", "--no-cone", "/sub/"],
-        );
-
-        ok(&env, &merge_args(&feat, "feat", &extra));
-
-        assert_eq!(
-            fs::read_to_string(env.repo.join("sub/y.txt")).unwrap(),
-            "y\n",
-            "{extra:?}"
-        );
-        assert!(!env.repo.join("other").exists(), "{extra:?}");
-        assert_eq!(
-            git_ok(&env, &env.repo, &["ls-files", "-t", "other/x.bin"]),
-            "S other/x.bin",
-            "{extra:?}"
-        );
-    }
-}
-
-#[test]
-fn a_merge_into_a_sparse_checkout_refuses_a_required_filter_path_inside_the_patterns() {
-    let env = lfs_setup(true);
-    env.write("sub/keep.txt", "k\n");
-    env.commit_all("sub");
-    let feat = add_branch(&env, "feat", "sub/y.bin", "y\n");
-    git_ok(
-        &env,
-        &env.repo,
-        &["sparse-checkout", "set", "--no-cone", "/sub/"],
-    );
-
-    let message = refused(&env, &merge_args(&feat, "feat", &[]));
-
-    assert!(message.contains("sub/y.bin"), "{message}");
-    assert!(message.contains("required filter 'lfs'"), "{message}");
-    assert!(!env.repo.join("sub/y.bin").exists());
-}
-
-#[test]
-fn a_rebase_that_would_write_a_required_filter_path_into_the_branch_is_refused_before_it_starts() {
-    let env = lfs_setup(true);
-    let feat = add_branch(&env, "feat", "b.txt", "b\n");
-    advance_main(&env, "new.bin", "fresh");
-    let work = add_worktree(&env, "work", &["feat"]);
-
-    let message = refused(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
-
-    assert!(
-        message.contains("cannot rebase feat onto main"),
-        "{message}"
-    );
-    assert!(message.contains("new.bin"), "{message}");
-    assert!(message.contains("required filter 'lfs'"), "{message}");
-    assert_eq!(tip(&env, "feat"), feat);
-    assert!(!work.join("new.bin").exists());
-}
-
-#[test]
-fn the_branch_lands_gate_waits_while_a_rebase_merge_would_write_a_required_filter_path() {
-    let env = lfs_setup(true);
-    let sha = add_branch(&env, "feat", "data.bin", "rewritten");
-    record_gates(&env, "feat", &[]);
-    advance_main(&env, "c.txt", "c\n");
-    add_worktree(&env, "work", &["feat"]);
-
-    let rebase = merge_args(&sha, "feat", &["--auto", "--method", "rebase"]);
-    let output = waiting(&env, &rebase);
-
-    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
-    let message = stderr(&output);
-    assert!(message.contains("lands:"), "{message}");
-    assert!(message.contains("required filter 'lfs'"), "{message}");
-    assert_eq!(tip(&env, "feat"), sha);
-}
-
-#[test]
-fn merges_over_filtered_paths_work_when_the_filter_is_not_required() {
-    for (extra, main_moves) in [(vec![], false), (vec!["--method", "rebase"], true)] {
-        let env = lfs_setup(false);
-        let feat = add_branch(&env, "feat", "data.bin", "rewritten");
-        if main_moves {
-            advance_main(&env, "b.txt", "b\n");
-            add_worktree(&env, "work", &["feat"]);
-        }
-
-        ok(&env, &merge_args(&feat, "feat", &extra));
-
-        assert_eq!(
-            fs::read_to_string(env.repo.join("data.bin")).unwrap(),
-            "rewritten",
-            "{extra:?}"
-        );
-    }
-}
-
-/// libgit2 hands a tree entry's raw mode to the checkout, and an entry written by an old git
-/// can carry a mode that git itself reads as a regular file.
-const LEGACY_MODES: [&str; 2] = ["100775", "100600"];
-
-#[test]
-fn a_fast_forward_that_writes_a_legacy_mode_entry_works_with_and_without_a_required_filter() {
-    for required in [false, true] {
-        for mode in LEGACY_MODES {
-            let env = lfs_setup(required);
-            let feat = commit_with_raw_mode(&env, "main", "a.txt", "legacy\n", mode);
-            point(&env, "feat", &feat);
-
-            let output = local(&env, &merge_args(&feat, "feat", &[]));
-
-            let context = format!("required={required} mode={mode}");
-            assert!(
-                output.status.success(),
-                "{context}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(
-                fs::read_to_string(env.repo.join("a.txt")).unwrap(),
-                "legacy\n",
-                "{context}"
-            );
-        }
-    }
-}
-
-/// `main` is sparse and leaves the legacy entry off disk, where libgit2 would see it as a local
-/// change. It moves to a commit with that entry, then `feat`, based before it, is rebased onto it.
-#[test]
-fn a_rebase_onto_a_target_with_a_legacy_mode_entry_works_with_and_without_a_required_filter() {
-    for required in [false, true] {
-        for mode in LEGACY_MODES {
-            let env = lfs_setup(required);
-            let base = tip(&env, "main");
-            let legacy = commit_with_raw_mode(&env, &base, "a.txt", "legacy\n", mode);
-            let feat = add_branch(&env, "feat", "c.txt", "c\n");
-            point(&env, "legacy", &legacy);
-            add_worktree(&env, "work", &["feat"]);
-            keep_only_sub(&env);
-            ok(&env, &merge_args(&legacy, "legacy", &[]));
-
-            let output = local(&env, &merge_args(&feat, "feat", &["--method", "rebase"]));
-
-            let context = format!("required={required} mode={mode}");
-            assert!(
-                output.status.success(),
-                "{context}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(tip(&env, "main"), tip(&env, "feat"), "{context}");
-            assert_ne!(tip(&env, "main"), feat, "{context}");
-        }
-    }
 }

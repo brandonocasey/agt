@@ -53,7 +53,7 @@ impl Resolved {
 pub(super) fn resolve(main: &Path) -> Result<Resolved> {
     let repo = Repo::at(main);
     // A bare main checkout has no `.config/agt.toml`, so only the global file applies.
-    if repo.is_bare()? {
+    if repo.git(&["rev-parse", "--is-bare-repository"])? == "true" {
         let hooks = Config::load()?.worktree.hooks;
         return Ok(Resolved {
             create: hooks.create,

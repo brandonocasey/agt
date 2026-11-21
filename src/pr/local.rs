@@ -13,8 +13,8 @@ use super::provider::{At, Capabilities, Filter, Outcome, Provider};
 use super::{How, Native, Pr, State};
 use crate::core::error::{Error, Result, fail};
 use crate::core::shell::quote;
+use crate::git::Repo;
 use crate::git::fast_forward::{Update, fast_forward};
-use crate::git::{BranchFilter, Repo};
 use crate::store::model::ReviewState;
 
 /// The most PRs `list` returns.
@@ -62,10 +62,13 @@ impl<'a> Local<'a> {
     /// The PR of `branch` against `target` at `target_tip`, with its messages as body.
     fn pr(&self, branch: &str, target: &str, target_tip: &str) -> Result<Pr> {
         let tip = self.tip(branch)?;
-        let messages = self.repo.messages(target_tip, &tip)?;
+        let range = format!("{target_tip}..{tip}");
+        let messages = self
+            .repo
+            .git(&["log", "--format=%B%x00", "--end-of-options", &range])?;
         let messages: Vec<&str> = messages
-            .iter()
-            .map(|message| message.trim())
+            .split('\0')
+            .map(str::trim)
             .filter(|message| !message.is_empty())
             .collect();
         let (author, title) = self
@@ -84,25 +87,34 @@ impl<'a> Local<'a> {
         self.row_pr(row, target, (merged, descends), messages.join("\n\n"))
     }
 
-    /// The local branches `filter` picks, newest commit first.
-    fn rows(&self, filter: &BranchFilter<'_>) -> Result<Vec<Row>> {
-        Ok(self
-            .repo
-            .branch_rows(filter)?
-            .into_iter()
-            .map(|row| Row {
-                branch: row.name,
-                tip: row.tip,
-                author: row.author,
-                title: row.subject,
+    /// The local branches `selector` picks, newest commit first, from one `git for-each-ref` call.
+    fn rows(&self, selector: &[&str]) -> Result<Vec<Row>> {
+        let mut args = vec![
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:lstrip=2)%00%(objectname)%00%(authorname)%00%(contents:subject)",
+        ];
+        args.extend(selector);
+        args.push("refs/heads/");
+        let listing = self.repo.git(&args)?;
+        Ok(listing
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(4, '\0');
+                Some(Row {
+                    branch: fields.next()?.to_owned(),
+                    tip: fields.next()?.to_owned(),
+                    author: fields.next()?.to_owned(),
+                    title: fields.next()?.to_owned(),
+                })
             })
             .collect())
     }
 
     /// The names of the branches `selector` picks.
-    fn names(&self, filter: &BranchFilter<'_>) -> Result<HashSet<String>> {
+    fn names(&self, selector: &[&str]) -> Result<HashSet<String>> {
         Ok(self
-            .rows(filter)?
+            .rows(selector)?
             .into_iter()
             .map(|row| row.branch)
             .collect())
@@ -295,17 +307,17 @@ impl Provider for Local<'_> {
             None
         };
         let rows = match filter.state {
-            State::Open => self.rows(&BranchFilter::NotMerged(&target_tip))?,
-            State::Merged => self.rows(&BranchFilter::Merged(&target_tip))?,
-            State::All => self.rows(&BranchFilter::All)?,
+            State::Open => self.rows(&["--no-merged", &target_tip])?,
+            State::Merged => self.rows(&["--merged", &target_tip])?,
+            State::All => self.rows(&[])?,
         };
         let merged = match filter.state {
-            State::All => self.names(&BranchFilter::Merged(&target_tip))?,
+            State::All => self.names(&["--merged", &target_tip])?,
             State::Open | State::Merged => HashSet::new(),
         };
         let descending = match filter.state {
             State::Merged => HashSet::new(),
-            State::Open | State::All => self.names(&BranchFilter::Containing(&target_tip))?,
+            State::Open | State::All => self.names(&["--contains", &target_tip])?,
         };
         let mut found = Vec::new();
         for row in rows {
