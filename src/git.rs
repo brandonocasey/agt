@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 pub mod base;
 pub mod fast_forward;
+pub(crate) mod worktrees;
 
 use crate::core::error::{Error, Result, ctx, fail};
 use crate::core::process;

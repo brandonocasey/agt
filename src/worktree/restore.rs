@@ -180,16 +180,12 @@ fn add_worktree(
         }
         Some(branch) => {
             let tip = repo.branch_tip(branch)?;
-            let elsewhere = repo
-                .worktrees()?
-                .iter()
-                .any(|entry| entry.branch.as_deref() == Some(branch));
             match tip {
                 None => {
                     repo.git(&["worktree", "add", "-b", branch, &target_text, &record.head])?;
                     made_branch = Some(branch.clone());
                 }
-                Some(_) if elsewhere => {
+                Some(_) if repo.branch_in_use(branch)? => {
                     warnings.push(format!(
                         "branch {branch} is checked out in another worktree; restored detached at {}",
                         record.head

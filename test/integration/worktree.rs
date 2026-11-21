@@ -776,6 +776,85 @@ fn a_submodule_with_unpublished_work_blocks_removal() {
 }
 
 #[test]
+fn restore_detaches_when_the_branch_is_being_rebased_in_another_worktree() {
+    let f = Fixture::new();
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let feature = f.env.git(&["rev-parse", "feat"]);
+    f.env.write("feature.txt", "main side\n");
+    f.env.commit_all("main side");
+    f.env.git(&["switch", "-q", "feat"]);
+    let stopped = f
+        .env
+        .command("git", &f.env.repo)
+        .args(["rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(
+        !stopped.status.success(),
+        "the rebase must stop on a conflict"
+    );
+    let oracle = f
+        .env
+        .command("git", &f.env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            &f.env.path("by-git").to_string_lossy(),
+            "feat",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let restored = f.json(&["restore", &id]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("checked out in another worktree") && warning.contains(&feature),
+        "{warning}"
+    );
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
+}
+
+#[test]
+fn restore_detaches_when_the_branch_is_being_bisected_in_another_worktree() {
+    let f = Fixture::new();
+    for name in ["second.txt", "third.txt"] {
+        fs::write(f.wt.join(name), name).unwrap();
+        wgit(&f.env, &f.wt, &["add", "-A"]);
+        wgit(&f.env, &f.wt, &["commit", "-q", "-m", name]);
+    }
+    let id = f.remove()["id"].as_str().unwrap().to_owned();
+    let feature = f.env.git(&["rev-parse", "feat"]);
+    f.env.git(&["switch", "-q", "feat"]);
+    f.env.git(&["bisect", "start", "feat", "feat~3"]);
+    assert_eq!(f.env.git(&["branch", "--show-current"]), "");
+    let oracle = f
+        .env
+        .command("git", &f.env.repo)
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            &f.env.path("by-git").to_string_lossy(),
+            "feat",
+        ])
+        .output()
+        .unwrap();
+    assert!(!oracle.status.success(), "git added a second worktree");
+
+    let restored = f.json(&["restore", &id]);
+    let warning = restored["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("checked out in another worktree"),
+        "{warning}"
+    );
+    assert_eq!(wgit(&f.env, &f.wt, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(wgit(&f.env, &f.wt, &["branch", "--show-current"]), "");
+}
+
+#[test]
 fn restore_warns_when_the_branch_moved_and_refuses_an_existing_path() {
     let f = Fixture::new();
     f.dirty();
